@@ -1,0 +1,194 @@
+"""Regression tests for the herding environment."""
+
+from __future__ import annotations
+
+from sheepdog.config import EnvironmentConfig, LabConfig, RewardConfig, TrainingConfig
+from sheepdog.environment import SheepdogEnvironment
+from sheepdog.policies.heuristic import HeuristicPolicy
+
+
+def make_config(**environment_overrides):
+    environment = EnvironmentConfig(**environment_overrides)
+    return LabConfig(
+        environment=environment,
+        rewards=RewardConfig(),
+        training=TrainingConfig(
+            episodes=0,
+            checkpoint_episodes=(0,),
+            evaluation_seeds=(11,),
+            output_dir="artifacts",
+            web_export_dir="web/public/generated",
+        ),
+    )
+
+
+def test_reset_is_deterministic_for_fixed_seed() -> None:
+    config = make_config()
+    first = SheepdogEnvironment(config).reset(seed=42).to_dict()
+    second = SheepdogEnvironment(config).reset(seed=42).to_dict()
+
+    assert first == second
+
+
+def test_sheep_flee_from_nearby_dog() -> None:
+    config = make_config()
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=7)
+    sheep = environment._sheep[0]
+    dog = environment._dogs[0]
+    sheep.position = sheep.position.__class__(8, 8)
+    dog.position = dog.position.__class__(7, 8)
+
+    before = sheep.position
+    environment.step(["wait"] * config.environment.dogs)
+
+    after = environment._sheep[0].position
+    assert after.x >= before.x
+
+
+def test_sheep_enter_pen_and_counted() -> None:
+    config = make_config()
+    environment = SheepdogEnvironment(config)
+    snapshot = environment.reset(seed=11)
+    pen = snapshot.pen
+
+    for sheep in environment._sheep:
+        sheep.position = sheep.position.__class__(pen.origin.x, pen.origin.y)
+        sheep.penned = False
+
+    next_snapshot, _ = environment.step(["wait"] * config.environment.dogs)
+
+    assert next_snapshot.penned_count == config.environment.sheep
+    assert next_snapshot.success is True
+
+
+def test_episode_stops_when_no_progress_occurs() -> None:
+    config = make_config(no_progress_window=1, no_progress_distance_delta=100.0)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=5)
+
+    snapshot, _ = environment.step(["wait"] * config.environment.dogs)
+
+    assert snapshot.stopped is True
+    assert snapshot.timeout is False
+
+
+def test_action_mask_disallows_useless_wait_when_movement_exists() -> None:
+    config = make_config()
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=3)
+
+    mask = environment.action_mask_for_dog(0)
+
+    assert mask["wait"] is False
+
+
+def test_multiple_dogs_keep_consistent_state_updates() -> None:
+    config = make_config(dogs=4)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=9)
+
+    snapshot, _ = environment.step(["right", "left", "up", "down"])
+
+    assert len(snapshot.dogs) == 4
+    assert {dog.index for dog in snapshot.dogs} == {0, 1, 2, 3}
+
+
+def test_dog_speed_is_used_for_clear_moves() -> None:
+    config = make_config(dogs=1, dog_speed=2, sheep=0)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=3)
+    dog = environment._dogs[0]
+    dog.position = dog.position.__class__(5, 5)
+
+    environment.step(["right"])
+
+    assert environment._dogs[0].position.x == 7
+
+
+def test_dog_action_score_prefers_herding_standoff() -> None:
+    config = make_config(dogs=1, sheep=1)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=4)
+
+    dog = environment._dogs[0]
+    sheep = environment._sheep[0]
+    sheep.position = sheep.position.__class__(10, 10)
+    dog.position = dog.position.__class__(6, 10)
+
+    better_spacing = environment.score_action_for_dog(0, "right")
+    too_far = environment.score_action_for_dog(0, "left")
+
+    assert better_spacing > too_far
+
+
+def test_dog_action_score_prefers_spread_out_team_positions() -> None:
+    config = make_config(dogs=2, sheep=1)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=6)
+
+    first_dog = environment._dogs[0]
+    second_dog = environment._dogs[1]
+    first_dog.position = first_dog.position.__class__(6, 10)
+    second_dog.position = second_dog.position.__class__(8, 10)
+
+    spacing_weights = type(
+        "SpacingWeights",
+        (),
+        {
+            "nearest_sheep": 0.0,
+            "flock_center": 0.0,
+            "pen_pressure": 0.0,
+            "behind_flock": 0.0,
+            "team_formation": 0.0,
+            "dog_spacing": 5.0,
+            "wall_margin": 0.0,
+            "wait_bias": 0.0,
+        },
+    )()
+
+    spread_out = environment.score_action_for_dog(0, "left", weights=spacing_weights)
+    bunched_up = environment.score_action_for_dog(0, "right", weights=spacing_weights)
+
+    assert spread_out > bunched_up
+
+
+def test_heuristic_policy_runs_to_completion_or_stop() -> None:
+    config = make_config()
+    environment = SheepdogEnvironment(config)
+    result = environment.run_policy(HeuristicPolicy(), seed=13, capture_replay=True)
+
+    assert result.stats.terminated is True
+    assert result.final_snapshot.status in {"success", "timeout", "no-progress", "stopped"}
+
+
+def test_pen_has_three_closed_fences_and_one_opening() -> None:
+    config = make_config()
+    environment = SheepdogEnvironment(config)
+    snapshot = environment.reset(seed=11)
+
+    pen = snapshot.pen
+    assert pen.opening == "left"
+    segments = pen.fence_segments()
+    assert len(segments) == 3
+
+    fence_cells = pen.fence_cells()
+    # No fence on the open side (left column outside the pen).
+    open_x = pen.origin.x - 1
+    assert all(cell.x != open_x for cell in fence_cells)
+
+
+def test_dog_cannot_step_into_fence_cell() -> None:
+    config = make_config()
+    environment = SheepdogEnvironment(config)
+    snapshot = environment.reset(seed=11)
+    pen = snapshot.pen
+    fence_cell = next(iter(pen.fence_cells()))
+
+    dog = environment._dogs[0]
+    # Place dog adjacent to a fence cell from outside the pen.
+    dog.position = dog.position.__class__(fence_cell.x, fence_cell.y + 1)
+    if not environment._pen.contains(dog.position):
+        environment.step(["up"] + ["wait"] * (config.environment.dogs - 1))
+        # Dog should not have moved onto the fence.
+        assert environment._dogs[0].position != fence_cell

@@ -1,0 +1,243 @@
+import { render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { App } from "./App";
+
+const checkpointIndex = {
+  checkpoints: [
+    {
+      checkpoint_episode: 0,
+      checkpoint: "checkpoint-000000.json",
+      evaluation: "evaluation-checkpoint-000000.json",
+      replay: "/generated/replays/checkpoint-000000-seed-000011.json",
+      success_rate: 0,
+      timeout_rate: 1,
+      average_completion_steps: 300,
+      average_completion_seconds: 300,
+      average_sheep_penned: 0,
+      average_reward: -12,
+      records: [
+        {
+          seed: 11,
+          success: false,
+          timeout: true,
+          stopped: false,
+          steps: 300,
+          simulated_seconds: 300,
+          sheep_penned: 0,
+          final_sheep_distance_to_pen: 17,
+          no_progress_steps: 22,
+          reward_total: -12,
+          reward_breakdown: {
+            progress_to_pen: 0,
+            sheep_penned: 0,
+            flock_cohesion: 0,
+            scatter_penalty: 0,
+            time_penalty: -0.05,
+            no_progress_penalty: -1,
+            wall_pressure_penalty: 0,
+            wait_penalty: 0,
+            terminal_success: 0,
+            terminal_failure: -12,
+            total: -13.05,
+          },
+          replay_path: "/generated/replays/checkpoint-000000-seed-000011.json",
+        },
+      ],
+    },
+  ],
+  latest: {
+    checkpoint_episode: 0,
+    policy_name: "trained-checkpoint",
+    records: [
+      {
+        seed: 11,
+        success: false,
+        timeout: true,
+        stopped: false,
+        steps: 300,
+        simulated_seconds: 300,
+        sheep_penned: 0,
+        final_sheep_distance_to_pen: 17,
+        no_progress_steps: 22,
+        reward_total: -12,
+        reward_breakdown: {
+          progress_to_pen: 0,
+          sheep_penned: 0,
+          flock_cohesion: 0,
+          scatter_penalty: 0,
+          time_penalty: -0.05,
+          no_progress_penalty: -1,
+          wall_pressure_penalty: 0,
+          wait_penalty: 0,
+          terminal_success: 0,
+          terminal_failure: -12,
+          total: -13.05,
+        },
+        replay_path: "/generated/replays/checkpoint-000000-seed-000011.json",
+      },
+    ],
+    success_rate: 0,
+    timeout_rate: 1,
+    average_completion_steps: 300,
+    average_completion_seconds: 300,
+    average_sheep_penned: 0,
+    average_reward: -12,
+  },
+};
+
+const replay = {
+  seed: 11,
+  policy_name: "trained-checkpoint",
+  final_snapshot: {
+    step: 3,
+    simulated_seconds: 3,
+    dogs: [
+      { index: 0, x: 1, y: 1, last_action: "right" },
+      { index: 1, x: 2, y: 1, last_action: "right" },
+    ],
+    sheep: [
+      { index: 0, x: 14, y: 9, penned: false },
+      { index: 1, x: 15, y: 10, penned: false },
+    ],
+    pen: { origin: { x: 16, y: 2 }, width: 5, height: 5 },
+    penned_count: 0,
+    average_distance_to_pen: 16,
+    flock_spread: 1.2,
+    no_progress_steps: 2,
+    terminated: true,
+    timeout: true,
+    stopped: false,
+    success: false,
+    status: "timeout",
+  },
+  stats: {
+    steps: 3,
+    simulated_seconds: 3,
+    sheep_penned: 0,
+    timeout: true,
+    terminated: true,
+    success: false,
+    stopped: false,
+    stop_reason: "timeout",
+    reward_total: 1.2,
+    no_progress_steps: 2,
+    final_avg_distance_to_pen: 16,
+    final_flock_spread: 1.2,
+    final_reward_breakdown: {
+      progress_to_pen: 1.4,
+      sheep_penned: 0,
+      flock_cohesion: 0.1,
+      scatter_penalty: 0,
+      time_penalty: -0.05,
+      no_progress_penalty: 0,
+      wall_pressure_penalty: 0,
+      wait_penalty: 0,
+      terminal_success: 0,
+      terminal_failure: 0,
+      total: 1.45,
+    },
+  },
+  frames: [
+    {
+      step: 1,
+      actions: ["right", "right"],
+      snapshot: {
+        step: 1,
+        simulated_seconds: 1,
+        dogs: [
+          { index: 0, x: 1, y: 1, last_action: "right" },
+          { index: 1, x: 2, y: 1, last_action: "right" },
+        ],
+        sheep: [
+          { index: 0, x: 15, y: 9, penned: false },
+          { index: 1, x: 15, y: 10, penned: false },
+        ],
+        pen: { origin: { x: 16, y: 2 }, width: 5, height: 5 },
+        penned_count: 0,
+        average_distance_to_pen: 16.5,
+        flock_spread: 1,
+        no_progress_steps: 0,
+        terminated: false,
+        timeout: false,
+        stopped: false,
+        success: false,
+        status: "running",
+      },
+      reward: {
+        progress_to_pen: 1.4,
+        sheep_penned: 0,
+        flock_cohesion: 0.1,
+        scatter_penalty: 0,
+        time_penalty: -0.05,
+        no_progress_penalty: 0,
+        wall_pressure_penalty: 0,
+        wait_penalty: 0,
+        terminal_success: 0,
+        terminal_failure: 0,
+        total: 1.45,
+      },
+    },
+  ],
+};
+
+beforeEach(() => {
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    const path = String(input);
+    if (path.includes("/api/training/status")) {
+      return new Response(
+        JSON.stringify({
+          running: false,
+          fast_mode: true,
+          requested_episodes: 0,
+          completed_episodes: 0,
+          current_episode: null,
+          checkpoint_episode: null,
+          latest_checkpoint_episode: null,
+          latest_seed: null,
+          latest_replay_path: null,
+          phase: "idle",
+          message: "Idle",
+          error: null,
+        }),
+        { status: 200 },
+      );
+    }
+    if (path.includes("checkpoint-index.json")) {
+      return new Response(JSON.stringify(checkpointIndex), { status: 200 });
+    }
+    if (path.includes("checkpoint-000000-seed-000011.json")) {
+      return new Response(JSON.stringify(replay), { status: 200 });
+    }
+    return new Response("not found", { status: 404 });
+  }));
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("App", () => {
+  it("renders checkpoint controls and labels", async () => {
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText("Current replay")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(within(screen.getByLabelText("Playback controls")).getByText("trained-checkpoint")).toBeInTheDocument(),
+    );
+    expect(screen.getByLabelText("Playback controls")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Start replay" })).toBeInTheDocument();
+    expect(screen.getByText(/Checkpoint 0/)).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Seed 11" })).toBeInTheDocument();
+  });
+
+  it("shows timeout and no-progress states from loaded replay data", async () => {
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText("Current replay")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(within(screen.getByLabelText("Run status")).getByText("timeout")).toBeInTheDocument(),
+    );
+    expect(screen.getByLabelText("Run status")).toBeInTheDocument();
+    expect(screen.getByText(/No-progress guard is active/)).toBeInTheDocument();
+  });
+});
