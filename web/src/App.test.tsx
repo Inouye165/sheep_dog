@@ -1,4 +1,5 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 
@@ -190,11 +191,15 @@ beforeEach(() => {
           fast_mode: true,
           requested_episodes: 0,
           completed_episodes: 0,
+          batch_total_episodes: 0,
+          batch_completed_episodes: 0,
+          total_episodes_trained: 0,
           current_episode: null,
           checkpoint_episode: null,
           latest_checkpoint_episode: null,
           latest_seed: null,
           latest_replay_path: null,
+          best_score: null,
           phase: "idle",
           message: "Idle",
           error: null,
@@ -217,27 +222,152 @@ afterEach(() => {
 });
 
 describe("App", () => {
-  it("renders checkpoint controls and labels", async () => {
+  it("renders the simplified controls and run button", async () => {
     render(<App />);
 
-    await waitFor(() => expect(screen.getByText("Current replay")).toBeInTheDocument());
-    await waitFor(() =>
-      expect(within(screen.getByLabelText("Playback controls")).getByText("trained-checkpoint")).toBeInTheDocument(),
-    );
+    await waitFor(() => expect(screen.getByText("Replay")).toBeInTheDocument());
     expect(screen.getByLabelText("Playback controls")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Run current dogs" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Start replay" })).toBeInTheDocument();
     expect(screen.getByText(/Checkpoint 0/)).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "Seed 11" })).toBeInTheDocument();
   });
 
-  it("shows timeout and no-progress states from loaded replay data", async () => {
+  it("shows current live run status from loaded replay data", async () => {
     render(<App />);
 
-    await waitFor(() => expect(screen.getByText("Current replay")).toBeInTheDocument());
-    await waitFor(() =>
-      expect(within(screen.getByLabelText("Run status")).getByText("timeout")).toBeInTheDocument(),
-    );
+    await waitFor(() => expect(screen.getByText("Replay")).toBeInTheDocument());
+    await waitFor(() => expect(within(screen.getByLabelText("Run status")).getByText("Live run")).toBeInTheDocument());
     expect(screen.getByLabelText("Run status")).toBeInTheDocument();
+    expect(screen.getByText("trained-checkpoint")).toBeInTheDocument();
     expect(screen.getByText(/No-progress guard is active/)).toBeInTheDocument();
+  });
+
+  it("clears saved training data from the training panel", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.includes("/api/training/reset")) {
+        return new Response(
+          JSON.stringify({
+            running: false,
+            fast_mode: true,
+            requested_episodes: 0,
+            completed_episodes: 0,
+            batch_total_episodes: 0,
+            batch_completed_episodes: 0,
+            total_episodes_trained: 0,
+            current_episode: null,
+            checkpoint_episode: null,
+            latest_checkpoint_episode: null,
+            latest_seed: null,
+            latest_replay_path: null,
+            best_score: null,
+            phase: "idle",
+            message: "Training history cleared",
+            error: null,
+          }),
+          { status: 200 },
+        );
+      }
+      if (path.includes("/api/training/status")) {
+        return new Response(
+          JSON.stringify({
+            running: false,
+            fast_mode: true,
+            requested_episodes: 0,
+            completed_episodes: 0,
+            batch_total_episodes: 0,
+            batch_completed_episodes: 0,
+            total_episodes_trained: 0,
+            current_episode: null,
+            checkpoint_episode: null,
+            latest_checkpoint_episode: null,
+            latest_seed: null,
+            latest_replay_path: null,
+            best_score: null,
+            phase: "idle",
+            message: "Idle",
+            error: null,
+          }),
+          { status: 200 },
+        );
+      }
+      if (path.includes("checkpoint-index.json")) {
+        return new Response(JSON.stringify(checkpointIndex), { status: 200 });
+      }
+      if (path.includes("checkpoint-000000-seed-000011.json")) {
+        return new Response(JSON.stringify(replay), { status: 200 });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByLabelText("Training controls")).toBeInTheDocument());
+
+    await userEvent.click(screen.getByRole("button", { name: "Clear training data" }));
+
+    await waitFor(() => expect(screen.getByText("Training history cleared")).toBeInTheDocument());
+    expect(fetchMock).toHaveBeenCalledWith(
+      new URL("/api/training/reset", "http://127.0.0.1:8000"),
+      expect.objectContaining({ cache: "no-store", method: "POST" }),
+    );
+  });
+
+  it("runs the current dogs even when no checkpoints have been exported", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.includes("checkpoint-index.json")) {
+        return new Response("not found", { status: 404 });
+      }
+      if (path.includes("/api/training/status")) {
+        return new Response(
+          JSON.stringify({
+            running: false,
+            fast_mode: true,
+            requested_episodes: 0,
+            completed_episodes: 0,
+            batch_total_episodes: 0,
+            batch_completed_episodes: 0,
+            total_episodes_trained: 0,
+            current_episode: null,
+            checkpoint_episode: null,
+            latest_checkpoint_episode: null,
+            latest_seed: null,
+            latest_replay_path: null,
+            best_score: null,
+            phase: "idle",
+            message: "Idle",
+            error: null,
+          }),
+          { status: 200 },
+        );
+      }
+      if (path.includes("/api/replay/run")) {
+        return new Response(
+          JSON.stringify({
+            ...replay,
+            policy_name: "instinct-only",
+            seed: 11,
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText("Use Run current dogs to watch instinct-only or trained behavior.")).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: "Run current dogs" }));
+
+    await waitFor(() => expect(screen.getByText("instinct-only")).toBeInTheDocument());
+    expect(fetchMock).toHaveBeenCalledWith(
+      new URL("/api/replay/run", "http://127.0.0.1:8000"),
+      expect.objectContaining({ cache: "no-store", method: "POST" }),
+    );
   });
 });

@@ -2,43 +2,46 @@ interface TrainingPanelProps {
   episodes: number;
   fastMode: boolean;
   running: boolean;
+  clearing: boolean;
   batchCompletedEpisodes: number;
   batchTotalEpisodes: number;
   totalEpisodesTrained: number;
   phase: string;
   message: string;
-  bestScore: number | null;
   error: string | null;
   onEpisodesChange: (episodes: number) => void;
   onFastModeChange: (enabled: boolean) => void;
   onStartTraining: () => void;
+  onClearTraining: () => void;
 }
 
 export function TrainingPanel({
   episodes,
   fastMode,
   running,
+  clearing,
   batchCompletedEpisodes,
   batchTotalEpisodes,
   totalEpisodesTrained,
   phase,
   message,
-  bestScore,
   error,
   onEpisodesChange,
   onFastModeChange,
   onStartTraining,
+  onClearTraining,
 }: TrainingPanelProps) {
   const denominator = batchTotalEpisodes || episodes;
   const progress = denominator === 0 ? 0 : Math.min(1, batchCompletedEpisodes / denominator);
   const safeTotal = Number.isFinite(totalEpisodesTrained) ? totalEpisodesTrained : 0;
+  const busy = running || clearing;
 
   return (
     <section className="training-card" aria-label="Training controls">
       <div className="training-card__header">
         <div>
           <p className="eyebrow">Train</p>
-          <h2>Continue training the dog team</h2>
+          <h2>Training</h2>
         </div>
         <span className={`pill ${running ? "pill--live" : "pill--muted"}`}>{phase}</span>
       </div>
@@ -52,7 +55,7 @@ export function TrainingPanel({
             max={1000}
             value={episodes}
             onChange={(event) => onEpisodesChange(Number(event.target.value) || 1)}
-            disabled={running}
+            disabled={busy}
           />
         </label>
 
@@ -61,7 +64,7 @@ export function TrainingPanel({
             type="checkbox"
             checked={fastMode}
             onChange={(event) => onFastModeChange(event.target.checked)}
-            disabled={running}
+            disabled={busy}
           />
           <span>Fast mode</span>
         </label>
@@ -79,10 +82,6 @@ export function TrainingPanel({
           </strong>
         </div>
         <div>
-          <span>Best score</span>
-          <strong>{bestScore === null || bestScore === undefined ? "-" : bestScore.toFixed(2)}</strong>
-        </div>
-        <div>
           <span>Status</span>
           <strong>{message}</strong>
         </div>
@@ -91,16 +90,15 @@ export function TrainingPanel({
       <div className="progress-shell" aria-label="Current batch progress">
         <div className="progress-shell__bar" style={{ width: `${progress * 100}%` }} />
       </div>
-      <p className="training-card__hint">
-        Progress bar shows the current batch only. Training uses a shared linear hill-climbing policy, and checkpoints are
-        already evaluated as part of the training run.
-      </p>
 
       {error ? <div className="warning-box warning-box--error">{error}</div> : null}
 
       <div className="button-row">
-        <button type="button" className="button-row__primary" onClick={onStartTraining} disabled={running}>
+        <button type="button" className="button-row__primary" onClick={onStartTraining} disabled={busy}>
           {running ? "Training..." : `Train ${episodes} more`}
+        </button>
+        <button type="button" className="button-row__danger" onClick={onClearTraining} disabled={busy}>
+          {clearing ? "Clearing..." : "Clear training data"}
         </button>
       </div>
     </section>
