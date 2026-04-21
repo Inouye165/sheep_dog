@@ -311,12 +311,6 @@ select {
   font-size: 1.05rem;
 }
 
-.training-card__hint {
-  margin: 0.45rem 0 0;
-  font-size: 0.78rem;
-  color: var(--muted);
-}
-
 .button-row {
   display: flex;
   flex-wrap: wrap;
@@ -327,6 +321,16 @@ select {
 .button-row__primary {
   border-color: rgba(244, 197, 66, 0.42);
   background: linear-gradient(180deg, rgba(125, 96, 4, 0.96), rgba(82, 57, 0, 0.96));
+}
+
+.button-row__secondary {
+  border-color: rgba(125, 211, 252, 0.26);
+  background: linear-gradient(180deg, rgba(20, 37, 58, 0.96), rgba(12, 23, 38, 0.96));
+}
+
+.button-row__danger {
+  border-color: rgba(248, 113, 113, 0.42);
+  background: linear-gradient(180deg, rgba(127, 29, 29, 0.96), rgba(69, 10, 10, 0.96));
 }
 
 .status-grid div,
@@ -355,6 +359,12 @@ select {
   display: block;
   margin: 0.1rem 0 0;
   font-size: 1.05rem;
+}
+
+.status-card__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
 }
 
 .reward-grid,

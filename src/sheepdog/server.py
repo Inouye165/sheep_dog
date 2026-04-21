@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 import json
+import shutil
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -10,6 +12,9 @@ from pathlib import Path
 from typing import Any
 
 from sheepdog.config import LabConfig, TrainingConfig
+from sheepdog.environment import EpisodeResult, SheepdogEnvironment
+from sheepdog.policies.heuristic import HeuristicPolicy
+from sheepdog.policies.trainable import PolicyWeights, TrainableLinearPolicy
 from sheepdog.training.trainer import Trainer
 
 
@@ -24,6 +29,70 @@ def _read_persisted_total() -> int:
         return int(payload.get("total_episodes_trained", 0))
     except (OSError, json.JSONDecodeError, ValueError):
         return 0
+
+
+def _clear_training_outputs(config: LabConfig) -> None:
+    """Remove persisted training artifacts so a fresh run starts from episode 0."""
+
+    output_root = Path(config.training.output_dir)
+    web_export_root = Path(config.training.web_export_dir)
+    for path in (
+        output_root / "checkpoints",
+        output_root / "evaluations",
+        output_root / Trainer.STATE_FILENAME,
+        output_root / "training-summary.json",
+        web_export_root / "replays",
+        web_export_root / "checkpoint-index.json",
+        web_export_root / "latest-checkpoint.json",
+        web_export_root / "latest-evaluation.json",
+        web_export_root / "latest-replay.json",
+    ):
+        if not path.exists():
+            continue
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+
+
+def _load_playable_policy(config: LabConfig) -> tuple[object, str]:
+    """Prefer trained weights when they exist; otherwise fall back to instinct-only play."""
+
+    state_path = Path(config.training.output_dir) / Trainer.STATE_FILENAME
+    if not state_path.exists():
+        return HeuristicPolicy(), "instinct-only"
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return HeuristicPolicy(), "instinct-only"
+
+    total_episodes = int(payload.get("total_episodes_trained", 0))
+    weights_payload = payload.get("weights")
+    if total_episodes > 0 and weights_payload:
+        weights = PolicyWeights.from_dict(weights_payload)
+        return TrainableLinearPolicy(weights), "trained-checkpoint"
+    return HeuristicPolicy(), "instinct-only"
+
+
+def _replay_payload(result: EpisodeResult, policy_name: str) -> dict[str, Any]:
+    return {
+        "seed": result.seed,
+        "policy_name": policy_name,
+        "final_snapshot": result.final_snapshot.to_dict(),
+        "stats": asdict(result.stats),
+        "frames": [frame.to_dict() for frame in result.replay],
+    }
+
+
+def _run_live_replay(seed: int) -> dict[str, Any]:
+    config = LabConfig()
+    policy, policy_name = _load_playable_policy(config)
+    result = SheepdogEnvironment(config).run_policy(policy, seed=seed, capture_replay=True)
+    payload = _replay_payload(result, policy_name)
+    replay_path = Path(config.training.web_export_dir) / "latest-replay.json"
+    replay_path.parent.mkdir(parents=True, exist_ok=True)
+    replay_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return payload
 
 
 class TrainingManager:
@@ -78,6 +147,20 @@ class TrainingManager:
                 daemon=True,
             )
             self._thread.start()
+            return dict(self._status)
+
+    def clear(self) -> dict[str, Any]:
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                status = dict(self._status)
+                status["error"] = "Cannot clear training while a batch is running."
+                return status
+
+        _clear_training_outputs(LabConfig())
+        with self._lock:
+            self._status = self._initial_status()
+            self._status["message"] = "Training history cleared"
+            self._status["error"] = None
             return dict(self._status)
 
     def _update_status(self, payload: dict[str, Any]) -> None:
@@ -205,6 +288,16 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         self._json_response({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:  # noqa: N802
+        if self.path == "/api/training/reset":
+            self._json_response(self.manager.clear())
+            return
+
+        if self.path == "/api/replay/run":
+            payload = self._read_json()
+            seed = max(0, int(payload.get("seed", 11)))
+            self._json_response(_run_live_replay(seed))
+            return
+
         if self.path != "/api/training/start":
             self._json_response({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
             return

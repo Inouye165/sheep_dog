@@ -105,7 +105,7 @@ export function FieldView({ snapshot }: FieldViewProps) {
         ) : (
           <div className="field-stage__empty">
             <p>No replay loaded yet.</p>
-            <p>Run the Python export command to populate the viewer.</p>
+            <p>Use Run current dogs to watch instinct-only or trained behavior.</p>
           </div>
         )}
       </div>

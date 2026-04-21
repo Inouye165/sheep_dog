@@ -9,6 +9,7 @@ from sheepdog.config import EnvironmentConfig, LabConfig, RewardConfig, Training
 from sheepdog.evaluation.evaluator import Evaluator
 from sheepdog.policies.heuristic import HeuristicPolicy
 from sheepdog.policies.trainable import PolicyWeights
+from sheepdog.server import TrainingManager, _load_playable_policy, _run_live_replay
 from sheepdog.training.trainer import Trainer
 
 
@@ -98,3 +99,82 @@ def test_policy_weights_load_legacy_state_payload() -> None:
 
     assert weights.nearest_sheep == 1.0
     assert weights.team_formation == PolicyWeights().team_formation
+
+
+def test_training_manager_clear_removes_artifacts_and_resets_status(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = make_config(tmp_path)
+    Trainer(config, tmp_path).train()
+
+    generated_root = Path(config.training.web_export_dir)
+    assert (tmp_path / Trainer.STATE_FILENAME).exists()
+    assert (tmp_path / "checkpoints").exists()
+    assert (tmp_path / "evaluations").exists()
+    assert (generated_root / "checkpoint-index.json").exists()
+    assert (generated_root / "replays").exists()
+
+    monkeypatch.setattr("sheepdog.server.LabConfig", lambda: config)
+    manager = TrainingManager()
+
+    status = manager.clear()
+
+    assert status["running"] is False
+    assert status["total_episodes_trained"] == 0
+    assert status["message"] == "Training history cleared"
+    assert not (tmp_path / Trainer.STATE_FILENAME).exists()
+    assert not (tmp_path / "checkpoints").exists()
+    assert not (tmp_path / "evaluations").exists()
+    assert not (generated_root / "checkpoint-index.json").exists()
+    assert not (generated_root / "replays").exists()
+
+
+def test_live_replay_uses_instinct_only_when_no_training_state(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = make_config(tmp_path)
+    monkeypatch.setattr("sheepdog.server.LabConfig", lambda: config)
+
+    policy, policy_name = _load_playable_policy(config)
+    payload = _run_live_replay(seed=11)
+
+    assert policy.__class__.__name__ == "HeuristicPolicy"
+    assert policy_name == "instinct-only"
+    assert payload["policy_name"] == "instinct-only"
+    assert payload["seed"] == 11
+    assert payload["frames"]
+    assert (Path(config.training.web_export_dir) / "latest-replay.json").exists()
+
+
+def test_live_replay_uses_trained_policy_when_training_state_exists(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    base_config = make_config(tmp_path)
+    config = LabConfig(
+        environment=base_config.environment,
+        rewards=base_config.rewards,
+        training=TrainingConfig(
+            episodes=1,
+            checkpoint_episodes=(0, 1),
+            evaluation_seeds=base_config.training.evaluation_seeds,
+            train_seed=base_config.training.train_seed,
+            evaluation_seed=base_config.training.evaluation_seed,
+            mutation_scale=base_config.training.mutation_scale,
+            output_dir=base_config.training.output_dir,
+            web_export_dir=base_config.training.web_export_dir,
+        ),
+    )
+    Trainer(config, tmp_path).train()
+    monkeypatch.setattr("sheepdog.server.LabConfig", lambda: config)
+
+    policy, policy_name = _load_playable_policy(config)
+    payload = _run_live_replay(seed=13)
+
+    assert policy.__class__.__name__ == "TrainableLinearPolicy"
+    assert policy_name == "trained-checkpoint"
+    assert payload["policy_name"] == "trained-checkpoint"
+    assert payload["seed"] == 13
+    assert payload["frames"]

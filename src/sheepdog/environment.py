@@ -254,6 +254,7 @@ class SheepdogEnvironment:
             raise ValueError("Action count does not match dog count.")
 
         previous_snapshot = self.get_state_snapshot()
+        previous_flock_centroid = self._flock_center()
         self._apply_dog_actions(actions)
         self._move_sheep()
         self._step_count += 1
@@ -290,6 +291,12 @@ class SheepdogEnvironment:
             else ""
         )
 
+        current_flock_centroid = self._flock_center()
+        unpenned_sheep_positions = tuple(
+            (float(sheep.position.x), float(sheep.position.y))
+            for sheep in self._sheep
+            if not sheep.penned
+        )
         breakdown = self.reward_computer.compute(
             RewardInputs(
                 previous_average_distance=previous_snapshot.average_distance_to_pen,
@@ -303,6 +310,21 @@ class SheepdogEnvironment:
                 terminated=self._terminated,
                 timeout=self._timeout,
                 success=self._success,
+                dog_positions=tuple(
+                    (float(dog.position.x), float(dog.position.y)) for dog in self._dogs
+                ),
+                sheep_positions=unpenned_sheep_positions,
+                flock_centroid=(
+                    (float(current_flock_centroid.x), float(current_flock_centroid.y))
+                    if current_flock_centroid is not None
+                    else None
+                ),
+                previous_flock_centroid=(
+                    (float(previous_flock_centroid.x), float(previous_flock_centroid.y))
+                    if previous_flock_centroid is not None
+                    else None
+                ),
+                target_position=(float(self._pen.center.x), float(self._pen.center.y)),
             )
         )
         self._reward_total += breakdown.total

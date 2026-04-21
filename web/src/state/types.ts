@@ -103,6 +103,10 @@ export interface TrainingStartRequest {
   fast_mode: boolean;
 }
 
+export interface ReplayRunRequest {
+  seed: number;
+}
+
 export interface EvaluationRecord {
   seed: number;
   success: boolean;

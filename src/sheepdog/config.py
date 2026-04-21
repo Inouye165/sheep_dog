@@ -33,6 +33,35 @@ class EnvironmentConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class InstinctRewardConfig:
+    """Weights and toggles for the optional sheepdog-instinct reward shaping.
+
+    These rewards simulate biological herding instincts (pressure-zone,
+    safe distance, grouping, drive/fetch, anti-chaos, cooperation). They
+    are off by default so existing training behavior stays unchanged.
+    """
+
+    enable_instinct_rewards: bool = False
+    debug_reward_breakdown: bool = False
+    curriculum_stage: int = 0
+
+    pressure_zone_weight: float = 0.6
+    safe_pressure_weight: float = 0.4
+    grouping_weight: float = 0.3
+    target_progress_weight: float = 0.5
+    chaos_penalty_weight: float = 0.5
+    overpressure_penalty_weight: float = 0.4
+    split_flock_penalty_weight: float = 0.3
+
+    safe_pressure_min_distance: float = 2.0
+    safe_pressure_max_distance: float = 6.0
+    overpressure_distance: float = 1.5
+    chaos_inside_flock_distance: float = 1.5
+    chaos_scatter_delta: float = 0.5
+    split_flock_ratio: float = 1.8
+
+
+@dataclass(frozen=True, slots=True)
 class RewardConfig:
     """Reward shaping controls."""
 
@@ -46,6 +75,7 @@ class RewardConfig:
     terminal_failure_penalty: float = 12.0
     wall_pressure_penalty: float = 0.4
     wait_penalty: float = 0.05
+    instincts: InstinctRewardConfig = field(default_factory=InstinctRewardConfig)
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,9 +105,16 @@ class LabConfig:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> LabConfig:
+        rewards_payload = dict(payload["rewards"])
+        instincts_payload = rewards_payload.pop("instincts", None)
+        instincts = (
+            InstinctRewardConfig(**instincts_payload)
+            if isinstance(instincts_payload, dict)
+            else InstinctRewardConfig()
+        )
         return cls(
             environment=EnvironmentConfig(**payload["environment"]),
-            rewards=RewardConfig(**payload["rewards"]),
+            rewards=RewardConfig(instincts=instincts, **rewards_payload),
             training=TrainingConfig(**payload["training"]),
         )
 

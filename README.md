@@ -98,6 +98,46 @@ The evaluator writes:
 
 Those files live under `artifacts/evaluations/` and are copied to the web public folder for playback.
 
+## Herding Instincts and Curriculum
+
+Real sheepdogs start with herding instincts; the agents in this lab do not.
+To narrow that gap without scripting the answer, the project adds optional
+reward shaping that simulates instinct, plus a curriculum that starts simple
+and grows harder. The dog still selects its own actions through the existing
+policy; instincts only shape the reward signal and the training scenario.
+
+Configurable instinct reward terms (`InstinctRewardConfig` in
+`src/sheepdog/config.py`):
+
+- `pressure_zone_weight` – reward being on the opposite side of the flock from the pen.
+- `safe_pressure_weight` – reward staying in a useful distance band from the flock.
+- `grouping_weight` – reward decreasing flock spread.
+- `target_progress_weight` – reward the flock centroid moving toward the pen.
+- `chaos_penalty_weight` – penalize entering the flock or causing sudden scatter.
+- `overpressure_penalty_weight` – penalize crowding individual sheep.
+- `split_flock_penalty_weight` – penalize one sheep straying far from the rest.
+
+Toggles:
+
+- `enable_instinct_rewards` – off by default. Turn on to add the instinct terms to training.
+- `debug_reward_breakdown` – flag for downstream tooling to surface per-term values.
+- `curriculum_stage` – non-zero to apply a curriculum-stage environment override.
+
+Curriculum stages (`CURRICULUM_STAGES` in `src/sheepdog/curriculum.py`):
+
+1. One dog, one sheep, small open field, nearby pen.
+2. One dog, small flock, learn grouping in an open field.
+3. One dog, small flock, larger field for sustained drive/fetch.
+4. One dog, slightly bigger flock, longer episodes for guarded pens.
+5. Two dogs, small flock, basic cooperation without interference.
+
+Reward breakdown is always returned per step on `RewardBreakdown`, so the
+viewer or any debugging tool can inspect contributions term by term without
+log spam. To compare shaped vs. unshaped training, run with
+`enable_instinct_rewards=False` (the default) and again with it set to
+`True`.
+
+
 ## UI
 
 Start the web viewer with:
