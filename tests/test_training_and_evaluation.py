@@ -9,7 +9,12 @@ from sheepdog.config import EnvironmentConfig, LabConfig, RewardConfig, Training
 from sheepdog.evaluation.evaluator import Evaluator
 from sheepdog.policies.heuristic import HeuristicPolicy
 from sheepdog.policies.trainable import PolicyWeights
-from sheepdog.server import TrainingManager, _load_playable_policy, _run_live_replay
+from sheepdog.server import (
+    TrainingManager,
+    _build_training_job_config,
+    _load_playable_policy,
+    _run_live_replay,
+)
 from sheepdog.training.trainer import Trainer
 
 
@@ -128,6 +133,49 @@ def test_training_manager_clear_removes_artifacts_and_resets_status(
     assert not (tmp_path / "evaluations").exists()
     assert not (generated_root / "checkpoint-index.json").exists()
     assert not (generated_root / "replays").exists()
+
+
+def test_server_training_job_config_applies_instincts_and_curriculum(
+    tmp_path: Path,
+) -> None:
+    base_config = make_config(tmp_path)
+
+    job_config = _build_training_job_config(
+        base_config,
+        requested_episodes=3,
+        fast_mode=True,
+        enable_instinct_rewards=True,
+        curriculum_stage=1,
+        debug_reward_breakdown=True,
+    )
+
+    assert job_config.rewards.instincts.enable_instinct_rewards is True
+    assert job_config.rewards.instincts.debug_reward_breakdown is True
+    assert job_config.rewards.instincts.curriculum_stage == 1
+    assert job_config.environment.dogs == 1
+    assert job_config.environment.sheep == 1
+    assert job_config.environment.dog_speed == 1
+    assert job_config.training.evaluation_seeds == (11,)
+
+
+def test_server_training_job_config_can_disable_instinct_rewards(
+    tmp_path: Path,
+) -> None:
+    base_config = make_config(tmp_path)
+
+    job_config = _build_training_job_config(
+        base_config,
+        requested_episodes=2,
+        fast_mode=False,
+        enable_instinct_rewards=False,
+        curriculum_stage=0,
+        debug_reward_breakdown=False,
+    )
+
+    assert job_config.rewards.instincts.enable_instinct_rewards is False
+    assert job_config.rewards.instincts.debug_reward_breakdown is False
+    assert job_config.rewards.instincts.curriculum_stage == 0
+    assert job_config.environment.dogs == base_config.environment.dogs
 
 
 def test_live_replay_uses_instinct_only_when_no_training_state(

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from sheepdog.config import EnvironmentConfig, LabConfig, RewardConfig, TrainingConfig
 from sheepdog.environment import SheepdogEnvironment
 from sheepdog.policies.heuristic import HeuristicPolicy
@@ -120,6 +122,101 @@ def test_dog_action_score_prefers_herding_standoff() -> None:
     too_far = environment.score_action_for_dog(0, "left")
 
     assert better_spacing > too_far
+
+
+def test_action_score_prefers_behind_flock_over_pen_side_position() -> None:
+    config = make_config(dogs=1, sheep=1)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=4)
+
+    sheep = environment._sheep[0]
+    sheep.position = sheep.position.__class__(18, 10)
+    dog = environment._dogs[0]
+
+    dog.position = dog.position.__class__(14, 10)
+    behind_score = environment.score_action_for_dog(0, "wait")
+
+    dog.position = dog.position.__class__(22, 10)
+    pen_side_score = environment.score_action_for_dog(0, "wait")
+
+    assert behind_score > pen_side_score
+
+
+def test_action_score_penalizes_positions_inside_or_too_close_to_flock() -> None:
+    config = make_config(dogs=1, sheep=1)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=8)
+
+    sheep = environment._sheep[0]
+    sheep.position = sheep.position.__class__(10, 10)
+    dog = environment._dogs[0]
+    dog.position = dog.position.__class__(7, 10)
+
+    safer_pressure = environment.score_action_for_dog(0, "wait")
+    too_close = environment.score_action_for_dog(0, "right")
+
+    assert safer_pressure > too_close
+
+
+def test_action_score_no_longer_rewards_diving_toward_flock_center() -> None:
+    config = make_config(dogs=1, sheep=1)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=10)
+
+    sheep = environment._sheep[0]
+    sheep.position = sheep.position.__class__(10, 10)
+    dog = environment._dogs[0]
+    dog.position = dog.position.__class__(7, 10)
+
+    hold_pressure = environment.score_action_for_dog(0, "wait")
+    step_toward_center = environment.score_action_for_dog(0, "right")
+
+    assert hold_pressure > step_toward_center
+
+
+def test_anti_oscillation_penalty_lowers_immediate_reverse_actions() -> None:
+    config = make_config(dogs=1, sheep=1)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=12)
+
+    sheep = environment._sheep[0]
+    sheep.position = sheep.position.__class__(10, 10)
+    dog = environment._dogs[0]
+    dog.position = dog.position.__class__(7, 10)
+    dog.last_action = "right"
+
+    reverse_score = environment.score_action_for_dog(0, "left")
+    hold_score = environment.score_action_for_dog(0, "wait")
+
+    assert hold_score > reverse_score
+
+
+def test_debug_snapshot_includes_pressure_position_fields() -> None:
+    config = make_config(dogs=1, sheep=1)
+    config = replace(
+        config,
+        rewards=replace(
+            config.rewards,
+            instincts=replace(
+                config.rewards.instincts,
+                enable_instinct_rewards=True,
+                debug_reward_breakdown=True,
+                curriculum_stage=2,
+            ),
+        ),
+    )
+    environment = SheepdogEnvironment(config)
+
+    snapshot = environment.reset(seed=2)
+
+    assert snapshot.debug["curriculum_stage"] == 2
+    assert snapshot.debug["enable_instinct_rewards"] is True
+    dog_debug = snapshot.debug["dogs"][0]
+    assert "desired_pressure_target" in dog_debug
+    assert "distance_to_pressure_target" in dog_debug
+    assert "pressure_side_alignment" in dog_debug
+    assert "between_flock_and_pen" in dog_debug
+    assert "inside_or_too_close_to_flock" in dog_debug
 
 
 def test_dog_action_score_prefers_spread_out_team_positions() -> None:

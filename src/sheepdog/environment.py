@@ -23,6 +23,13 @@ ACTION_DELTAS: dict[Action, tuple[int, int]] = {
 }
 
 ACTION_ORDER: tuple[Action, ...] = ("up", "down", "left", "right", "wait")
+OPPOSITE_ACTIONS: dict[Action, Action] = {
+    "up": "down",
+    "down": "up",
+    "left": "right",
+    "right": "left",
+    "wait": "wait",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +62,7 @@ class EnvironmentSnapshot:
     stopped: bool
     success: bool
     status: str
+    debug: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -168,6 +176,7 @@ class SheepdogEnvironment:
         return current
 
     def get_state_snapshot(self) -> EnvironmentSnapshot:
+        debug_payload = self._snapshot_debug_payload()
         return EnvironmentSnapshot(
             step=self._step_count,
             simulated_seconds=self._simulated_seconds,
@@ -203,6 +212,7 @@ class SheepdogEnvironment:
             stopped=self._stopped,
             success=self._success,
             status=self._status(),
+            debug=debug_payload,
         )
 
     def action_mask_for_dog(self, dog_index: int) -> dict[Action, bool]:
@@ -493,47 +503,69 @@ class SheepdogEnvironment:
     ) -> float:
         dog = self._dogs[dog_index]
         candidate = self._target_position(dog.position, action)
-        flock_center = self._flock_center() or dog.position
-        pen_center = self._pen.center
-        formation_target = self._formation_target(dog_index, flock_center, pen_center)
+        candidate_debug = self._pressure_position_debug(dog_index, candidate)
+        current_debug = self._pressure_position_debug(dog_index, dog.position)
         teammate_spacing = self._teammate_spacing(candidate, dog_index)
-        driving_sheep = self._nearest_unpenned_sheep(candidate)
-        distance_to_sheep = (
-            candidate.distance_to(driving_sheep.position) if driving_sheep is not None else 0.0
+        distance_to_sheep = candidate_debug["distance_to_focus_sheep"]
+        preferred_sheep_distance = 2.5 if candidate_debug["focus_mode"] == "collect" else 3.5
+        sheep_term = 0.0
+        if distance_to_sheep is not None and (
+            candidate_debug["pressure_side_alignment"] >= 0.25
+            or candidate_debug["focus_mode"] == "collect"
+        ):
+            sheep_term = -abs(distance_to_sheep - preferred_sheep_distance)
+        inside_distance = max(
+            0.0,
+            candidate_debug["flock_buffer_radius"] + 1.0 - candidate_debug["distance_to_flock"],
         )
-        drive_distance = 3.0
-        drive_distance_error = abs(distance_to_sheep - drive_distance)
-        distance_to_flock = candidate.distance_to(flock_center)
-        distance_to_pen = candidate.distance_to(pen_center)
-        distance_to_formation = candidate.distance_to(formation_target)
-        alignment = self._alignment_score(candidate, flock_center, pen_center)
+        inside_flock_penalty = -inside_distance
+        pen_side_penalty = -1.0 if candidate_debug["between_flock_and_pen"] else 0.0
+        formation_hold_bonus = 0.75 if candidate_debug["holding_pressure_position"] else 0.0
         wall_margin = self._wall_margin(candidate)
         if weights is None:
             weights = type(
                 "Weights",
                 (),
                 {
-                    "nearest_sheep": 1.4,
-                    "flock_center": 1.0,
-                    "pen_pressure": 0.9,
-                    "behind_flock": 1.1,
-                    "team_formation": 0.85,
+                    "nearest_sheep": 0.45,
+                    "flock_center": 1.8,
+                    "pen_pressure": 2.2,
+                    "behind_flock": 3.2,
+                    "team_formation": 2.8,
                     "dog_spacing": 0.6,
-                    "wall_margin": 0.35,
+                    "wall_margin": 0.2,
                     "wait_bias": -1.5,
                 },
             )()
-        wait_bias = weights.wait_bias if action == "wait" else 0.0
-        return (
-            weights.nearest_sheep * (-drive_distance_error)
-            + weights.flock_center * (-distance_to_flock)
-            + weights.pen_pressure * (-distance_to_pen)
-            + weights.behind_flock * alignment
-            + weights.team_formation * (-distance_to_formation)
+        wait_bias = 0.0
+        if action == "wait":
+            if candidate_debug["holding_pressure_position"]:
+                wait_bias = 0.5
+            elif (
+                candidate_debug["pressure_side_alignment"] >= 0.8
+                and not candidate_debug["between_flock_and_pen"]
+                and not candidate_debug["inside_or_too_close_to_flock"]
+            ):
+                wait_bias = -0.1
+            else:
+                wait_bias = weights.wait_bias
+        score = (
+            weights.nearest_sheep * sheep_term
+            + weights.flock_center * inside_flock_penalty
+            + weights.pen_pressure * pen_side_penalty
+            + weights.behind_flock
+            * (candidate_debug["pressure_side_alignment"] + formation_hold_bonus)
+            + weights.team_formation * (-candidate_debug["distance_to_pressure_target"])
             + weights.dog_spacing * (-teammate_spacing)
             + weights.wall_margin * wall_margin
             + wait_bias
         )
+        if self._is_reverse_action(dog.last_action, action) and not self._reverse_is_clearly_better(
+            current_debug,
+            candidate_debug,
+        ):
+            score -= 1.2
+        return score
 
     def _formation_target(
         self,
@@ -543,18 +575,24 @@ class SheepdogEnvironment:
     ) -> Point:
         to_pen_x = self._sign(pen_center.x - flock_center.x)
         to_pen_y = self._sign(pen_center.y - flock_center.y)
-        behind_distance = 3
+        behind_distance = max(3, min(6, round(self._flock_spread()) + 3))
         lateral_spacing = 3
         base_x = flock_center.x - to_pen_x * behind_distance
         base_y = flock_center.y - to_pen_y * behind_distance
         lateral_x = -to_pen_y
         lateral_y = to_pen_x
-        lateral_offset = dog_index - (self.dog_count - 1) / 2
-        offset = round(lateral_offset * lateral_spacing)
+        offset = self._pressure_role_offset(dog_index) * lateral_spacing
         return Point(base_x + lateral_x * offset, base_y + lateral_y * offset).clamp(
             self.env_config.width,
             self.env_config.height,
         )
+
+    def _pressure_role_offset(self, dog_index: int) -> int:
+        if self.dog_count <= 1:
+            return 0
+        if self.dog_count == 2:
+            return -1 if dog_index == 0 else 1
+        return (-1, 0, 1)[dog_index % 3]
 
     def _teammate_spacing(self, candidate: Point, dog_index: int) -> float:
         teammate_positions = [dog.position for dog in self._dogs if dog.index != dog_index]
@@ -623,8 +661,126 @@ class SheepdogEnvironment:
         vector_candidate_x = candidate.x - flock_center.x
         vector_candidate_y = candidate.y - flock_center.y
         numerator = vector_candidate_x * vector_to_pen_x + vector_candidate_y * vector_to_pen_y
-        denominator = max(1.0, (vector_to_pen_x**2 + vector_to_pen_y**2) ** 0.5)
+        pen_norm = (vector_to_pen_x**2 + vector_to_pen_y**2) ** 0.5
+        candidate_norm = (vector_candidate_x**2 + vector_candidate_y**2) ** 0.5
+        denominator = max(1.0, pen_norm * candidate_norm)
         return -numerator / denominator
+
+    def _pressure_position_debug(self, dog_index: int, position: Point) -> dict[str, Any]:
+        flock_center = self._flock_center()
+        pen_center = self._pen.center
+        if flock_center is None:
+            return {
+                "desired_pressure_target": {"x": position.x, "y": position.y},
+                "distance_to_pressure_target": 0.0,
+                "pressure_side_alignment": 0.0,
+                "between_flock_and_pen": False,
+                "inside_or_too_close_to_flock": False,
+                "distance_to_flock": 0.0,
+                "flock_buffer_radius": 0.0,
+                "focus_mode": "formation",
+                "distance_to_focus_sheep": None,
+                "holding_pressure_position": False,
+                "role_slot": self._pressure_role_offset(dog_index),
+            }
+
+        target = self._formation_target(dog_index, flock_center, pen_center)
+        alignment = self._alignment_score(position, flock_center, pen_center)
+        focus_sheep, focus_mode = self._focus_sheep_for_dog(dog_index, flock_center, position)
+        distance_to_flock = position.distance_to(flock_center)
+        flock_buffer_radius = self._flock_buffer_radius()
+        distance_to_target = position.distance_to(target)
+        return {
+            "desired_pressure_target": {"x": target.x, "y": target.y},
+            "distance_to_pressure_target": distance_to_target,
+            "pressure_side_alignment": alignment,
+            "between_flock_and_pen": alignment < -0.1,
+            "inside_or_too_close_to_flock": distance_to_flock < flock_buffer_radius,
+            "distance_to_flock": distance_to_flock,
+            "flock_buffer_radius": flock_buffer_radius,
+            "focus_mode": focus_mode,
+            "distance_to_focus_sheep": (
+                position.distance_to(focus_sheep.position) if focus_sheep is not None else None
+            ),
+            "holding_pressure_position": distance_to_target <= 1.5 and alignment >= 0.35,
+            "role_slot": self._pressure_role_offset(dog_index),
+        }
+
+    def _focus_sheep_for_dog(
+        self,
+        dog_index: int,
+        flock_center: Point,
+        position: Point,
+    ) -> tuple[SheepState | None, str]:
+        unpenned = [sheep for sheep in self._sheep if not sheep.penned]
+        if not unpenned:
+            return None, "formation"
+        straggler = self._straggler_sheep(flock_center)
+        if straggler is not None and self._assigned_straggler_dog(straggler) == dog_index:
+            return straggler, "collect"
+        nearest = min(unpenned, key=lambda sheep: sheep.position.distance_to(position))
+        return nearest, "formation"
+
+    def _straggler_sheep(self, flock_center: Point) -> SheepState | None:
+        unpenned = [sheep for sheep in self._sheep if not sheep.penned]
+        if len(unpenned) <= 1:
+            return None
+        straggler = max(
+            unpenned,
+            key=lambda sheep: sheep.position.distance_to(flock_center),
+        )
+        spread = max(1.5, self._flock_spread())
+        if straggler.position.distance_to(flock_center) <= max(3.5, spread * 1.8):
+            return None
+        return straggler
+
+    def _assigned_straggler_dog(self, straggler: SheepState) -> int:
+        return min(
+            self._dogs,
+            key=lambda dog: (dog.position.distance_to(straggler.position), dog.index),
+        ).index
+
+    def _flock_buffer_radius(self) -> float:
+        return max(2.0, self._flock_spread() + 1.0)
+
+    def _is_reverse_action(self, previous: str, action: Action) -> bool:
+        return previous in OPPOSITE_ACTIONS and OPPOSITE_ACTIONS[previous] == action
+
+    def _reverse_is_clearly_better(
+        self,
+        current_debug: dict[str, Any],
+        candidate_debug: dict[str, Any],
+    ) -> bool:
+        return bool(
+            current_debug["between_flock_and_pen"]
+            and not candidate_debug["between_flock_and_pen"]
+            or current_debug["inside_or_too_close_to_flock"]
+            and not candidate_debug["inside_or_too_close_to_flock"]
+            or candidate_debug["distance_to_pressure_target"]
+            <= current_debug["distance_to_pressure_target"] - 1.0
+            or candidate_debug["pressure_side_alignment"]
+            >= current_debug["pressure_side_alignment"] + 0.45
+        )
+
+    def _snapshot_debug_payload(self) -> dict[str, Any]:
+        instincts = self.config.rewards.instincts
+        if not instincts.debug_reward_breakdown:
+            return {}
+        flock_center = self._flock_center()
+        return {
+            "curriculum_stage": instincts.curriculum_stage,
+            "enable_instinct_rewards": instincts.enable_instinct_rewards,
+            "flock_center": (
+                {"x": flock_center.x, "y": flock_center.y} if flock_center is not None else None
+            ),
+            "dogs": [
+                {
+                    "index": dog.index,
+                    **self._pressure_position_debug(dog.index, dog.position),
+                }
+                for dog in self._dogs
+            ],
+        }
 
     def _wall_avoidance(self, position: Point, axis: str) -> float:
         margin = 3

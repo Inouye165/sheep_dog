@@ -137,6 +137,32 @@ log spam. To compare shaped vs. unshaped training, run with
 `enable_instinct_rewards=False` (the default) and again with it set to
 `True`.
 
+The UI training path now sends `enable_instinct_rewards`, `curriculum_stage`,
+and `debug_reward_breakdown` to the backend. By default the Train panel starts
+new runs with instinct rewards enabled and curriculum stage 1 unless you
+override them.
+
+Compatibility warning: older checkpoints trained without instinct rewards can
+work against the new pressure-position curriculum. Do not expect a 1100-episode
+run from the old reward mix to improve just because the viewer changed. Clear
+existing training data before starting a fresh instincts curriculum run, but do
+that manually so you can keep old artifacts if you still want them for
+comparison.
+
+Recommended first run:
+
+- clear training data
+- enable instincts
+- use curriculum stage 1
+- keep dog speed at 1 through the stage-1 defaults
+
+Recommended progression:
+
+- stage 1 until the dog reliably holds pressure behind a single sheep
+- stage 2 until grouping three sheep looks stable
+- stage 3 for longer driving and fetch behavior in a larger field
+- stage 4 and stage 5 only after pressure positioning stays stable with one dog
+
 
 ## UI
 
@@ -169,6 +195,11 @@ python -m sheepdog.server
 ```
 
 Then open the UI, choose an episode count in the Train panel, toggle Fast mode if you want the replay to advance without visible delay, and press Train. The page will poll training status and refresh the latest checkpoint as each episode finishes.
+
+The Train panel also exposes instinct shaping, curriculum stage, and replay
+debug toggles. If you are switching from an older reward setup, clear the
+persisted training artifacts before you start the new curriculum run so the
+trainer does not continue mutating weights that learned to dive into the flock.
 
 ## Tests
 

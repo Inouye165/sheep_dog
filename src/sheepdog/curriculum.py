@@ -25,20 +25,24 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "sheep": 1,
         "width": 20,
         "height": 15,
-        "pen_width": 4,
-        "pen_height": 4,
+        "pen_width": 6,
+        "pen_height": 6,
+        "dog_speed": 1,
+        "sheep_speed": 1,
         "max_steps": 200,
-        "no_progress_window": 30,
+        "no_progress_window": 40,
     },
     2: {
         "dogs": 1,
         "sheep": 3,
         "width": 24,
         "height": 18,
-        "pen_width": 4,
-        "pen_height": 4,
-        "max_steps": 220,
-        "no_progress_window": 35,
+        "pen_width": 6,
+        "pen_height": 6,
+        "dog_speed": 1,
+        "sheep_speed": 1,
+        "max_steps": 240,
+        "no_progress_window": 40,
     },
     3: {
         "dogs": 1,
@@ -47,26 +51,32 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "height": 28,
         "pen_width": 5,
         "pen_height": 5,
+        "dog_speed": 2,
+        "sheep_speed": 1,
         "max_steps": 280,
         "no_progress_window": 40,
     },
     4: {
-        "dogs": 1,
-        "sheep": 4,
-        "width": 40,
-        "height": 28,
-        "pen_width": 5,
-        "pen_height": 5,
-        "max_steps": 320,
-        "no_progress_window": 45,
-    },
-    5: {
         "dogs": 2,
         "sheep": 5,
         "width": 44,
         "height": 30,
         "pen_width": 5,
         "pen_height": 5,
+        "dog_speed": 2,
+        "sheep_speed": 1,
+        "max_steps": 320,
+        "no_progress_window": 45,
+    },
+    5: {
+        "dogs": 3,
+        "sheep": 6,
+        "width": 48,
+        "height": 32,
+        "pen_width": 5,
+        "pen_height": 5,
+        "dog_speed": 3,
+        "sheep_speed": 1,
         "max_steps": 340,
         "no_progress_window": 50,
     },
@@ -77,6 +87,52 @@ def available_stages() -> tuple[int, ...]:
     """Return the sorted tuple of available curriculum stage numbers."""
 
     return tuple(sorted(CURRICULUM_STAGES))
+
+
+def validate_curriculum_stage(stage: int) -> int:
+    """Return a normalized curriculum stage or raise for unknown non-zero values."""
+
+    normalized = max(0, int(stage))
+    if normalized == 0:
+        return 0
+    if normalized not in CURRICULUM_STAGES:
+        choices = ", ".join(str(value) for value in available_stages())
+        raise ValueError(f"Unknown curriculum stage {stage}. Available stages: {choices}")
+    return normalized
+
+
+def apply_training_profile(
+    config: LabConfig,
+    *,
+    enable_instinct_rewards: bool | None = None,
+    curriculum_stage: int | None = None,
+    debug_reward_breakdown: bool | None = None,
+) -> LabConfig:
+    """Apply instinct toggles and curriculum overrides to a config copy."""
+
+    base_instincts = config.rewards.instincts
+    stage = validate_curriculum_stage(
+        base_instincts.curriculum_stage if curriculum_stage is None else curriculum_stage
+    )
+    updated_instincts = replace(
+        base_instincts,
+        enable_instinct_rewards=(
+            base_instincts.enable_instinct_rewards
+            if enable_instinct_rewards is None
+            else enable_instinct_rewards
+        ),
+        debug_reward_breakdown=(
+            base_instincts.debug_reward_breakdown
+            if debug_reward_breakdown is None
+            else debug_reward_breakdown
+        ),
+        curriculum_stage=stage,
+    )
+    updated_config = replace(
+        config,
+        rewards=replace(config.rewards, instincts=updated_instincts),
+    )
+    return apply_curriculum_stage(updated_config, stage)
 
 
 def apply_curriculum_stage(config: LabConfig, stage: int) -> LabConfig:
@@ -97,10 +153,10 @@ def stage_summary(stage: int) -> str:
     """Return a short human-readable description of a curriculum stage."""
 
     descriptions = {
-        1: "One dog, one sheep, small open field, nearby pen.",
-        2: "One dog, small flock, learn grouping in an open field.",
-        3: "One dog, small flock, larger field for sustained drive/fetch.",
-        4: "One dog, slightly bigger flock, longer episodes for guarded pens.",
-        5: "Two dogs, small flock, basic cooperation without interference.",
+        1: "One dog, one sheep, slow movement, open field, forgiving pen.",
+        2: "One dog, three sheep, slow movement, open field grouping.",
+        3: "One dog, three sheep, larger field for longer drive/fetch paths.",
+        4: "Two dogs, medium flock, harder pressure control and role spacing.",
+        5: "Three dogs, larger flock, multi-dog cooperation under full speed.",
     }
     return descriptions.get(stage, "Custom stage.")

@@ -3,6 +3,28 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 
+const idleTrainingStatus = {
+  running: false,
+  fast_mode: true,
+  enable_instinct_rewards: true,
+  debug_reward_breakdown: false,
+  curriculum_stage: 1,
+  requested_episodes: 0,
+  completed_episodes: 0,
+  batch_total_episodes: 0,
+  batch_completed_episodes: 0,
+  total_episodes_trained: 0,
+  current_episode: null,
+  checkpoint_episode: null,
+  latest_checkpoint_episode: null,
+  latest_seed: null,
+  latest_replay_path: null,
+  best_score: null,
+  phase: "idle",
+  message: "Idle",
+  error: null,
+};
+
 const checkpointIndex = {
   checkpoints: [
     {
@@ -185,27 +207,7 @@ beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const path = String(input);
     if (path.includes("/api/training/status")) {
-      return new Response(
-        JSON.stringify({
-          running: false,
-          fast_mode: true,
-          requested_episodes: 0,
-          completed_episodes: 0,
-          batch_total_episodes: 0,
-          batch_completed_episodes: 0,
-          total_episodes_trained: 0,
-          current_episode: null,
-          checkpoint_episode: null,
-          latest_checkpoint_episode: null,
-          latest_seed: null,
-          latest_replay_path: null,
-          best_score: null,
-          phase: "idle",
-          message: "Idle",
-          error: null,
-        }),
-        { status: 200 },
-      );
+      return new Response(JSON.stringify(idleTrainingStatus), { status: 200 });
     }
     if (path.includes("checkpoint-index.json")) {
       return new Response(JSON.stringify(checkpointIndex), { status: 200 });
@@ -250,48 +252,14 @@ describe("App", () => {
       if (path.includes("/api/training/reset")) {
         return new Response(
           JSON.stringify({
-            running: false,
-            fast_mode: true,
-            requested_episodes: 0,
-            completed_episodes: 0,
-            batch_total_episodes: 0,
-            batch_completed_episodes: 0,
-            total_episodes_trained: 0,
-            current_episode: null,
-            checkpoint_episode: null,
-            latest_checkpoint_episode: null,
-            latest_seed: null,
-            latest_replay_path: null,
-            best_score: null,
-            phase: "idle",
+            ...idleTrainingStatus,
             message: "Training history cleared",
-            error: null,
           }),
           { status: 200 },
         );
       }
       if (path.includes("/api/training/status")) {
-        return new Response(
-          JSON.stringify({
-            running: false,
-            fast_mode: true,
-            requested_episodes: 0,
-            completed_episodes: 0,
-            batch_total_episodes: 0,
-            batch_completed_episodes: 0,
-            total_episodes_trained: 0,
-            current_episode: null,
-            checkpoint_episode: null,
-            latest_checkpoint_episode: null,
-            latest_seed: null,
-            latest_replay_path: null,
-            best_score: null,
-            phase: "idle",
-            message: "Idle",
-            error: null,
-          }),
-          { status: 200 },
-        );
+        return new Response(JSON.stringify(idleTrainingStatus), { status: 200 });
       }
       if (path.includes("checkpoint-index.json")) {
         return new Response(JSON.stringify(checkpointIndex), { status: 200 });
@@ -324,27 +292,7 @@ describe("App", () => {
         return new Response("not found", { status: 404 });
       }
       if (path.includes("/api/training/status")) {
-        return new Response(
-          JSON.stringify({
-            running: false,
-            fast_mode: true,
-            requested_episodes: 0,
-            completed_episodes: 0,
-            batch_total_episodes: 0,
-            batch_completed_episodes: 0,
-            total_episodes_trained: 0,
-            current_episode: null,
-            checkpoint_episode: null,
-            latest_checkpoint_episode: null,
-            latest_seed: null,
-            latest_replay_path: null,
-            best_score: null,
-            phase: "idle",
-            message: "Idle",
-            error: null,
-          }),
-          { status: 200 },
-        );
+        return new Response(JSON.stringify(idleTrainingStatus), { status: 200 });
       }
       if (path.includes("/api/replay/run")) {
         return new Response(
@@ -368,6 +316,60 @@ describe("App", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       new URL("/api/replay/run", "http://127.0.0.1:8000"),
       expect.objectContaining({ cache: "no-store", method: "POST" }),
+    );
+  });
+
+  it("starts training with instincts enabled and curriculum stage one by default", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.includes("/api/training/start")) {
+        return new Response(
+          JSON.stringify({
+            ...idleTrainingStatus,
+            running: true,
+            requested_episodes: 5,
+            batch_total_episodes: 5,
+            enable_instinct_rewards: true,
+            curriculum_stage: 1,
+            message: "Queued training job",
+          }),
+          { status: 200 },
+        );
+      }
+      if (path.includes("/api/training/status")) {
+        return new Response(JSON.stringify(idleTrainingStatus), { status: 200 });
+      }
+      if (path.includes("checkpoint-index.json")) {
+        return new Response(JSON.stringify(checkpointIndex), { status: 200 });
+      }
+      if (path.includes("checkpoint-000000-seed-000011.json")) {
+        return new Response(JSON.stringify(replay), { status: 200 });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByLabelText("Training controls")).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: "Train 5 more" }));
+
+    const trainingStartCall = fetchMock.mock.calls.find(([request]) =>
+      String(request).includes("/api/training/start"),
+    );
+    expect(trainingStartCall).toBeDefined();
+    expect(trainingStartCall?.[1]).toEqual(
+      expect.objectContaining({
+        cache: "no-store",
+        method: "POST",
+        body: JSON.stringify({
+          episodes: 5,
+          fast_mode: true,
+          enable_instinct_rewards: true,
+          curriculum_stage: 1,
+          debug_reward_breakdown: false,
+        }),
+      }),
     );
   });
 });

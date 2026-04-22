@@ -5,10 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import replace
 from dataclasses import asdict
 from pathlib import Path
 
 from sheepdog.config import LabConfig
+from sheepdog.curriculum import apply_training_profile
 from sheepdog.environment import SheepdogEnvironment
 from sheepdog.evaluation.evaluator import Evaluator
 from sheepdog.policies.heuristic import HeuristicPolicy
@@ -24,12 +26,44 @@ def _load_config(path: str | None) -> LabConfig:
         return LabConfig.from_dict(json.load(handle))
 
 
+def _add_profile_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--enable-instincts",
+        action="store_true",
+        help="Enable instinct reward shaping for this run.",
+    )
+    parser.add_argument(
+        "--curriculum-stage",
+        type=int,
+        default=None,
+        help="Apply a curriculum stage before training, evaluation, or demo export.",
+    )
+    parser.add_argument(
+        "--debug-reward-breakdown",
+        action="store_true",
+        help="Emit debug-friendly replay metadata for reward and pressure diagnostics.",
+    )
+
+
+def _apply_runtime_profile(args: argparse.Namespace, config: LabConfig) -> LabConfig:
+    try:
+        return apply_training_profile(
+            config,
+            enable_instinct_rewards=True if args.enable_instincts else None,
+            curriculum_stage=args.curriculum_stage,
+            debug_reward_breakdown=True if args.debug_reward_breakdown else None,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
 def train_command() -> None:
     parser = argparse.ArgumentParser(description="Train sheepdog checkpoint policy.")
     parser.add_argument("--config", default=None, help="Optional JSON config file.")
     parser.add_argument("--output-dir", default=None, help="Override the artifact root.")
+    _add_profile_args(parser)
     args = parser.parse_args()
-    config = _load_config(args.config)
+    config = _apply_runtime_profile(args, _load_config(args.config))
     if args.output_dir:
         config = LabConfig(
             environment=config.environment,
@@ -44,8 +78,9 @@ def evaluate_command() -> None:
     parser.add_argument("--config", default=None, help="Optional JSON config file.")
     parser.add_argument("--policy", choices=["heuristic", "random", "trained"], default="heuristic")
     parser.add_argument("--seeds", nargs="*", type=int, default=None)
+    _add_profile_args(parser)
     args = parser.parse_args()
-    config = _load_config(args.config)
+    config = _apply_runtime_profile(args, _load_config(args.config))
     seeds = tuple(args.seeds or config.training.evaluation_seeds)
     policy = _policy_from_name(args.policy)
     evaluator = Evaluator(config, Path(config.training.output_dir) / "evaluations")
@@ -58,8 +93,9 @@ def export_demo_command() -> None:
     parser.add_argument("--seed", type=int, default=11, help="Replay seed.")
     parser.add_argument("--policy", choices=["heuristic", "random", "trained"], default="heuristic")
     parser.add_argument("--output", default=None, help="Replay output file path.")
+    _add_profile_args(parser)
     args = parser.parse_args()
-    config = _load_config(args.config)
+    config = _apply_runtime_profile(args, _load_config(args.config))
     policy = _policy_from_name(args.policy)
     result = SheepdogEnvironment(config).run_policy(policy, seed=args.seed, capture_replay=True)
     output = Path(args.output or Path(config.training.web_export_dir) / "latest-replay.json")
@@ -87,15 +123,9 @@ def _policy_from_name(policy_name: str):
 
 
 def replace_training_output(config: LabConfig, output_dir: str):
-    return config.training.__class__(
-        episodes=config.training.episodes,
-        checkpoint_episodes=config.training.checkpoint_episodes,
-        evaluation_seeds=config.training.evaluation_seeds,
-        train_seed=config.training.train_seed,
-        evaluation_seed=config.training.evaluation_seed,
-        mutation_scale=config.training.mutation_scale,
+    return replace(
+        config.training,
         output_dir=output_dir,
-        web_export_dir=config.training.web_export_dir,
     )
 
 
