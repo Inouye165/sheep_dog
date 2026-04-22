@@ -16,20 +16,43 @@ The goal is to make herd behavior visible, measurable, and comparable across che
 ## Quick Start
 
 1. Create a Python environment and install the backend package in editable mode with dev tools.
-2. Run the training pipeline to generate checkpoints, evaluations, and replay files.
-3. Install the web dependencies and start the Vite dev server.
-4. Open the UI and load the exported replay data.
+2. Start the backend and web viewer from PowerShell.
+3. Open the UI and train or run the current dogs.
+4. Run the training pipeline when you want exported checkpoints and replay files.
+
+## Start From PowerShell
+
+From the repository root in PowerShell, run:
+
+```powershell
+.\start-app.ps1
+```
+
+That launcher will:
+
+- install the backend in editable mode if needed
+- install the web dependencies if `web/node_modules` is missing
+- start the Python API server at `http://127.0.0.1:8000`
+- start the Vite viewer at `http://127.0.0.1:5173`
+- write process ids and startup log paths to `artifacts/startup/pids.json`
+
+If you want to start the services manually from PowerShell instead of using the launcher:
+
+```powershell
+python -m pip install -e .[dev]
+python -m sheepdog.server
+cd web
+npm install
+npm run dev -- --host 127.0.0.1 --port 5173
+```
 
 Example commands:
 
 ```powershell
 python -m pip install -e .[dev]
-python -m sheepdog.server
+.\start-app.ps1
 python -m sheepdog.cli train
 python -m sheepdog.cli export-demo
-cd web
-npm install
-npm run dev
 ```
 
 ## Repo Structure
@@ -64,6 +87,22 @@ By default the no-training playback path uses `instinct_only`, not the expert he
 - The pen is a goal area inside the field.
 - Episodes succeed only when every sheep is penned.
 - The environment stops on success, timeout, or no-progress conditions.
+
+## Movement and Occupancy Rules
+
+- The logical field now runs on a significantly denser grid than the original release, so agents can reposition in smaller increments without visually shrinking to dots.
+- The default field now renders at one fixed world size instead of zooming to the current group positions.
+- Dogs move two logical cells per simulation step by default.
+- Sheep move one logical cell per simulation step.
+- Curriculum stages can still override dog speed for slower early training scenarios.
+- The viewer keeps icons roughly the same apparent size by scaling the rendered agent markers relative to grid density instead of tying icon size to one logical cell.
+- Dog-dog overlap is disallowed.
+- Dog-sheep overlap is disallowed.
+- Sheep-sheep overlap is also prevented in normal play.
+- If multiple agents want the same cell, resolution is deterministic: lower-index agents keep priority and blocked agents remain in place for that step.
+- Sheep add a small seed-driven tie-break jitter to local movement scoring so wall escapes and local minima do not always collapse to the same deterministic axis choice.
+- When a sheep stays pinned near a wall or pen edge and progress stalls, the dog scorer boosts flank/lateral repositioning and penalizes repeated bounce loops more strongly.
+- The pen now sits flush against the right wall so there is no dead strip behind it where sheep can get trapped.
 
 ## Training
 
@@ -142,11 +181,11 @@ Policy config (`PolicyConfig` in `src/sheepdog/config.py`):
 
 Curriculum stages (`CURRICULUM_STAGES` in `src/sheepdog/curriculum.py`):
 
-1. One dog, one sheep, small open field, nearby pen.
-2. One dog, small flock, learn grouping in an open field.
-3. One dog, small flock, larger field for sustained drive/fetch.
-4. One dog, slightly bigger flock, longer episodes for guarded pens.
-5. Two dogs, small flock, basic cooperation without interference.
+1. One dog, one sheep, dense open field, one-cell motion, nearby pen.
+2. One dog, small flock, dense-grid grouping in an open field.
+3. One dog, small flock, larger dense field for sustained drive/fetch.
+4. Two dogs, medium flock, dense-grid pressure control near guarded pens.
+5. Three dogs, larger flock, dense-grid cooperation without jump movement.
 
 Reward breakdown is always returned per step on `RewardBreakdown`, so the
 viewer or any debugging tool can inspect contributions term by term without
@@ -171,7 +210,7 @@ Recommended first run:
 - clear training data
 - enable instincts
 - use curriculum stage 1
-- keep dog speed at 1 through the stage-1 defaults
+- keep the stage-1 one-cell dog speed defaults while the policy is learning pressure control
 
 Recommended progression:
 
@@ -179,6 +218,8 @@ Recommended progression:
 - stage 2 until grouping three sheep looks stable
 - stage 3 for longer driving and fetch behavior in a larger field
 - stage 4 and stage 5 only after pressure positioning stays stable with one dog
+
+Realism note: the denser logical grid is doing the main visual work here. Instead of letting dogs jump 2-3 cells in one update, the simulation now advances with smaller logical steps and more total steps. That improves wall interactions, makes flanking space available, and gives the UI enough intermediate positions for smoother playback.
 
 
 ## UI
@@ -236,7 +277,17 @@ cd web
 npm install
 npm run lint
 npm run test
-npm run build
+```
+
+Full validation pass from PowerShell:
+
+```powershell
+python -m pytest
+ruff check src tests
+ruff format --check src tests
+cd web
+npm run lint
+npm run test
 ```
 
 ## Configuration Example

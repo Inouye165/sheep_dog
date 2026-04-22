@@ -37,6 +37,8 @@ def test_stage_one_uses_single_dog_single_sheep_and_slow_speeds() -> None:
     assert stage_one.sheep == 1
     assert stage_one.dog_speed == 1
     assert stage_one.sheep_speed == 1
+    assert stage_one.width >= 60
+    assert stage_one.height >= 45
 
 
 def test_stage_two_keeps_dog_speed_slow() -> None:

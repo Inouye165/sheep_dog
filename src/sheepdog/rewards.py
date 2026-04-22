@@ -205,8 +205,8 @@ class RewardComputer:
             previous_distance = _distance(inputs.previous_flock_centroid, target)
             current_distance = _distance(flock, target)
             target_progress = (
-                (previous_distance - current_distance) * instinct_config.target_progress_weight
-            )
+                previous_distance - current_distance
+            ) * instinct_config.target_progress_weight
 
         scatter_delta = inputs.current_flock_spread - inputs.previous_flock_spread
         if scatter_delta > instinct_config.chaos_scatter_delta:

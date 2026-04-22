@@ -23,9 +23,19 @@ function fenceSegments(snapshot: ReplaySnapshot): Array<{ side: Side; x1: number
 }
 
 export function FieldView({ snapshot }: FieldViewProps) {
-  const width = snapshot ? snapshot.pen.origin.x + snapshot.pen.width + 4 : 40;
-  const height = snapshot ? Math.max(snapshot.pen.origin.y + snapshot.pen.height + 4, 30) : 30;
+  const width = snapshot ? Math.max(snapshot.field_width ?? snapshot.pen.origin.x + snapshot.pen.width + 4, 40) : 40;
+  const height = snapshot ? Math.max(snapshot.field_height ?? Math.max(snapshot.pen.origin.y + snapshot.pen.height + 4, 30), 30) : 30;
   const fences = snapshot ? fenceSegments(snapshot) : [];
+  const densityScale = Math.max(width / 40, height / 30, 1);
+  const dogRadius = 0.48 * densityScale;
+  const sheepRadius = 0.42 * densityScale;
+  const fontSize = 0.34 * densityScale;
+  const fenceStroke = 0.32 * densityScale;
+  const fenceMarkerRadius = 0.18 * densityScale;
+  const penStroke = 0.08 * densityScale;
+  const transitionStyle = {
+    transition: "transform 150ms linear, cx 150ms linear, cy 150ms linear, x 150ms linear, y 150ms linear",
+  };
 
   return (
     <section className="field-card" aria-label="Simulation field">
@@ -60,11 +70,11 @@ export function FieldView({ snapshot }: FieldViewProps) {
               y={snapshot.pen.origin.y}
               width={snapshot.pen.width}
               height={snapshot.pen.height}
-              rx="0.4"
+              rx={0.4 * densityScale}
               fill="rgba(244, 197, 66, 0.12)"
               stroke="rgba(244, 197, 66, 0.55)"
-              strokeDasharray="0.4 0.3"
-              strokeWidth="0.08"
+              strokeDasharray={`${0.4 * densityScale} ${0.3 * densityScale}`}
+              strokeWidth={penStroke}
             />
             {fences.map((segment) => (
               <line
@@ -74,29 +84,29 @@ export function FieldView({ snapshot }: FieldViewProps) {
                 x2={segment.x2}
                 y2={segment.y2}
                 stroke="#f4c542"
-                strokeWidth="0.32"
+                strokeWidth={fenceStroke}
                 strokeLinecap="round"
               />
             ))}
             {/* Gate markers on the open side */}
             {snapshot.pen.opening === "left" || snapshot.pen.opening === undefined ? (
               <>
-                <circle cx={snapshot.pen.origin.x} cy={snapshot.pen.origin.y} r="0.18" fill="#fde68a" />
-                <circle cx={snapshot.pen.origin.x} cy={snapshot.pen.origin.y + snapshot.pen.height} r="0.18" fill="#fde68a" />
+                <circle cx={snapshot.pen.origin.x} cy={snapshot.pen.origin.y} r={fenceMarkerRadius} fill="#fde68a" />
+                <circle cx={snapshot.pen.origin.x} cy={snapshot.pen.origin.y + snapshot.pen.height} r={fenceMarkerRadius} fill="#fde68a" />
               </>
             ) : null}
             {snapshot.sheep.map((sheep) => (
               <g key={`sheep-${sheep.index}`} transform={`translate(${sheep.x + 0.5}, ${sheep.y + 0.5})`}>
-                <circle r="0.42" fill={sheep.penned ? "#bbf7d0" : "#f8fafc"} stroke="#cbd5e1" strokeWidth="0.08" />
-                <text textAnchor="middle" dominantBaseline="central" fill="#0f172a" fontSize="0.35" fontWeight={700}>
+                <circle r={sheepRadius} fill={sheep.penned ? "#bbf7d0" : "#f8fafc"} stroke="#cbd5e1" strokeWidth={penStroke} style={transitionStyle} />
+                <text textAnchor="middle" dominantBaseline="central" fill="#0f172a" fontSize={fontSize} fontWeight={700} style={transitionStyle}>
                   S
                 </text>
               </g>
             ))}
             {snapshot.dogs.map((dog) => (
               <g key={`dog-${dog.index}`} transform={`translate(${dog.x + 0.5}, ${dog.y + 0.5})`}>
-                <circle r="0.48" fill="#1d4ed8" stroke="#dbeafe" strokeWidth="0.08" />
-                <text textAnchor="middle" dominantBaseline="central" fill="#eff6ff" fontSize="0.34" fontWeight={700}>
+                <circle r={dogRadius} fill="#1d4ed8" stroke="#dbeafe" strokeWidth={penStroke} style={transitionStyle} />
+                <text textAnchor="middle" dominantBaseline="central" fill="#eff6ff" fontSize={fontSize} fontWeight={700} style={transitionStyle}>
                   D
                 </text>
               </g>

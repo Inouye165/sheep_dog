@@ -5,8 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import replace
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from sheepdog.config import LabConfig

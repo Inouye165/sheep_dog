@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
 import json
 import shutil
 import threading
+from dataclasses import asdict
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -45,9 +45,9 @@ def _build_training_job_config(
     )
     return apply_training_profile(
         LabConfig(
-        environment=config.environment,
-        rewards=config.rewards,
-        training=training_config,
+            environment=config.environment,
+            rewards=config.rewards,
+            training=training_config,
         ),
         enable_instinct_rewards=enable_instinct_rewards,
         curriculum_stage=curriculum_stage,
@@ -189,6 +189,8 @@ class TrainingManager:
         curriculum_stage: int | None = None,
         debug_reward_breakdown: bool = False,
     ) -> dict[str, Any]:
+        config = LabConfig()
+        status: dict[str, Any]
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return dict(self._status)
@@ -202,7 +204,9 @@ class TrainingManager:
                     "fast_mode": fast_mode,
                     "enable_instinct_rewards": instincts_enabled,
                     "policy_mode": "trained_policy",
-                    "allow_instinct_target_awareness": config.policy.allow_instinct_target_awareness,
+                    "allow_instinct_target_awareness": (
+                        config.policy.allow_instinct_target_awareness
+                    ),
                     "handler_target_enabled": config.policy.handler_target_enabled,
                     "debug_reward_breakdown": debug_reward_breakdown,
                     "curriculum_stage": stage,
@@ -221,8 +225,25 @@ class TrainingManager:
                 ),
                 daemon=True,
             )
-            self._thread.start()
-            return dict(self._status)
+            status = dict(self._status)
+        return status
+
+    def launch_pending(self) -> None:
+        with self._lock:
+            thread = self._thread
+            if thread is None or thread.is_alive():
+                return
+        try:
+            thread.start()
+        except RuntimeError as exc:
+            self._update_status(
+                {
+                    "running": False,
+                    "phase": "error",
+                    "message": "Training failed to start",
+                    "error": str(exc),
+                }
+            )
 
     def clear(self) -> dict[str, Any]:
         with self._lock:
@@ -310,7 +331,9 @@ class TrainingManager:
                     "fast_mode": fast_mode,
                     "enable_instinct_rewards": enable_instinct_rewards,
                     "policy_mode": "trained_policy",
-                    "allow_instinct_target_awareness": config.policy.allow_instinct_target_awareness,
+                    "allow_instinct_target_awareness": (
+                        config.policy.allow_instinct_target_awareness
+                    ),
                     "handler_target_enabled": config.policy.handler_target_enabled,
                     "debug_reward_breakdown": debug_reward_breakdown,
                     "curriculum_stage": curriculum_stage,
@@ -388,30 +411,30 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             self._json_response({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
             return
 
-        payload = self._read_json()
-        requested_episodes = int(payload.get("episodes", 1))
-        fast_mode = bool(payload.get("fast_mode", True))
-        enable_instinct_rewards = payload.get("enable_instinct_rewards")
-        debug_reward_breakdown = bool(payload.get("debug_reward_breakdown", False))
-        curriculum_stage = int(payload.get("curriculum_stage", 1))
-        if requested_episodes < 1:
-            requested_episodes = 1
         try:
-            self._json_response(
-                self.manager.start(
-                    requested_episodes,
-                    fast_mode,
-                    enable_instinct_rewards=(
-                        bool(enable_instinct_rewards)
-                        if enable_instinct_rewards is not None
-                        else True
-                    ),
-                    curriculum_stage=curriculum_stage,
-                    debug_reward_breakdown=debug_reward_breakdown,
-                )
+            payload = self._read_json()
+            requested_episodes = int(payload.get("episodes", 1))
+            fast_mode = bool(payload.get("fast_mode", True))
+            enable_instinct_rewards = payload.get("enable_instinct_rewards")
+            debug_reward_breakdown = bool(payload.get("debug_reward_breakdown", False))
+            curriculum_stage = int(payload.get("curriculum_stage", 1))
+            if requested_episodes < 1:
+                requested_episodes = 1
+            status = self.manager.start(
+                requested_episodes,
+                fast_mode,
+                enable_instinct_rewards=(
+                    bool(enable_instinct_rewards) if enable_instinct_rewards is not None else True
+                ),
+                curriculum_stage=curriculum_stage,
+                debug_reward_breakdown=debug_reward_breakdown,
             )
+            self._json_response(status)
+            self.manager.launch_pending()
         except ValueError as exc:
             self._json_response({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except Exception as exc:  # pragma: no cover - surfaced through UI
+            self._json_response({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def do_OPTIONS(self) -> None:  # noqa: N802
         self.send_response(HTTPStatus.NO_CONTENT)

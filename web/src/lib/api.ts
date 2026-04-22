@@ -2,6 +2,11 @@ import type { CheckpointIndex, ReplayBundle, ReplayRunRequest, TrainingStartRequ
 
 const API_BASE_URL = "http://127.0.0.1:8000";
 
+function isJsonResponse(response: Response): boolean {
+  const contentType = response.headers.get("content-type") ?? "";
+  return contentType.toLowerCase().includes("application/json");
+}
+
 async function fetchJson<T>(path: string, init?: RequestInit, baseUrl?: string): Promise<T> {
   const requestUrl = baseUrl ? new URL(path, baseUrl) : path;
   const response = await fetch(requestUrl, { cache: "no-store", ...init });
@@ -10,6 +15,14 @@ async function fetchJson<T>(path: string, init?: RequestInit, baseUrl?: string):
     error.status = response.status;
     throw error;
   }
+
+  if (!isJsonResponse(response)) {
+    const error = new Error(`Expected JSON from ${path}, received ${response.headers.get("content-type") ?? "unknown content type"}`) as Error & { status?: number; contentType?: string };
+    error.status = response.status;
+    error.contentType = response.headers.get("content-type") ?? undefined;
+    throw error;
+  }
+
   return (await response.json()) as T;
 }
 
@@ -17,7 +30,11 @@ export async function loadCheckpointIndex(): Promise<CheckpointIndex | null> {
   try {
     return await fetchJson<CheckpointIndex>("/generated/checkpoint-index.json");
   } catch (error) {
-    if ((error as { status?: number }).status === 404) {
+    const fetchError = error as { status?: number; contentType?: string };
+    if (fetchError.status === 404) {
+      return null;
+    }
+    if (fetchError.status === 200 && fetchError.contentType?.toLowerCase().includes("text/html")) {
       return null;
     }
     throw error;

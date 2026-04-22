@@ -7,7 +7,7 @@ from pathlib import Path
 
 from sheepdog.config import EnvironmentConfig, LabConfig, RewardConfig, TrainingConfig
 from sheepdog.evaluation.evaluator import Evaluator
-from sheepdog.policies.heuristic import HeuristicExpertPolicy, InstinctOnlyPolicy
+from sheepdog.policies.heuristic import HeuristicExpertPolicy
 from sheepdog.policies.trainable import PolicyWeights
 from sheepdog.server import (
     TrainingManager,
@@ -176,6 +176,30 @@ def test_server_training_job_config_can_disable_instinct_rewards(
     assert job_config.rewards.instincts.debug_reward_breakdown is False
     assert job_config.rewards.instincts.curriculum_stage == 0
     assert job_config.environment.dogs == base_config.environment.dogs
+
+
+def test_training_manager_start_returns_status_payload(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = make_config(tmp_path)
+    monkeypatch.setattr("sheepdog.server.LabConfig", lambda: config)
+    monkeypatch.setattr("threading.Thread.start", lambda self: None)
+    manager = TrainingManager()
+
+    status = manager.start(
+        requested_episodes=5,
+        fast_mode=True,
+        enable_instinct_rewards=True,
+        curriculum_stage=1,
+        debug_reward_breakdown=False,
+    )
+
+    assert status["running"] is True
+    assert status["message"] == "Queued training job"
+    assert status["policy_mode"] == "trained_policy"
+    assert status["allow_instinct_target_awareness"] is False
+    assert status["handler_target_enabled"] is False
 
 
 def test_live_replay_uses_instinct_only_when_no_training_state(

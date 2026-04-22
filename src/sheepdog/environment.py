@@ -49,6 +49,8 @@ class EnvironmentSnapshot:
 
     step: int
     simulated_seconds: float
+    field_width: int
+    field_height: int
     dogs: tuple[AgentSnapshot, ...]
     sheep: tuple[AgentSnapshot, ...]
     pen: Pen
@@ -152,7 +154,7 @@ class SheepdogEnvironment:
         self._stop_reason = ""
         self._history = []
         self._stats = EpisodeStats()
-        pen_origin = Point(self.env_config.width - self.env_config.pen_width - 2, 1)
+        pen_origin = Point(self.env_config.width - self.env_config.pen_width, 1)
         self._pen = Pen(
             pen_origin,
             self.env_config.pen_width,
@@ -162,15 +164,26 @@ class SheepdogEnvironment:
         self._fence_cells = self._pen.fence_cells()
         self._dogs = self._initial_dogs()
         self._sheep = self._initial_sheep()
+        for dog in self._dogs:
+            self._record_position_history(dog.recent_positions, dog.position)
+        for sheep in self._sheep:
+            self._record_position_history(sheep.recent_positions, sheep.position)
         self._previous_average_distance = self._average_distance_to_pen()
         self._previous_flock_spread = self._flock_spread()
         return self.get_state_snapshot()
 
-    def _advance_position(self, position: Point, action: Action, speed: int) -> Point:
+    def _advance_position(
+        self,
+        position: Point,
+        action: Action,
+        speed: int,
+        blocked_positions: set[Point] | None = None,
+    ) -> Point:
         current = position
+        blocked = blocked_positions or set()
         for _ in range(max(1, speed)):
             candidate = self._target_position(current, action)
-            if candidate == current:
+            if candidate == current or candidate in blocked:
                 break
             current = candidate
         return current
@@ -180,6 +193,8 @@ class SheepdogEnvironment:
         return EnvironmentSnapshot(
             step=self._step_count,
             simulated_seconds=self._simulated_seconds,
+            field_width=self.env_config.width,
+            field_height=self.env_config.height,
             dogs=tuple(
                 AgentSnapshot(
                     index=dog.index,
@@ -200,8 +215,7 @@ class SheepdogEnvironment:
             ),
             pen=self._pen,
             fence_cells=tuple(
-                (cell.x, cell.y)
-                for cell in sorted(self._fence_cells, key=lambda p: (p.y, p.x))
+                (cell.x, cell.y) for cell in sorted(self._fence_cells, key=lambda p: (p.y, p.x))
             ),
             penned_count=sum(1 for sheep in self._sheep if sheep.penned),
             average_distance_to_pen=self._average_distance_to_pen(),
@@ -222,7 +236,9 @@ class SheepdogEnvironment:
         weights: Any | None = None,
     ) -> dict[Action, bool]:
         dog = self._dogs[dog_index]
-        current_score = self._action_score(dog_index, "wait", policy_mode=policy_mode, weights=weights)
+        current_score = self._action_score(
+            dog_index, "wait", policy_mode=policy_mode, weights=weights
+        )
         move_scores = {
             action: self._action_score(dog_index, action, policy_mode=policy_mode, weights=weights)
             for action in ACTION_ORDER
@@ -393,11 +409,19 @@ class SheepdogEnvironment:
     def _initial_dogs(self) -> list[DogState]:
         dogs: list[DogState] = []
         base_y = self.env_config.height // 2 + 2
+        occupied: set[Point] = set()
         for index in range(self.env_config.dogs):
+            position = self._sample_open_position(
+                center=Point(2 + index * 4, base_y),
+                radius_x=3,
+                radius_y=3,
+                occupied=occupied,
+            )
+            occupied.add(position)
             dogs.append(
                 DogState(
                     index=index,
-                    position=Point(2 + index * 2, base_y + self._rng.randint(-1, 1)),
+                    position=position,
                 )
             )
         return dogs
@@ -406,17 +430,54 @@ class SheepdogEnvironment:
         sheep: list[SheepState] = []
         base_x = self.env_config.width // 3
         base_y = self.env_config.height // 2
+        occupied = {dog.position for dog in self._dogs}
         for index in range(self.env_config.sheep):
+            position = self._sample_open_position(
+                center=Point(base_x, base_y),
+                radius_x=6,
+                radius_y=6,
+                occupied=occupied,
+            )
+            occupied.add(position)
             sheep.append(
                 SheepState(
                     index=index,
-                    position=Point(
-                        base_x + self._rng.randint(-2, 2),
-                        base_y + self._rng.randint(-2, 2),
-                    ).clamp(self.env_config.width, self.env_config.height),
+                    position=position,
                 )
             )
         return sheep
+
+    def _sample_open_position(
+        self,
+        center: Point,
+        radius_x: int,
+        radius_y: int,
+        occupied: set[Point],
+    ) -> Point:
+        attempts = max(12, (radius_x * 2 + 1) * (radius_y * 2 + 1))
+        for _ in range(attempts):
+            candidate = Point(
+                center.x + self._rng.randint(-radius_x, radius_x),
+                center.y + self._rng.randint(-radius_y, radius_y),
+            ).clamp(self.env_config.width, self.env_config.height)
+            if (
+                candidate in occupied
+                or candidate in self._fence_cells
+                or self._pen.contains(candidate)
+            ):
+                continue
+            return candidate
+        for y in range(self.env_config.height):
+            for x in range(self.env_config.width):
+                candidate = Point(x, y)
+                if (
+                    candidate in occupied
+                    or candidate in self._fence_cells
+                    or self._pen.contains(candidate)
+                ):
+                    continue
+                return candidate
+        raise RuntimeError("No open position available for agent placement.")
 
     def _target_position(self, position: Point, action: Action) -> Point:
         dx, dy = ACTION_DELTAS[action]
@@ -428,47 +489,87 @@ class SheepdogEnvironment:
         return candidate
 
     def _apply_dog_actions(self, actions: list[Action]) -> None:
+        sheep_positions = {sheep.position for sheep in self._sheep if not sheep.penned}
+        next_positions: dict[int, Point] = {}
+        claimed_positions = set(sheep_positions)
+        unresolved_positions = {dog.index: dog.position for dog in self._dogs}
+
         for dog, action in zip(self._dogs, actions, strict=True):
+            unresolved_positions.pop(dog.index, None)
+            other_current_positions = set(unresolved_positions.values())
             candidate = self._advance_position(
                 dog.position,
                 action,
                 self.env_config.dog_speed,
+                blocked_positions=claimed_positions | other_current_positions,
             )
-            dog.position = candidate
+            if (
+                candidate != dog.position
+                and candidate not in claimed_positions
+                and candidate not in other_current_positions
+            ):
+                next_position = candidate
+            else:
+                next_position = dog.position
+            next_positions[dog.index] = next_position
+            claimed_positions.add(next_position)
+
+        for dog, action in zip(self._dogs, actions, strict=True):
+            next_position = next_positions[dog.index]
+            dog.blocked_steps = dog.blocked_steps + 1 if next_position == dog.position else 0
+            dog.position = next_position
             dog.last_action = action
+            self._record_position_history(dog.recent_positions, dog.position)
 
     def _move_sheep(self) -> None:
         dog_positions = [dog.position for dog in self._dogs]
-        next_positions: list[Point] = []
+        flock_center = self._flock_center()
+        occupied_positions = {dog.position for dog in self._dogs}
+        unresolved_positions = {
+            sheep.index: sheep.position
+            for sheep in self._sheep
+            if not sheep.penned and not self._pen.contains(sheep.position)
+        }
+        next_positions: dict[int, Point] = {}
         for sheep in self._sheep:
             if sheep.penned or self._pen.contains(sheep.position):
                 sheep.penned = True
                 sheep.panic_steps = 0
-                next_positions.append(sheep.position)
+                sheep.blocked_steps = 0
+                next_positions[sheep.index] = sheep.position
+                occupied_positions.add(sheep.position)
+                self._record_position_history(sheep.recent_positions, sheep.position)
                 continue
-            move = sheep.position
-            flock_center = self._flock_center()
-            for _ in range(max(1, self.env_config.sheep_speed)):
-                move = self._sheep_step(move, dog_positions, flock_center, sheep.panic_steps)
-                if sheep.panic_steps > 0:
-                    sheep.panic_steps = max(0, sheep.panic_steps - 1)
-                if move == sheep.position:
-                    break
+            unresolved_positions.pop(sheep.index, None)
+            blocked_positions = occupied_positions | set(unresolved_positions.values())
+            move = self._sheep_step(
+                sheep,
+                dog_positions,
+                flock_center,
+                blocked_positions,
+            )
+            if sheep.panic_steps > 0:
+                sheep.panic_steps = max(0, sheep.panic_steps - 1)
             if self._nearest_dog_distance(move, dog_positions) <= self.env_config.dog_vision:
                 sheep.panic_steps = max(sheep.panic_steps, 2)
-            next_positions.append(move)
+            sheep.blocked_steps = sheep.blocked_steps + 1 if move == sheep.position else 0
+            next_positions[sheep.index] = move
+            occupied_positions.add(move)
 
-        for sheep, position in zip(self._sheep, next_positions, strict=True):
+        for sheep in self._sheep:
+            position = next_positions[sheep.index]
             sheep.position = position
             sheep.penned = self._pen.contains(position)
+            self._record_position_history(sheep.recent_positions, sheep.position)
 
     def _sheep_step(
         self,
-        position: Point,
+        sheep: SheepState,
         dog_positions: list[Point],
         flock_center: Point | None,
-        panic_steps: int,
+        blocked_positions: set[Point],
     ) -> Point:
+        position = sheep.position
         vector_x = 0.0
         vector_y = 0.0
         nearest_dog_distance = inf
@@ -479,7 +580,7 @@ class SheepdogEnvironment:
                 weight = (self.env_config.dog_vision - distance + 1.0) / distance
                 vector_x += (position.x - dog_position.x) * weight
                 vector_y += (position.y - dog_position.y) * weight
-        if panic_steps <= 0 and flock_center is not None:
+        if sheep.panic_steps <= 0 and flock_center is not None:
             vector_x += (flock_center.x - position.x) * 0.35
             vector_y += (flock_center.y - position.y) * 0.35
         if nearest_dog_distance <= self.env_config.dog_vision:
@@ -487,18 +588,60 @@ class SheepdogEnvironment:
             vector_y *= 1.5
         vector_x += self._wall_avoidance(position, axis="x")
         vector_y += self._wall_avoidance(position, axis="y")
-        if vector_x == 0 and vector_y == 0:
-            return position
-        if abs(vector_x) >= abs(vector_y):
-            move = Point(position.x + self._sign(vector_x), position.y)
-        else:
-            move = Point(position.x, position.y + self._sign(vector_y))
-        move = move.clamp(self.env_config.width, self.env_config.height)
-        if move in self._fence_cells and not self._pen.contains(position):
-            return position
-        if move in dog_positions:
-            return position
-        return move
+        if self._sheep_is_wall_pinned(sheep):
+            escape_x, escape_y = self._wall_escape_vector(position)
+            vector_x += escape_x * 0.9
+            vector_y += escape_y * 0.9
+        noise_scale = 0.18 if nearest_dog_distance <= self.env_config.dog_vision else 0.08
+        if self._sheep_is_wall_pinned(sheep):
+            noise_scale += 0.12
+        vector_x += self._rng.uniform(-noise_scale, noise_scale)
+        vector_y += self._rng.uniform(-noise_scale, noise_scale)
+
+        best_position = position
+        best_score = -inf
+        for action in ACTION_ORDER:
+            candidate = self._target_position(position, action)
+            if candidate in blocked_positions:
+                continue
+            score = self._sheep_candidate_score(
+                position,
+                candidate,
+                flock_center,
+                vector_x,
+                vector_y,
+                sheep,
+            )
+            if score > best_score:
+                best_score = score
+                best_position = candidate
+        return best_position
+
+    def _sheep_candidate_score(
+        self,
+        position: Point,
+        candidate: Point,
+        flock_center: Point | None,
+        drive_x: float,
+        drive_y: float,
+        sheep: SheepState,
+    ) -> float:
+        delta_x = candidate.x - position.x
+        delta_y = candidate.y - position.y
+        drive_score = delta_x * drive_x + delta_y * drive_y
+        wall_bonus = self._wall_margin(candidate) * 0.12
+        move_bonus = 0.06 if candidate != position else -0.05
+        flock_bonus = 0.0
+        jitter = self._rng.uniform(-0.045, 0.045) if candidate != position else 0.0
+        if flock_center is not None and sheep.panic_steps <= 0:
+            flock_bonus = -candidate.distance_to(flock_center) * 0.03
+        repeat_penalty = (
+            -0.12 if self._revisits_recent_position(sheep.recent_positions, candidate) else 0.0
+        )
+        if self._sheep_is_wall_pinned(sheep):
+            move_bonus += 0.14 if candidate != position else -0.18
+            wall_bonus *= 1.8
+        return drive_score + wall_bonus + move_bonus + flock_bonus + repeat_penalty + jitter
 
     def _nearest_dog_distance(self, position: Point, dog_positions: list[Point]) -> float:
         if not dog_positions:
@@ -559,6 +702,15 @@ class SheepdogEnvironment:
             + weights.wall_margin * wall_margin
             + wait_bias
         )
+        score += self._deadlock_action_adjustment(
+            dog_index,
+            dog.position,
+            candidate,
+            action,
+            active_policy_mode,
+            candidate_debug,
+        )
+        score += self._loop_penalty(dog, candidate)
         if self._is_reverse_action(dog.last_action, action) and not self._reverse_is_clearly_better(
             current_debug,
             candidate_debug,
@@ -651,7 +803,9 @@ class SheepdogEnvironment:
     ) -> bool:
         if not self._sheep:
             return False
-        current_score = self._action_score(dog.index, "wait", policy_mode=policy_mode, weights=weights)
+        current_score = self._action_score(
+            dog.index, "wait", policy_mode=policy_mode, weights=weights
+        )
         best_move_score = max(
             self._action_score(dog.index, action, policy_mode=policy_mode, weights=weights)
             for action in ACTION_ORDER
@@ -932,7 +1086,9 @@ class SheepdogEnvironment:
             "dogs": [
                 {
                     "index": dog.index,
-                    **self._action_context_debug(self.config.policy.policy_mode, dog.index, dog.position),
+                    **self._action_context_debug(
+                        self.config.policy.policy_mode, dog.index, dog.position
+                    ),
                 }
                 for dog in self._dogs
             ],
@@ -958,6 +1114,116 @@ class SheepdogEnvironment:
         top = position.y
         bottom = self.env_config.height - 1 - position.y
         return min(left, right, top, bottom)
+
+    def _record_position_history(
+        self, history: list[Point], position: Point, limit: int = 6
+    ) -> None:
+        history.append(position)
+        if len(history) > limit:
+            del history[:-limit]
+
+    def _revisits_recent_position(self, history: list[Point], candidate: Point) -> bool:
+        return len(history) >= 2 and candidate == history[-2]
+
+    def _in_two_position_loop(self, history: list[Point]) -> bool:
+        if len(history) < 4:
+            return False
+        tail = history[-4:]
+        return tail[-1] == tail[-3] and tail[-2] == tail[-4] and len({*tail}) <= 2
+
+    def _sheep_is_wall_pinned(self, sheep: SheepState) -> bool:
+        return sheep.blocked_steps >= 2 and self._is_near_wall_or_pen_edge(sheep.position)
+
+    def _is_near_wall_or_pen_edge(self, position: Point) -> bool:
+        if self._wall_margin(position) <= 2:
+            return True
+        return any(position.distance_to(cell) <= 2.0 for cell in self._fence_cells)
+
+    def _wall_escape_vector(self, position: Point) -> tuple[float, float]:
+        x_component = 0.0
+        y_component = 0.0
+        if position.x <= 2:
+            x_component += 1.0
+        elif position.x >= self.env_config.width - 3:
+            x_component -= 1.0
+        if position.y <= 2:
+            y_component += 1.0
+        elif position.y >= self.env_config.height - 3:
+            y_component -= 1.0
+        if x_component == 0.0 and y_component == 0.0 and self._fence_cells:
+            nearest_fence = min(self._fence_cells, key=lambda cell: position.distance_to(cell))
+            x_component = self._sign(position.x - nearest_fence.x)
+            y_component = self._sign(position.y - nearest_fence.y)
+        if x_component != 0.0 and y_component == 0.0:
+            y_component = self._rng.choice((-1.0, 1.0))
+        elif y_component != 0.0 and x_component == 0.0:
+            x_component = self._rng.choice((-1.0, 1.0))
+        return x_component, y_component
+
+    def _deadlock_state(self) -> dict[str, Any]:
+        wall_pinned_sheep = [
+            sheep.index
+            for sheep in self._sheep
+            if not sheep.penned and self._sheep_is_wall_pinned(sheep)
+        ]
+        oscillating_dogs = [
+            dog.index for dog in self._dogs if self._in_two_position_loop(dog.recent_positions)
+        ]
+        active = self._no_progress_steps >= 4 and bool(wall_pinned_sheep or oscillating_dogs)
+        return {
+            "active": active,
+            "wall_pinned_sheep": tuple(wall_pinned_sheep),
+            "oscillating_dogs": tuple(oscillating_dogs),
+        }
+
+    def _flank_score(self, candidate: Point, flock_center: Point, target: Point) -> float:
+        target_dx = target.x - flock_center.x
+        target_dy = target.y - flock_center.y
+        candidate_dx = candidate.x - flock_center.x
+        candidate_dy = candidate.y - flock_center.y
+        target_norm = max(1.0, (target_dx**2 + target_dy**2) ** 0.5)
+        candidate_norm = max(1.0, (candidate_dx**2 + candidate_dy**2) ** 0.5)
+        cross = abs(target_dx * candidate_dy - target_dy * candidate_dx)
+        return cross / (target_norm * candidate_norm)
+
+    def _deadlock_action_adjustment(
+        self,
+        dog_index: int,
+        current: Point,
+        candidate: Point,
+        action: Action,
+        policy_mode: PolicyMode,
+        candidate_debug: dict[str, Any],
+    ) -> float:
+        state = self._deadlock_state()
+        if not state["active"]:
+            return 0.0
+        flock_center = self._flock_center()
+        if flock_center is None:
+            return 0.0
+        if self._instinct_target_awareness_enabled(policy_mode):
+            target = self._pen.center
+        else:
+            desired = candidate_debug["desired_pressure_target"]
+            target = Point(int(desired["x"]), int(desired["y"]))
+        flank_bonus = self._flank_score(candidate, flock_center, target) * 1.6
+        straight_pressure_penalty = -0.7 if candidate_debug["holding_pressure_position"] else 0.0
+        bounce_penalty = 0.0
+        if (
+            dog_index in state["oscillating_dogs"]
+            and action in {"up", "down"}
+            and candidate.x == current.x
+        ):
+            bounce_penalty -= 0.9
+        return flank_bonus + straight_pressure_penalty + bounce_penalty
+
+    def _loop_penalty(self, dog: DogState, candidate: Point) -> float:
+        penalty = 0.0
+        if self._revisits_recent_position(dog.recent_positions, candidate):
+            penalty -= 0.35
+        if self._in_two_position_loop(dog.recent_positions):
+            penalty -= 0.55
+        return penalty
 
     def _sign(self, value: float) -> int:
         return 0 if value == 0 else (1 if value > 0 else -1)

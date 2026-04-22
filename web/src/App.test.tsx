@@ -3,6 +3,15 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 
+function jsonResponse(payload: unknown, status = 200): Response {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+    },
+  });
+}
+
 const idleTrainingStatus = {
   running: false,
   fast_mode: true,
@@ -207,13 +216,13 @@ beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const path = String(input);
     if (path.includes("/api/training/status")) {
-      return new Response(JSON.stringify(idleTrainingStatus), { status: 200 });
+      return jsonResponse(idleTrainingStatus);
     }
     if (path.includes("checkpoint-index.json")) {
-      return new Response(JSON.stringify(checkpointIndex), { status: 200 });
+      return jsonResponse(checkpointIndex);
     }
     if (path.includes("checkpoint-000000-seed-000011.json")) {
-      return new Response(JSON.stringify(replay), { status: 200 });
+      return jsonResponse(replay);
     }
     return new Response("not found", { status: 404 });
   }));
@@ -251,22 +260,19 @@ describe("App", () => {
     fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
       const path = String(input);
       if (path.includes("/api/training/reset")) {
-        return new Response(
-          JSON.stringify({
-            ...idleTrainingStatus,
-            message: "Training history cleared",
-          }),
-          { status: 200 },
-        );
+        return jsonResponse({
+          ...idleTrainingStatus,
+          message: "Training history cleared",
+        });
       }
       if (path.includes("/api/training/status")) {
-        return new Response(JSON.stringify(idleTrainingStatus), { status: 200 });
+        return jsonResponse(idleTrainingStatus);
       }
       if (path.includes("checkpoint-index.json")) {
-        return new Response(JSON.stringify(checkpointIndex), { status: 200 });
+        return jsonResponse(checkpointIndex);
       }
       if (path.includes("checkpoint-000000-seed-000011.json")) {
-        return new Response(JSON.stringify(replay), { status: 200 });
+        return jsonResponse(replay);
       }
       return new Response("not found", { status: 404 });
     });
@@ -293,17 +299,14 @@ describe("App", () => {
         return new Response("not found", { status: 404 });
       }
       if (path.includes("/api/training/status")) {
-        return new Response(JSON.stringify(idleTrainingStatus), { status: 200 });
+        return jsonResponse(idleTrainingStatus);
       }
       if (path.includes("/api/replay/run")) {
-        return new Response(
-          JSON.stringify({
-            ...replay,
-            policy_name: "instinct_only",
-            seed: 11,
-          }),
-          { status: 200 },
-        );
+        return jsonResponse({
+          ...replay,
+          policy_name: "instinct_only",
+          seed: 11,
+        });
       }
       return new Response("not found", { status: 404 });
     });
@@ -321,32 +324,53 @@ describe("App", () => {
     );
   });
 
+  it("treats the Vite HTML fallback for a missing checkpoint index as no exported checkpoints", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.includes("checkpoint-index.json")) {
+        return new Response("<!doctype html><html><body>fallback</body></html>", {
+          status: 200,
+          headers: {
+            "Content-Type": "text/html",
+          },
+        });
+      }
+      if (path.includes("/api/training/status")) {
+        return jsonResponse(idleTrainingStatus);
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText("No replay loaded yet.")).toBeInTheDocument());
+    expect(screen.queryByText(/Unexpected token/)).not.toBeInTheDocument();
+  });
+
   it("starts training with instincts enabled and curriculum stage one by default", async () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
       const path = String(input);
       if (path.includes("/api/training/start")) {
-        return new Response(
-          JSON.stringify({
-            ...idleTrainingStatus,
-            running: true,
-            requested_episodes: 5,
-            batch_total_episodes: 5,
-            enable_instinct_rewards: true,
-            curriculum_stage: 1,
-            message: "Queued training job",
-          }),
-          { status: 200 },
-        );
+        return jsonResponse({
+          ...idleTrainingStatus,
+          running: true,
+          requested_episodes: 5,
+          batch_total_episodes: 5,
+          enable_instinct_rewards: true,
+          curriculum_stage: 1,
+          message: "Queued training job",
+        });
       }
       if (path.includes("/api/training/status")) {
-        return new Response(JSON.stringify(idleTrainingStatus), { status: 200 });
+        return jsonResponse(idleTrainingStatus);
       }
       if (path.includes("checkpoint-index.json")) {
-        return new Response(JSON.stringify(checkpointIndex), { status: 200 });
+        return jsonResponse(checkpointIndex);
       }
       if (path.includes("checkpoint-000000-seed-000011.json")) {
-        return new Response(JSON.stringify(replay), { status: 200 });
+        return jsonResponse(replay);
       }
       return new Response("not found", { status: 404 });
     });

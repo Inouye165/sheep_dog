@@ -60,6 +60,8 @@ export interface ReplayDebugSnapshot {
 export interface ReplaySnapshot {
   step: number;
   simulated_seconds: number;
+  field_width?: number;
+  field_height?: number;
   dogs: AgentSnapshot[];
   sheep: AgentSnapshot[];
   pen: Pen;

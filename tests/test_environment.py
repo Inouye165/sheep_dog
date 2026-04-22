@@ -95,10 +95,11 @@ def test_multiple_dogs_keep_consistent_state_updates() -> None:
 
     assert len(snapshot.dogs) == 4
     assert {dog.index for dog in snapshot.dogs} == {0, 1, 2, 3}
+    assert len({(dog.x, dog.y) for dog in snapshot.dogs}) == 4
 
 
-def test_dog_speed_is_used_for_clear_moves() -> None:
-    config = make_config(dogs=1, dog_speed=2, sheep=0)
+def test_default_dog_movement_uses_two_cell_steps() -> None:
+    config = make_config(dogs=1, sheep=0, dog_speed=2)
     environment = SheepdogEnvironment(config)
     environment.reset(seed=3)
     dog = environment._dogs[0]
@@ -107,6 +108,20 @@ def test_dog_speed_is_used_for_clear_moves() -> None:
     environment.step(["right"])
 
     assert environment._dogs[0].position.x == 7
+
+
+def test_dog_speed_stops_before_blocking_sheep() -> None:
+    config = make_config(dogs=1, sheep=1, dog_speed=2, sheep_speed=1)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=3)
+    dog = environment._dogs[0]
+    sheep = environment._sheep[0]
+    dog.position = dog.position.__class__(5, 5)
+    sheep.position = sheep.position.__class__(7, 5)
+
+    environment.step(["right"])
+
+    assert environment._dogs[0].position.x == 6
 
 
 def test_dog_action_score_prefers_herding_standoff() -> None:
@@ -170,7 +185,9 @@ def test_action_score_no_longer_rewards_diving_toward_flock_center() -> None:
     dog.position = dog.position.__class__(7, 10)
 
     hold_pressure = environment.score_action_for_dog(0, "wait", policy_mode="heuristic_expert")
-    step_toward_center = environment.score_action_for_dog(0, "right", policy_mode="heuristic_expert")
+    step_toward_center = environment.score_action_for_dog(
+        0, "right", policy_mode="heuristic_expert"
+    )
 
     assert hold_pressure > step_toward_center
 
@@ -338,13 +355,113 @@ def test_instinct_only_policy_runs_without_pen_target_knowledge() -> None:
     assert result.stats.terminated is True
 
 
+def test_dog_and_sheep_cannot_occupy_same_cell() -> None:
+    config = make_config(dogs=1, sheep=1)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=31)
+    dog = environment._dogs[0]
+    sheep = environment._sheep[0]
+    dog.position = dog.position.__class__(5, 5)
+    sheep.position = sheep.position.__class__(6, 5)
+
+    environment.step(["right"])
+
+    assert environment._dogs[0].position != environment._sheep[0].position
+    assert environment._dogs[0].position == dog.position.__class__(5, 5)
+
+
+def test_two_dogs_cannot_occupy_same_cell() -> None:
+    config = make_config(dogs=2, sheep=0)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=32)
+    environment._dogs[0].position = environment._dogs[0].position.__class__(5, 5)
+    environment._dogs[1].position = environment._dogs[1].position.__class__(7, 5)
+
+    environment.step(["right", "left"])
+
+    positions = {(dog.position.x, dog.position.y) for dog in environment._dogs}
+    assert len(positions) == 2
+
+
+def test_denser_grid_defaults_are_active() -> None:
+    config = make_config()
+
+    assert config.environment.width >= 120
+    assert config.environment.height >= 90
+    assert config.environment.pen_width >= 15
+    assert config.environment.dog_speed == 2
+
+
+def test_sheep_randomness_changes_tie_break_outcomes_by_seed() -> None:
+    left_environment = SheepdogEnvironment(make_config(dogs=1, sheep=1))
+    right_environment = SheepdogEnvironment(make_config(dogs=1, sheep=1))
+    left_environment.reset(seed=41)
+    right_environment.reset(seed=42)
+
+    for environment in (left_environment, right_environment):
+        environment._dogs[0].position = environment._dogs[0].position.__class__(10, 10)
+        environment._sheep[0].position = environment._sheep[0].position.__class__(12, 12)
+
+    left_environment.step(["wait"])
+    right_environment.step(["wait"])
+
+    assert left_environment._sheep[0].position != right_environment._sheep[0].position
+
+
+def test_deadlock_detection_triggers_for_wall_pinned_sheep() -> None:
+    config = make_config(dogs=1, sheep=1)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=51)
+    sheep = environment._sheep[0]
+    dog = environment._dogs[0]
+    sheep.position = sheep.position.__class__(0, 10)
+    sheep.blocked_steps = 3
+    dog.position = dog.position.__class__(2, 10)
+    environment._no_progress_steps = 5
+
+    state = environment._deadlock_state()
+
+    assert state["active"] is True
+    assert state["wall_pinned_sheep"] == (0,)
+
+
+def test_two_position_loop_penalty_reduces_back_and_forth_behavior() -> None:
+    config = make_config(dogs=1, sheep=1)
+    clean_environment = SheepdogEnvironment(config)
+    loop_environment = SheepdogEnvironment(config)
+    clean_environment.reset(seed=61)
+    loop_environment.reset(seed=61)
+
+    for environment in (clean_environment, loop_environment):
+        sheep = environment._sheep[0]
+        dog = environment._dogs[0]
+        sheep.position = sheep.position.__class__(20, 20)
+        dog.position = dog.position.__class__(16, 20)
+
+    loop_environment._dogs[0].recent_positions[:] = [
+        loop_environment._dogs[0].position.__class__(16, 20),
+        loop_environment._dogs[0].position.__class__(17, 20),
+        loop_environment._dogs[0].position.__class__(16, 20),
+        loop_environment._dogs[0].position.__class__(17, 20),
+    ]
+
+    clean_score = clean_environment.score_action_for_dog(0, "right", policy_mode="heuristic_expert")
+    loop_score = loop_environment.score_action_for_dog(0, "right", policy_mode="heuristic_expert")
+
+    assert loop_score < clean_score
+
+
 def test_pen_has_three_closed_fences_and_one_opening() -> None:
     config = make_config()
     environment = SheepdogEnvironment(config)
     snapshot = environment.reset(seed=11)
 
+    assert snapshot.field_width == config.environment.width
+    assert snapshot.field_height == config.environment.height
+
     pen = snapshot.pen
     assert pen.opening == "left"
+    assert pen.origin.x + pen.width == config.environment.width
     segments = pen.fence_segments()
     assert len(segments) == 3
 
