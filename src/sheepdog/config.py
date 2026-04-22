@@ -6,29 +6,31 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from sheepdog.policies.base import PolicyMode
+
 
 @dataclass(frozen=True, slots=True)
 class EnvironmentConfig:
     """Grid, entity, and termination settings."""
 
-    width: int = 40
-    height: int = 30
+    width: int = 120
+    height: int = 90
     dogs: int = 3
     sheep: int = 6
-    pen_width: int = 5
-    pen_height: int = 5
+    pen_width: int = 15
+    pen_height: int = 15
     pen_opening: str = "left"
-    max_steps: int = 300
-    seconds_per_step: float = 1.0
-    dog_vision: int = 8
-    sheep_vision: int = 6
-    flock_radius: int = 5
-    dog_speed: int = 3
+    max_steps: int = 900
+    seconds_per_step: float = 0.35
+    dog_vision: int = 24
+    sheep_vision: int = 18
+    flock_radius: int = 15
+    dog_speed: int = 2
     sheep_speed: int = 1
-    no_progress_window: int = 40
+    no_progress_window: int = 120
     no_progress_distance_delta: float = 0.15
     no_progress_penned_delta: int = 0
-    no_progress_timeout_penalty_steps: int = 40
+    no_progress_timeout_penalty_steps: int = 120
     seed_offset: int = 0
 
 
@@ -93,12 +95,22 @@ class TrainingConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class PolicyConfig:
+    """Runtime policy controls for demo, evaluation, and untrained playback."""
+
+    policy_mode: PolicyMode = "instinct_only"
+    allow_instinct_target_awareness: bool = False
+    handler_target_enabled: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class LabConfig:
     """Bundle of environment, reward, and training settings."""
 
     environment: EnvironmentConfig = field(default_factory=EnvironmentConfig)
     rewards: RewardConfig = field(default_factory=RewardConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
+    policy: PolicyConfig = field(default_factory=PolicyConfig)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -107,15 +119,20 @@ class LabConfig:
     def from_dict(cls, payload: dict[str, Any]) -> LabConfig:
         rewards_payload = dict(payload["rewards"])
         instincts_payload = rewards_payload.pop("instincts", None)
+        policy_payload = payload.get("policy")
         instincts = (
             InstinctRewardConfig(**instincts_payload)
             if isinstance(instincts_payload, dict)
             else InstinctRewardConfig()
         )
+        policy = (
+            PolicyConfig(**policy_payload) if isinstance(policy_payload, dict) else PolicyConfig()
+        )
         return cls(
             environment=EnvironmentConfig(**payload["environment"]),
             rewards=RewardConfig(instincts=instincts, **rewards_payload),
             training=TrainingConfig(**payload["training"]),
+            policy=policy,
         )
 
 

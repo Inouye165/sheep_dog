@@ -32,9 +32,36 @@ export interface RewardBreakdown {
   total: number;
 }
 
+export interface PressureDebugDog {
+  index: number;
+  desired_pressure_target: Point;
+  distance_to_pressure_target: number;
+  pressure_side_alignment: number;
+  between_flock_and_pen: boolean;
+  inside_or_too_close_to_flock: boolean;
+  distance_to_flock?: number;
+  flock_buffer_radius?: number;
+  focus_mode?: string;
+  distance_to_focus_sheep?: number | null;
+  holding_pressure_position?: boolean;
+  role_slot?: number;
+}
+
+export interface ReplayDebugSnapshot {
+  curriculum_stage: number;
+  enable_instinct_rewards: boolean;
+  policy_mode?: string;
+  allow_instinct_target_awareness?: boolean;
+  handler_target_enabled?: boolean;
+  flock_center?: Point | null;
+  dogs: PressureDebugDog[];
+}
+
 export interface ReplaySnapshot {
   step: number;
   simulated_seconds: number;
+  field_width?: number;
+  field_height?: number;
   dogs: AgentSnapshot[];
   sheep: AgentSnapshot[];
   pen: Pen;
@@ -48,6 +75,7 @@ export interface ReplaySnapshot {
   stopped: boolean;
   success: boolean;
   status: string;
+  debug?: ReplayDebugSnapshot;
 }
 
 export interface ReplayFrame {
@@ -82,6 +110,12 @@ export interface ReplayBundle {
 export interface TrainingStatus {
   running: boolean;
   fast_mode: boolean;
+  enable_instinct_rewards: boolean;
+  policy_mode?: string;
+  allow_instinct_target_awareness?: boolean;
+  handler_target_enabled?: boolean;
+  debug_reward_breakdown: boolean;
+  curriculum_stage: number;
   requested_episodes: number;
   completed_episodes: number;
   batch_total_episodes: number;
@@ -101,6 +135,9 @@ export interface TrainingStatus {
 export interface TrainingStartRequest {
   episodes: number;
   fast_mode: boolean;
+  enable_instinct_rewards: boolean;
+  curriculum_stage: number;
+  debug_reward_breakdown: boolean;
 }
 
 export interface ReplayRunRequest {

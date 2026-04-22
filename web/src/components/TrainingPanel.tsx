@@ -1,6 +1,9 @@
 interface TrainingPanelProps {
   episodes: number;
   fastMode: boolean;
+  enableInstincts: boolean;
+  curriculumStage: number;
+  debugRewardBreakdown: boolean;
   running: boolean;
   clearing: boolean;
   batchCompletedEpisodes: number;
@@ -11,6 +14,9 @@ interface TrainingPanelProps {
   error: string | null;
   onEpisodesChange: (episodes: number) => void;
   onFastModeChange: (enabled: boolean) => void;
+  onEnableInstinctsChange: (enabled: boolean) => void;
+  onCurriculumStageChange: (stage: number) => void;
+  onDebugRewardBreakdownChange: (enabled: boolean) => void;
   onStartTraining: () => void;
   onClearTraining: () => void;
 }
@@ -18,6 +24,9 @@ interface TrainingPanelProps {
 export function TrainingPanel({
   episodes,
   fastMode,
+  enableInstincts,
+  curriculumStage,
+  debugRewardBreakdown,
   running,
   clearing,
   batchCompletedEpisodes,
@@ -28,6 +37,9 @@ export function TrainingPanel({
   error,
   onEpisodesChange,
   onFastModeChange,
+  onEnableInstinctsChange,
+  onCurriculumStageChange,
+  onDebugRewardBreakdownChange,
   onStartTraining,
   onClearTraining,
 }: TrainingPanelProps) {
@@ -68,6 +80,42 @@ export function TrainingPanel({
           />
           <span>Fast mode</span>
         </label>
+
+        <label className="training-toggle">
+          <input
+            type="checkbox"
+            checked={enableInstincts}
+            onChange={(event) => onEnableInstinctsChange(event.target.checked)}
+            disabled={busy}
+          />
+          <span>Enable instincts</span>
+        </label>
+
+        <label>
+          <span>Curriculum stage</span>
+          <input
+            type="number"
+            min={0}
+            max={5}
+            value={curriculumStage}
+            onChange={(event) => onCurriculumStageChange(Number(event.target.value) || 0)}
+            disabled={busy}
+          />
+        </label>
+
+        <label className="training-toggle">
+          <input
+            type="checkbox"
+            checked={debugRewardBreakdown}
+            onChange={(event) => onDebugRewardBreakdownChange(event.target.checked)}
+            disabled={busy}
+          />
+          <span>Debug reward breakdown</span>
+        </label>
+      </div>
+
+      <div className="warning-box" role="status">
+        Old weights trained without instinct rewards may not transfer cleanly. Clear training data before starting a new instincts curriculum run.
       </div>
 
       <div className="training-summary">
@@ -84,6 +132,14 @@ export function TrainingPanel({
         <div>
           <span>Status</span>
           <strong>{message}</strong>
+        </div>
+        <div>
+          <span>Curriculum</span>
+          <strong>Stage {curriculumStage}</strong>
+        </div>
+        <div>
+          <span>Instinct rewards</span>
+          <strong>{enableInstincts ? "Enabled" : "Disabled"}</strong>
         </div>
       </div>
 

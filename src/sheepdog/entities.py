@@ -37,6 +37,8 @@ class DogState:
     index: int
     position: Point
     last_action: str = "wait"
+    blocked_steps: int = 0
+    recent_positions: list[Point] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -47,6 +49,8 @@ class SheepState:
     position: Point
     penned: bool = False
     panic_steps: int = 0
+    blocked_steps: int = 0
+    recent_positions: list[Point] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)

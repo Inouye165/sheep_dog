@@ -2,20 +2,57 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
 import json
 import shutil
 import threading
+from dataclasses import asdict
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
 from sheepdog.config import LabConfig, TrainingConfig
+from sheepdog.curriculum import apply_training_profile
 from sheepdog.environment import EpisodeResult, SheepdogEnvironment
-from sheepdog.policies.heuristic import HeuristicPolicy
+from sheepdog.policies.heuristic import HeuristicExpertPolicy, InstinctOnlyPolicy
+from sheepdog.policies.random_policy import RandomPolicy
 from sheepdog.policies.trainable import PolicyWeights, TrainableLinearPolicy
 from sheepdog.training.trainer import Trainer
+
+
+def _build_training_job_config(
+    config: LabConfig,
+    *,
+    requested_episodes: int,
+    fast_mode: bool,
+    enable_instinct_rewards: bool | None,
+    curriculum_stage: int | None,
+    debug_reward_breakdown: bool,
+) -> LabConfig:
+    total_episodes = max(1, requested_episodes)
+    training_episodes = max(0, total_episodes - 1)
+    checkpoint_episodes = tuple(range(total_episodes))
+    evaluation_seeds = (11,) if fast_mode else config.training.evaluation_seeds
+    training_config = TrainingConfig(
+        episodes=training_episodes,
+        checkpoint_episodes=checkpoint_episodes,
+        evaluation_seeds=evaluation_seeds,
+        train_seed=config.training.train_seed,
+        evaluation_seed=config.training.evaluation_seed,
+        mutation_scale=config.training.mutation_scale,
+        output_dir=config.training.output_dir,
+        web_export_dir=config.training.web_export_dir,
+    )
+    return apply_training_profile(
+        LabConfig(
+            environment=config.environment,
+            rewards=config.rewards,
+            training=training_config,
+        ),
+        enable_instinct_rewards=enable_instinct_rewards,
+        curriculum_stage=curriculum_stage,
+        debug_reward_breakdown=debug_reward_breakdown,
+    )
 
 
 def _read_persisted_total() -> int:
@@ -58,20 +95,30 @@ def _clear_training_outputs(config: LabConfig) -> None:
 def _load_playable_policy(config: LabConfig) -> tuple[object, str]:
     """Prefer trained weights when they exist; otherwise fall back to instinct-only play."""
 
+    fallback_policy: object
+    fallback_name = config.policy.policy_mode
+    if config.policy.policy_mode == "random_untrained":
+        fallback_policy = RandomPolicy()
+    elif config.policy.policy_mode == "heuristic_expert":
+        fallback_policy = HeuristicExpertPolicy()
+    else:
+        fallback_policy = InstinctOnlyPolicy()
+        fallback_name = "instinct_only"
+
     state_path = Path(config.training.output_dir) / Trainer.STATE_FILENAME
     if not state_path.exists():
-        return HeuristicPolicy(), "instinct-only"
+        return fallback_policy, fallback_name
     try:
         payload = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, ValueError):
-        return HeuristicPolicy(), "instinct-only"
+        return fallback_policy, fallback_name
 
     total_episodes = int(payload.get("total_episodes_trained", 0))
     weights_payload = payload.get("weights")
     if total_episodes > 0 and weights_payload:
         weights = PolicyWeights.from_dict(weights_payload)
-        return TrainableLinearPolicy(weights), "trained-checkpoint"
-    return HeuristicPolicy(), "instinct-only"
+        return TrainableLinearPolicy(weights), "trained_policy"
+    return fallback_policy, fallback_name
 
 
 def _replay_payload(result: EpisodeResult, policy_name: str) -> dict[str, Any]:
@@ -107,6 +154,12 @@ class TrainingManager:
         return {
             "running": False,
             "fast_mode": True,
+            "enable_instinct_rewards": True,
+            "policy_mode": "instinct_only",
+            "allow_instinct_target_awareness": False,
+            "handler_target_enabled": False,
+            "debug_reward_breakdown": False,
+            "curriculum_stage": 1,
             "requested_episodes": 0,
             "completed_episodes": 0,
             "batch_total_episodes": 0,
@@ -127,27 +180,70 @@ class TrainingManager:
         with self._lock:
             return dict(self._status)
 
-    def start(self, requested_episodes: int, fast_mode: bool) -> dict[str, Any]:
+    def start(
+        self,
+        requested_episodes: int,
+        fast_mode: bool,
+        *,
+        enable_instinct_rewards: bool | None = None,
+        curriculum_stage: int | None = None,
+        debug_reward_breakdown: bool = False,
+    ) -> dict[str, Any]:
+        config = LabConfig()
+        status: dict[str, Any]
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return dict(self._status)
 
+            stage = max(0, curriculum_stage or 0)
+            instincts_enabled = True if enable_instinct_rewards is None else enable_instinct_rewards
             self._status = self._initial_status()
             self._status.update(
                 {
                     "running": True,
                     "fast_mode": fast_mode,
+                    "enable_instinct_rewards": instincts_enabled,
+                    "policy_mode": "trained_policy",
+                    "allow_instinct_target_awareness": (
+                        config.policy.allow_instinct_target_awareness
+                    ),
+                    "handler_target_enabled": config.policy.handler_target_enabled,
+                    "debug_reward_breakdown": debug_reward_breakdown,
+                    "curriculum_stage": stage,
                     "requested_episodes": requested_episodes,
                     "message": "Queued training job",
                 }
             )
             self._thread = threading.Thread(
                 target=self._run_training,
-                args=(requested_episodes, fast_mode),
+                args=(
+                    requested_episodes,
+                    fast_mode,
+                    instincts_enabled,
+                    stage,
+                    debug_reward_breakdown,
+                ),
                 daemon=True,
             )
-            self._thread.start()
-            return dict(self._status)
+            status = dict(self._status)
+        return status
+
+    def launch_pending(self) -> None:
+        with self._lock:
+            thread = self._thread
+            if thread is None or thread.is_alive():
+                return
+        try:
+            thread.start()
+        except RuntimeError as exc:
+            self._update_status(
+                {
+                    "running": False,
+                    "phase": "error",
+                    "message": "Training failed to start",
+                    "error": str(exc),
+                }
+            )
 
     def clear(self) -> dict[str, Any]:
         with self._lock:
@@ -167,26 +263,23 @@ class TrainingManager:
         with self._lock:
             self._status.update(payload)
 
-    def _run_training(self, requested_episodes: int, fast_mode: bool) -> None:
+    def _run_training(
+        self,
+        requested_episodes: int,
+        fast_mode: bool,
+        enable_instinct_rewards: bool,
+        curriculum_stage: int,
+        debug_reward_breakdown: bool,
+    ) -> None:
         config = LabConfig()
         total_episodes = max(1, requested_episodes)
-        training_episodes = max(0, total_episodes - 1)
-        checkpoint_episodes = tuple(range(total_episodes))
-        evaluation_seeds = (11,) if fast_mode else config.training.evaluation_seeds
-        training_config = TrainingConfig(
-            episodes=training_episodes,
-            checkpoint_episodes=checkpoint_episodes,
-            evaluation_seeds=evaluation_seeds,
-            train_seed=config.training.train_seed,
-            evaluation_seed=config.training.evaluation_seed,
-            mutation_scale=config.training.mutation_scale,
-            output_dir=config.training.output_dir,
-            web_export_dir=config.training.web_export_dir,
-        )
-        job_config = LabConfig(
-            environment=config.environment,
-            rewards=config.rewards,
-            training=training_config,
+        job_config = _build_training_job_config(
+            config,
+            requested_episodes=total_episodes,
+            fast_mode=fast_mode,
+            enable_instinct_rewards=enable_instinct_rewards,
+            curriculum_stage=curriculum_stage,
+            debug_reward_breakdown=debug_reward_breakdown,
         )
         trainer = Trainer(job_config, job_config.training.output_dir)
 
@@ -205,6 +298,13 @@ class TrainingManager:
             update: dict[str, Any] = {
                 "running": payload.get("phase") != "complete",
                 "phase": payload.get("phase", "running"),
+                "fast_mode": fast_mode,
+                "enable_instinct_rewards": enable_instinct_rewards,
+                "policy_mode": "trained_policy",
+                "allow_instinct_target_awareness": config.policy.allow_instinct_target_awareness,
+                "handler_target_enabled": config.policy.handler_target_enabled,
+                "debug_reward_breakdown": debug_reward_breakdown,
+                "curriculum_stage": curriculum_stage,
                 "requested_episodes": batch_total,
                 "completed_episodes": batch_completed,
                 "batch_total_episodes": batch_total,
@@ -228,6 +328,15 @@ class TrainingManager:
                 {
                     "running": True,
                     "phase": "training",
+                    "fast_mode": fast_mode,
+                    "enable_instinct_rewards": enable_instinct_rewards,
+                    "policy_mode": "trained_policy",
+                    "allow_instinct_target_awareness": (
+                        config.policy.allow_instinct_target_awareness
+                    ),
+                    "handler_target_enabled": config.policy.handler_target_enabled,
+                    "debug_reward_breakdown": debug_reward_breakdown,
+                    "curriculum_stage": curriculum_stage,
                     "requested_episodes": total_episodes,
                     "completed_episodes": 0,
                     "batch_total_episodes": total_episodes,
@@ -302,12 +411,30 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             self._json_response({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
             return
 
-        payload = self._read_json()
-        requested_episodes = int(payload.get("episodes", 1))
-        fast_mode = bool(payload.get("fast_mode", True))
-        if requested_episodes < 1:
-            requested_episodes = 1
-        self._json_response(self.manager.start(requested_episodes, fast_mode))
+        try:
+            payload = self._read_json()
+            requested_episodes = int(payload.get("episodes", 1))
+            fast_mode = bool(payload.get("fast_mode", True))
+            enable_instinct_rewards = payload.get("enable_instinct_rewards")
+            debug_reward_breakdown = bool(payload.get("debug_reward_breakdown", False))
+            curriculum_stage = int(payload.get("curriculum_stage", 1))
+            if requested_episodes < 1:
+                requested_episodes = 1
+            status = self.manager.start(
+                requested_episodes,
+                fast_mode,
+                enable_instinct_rewards=(
+                    bool(enable_instinct_rewards) if enable_instinct_rewards is not None else True
+                ),
+                curriculum_stage=curriculum_stage,
+                debug_reward_breakdown=debug_reward_breakdown,
+            )
+            self._json_response(status)
+            self.manager.launch_pending()
+        except ValueError as exc:
+            self._json_response({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except Exception as exc:  # pragma: no cover - surfaced through UI
+            self._json_response({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def do_OPTIONS(self) -> None:  # noqa: N802
         self.send_response(HTTPStatus.NO_CONTENT)

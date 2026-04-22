@@ -36,6 +36,9 @@ export function App() {
   const [loading, setLoading] = useState(true);
   const [trainingEpisodes, setTrainingEpisodes] = useState(5);
   const [trainingFastMode, setTrainingFastMode] = useState(true);
+  const [trainingEnableInstincts, setTrainingEnableInstincts] = useState(true);
+  const [trainingCurriculumStage, setTrainingCurriculumStage] = useState(1);
+  const [trainingDebugRewardBreakdown, setTrainingDebugRewardBreakdown] = useState(false);
   const [playbackFastMode, setPlaybackFastMode] = useState(false);
   const [trainingStatus, setTrainingStatus] = useState<TrainingStatus | null>(null);
   const [clearingTraining, setClearingTraining] = useState(false);
@@ -238,7 +241,13 @@ export function App() {
     setTrainingError(null);
     setError(null);
     try {
-      const status = await startTraining({ episodes: trainingEpisodes, fast_mode: trainingFastMode });
+      const status = await startTraining({
+        episodes: trainingEpisodes,
+        fast_mode: trainingFastMode,
+        enable_instinct_rewards: trainingEnableInstincts,
+        curriculum_stage: trainingCurriculumStage,
+        debug_reward_breakdown: trainingDebugRewardBreakdown,
+      });
       setTrainingStatus(status);
     } catch (startError) {
       setTrainingError(startError instanceof Error ? startError.message : "Unable to start training.");
@@ -312,6 +321,9 @@ export function App() {
           <TrainingPanel
             episodes={trainingEpisodes}
             fastMode={trainingFastMode}
+            enableInstincts={trainingStatus?.enable_instinct_rewards ?? trainingEnableInstincts}
+            curriculumStage={trainingStatus?.curriculum_stage ?? trainingCurriculumStage}
+            debugRewardBreakdown={trainingStatus?.debug_reward_breakdown ?? trainingDebugRewardBreakdown}
             running={trainingStatus?.running ?? false}
             clearing={clearingTraining}
             batchCompletedEpisodes={trainingStatus?.batch_completed_episodes ?? trainingStatus?.completed_episodes ?? 0}
@@ -322,6 +334,9 @@ export function App() {
             error={trainingStatus?.error ?? null}
             onEpisodesChange={setTrainingEpisodes}
             onFastModeChange={setTrainingFastMode}
+            onEnableInstinctsChange={setTrainingEnableInstincts}
+            onCurriculumStageChange={setTrainingCurriculumStage}
+            onDebugRewardBreakdownChange={setTrainingDebugRewardBreakdown}
             onStartTraining={handleStartTraining}
             onClearTraining={handleClearTraining}
           />

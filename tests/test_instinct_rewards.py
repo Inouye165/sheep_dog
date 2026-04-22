@@ -145,6 +145,20 @@ def test_target_progress_reward_tracks_centroid_movement() -> None:
     assert farther.target_progress < 0
 
 
+def test_training_rewards_can_still_include_target_progress() -> None:
+    config = _instinct_config(target_progress_weight=0.75)
+    breakdown = RewardComputer(config).compute(
+        _base_inputs(
+            previous_flock_centroid=(8.0, 10.0),
+            flock_centroid=(12.0, 10.0),
+            dog_positions=((4.0, 10.0),),
+            target_position=(20.0, 10.0),
+        )
+    )
+
+    assert breakdown.target_progress > 0
+
+
 def test_chaos_penalty_when_dog_inside_flock() -> None:
     config = _instinct_config()
     flock = (10.0, 10.0)
