@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import json
+import shutil
 import threading
+from dataclasses import asdict
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from sheepdog.checkpoints.store import CheckpointMetadata
 from sheepdog.config import LabConfig, TrainingConfig
+from sheepdog.policies.trainable import PolicyWeights, TrainableLinearPolicy
 from sheepdog.training.trainer import Trainer
 
 
@@ -79,6 +83,92 @@ class TrainingManager:
             )
             self._thread.start()
             return dict(self._status)
+
+    def clear(self) -> tuple[dict[str, Any], int]:
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                payload = dict(self._status)
+                payload["message"] = "Cannot clear training while a job is running"
+                return payload, HTTPStatus.CONFLICT
+
+        config = LabConfig()
+        output_root = Path(config.training.output_dir)
+        generated_root = Path(config.training.web_export_dir)
+
+        self._remove_path(output_root / "checkpoints")
+        self._remove_path(output_root / "evaluations")
+        self._remove_path(output_root / Trainer.STATE_FILENAME)
+        self._remove_path(output_root / "training-summary.json")
+
+        self._remove_path(generated_root / "replays")
+        self._remove_path(generated_root / "latest-checkpoint.json")
+        self._remove_path(generated_root / "latest-evaluation.json")
+        self._remove_path(generated_root / "latest-replay.json")
+
+        self._export_untrained_baseline(config)
+
+        with self._lock:
+            self._thread = None
+            self._status = self._initial_status()
+            self._status["message"] = "Training cleared. Baseline replay restored"
+            return dict(self._status), HTTPStatus.OK
+
+    def _export_untrained_baseline(self, config: LabConfig) -> None:
+        trainer = Trainer(config, config.training.output_dir)
+        baseline_policy = TrainableLinearPolicy(PolicyWeights())
+        checkpoint_episode = 0
+        summary, evaluation_json, _csv_path = trainer.evaluator.evaluate(
+            baseline_policy,
+            config.training.evaluation_seeds,
+            checkpoint_episode=checkpoint_episode,
+        )
+        representative_replay_path = Path(summary.records[0].replay_path)
+        metadata = CheckpointMetadata(
+            checkpoint_episode=checkpoint_episode,
+            total_training_episodes=0,
+            policy_name=baseline_policy.name,
+            seed=config.training.train_seed,
+            success_rate=summary.success_rate,
+            average_completion_steps=summary.average_completion_steps,
+            timeout_rate=summary.timeout_rate,
+            average_sheep_penned=summary.average_sheep_penned,
+            average_reward=summary.average_reward,
+            environment_config=asdict(config.environment),
+            reward_config=asdict(config.rewards),
+            policy_weights=asdict(baseline_policy.weights),
+            evaluation_replay_path=str(representative_replay_path),
+        )
+        checkpoint_path = trainer.checkpoint_store.write(metadata)
+        checkpoint_payload = {
+            "checkpoint_episode": checkpoint_episode,
+            "checkpoint": checkpoint_path.name,
+            "evaluation": evaluation_json.name,
+            "replay": str(representative_replay_path),
+            "success_rate": summary.success_rate,
+            "timeout_rate": summary.timeout_rate,
+            "average_completion_steps": summary.average_completion_steps,
+            "average_completion_seconds": summary.average_completion_seconds,
+            "average_sheep_penned": summary.average_sheep_penned,
+            "average_reward": summary.average_reward,
+            "records": [record.to_dict() for record in summary.records],
+        }
+        trainer._export_web_assets(
+            Path(config.training.web_export_dir),
+            [checkpoint_payload],
+            summary,
+            representative_replay_path,
+            checkpoint_path,
+        )
+        trainer._export_training_summary([checkpoint_payload], baseline_policy.weights, 0)
+        trainer._save_state(0, baseline_policy.weights, trainer._evaluate_score(baseline_policy))
+
+    def _remove_path(self, path: Path) -> None:
+        if not path.exists():
+            return
+        if path.is_dir():
+            shutil.rmtree(path)
+            return
+        path.unlink()
 
     def _update_status(self, payload: dict[str, Any]) -> None:
         with self._lock:
@@ -205,6 +295,11 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         self._json_response({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:  # noqa: N802
+        if self.path == "/api/training/clear":
+            payload, status = self.manager.clear()
+            self._json_response(payload, status=status)
+            return
+
         if self.path != "/api/training/start":
             self._json_response({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
             return

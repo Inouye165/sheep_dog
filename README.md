@@ -46,11 +46,14 @@ The simulation is grid based and deterministic for a fixed seed. Dogs act first,
 
 The trainer uses a simple shared trainable policy with hill climbing. It does not pretend to be PPO or another full RL algorithm. Checkpoints are real evaluation snapshots, not fabricated milestones.
 
+The current baseline now adds dynamic team roles on top of that same hill-climbing policy. Dogs still share one linear weight vector, but each step the environment assigns tactical jobs such as rear pressure, flanking, collecting strays, and blocking near the pen, then scores actions against those temporary responsibilities.
+
 The web app is a viewer, not a second simulation engine. It loads exported checkpoint and replay JSON files from `web/public/generated/` and plays them back frame by frame.
 
 ## Simulation Concepts
 
 - Dogs are AI-controlled and share one policy.
+- Dogs can switch dynamic tactical roles each step while still using the shared linear hill-climbing policy.
 - Sheep flee from nearby dogs, stay loosely flocked, and avoid walls.
 - The pen is a goal area inside the field.
 - Episodes succeed only when every sheep is penned.
@@ -111,6 +114,7 @@ npm run dev
 The UI shows:
 
 - the field, dogs, sheep, and pen
+- compact dog role labels during replay
 - the selected checkpoint and seed
 - policy mode
 - run state
@@ -179,12 +183,13 @@ You can provide a JSON config file to the CLI. Example:
 ## Known Limitations
 
 - The first release uses a simple hill-climbing policy rather than PPO.
+- Dynamic cooperation is role-aware, but it is still a shared linear baseline rather than a neural policy.
 - The UI is a replay viewer for exported runs, not a live training dashboard.
 - There is no backend API server yet; the browser reads generated files directly.
 
 ## Next Steps
 
-1. Replace the baseline trainer with a fuller RL implementation if needed.
-2. Add richer dog coordination policies.
+1. Compare this role-aware hill-climbing baseline against PPO or MaskablePPO rather than replacing it blindly.
+2. Add richer role analytics and per-dog trajectory overlays in the replay viewer.
 3. Expand replay analytics with per-step trajectory charts.
 4. Add a lightweight local API if live browser control becomes necessary.

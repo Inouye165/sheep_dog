@@ -1,4 +1,5 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 
@@ -92,8 +93,8 @@ const replay = {
     step: 3,
     simulated_seconds: 3,
     dogs: [
-      { index: 0, x: 1, y: 1, last_action: "right" },
-      { index: 1, x: 2, y: 1, last_action: "right" },
+      { index: 0, x: 1, y: 1, last_action: "right", role: "rear_pressure" },
+      { index: 1, x: 2, y: 1, last_action: "right", role: "left_flanker" },
     ],
     sheep: [
       { index: 0, x: 14, y: 9, penned: false },
@@ -123,6 +124,11 @@ const replay = {
     no_progress_steps: 2,
     final_avg_distance_to_pen: 16,
     final_flock_spread: 1.2,
+    role_distribution: { rear_pressure: 3, left_flanker: 3, collector: 1 },
+    role_switches: 4,
+    collector_activations: 1,
+    blocker_activations: 0,
+    sheep_split_events: 1,
     final_reward_breakdown: {
       progress_to_pen: 1.4,
       sheep_penned: 0,
@@ -145,8 +151,8 @@ const replay = {
         step: 1,
         simulated_seconds: 1,
         dogs: [
-          { index: 0, x: 1, y: 1, last_action: "right" },
-          { index: 1, x: 2, y: 1, last_action: "right" },
+          { index: 0, x: 1, y: 1, last_action: "right", role: "rear_pressure" },
+          { index: 1, x: 2, y: 1, last_action: "right", role: "left_flanker" },
         ],
         sheep: [
           { index: 0, x: 15, y: 9, penned: false },
@@ -239,5 +245,76 @@ describe("App", () => {
     );
     expect(screen.getByLabelText("Run status")).toBeInTheDocument();
     expect(screen.getByText(/No-progress guard is active/)).toBeInTheDocument();
+    expect(screen.getByText(/rear_pressure, left_flanker/i)).toBeInTheDocument();
+  });
+
+  it("clears training artifacts from the UI", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.includes("/api/training/clear")) {
+        return new Response(
+          JSON.stringify({
+            running: false,
+            fast_mode: true,
+            requested_episodes: 0,
+            completed_episodes: 0,
+            batch_total_episodes: 0,
+            batch_completed_episodes: 0,
+            total_episodes_trained: 0,
+            current_episode: null,
+            checkpoint_episode: null,
+            latest_checkpoint_episode: null,
+            latest_seed: null,
+            latest_replay_path: null,
+            best_score: null,
+            phase: "idle",
+            message: "Training cleared. Baseline replay restored",
+            error: null,
+          }),
+          { status: 200 },
+        );
+      }
+      if (path.includes("/api/training/status")) {
+        return new Response(
+          JSON.stringify({
+            running: false,
+            fast_mode: true,
+            requested_episodes: 0,
+            completed_episodes: 0,
+            batch_total_episodes: 0,
+            batch_completed_episodes: 0,
+            total_episodes_trained: 0,
+            current_episode: null,
+            checkpoint_episode: null,
+            latest_checkpoint_episode: null,
+            latest_seed: null,
+            latest_replay_path: null,
+            best_score: null,
+            phase: "idle",
+            message: "Idle",
+            error: null,
+          }),
+          { status: 200 },
+        );
+      }
+      if (path.includes("checkpoint-index.json")) {
+        return new Response(JSON.stringify(checkpointIndex), { status: 200 });
+      }
+      if (path.includes("checkpoint-000000-seed-000011.json")) {
+        return new Response(JSON.stringify(replay), { status: 200 });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Clear training" })).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Clear training" }));
+
+    await waitFor(() => expect(screen.getByText("Training cleared. Baseline replay restored")).toBeInTheDocument());
+    expect(within(screen.getByLabelText("Checkpoint summary")).getByText(/Episode 0/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Start replay" })).toBeInTheDocument();
   });
 });

@@ -12,6 +12,7 @@ interface TrainingPanelProps {
   onEpisodesChange: (episodes: number) => void;
   onFastModeChange: (enabled: boolean) => void;
   onStartTraining: () => void;
+  onClearTraining: () => void;
 }
 
 export function TrainingPanel({
@@ -28,6 +29,7 @@ export function TrainingPanel({
   onEpisodesChange,
   onFastModeChange,
   onStartTraining,
+  onClearTraining,
 }: TrainingPanelProps) {
   const denominator = batchTotalEpisodes || episodes;
   const progress = denominator === 0 ? 0 : Math.min(1, batchCompletedEpisodes / denominator);
@@ -101,6 +103,9 @@ export function TrainingPanel({
       <div className="button-row">
         <button type="button" className="button-row__primary" onClick={onStartTraining} disabled={running}>
           {running ? "Training..." : `Train ${episodes} more`}
+        </button>
+        <button type="button" className="button-row__secondary" onClick={onClearTraining} disabled={running}>
+          Clear training
         </button>
       </div>
     </section>

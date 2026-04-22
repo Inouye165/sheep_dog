@@ -12,13 +12,15 @@ class HeuristicPolicy:
 
     def select_actions(self, environment: object) -> list[Action]:
         actions: list[Action] = []
+        reserved_positions: set[object] = set()
+        if hasattr(environment, "prepare_policy_step"):
+            environment.prepare_policy_step()
         for dog_index in range(environment.dog_count):
-            mask = environment.action_mask_for_dog(dog_index)
-            candidates = [action for action, allowed in mask.items() if allowed]
-            ranked = sorted(
-                candidates,
-                key=lambda action: environment.score_action_for_dog(dog_index, action),
-                reverse=True,
+            ranked = environment.ranked_actions_for_dog(
+                dog_index,
+                reserved_positions=reserved_positions,
             )
-            actions.append(ranked[0])
+            choice = ranked[0]
+            actions.append(choice)
+            reserved_positions.add(environment.project_dog_action(dog_index, choice))
         return actions

@@ -1,8 +1,11 @@
 """Regression tests for the herding environment."""
 
+# pylint: disable=protected-access
+
 from __future__ import annotations
 
 from sheepdog.config import EnvironmentConfig, LabConfig, RewardConfig, TrainingConfig
+from sheepdog.entities import DogRole
 from sheepdog.environment import SheepdogEnvironment
 from sheepdog.policies.heuristic import HeuristicPolicy
 
@@ -30,20 +33,41 @@ def test_reset_is_deterministic_for_fixed_seed() -> None:
     assert first == second
 
 
+def test_reset_starts_with_unique_dog_and_sheep_cells() -> None:
+    config = make_config(dogs=4, sheep=6)
+    snapshot = SheepdogEnvironment(config).reset(seed=42)
+
+    dog_positions = {(dog.x, dog.y) for dog in snapshot.dogs}
+    sheep_positions = {(sheep.x, sheep.y) for sheep in snapshot.sheep}
+
+    assert len(dog_positions) == len(snapshot.dogs)
+    assert len(sheep_positions) == len(snapshot.sheep)
+    assert dog_positions.isdisjoint(sheep_positions)
+
+
 def test_sheep_flee_from_nearby_dog() -> None:
     config = make_config()
     environment = SheepdogEnvironment(config)
     environment.reset(seed=7)
-    sheep = environment._sheep[0]
-    dog = environment._dogs[0]
+    sheep = environment.sheep[0]
+    dog = environment.dogs[0]
     sheep.position = sheep.position.__class__(8, 8)
     dog.position = dog.position.__class__(7, 8)
 
     before = sheep.position
     environment.step(["wait"] * config.environment.dogs)
 
-    after = environment._sheep[0].position
+    after = environment.sheep[0].position
     assert after.x >= before.x
+
+
+def test_default_environment_uses_doubled_grid_resolution() -> None:
+    config = make_config()
+
+    assert config.environment.width == 80
+    assert config.environment.height == 60
+    assert config.environment.pen_width == 10
+    assert config.environment.pen_height == 10
 
 
 def test_sheep_enter_pen_and_counted() -> None:
@@ -52,7 +76,7 @@ def test_sheep_enter_pen_and_counted() -> None:
     snapshot = environment.reset(seed=11)
     pen = snapshot.pen
 
-    for sheep in environment._sheep:
+    for sheep in environment.sheep:
         sheep.position = sheep.position.__class__(pen.origin.x, pen.origin.y)
         sheep.penned = False
 
@@ -94,16 +118,104 @@ def test_multiple_dogs_keep_consistent_state_updates() -> None:
     assert {dog.index for dog in snapshot.dogs} == {0, 1, 2, 3}
 
 
+def test_grouped_flock_assigns_rear_and_flank_roles() -> None:
+    config = make_config(dogs=3, sheep=3)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=9)
+    for index, sheep in enumerate(environment.sheep):
+        sheep.position = sheep.position.__class__(18 + index, 10 + index)
+
+    roles = environment.current_role_assignments()
+
+    assert set(roles.values()) == {
+        DogRole.REAR_PRESSURE.value,
+        DogRole.LEFT_FLANKER.value,
+        DogRole.RIGHT_FLANKER.value,
+    }
+
+
+def test_split_sheep_assigns_collector() -> None:
+    config = make_config(dogs=3, sheep=3)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=10)
+    environment.sheep[0].position = environment.sheep[0].position.__class__(18, 10)
+    environment.sheep[1].position = environment.sheep[1].position.__class__(19, 11)
+    environment.sheep[2].position = environment.sheep[2].position.__class__(6, 24)
+
+    roles = environment.current_role_assignments()
+
+    assert DogRole.COLLECTOR.value in roles.values()
+
+
+def test_near_pen_flock_assigns_blocker_and_flanker() -> None:
+    config = make_config(dogs=3, sheep=3)
+    environment = SheepdogEnvironment(config)
+    snapshot = environment.reset(seed=11)
+    pen = snapshot.pen
+    for index, sheep in enumerate(environment.sheep):
+        sheep.position = sheep.position.__class__(pen.origin.x - 4, pen.origin.y + 2 + index)
+
+    roles = environment.current_role_assignments()
+
+    assert DogRole.BLOCKER.value in roles.values()
+    assert any(role in roles.values() for role in (DogRole.LEFT_FLANKER.value, DogRole.RIGHT_FLANKER.value))
+
+
+def test_roles_change_when_flock_state_changes() -> None:
+    config = make_config(dogs=3, sheep=3)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=12)
+    for index, sheep in enumerate(environment.sheep):
+        sheep.position = sheep.position.__class__(18 + index, 10)
+    first_roles = environment.current_role_assignments()
+
+    environment.invalidate_role_assignments()
+    environment.sheep[2].position = environment.sheep[2].position.__class__(6, 24)
+    second_roles = environment.current_role_assignments()
+
+    assert first_roles != second_roles
+    assert DogRole.COLLECTOR.value in second_roles.values()
+
+
 def test_dog_speed_is_used_for_clear_moves() -> None:
     config = make_config(dogs=1, dog_speed=2, sheep=0)
     environment = SheepdogEnvironment(config)
     environment.reset(seed=3)
-    dog = environment._dogs[0]
+    dog = environment.dogs[0]
     dog.position = dog.position.__class__(5, 5)
 
     environment.step(["right"])
 
-    assert environment._dogs[0].position.x == 7
+    assert environment.dogs[0].position.x == 7
+
+
+def test_default_dog_speed_moves_one_cell() -> None:
+    config = make_config(dogs=1, sheep=0)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=4)
+    dog = environment.dogs[0]
+    dog.position = dog.position.__class__(5, 5)
+
+    environment.step(["right"])
+
+    assert environment.dogs[0].position.x == 6
+
+
+def test_fractional_sheep_speed_moves_three_cells_in_four_steps() -> None:
+    config = make_config(dogs=1, sheep=1, dog_vision=20, sheep_speed=0.75)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=21)
+
+    sheep = environment.sheep[0]
+    dog = environment.dogs[0]
+    sheep.position = sheep.position.__class__(20, 20)
+    dog.position = dog.position.__class__(10, 20)
+
+    start_x = sheep.position.x
+    for _ in range(4):
+        environment.step(["wait"])
+
+    assert environment.sheep[0].position.x - start_x == 3
 
 
 def test_dog_action_score_prefers_herding_standoff() -> None:
@@ -111,8 +223,8 @@ def test_dog_action_score_prefers_herding_standoff() -> None:
     environment = SheepdogEnvironment(config)
     environment.reset(seed=4)
 
-    dog = environment._dogs[0]
-    sheep = environment._sheep[0]
+    dog = environment.dogs[0]
+    sheep = environment.sheep[0]
     sheep.position = sheep.position.__class__(10, 10)
     dog.position = dog.position.__class__(6, 10)
 
@@ -123,14 +235,15 @@ def test_dog_action_score_prefers_herding_standoff() -> None:
 
 
 def test_dog_action_score_prefers_spread_out_team_positions() -> None:
-    config = make_config(dogs=2, sheep=1)
+    config = make_config(dogs=2, sheep=1, dog_speed=1)
     environment = SheepdogEnvironment(config)
     environment.reset(seed=6)
 
-    first_dog = environment._dogs[0]
-    second_dog = environment._dogs[1]
+    first_dog = environment.dogs[0]
+    second_dog = environment.dogs[1]
     first_dog.position = first_dog.position.__class__(6, 10)
     second_dog.position = second_dog.position.__class__(8, 10)
+    environment.sheep[0].position = environment.sheep[0].position.__class__(18, 18)
 
     spacing_weights = type(
         "SpacingWeights",
@@ -144,6 +257,12 @@ def test_dog_action_score_prefers_spread_out_team_positions() -> None:
             "dog_spacing": 5.0,
             "wall_margin": 0.0,
             "wait_bias": 0.0,
+            "rear_drive": 0.0,
+            "flank_control": 0.0,
+            "collector_focus": 0.0,
+            "blocker_cover": 0.0,
+            "anti_stack_penalty": 0.0,
+            "oscillation_penalty": 0.0,
         },
     )()
 
@@ -153,6 +272,58 @@ def test_dog_action_score_prefers_spread_out_team_positions() -> None:
     assert spread_out > bunched_up
 
 
+def test_dogs_avoid_stacking_when_target_cells_conflict() -> None:
+    config = make_config(dogs=2, sheep=1, dog_speed=1)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=13)
+    environment.dogs[0].position = environment.dogs[0].position.__class__(5, 5)
+    environment.dogs[1].position = environment.dogs[1].position.__class__(7, 5)
+    environment.sheep[0].position = environment.sheep[0].position.__class__(6, 5)
+
+    environment.step(["right", "left"])
+
+    positions = {(dog.position.x, dog.position.y) for dog in environment.dogs}
+    assert len(positions) == 2
+
+
+def test_sheep_do_not_stack_when_fleeing_into_same_cell() -> None:
+    config = make_config(dogs=1, sheep=2, dog_vision=20, sheep_speed=1)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=22)
+    dog = environment.dogs[0]
+    dog.position = dog.position.__class__(9, 10)
+    environment.sheep[0].position = environment.sheep[0].position.__class__(10, 9)
+    environment.sheep[1].position = environment.sheep[1].position.__class__(10, 11)
+
+    environment.step(["wait"])
+
+    positions = {(sheep.position.x, sheep.position.y) for sheep in environment.sheep}
+    assert len(positions) == 2
+
+
+def test_sheep_uses_side_escape_when_pressed_against_wall() -> None:
+    config = make_config(dogs=2, sheep=1, dog_vision=20, sheep_speed=1)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=23)
+    sheep = environment.sheep[0]
+    sheep.position = sheep.position.__class__(0, 10)
+    environment.dogs[0].position = environment.dogs[0].position.__class__(1, 10)
+    environment.dogs[1].position = environment.dogs[1].position.__class__(1, 11)
+
+    environment.step(["wait", "wait"])
+
+    assert environment.sheep[0].position == sheep.position.__class__(0, 9)
+
+
+def test_replay_frames_include_dog_roles() -> None:
+    config = make_config(dogs=3, sheep=3)
+    environment = SheepdogEnvironment(config)
+    result = environment.run_policy(HeuristicPolicy(), seed=14, capture_replay=True)
+
+    assert result.replay
+    assert all(frame.snapshot.dogs[0].role for frame in result.replay)
+
+
 def test_heuristic_policy_runs_to_completion_or_stop() -> None:
     config = make_config()
     environment = SheepdogEnvironment(config)
@@ -160,6 +331,7 @@ def test_heuristic_policy_runs_to_completion_or_stop() -> None:
 
     assert result.stats.terminated is True
     assert result.final_snapshot.status in {"success", "timeout", "no-progress", "stopped"}
+    assert isinstance(result.stats.role_distribution, dict)
 
 
 def test_pen_has_three_closed_fences_and_one_opening() -> None:
@@ -169,6 +341,7 @@ def test_pen_has_three_closed_fences_and_one_opening() -> None:
 
     pen = snapshot.pen
     assert pen.opening == "left"
+    assert pen.origin.x + pen.width == config.environment.width
     segments = pen.fence_segments()
     assert len(segments) == 3
 
@@ -185,10 +358,24 @@ def test_dog_cannot_step_into_fence_cell() -> None:
     pen = snapshot.pen
     fence_cell = next(iter(pen.fence_cells()))
 
-    dog = environment._dogs[0]
+    dog = environment.dogs[0]
     # Place dog adjacent to a fence cell from outside the pen.
     dog.position = dog.position.__class__(fence_cell.x, fence_cell.y + 1)
-    if not environment._pen.contains(dog.position):
+    if not environment.pen.contains(dog.position):
         environment.step(["up"] + ["wait"] * (config.environment.dogs - 1))
         # Dog should not have moved onto the fence.
-        assert environment._dogs[0].position != fence_cell
+        assert environment.dogs[0].position != fence_cell
+
+
+def test_dog_cannot_enter_pen_from_outside() -> None:
+    config = make_config(dogs=1, sheep=0)
+    environment = SheepdogEnvironment(config)
+    snapshot = environment.reset(seed=15)
+    pen = snapshot.pen
+
+    dog = environment.dogs[0]
+    dog.position = dog.position.__class__(pen.origin.x - 1, pen.origin.y + 1)
+
+    environment.step(["right"])
+
+    assert environment.dogs[0].position == dog.position

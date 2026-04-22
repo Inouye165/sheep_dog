@@ -98,3 +98,17 @@ def test_policy_weights_load_legacy_state_payload() -> None:
 
     assert weights.nearest_sheep == 1.0
     assert weights.team_formation == PolicyWeights().team_formation
+    assert weights.collector_focus == PolicyWeights().collector_focus
+
+
+def test_hill_climber_training_saves_role_aware_weights(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+
+    summary = Trainer(config, tmp_path).train()
+    state_path = tmp_path / Trainer.STATE_FILENAME
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+
+    assert state_path.exists()
+    assert "rear_drive" in payload["weights"]
+    assert "collector_focus" in payload["weights"]
+    assert summary.final_weights.collector_focus == payload["weights"]["collector_focus"]

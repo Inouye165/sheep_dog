@@ -20,6 +20,12 @@ class PolicyWeights:
     dog_spacing: float = 0.6
     wall_margin: float = 0.35
     wait_bias: float = -1.5
+    rear_drive: float = 1.05
+    flank_control: float = 0.95
+    collector_focus: float = 1.15
+    blocker_cover: float = 1.0
+    anti_stack_penalty: float = 2.0
+    oscillation_penalty: float = 0.8
 
     @classmethod
     def from_dict(cls, payload: dict[str, float] | None) -> PolicyWeights:
@@ -38,6 +44,16 @@ class PolicyWeights:
             dog_spacing=float(payload.get("dog_spacing", defaults.dog_spacing)),
             wall_margin=float(payload.get("wall_margin", defaults.wall_margin)),
             wait_bias=float(payload.get("wait_bias", defaults.wait_bias)),
+            rear_drive=float(payload.get("rear_drive", defaults.rear_drive)),
+            flank_control=float(payload.get("flank_control", defaults.flank_control)),
+            collector_focus=float(payload.get("collector_focus", defaults.collector_focus)),
+            blocker_cover=float(payload.get("blocker_cover", defaults.blocker_cover)),
+            anti_stack_penalty=float(
+                payload.get("anti_stack_penalty", defaults.anti_stack_penalty)
+            ),
+            oscillation_penalty=float(
+                payload.get("oscillation_penalty", defaults.oscillation_penalty)
+            ),
         )
 
     def mutated(self, rng: random.Random, scale: float) -> PolicyWeights:
@@ -51,6 +67,12 @@ class PolicyWeights:
             dog_spacing=self.dog_spacing + rng.uniform(-scale, scale),
             wall_margin=self.wall_margin + rng.uniform(-scale, scale),
             wait_bias=self.wait_bias + rng.uniform(-scale, scale),
+            rear_drive=self.rear_drive + rng.uniform(-scale, scale),
+            flank_control=self.flank_control + rng.uniform(-scale, scale),
+            collector_focus=self.collector_focus + rng.uniform(-scale, scale),
+            blocker_cover=self.blocker_cover + rng.uniform(-scale, scale),
+            anti_stack_penalty=self.anti_stack_penalty + rng.uniform(-scale, scale),
+            oscillation_penalty=self.oscillation_penalty + rng.uniform(-scale, scale),
         )
 
 
@@ -64,18 +86,16 @@ class TrainableLinearPolicy:
 
     def select_actions(self, environment: object) -> list[Action]:
         actions: list[Action] = []
+        reserved_positions: set[object] = set()
+        if hasattr(environment, "prepare_policy_step"):
+            environment.prepare_policy_step(weights=self.weights)
         for dog_index in range(environment.dog_count):
-            current_dog_index = dog_index
-            mask = environment.action_mask_for_dog(dog_index)
-            candidates = [action for action, allowed in mask.items() if allowed]
-            ranked = sorted(
-                candidates,
-                key=lambda action: environment.score_action_for_dog(
-                    current_dog_index,
-                    action,
-                    weights=self.weights,
-                ),
-                reverse=True,
+            ranked = environment.ranked_actions_for_dog(
+                dog_index,
+                weights=self.weights,
+                reserved_positions=reserved_positions,
             )
-            actions.append(ranked[0])
+            choice = ranked[0]
+            actions.append(choice)
+            reserved_positions.add(environment.project_dog_action(dog_index, choice))
         return actions

@@ -3,7 +3,7 @@ import { ControlBar } from "./components/ControlBar";
 import { FieldView } from "./components/FieldView";
 import { TrainingPanel } from "./components/TrainingPanel";
 import { StatusPanel } from "./components/StatusPanel";
-import { loadCheckpointIndex, loadReplay, loadTrainingStatus, startTraining } from "./lib/api";
+import { clearTraining, loadCheckpointIndex, loadReplay, loadTrainingStatus, startTraining } from "./lib/api";
 import type {
   CheckpointEntry,
   CheckpointIndex,
@@ -14,6 +14,8 @@ import type {
 } from "./state/types";
 
 type RunState = "idle" | "running" | "paused" | "success" | "timeout" | "stopped";
+
+const CLEAR_TRAINING_MESSAGE = "Training cleared. Baseline replay restored";
 
 function checkpointToSummary(checkpoint: CheckpointEntry | null): EvaluationSummary | null {
   if (!checkpoint) {
@@ -46,6 +48,13 @@ function resolveRunState(snapshot: ReplaySnapshot | null, currentState: RunState
     return "stopped";
   }
   return currentState;
+}
+
+function mergeTrainingStatus(previous: TrainingStatus | null, next: TrainingStatus): TrainingStatus {
+  if (next.phase === "idle" && next.message === "Idle" && previous?.message === CLEAR_TRAINING_MESSAGE) {
+    return { ...next, message: previous.message };
+  }
+  return next;
 }
 
 export function App() {
@@ -114,7 +123,7 @@ export function App() {
       try {
         const status = await loadTrainingStatus();
         if (active) {
-          setTrainingStatus(status);
+          setTrainingStatus((previous) => mergeTrainingStatus(previous, status));
         }
       } catch {
         if (active) {
@@ -128,7 +137,7 @@ export function App() {
         try {
           const status = await loadTrainingStatus();
           if (active) {
-            setTrainingStatus(status);
+            setTrainingStatus((previous) => mergeTrainingStatus(previous, status));
           }
         } catch {
           if (active) {
@@ -260,6 +269,36 @@ export function App() {
     }
   }
 
+  async function handleClearTraining() {
+    setTrainingError(null);
+    setError(null);
+    try {
+      const status = await clearTraining();
+      const index = await loadCheckpointIndex();
+      setTrainingStatus(status);
+      setCheckpointIndex(index);
+      setEvaluation(index.latest);
+      const latestCheckpoint = index.checkpoints[index.checkpoints.length - 1] ?? null;
+      const checkpointEpisode = latestCheckpoint?.checkpoint_episode ?? index.latest?.checkpoint_episode ?? null;
+      const seed = latestCheckpoint?.records[0]?.seed ?? index.latest?.records[0]?.seed ?? null;
+      setSelectedCheckpointEpisode(checkpointEpisode);
+      setSelectedSeed(seed);
+      if (latestCheckpoint && seed !== null) {
+        const record = latestCheckpoint.records.find((entry) => entry.seed === seed) ?? latestCheckpoint.records[0];
+        if (record) {
+          const bundle = await loadReplay(record.replay_path);
+          setReplay(bundle);
+        }
+      } else {
+        setReplay(null);
+      }
+      setFrameIndex(0);
+      setRunState("idle");
+    } catch (clearError) {
+      setTrainingError(clearError instanceof Error ? clearError.message : "Unable to clear training.");
+    }
+  }
+
   function handleStart() {
     if (!replay) {
       return;
@@ -310,6 +349,7 @@ export function App() {
             onEpisodesChange={setTrainingEpisodes}
             onFastModeChange={setTrainingFastMode}
             onStartTraining={handleStartTraining}
+            onClearTraining={handleClearTraining}
           />
 
           <StatusPanel

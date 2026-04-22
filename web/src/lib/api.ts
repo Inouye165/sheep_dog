@@ -33,3 +33,9 @@ export async function startTraining(request: TrainingStartRequest): Promise<Trai
   }, API_BASE_URL);
 }
 
+export async function clearTraining(): Promise<TrainingStatus> {
+  return fetchJson<TrainingStatus>("/api/training/clear", {
+    method: "POST",
+  }, API_BASE_URL);
+}
+

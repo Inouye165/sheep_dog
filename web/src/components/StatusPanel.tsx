@@ -36,6 +36,10 @@ export function StatusPanel({
   const sheepPenned = snapshot?.penned_count ?? 0;
   const totalSheep = snapshot?.sheep?.length ?? replay?.final_snapshot?.sheep?.length ?? 0;
   const completion = totalSheep === 0 ? 0 : sheepPenned / totalSheep;
+  const activeRoles = snapshot?.dogs?.map((dog) => dog.role).filter(Boolean) ?? [];
+  const activeRoleSummary = activeRoles.length > 0 ? activeRoles.join(", ") : "-";
+  const gridWidth = snapshot?.grid_width ?? replay?.final_snapshot?.grid_width ?? 40;
+  const gridHeight = snapshot?.grid_height ?? replay?.final_snapshot?.grid_height ?? 30;
 
   return (
     <section className="status-card" aria-label="Run status">
@@ -69,6 +73,10 @@ export function StatusPanel({
           <span>Reward</span>
           <strong>{rewardBreakdown ? rewardBreakdown.total.toFixed(2) : "-"}</strong>
         </div>
+        <div>
+          <span>Grid size</span>
+          <strong>{`${gridWidth} x ${gridHeight}`}</strong>
+        </div>
       </div>
 
       <div className="progress-shell" aria-label="Completion progress">
@@ -93,6 +101,10 @@ export function StatusPanel({
           <strong>{replay?.policy_name ?? "unloaded"}</strong>
         </div>
         <div>
+          <span>Active roles</span>
+          <strong>{activeRoleSummary}</strong>
+        </div>
+        <div>
           <span>Episode outcome</span>
           <strong>{episodeOutcome}</strong>
         </div>
@@ -107,6 +119,10 @@ export function StatusPanel({
                 }`
               : "idle"}
           </strong>
+        </div>
+        <div>
+          <span>Role switches</span>
+          <strong>{replay?.stats.role_switches ?? 0}</strong>
         </div>
       </div>
 

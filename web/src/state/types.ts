@@ -16,6 +16,7 @@ export interface AgentSnapshot {
   y: number;
   penned?: boolean;
   last_action?: string;
+  role?: string;
 }
 
 export interface RewardBreakdown {
@@ -35,6 +36,8 @@ export interface RewardBreakdown {
 export interface ReplaySnapshot {
   step: number;
   simulated_seconds: number;
+  grid_width?: number;
+  grid_height?: number;
   dogs: AgentSnapshot[];
   sheep: AgentSnapshot[];
   pen: Pen;
@@ -74,6 +77,11 @@ export interface ReplayBundle {
     no_progress_steps: number;
     final_avg_distance_to_pen: number;
     final_flock_spread: number;
+    role_distribution: Record<string, number>;
+    role_switches: number;
+    collector_activations: number;
+    blocker_activations: number;
+    sheep_split_events: number;
     final_reward_breakdown: RewardBreakdown;
   };
   frames: ReplayFrame[];
@@ -146,5 +154,5 @@ export interface EvaluationSummary {
 
 export interface CheckpointIndex {
   checkpoints: CheckpointEntry[];
-  latest: EvaluationSummary;
+  latest: EvaluationSummary | null;
 }
