@@ -3,7 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 from math import hypot
+
+
+class DogRole(StrEnum):
+    """Dynamic team roles for coordinated herding."""
+
+    REAR_PRESSURE = "rear_pressure"
+    LEFT_FLANKER = "left_flanker"
+    RIGHT_FLANKER = "right_flanker"
+    COLLECTOR = "collector"
+    BLOCKER = "blocker"
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,8 +47,10 @@ class DogState:
 
     index: int
     position: Point
+    current_role: DogRole = DogRole.REAR_PRESSURE
     last_action: str = "wait"
     blocked_steps: int = 0
+    movement_budget: float = 0.0
     recent_positions: list[Point] = field(default_factory=list)
 
 
@@ -50,6 +63,7 @@ class SheepState:
     penned: bool = False
     panic_steps: int = 0
     blocked_steps: int = 0
+    movement_budget: float = 0.0
     recent_positions: list[Point] = field(default_factory=list)
 
 
@@ -135,4 +149,9 @@ class EpisodeStats:
     no_progress_steps: int = 0
     final_avg_distance_to_pen: float = 0.0
     final_flock_spread: float = 0.0
+    role_distribution: dict[str, int] = field(default_factory=dict)
+    role_switches: int = 0
+    collector_activations: int = 0
+    blocker_activations: int = 0
+    sheep_split_events: int = 0
     final_reward_breakdown: dict[str, float] = field(default_factory=dict)

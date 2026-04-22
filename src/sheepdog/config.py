@@ -13,24 +13,24 @@ from sheepdog.policies.base import PolicyMode
 class EnvironmentConfig:
     """Grid, entity, and termination settings."""
 
-    width: int = 120
-    height: int = 90
+    width: int = 80
+    height: int = 60
     dogs: int = 3
     sheep: int = 6
-    pen_width: int = 15
-    pen_height: int = 15
+    pen_width: int = 10
+    pen_height: int = 10
     pen_opening: str = "left"
-    max_steps: int = 900
-    seconds_per_step: float = 0.35
-    dog_vision: int = 24
-    sheep_vision: int = 18
-    flock_radius: int = 15
-    dog_speed: int = 2
-    sheep_speed: int = 1
-    no_progress_window: int = 120
+    max_steps: int = 600
+    seconds_per_step: float = 1.0
+    dog_vision: int = 16
+    sheep_vision: int = 12
+    flock_radius: int = 10
+    dog_speed: float = 1.0
+    sheep_speed: float = 0.75
+    no_progress_window: int = 80
     no_progress_distance_delta: float = 0.15
     no_progress_penned_delta: int = 0
-    no_progress_timeout_penalty_steps: int = 120
+    no_progress_timeout_penalty_steps: int = 80
     seed_offset: int = 0
 
 

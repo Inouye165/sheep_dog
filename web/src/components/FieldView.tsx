@@ -6,6 +6,14 @@ interface FieldViewProps {
 
 type Side = "top" | "bottom" | "left" | "right";
 
+const ROLE_LABELS: Record<string, string> = {
+  rear_pressure: "RP",
+  left_flanker: "LF",
+  right_flanker: "RF",
+  collector: "CO",
+  blocker: "BL",
+};
+
 function fenceSegments(snapshot: ReplaySnapshot): Array<{ side: Side; x1: number; y1: number; x2: number; y2: number }> {
   const { pen } = snapshot;
   const opening = pen.opening ?? "left";
@@ -23,19 +31,29 @@ function fenceSegments(snapshot: ReplaySnapshot): Array<{ side: Side; x1: number
 }
 
 export function FieldView({ snapshot }: FieldViewProps) {
-  const width = snapshot ? Math.max(snapshot.field_width ?? snapshot.pen.origin.x + snapshot.pen.width + 4, 40) : 40;
-  const height = snapshot ? Math.max(snapshot.field_height ?? Math.max(snapshot.pen.origin.y + snapshot.pen.height + 4, 30), 30) : 30;
+  const baseWidth = snapshot?.grid_width ?? snapshot?.field_width ?? 40;
+  const baseHeight = snapshot?.grid_height ?? snapshot?.field_height ?? 30;
+  const width = snapshot ? Math.max(baseWidth, 40) : 40;
+  const height = snapshot ? Math.max(baseHeight, 30) : 30;
   const fences = snapshot ? fenceSegments(snapshot) : [];
   const densityScale = Math.max(width / 40, height / 30, 1);
   const dogRadius = 0.48 * densityScale;
   const sheepRadius = 0.42 * densityScale;
-  const fontSize = 0.34 * densityScale;
   const fenceStroke = 0.32 * densityScale;
-  const fenceMarkerRadius = 0.18 * densityScale;
+  const gateRadius = 0.18 * densityScale;
   const penStroke = 0.08 * densityScale;
+  const fontSize = 0.34 * densityScale;
   const transitionStyle = {
     transition: "transform 150ms linear, cx 150ms linear, cy 150ms linear, x 150ms linear, y 150ms linear",
   };
+  const roleTagX = -0.62 * densityScale;
+  const roleTagY = 0.52 * densityScale;
+  const roleTagWidth = 1.24 * densityScale;
+  const roleTagHeight = 0.38 * densityScale;
+  const roleTagRadius = 0.12 * densityScale;
+  const roleTagStroke = 0.04 * densityScale;
+  const roleLabelY = 0.71 * densityScale;
+  const roleLabelSize = 0.22 * densityScale;
 
   return (
     <section className="field-card" aria-label="Simulation field">
@@ -91,8 +109,8 @@ export function FieldView({ snapshot }: FieldViewProps) {
             {/* Gate markers on the open side */}
             {snapshot.pen.opening === "left" || snapshot.pen.opening === undefined ? (
               <>
-                <circle cx={snapshot.pen.origin.x} cy={snapshot.pen.origin.y} r={fenceMarkerRadius} fill="#fde68a" />
-                <circle cx={snapshot.pen.origin.x} cy={snapshot.pen.origin.y + snapshot.pen.height} r={fenceMarkerRadius} fill="#fde68a" />
+                <circle cx={snapshot.pen.origin.x} cy={snapshot.pen.origin.y} r={gateRadius} fill="#fde68a" />
+                <circle cx={snapshot.pen.origin.x} cy={snapshot.pen.origin.y + snapshot.pen.height} r={gateRadius} fill="#fde68a" />
               </>
             ) : null}
             {snapshot.sheep.map((sheep) => (
@@ -109,6 +127,31 @@ export function FieldView({ snapshot }: FieldViewProps) {
                 <text textAnchor="middle" dominantBaseline="central" fill="#eff6ff" fontSize={fontSize} fontWeight={700} style={transitionStyle}>
                   D
                 </text>
+                {dog.role ? (
+                  <>
+                    <rect
+                      x={roleTagX}
+                      y={roleTagY}
+                      width={roleTagWidth}
+                      height={roleTagHeight}
+                      rx={roleTagRadius}
+                      fill="rgba(15, 23, 42, 0.88)"
+                      stroke="rgba(219, 234, 254, 0.5)"
+                      strokeWidth={roleTagStroke}
+                    />
+                    <text
+                      textAnchor="middle"
+                      dominantBaseline="middle"
+                      y={roleLabelY}
+                      fill="#dbeafe"
+                      fontSize={roleLabelSize}
+                      fontWeight={700}
+                    >
+                      {ROLE_LABELS[dog.role] ?? dog.role.slice(0, 2).toUpperCase()}
+                    </text>
+                    <title>{`Dog ${dog.index}: ${dog.role.replaceAll("_", " ")}`}</title>
+                  </>
+                ) : null}
               </g>
             ))}
           </svg>

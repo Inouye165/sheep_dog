@@ -59,10 +59,14 @@ export async function startTraining(request: TrainingStartRequest): Promise<Trai
   }, API_BASE_URL);
 }
 
-export async function resetTraining(): Promise<TrainingStatus> {
-  return fetchJson<TrainingStatus>("/api/training/reset", {
+export async function clearTraining(): Promise<TrainingStatus> {
+  return fetchJson<TrainingStatus>("/api/training/clear", {
     method: "POST",
   }, API_BASE_URL);
+}
+
+export async function resetTraining(): Promise<TrainingStatus> {
+  return clearTraining();
 }
 
 export async function runReplay(request: ReplayRunRequest): Promise<ReplayBundle> {
@@ -74,4 +78,3 @@ export async function runReplay(request: ReplayRunRequest): Promise<ReplayBundle
     body: JSON.stringify(request),
   }, API_BASE_URL);
 }
-
