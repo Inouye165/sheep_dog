@@ -10,7 +10,7 @@ from sheepdog.policies.base import Action
 class RandomPolicy:
     """Choose uniformly among legal actions."""
 
-    name = "random"
+    name = "random_untrained"
 
     def __init__(self, seed: int | None = None) -> None:
         self._rng = random.Random(seed)

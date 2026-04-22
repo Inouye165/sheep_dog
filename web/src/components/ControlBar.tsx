@@ -3,11 +3,11 @@ interface ControlBarProps {
   selectedCheckpointEpisode: number | null;
   seedOptions: number[];
   selectedSeed: number | null;
-  policyMode: string;
-  runState: string;
+  runningCurrent: boolean;
   onSelectCheckpointEpisode: (episode: number) => void;
   onSelectSeed: (seed: number) => void;
   onStart: () => void;
+  onRunCurrent: () => void;
   disabled?: boolean;
   fastMode: boolean;
   onFastModeChange: (enabled: boolean) => void;
@@ -18,11 +18,11 @@ export function ControlBar({
   selectedCheckpointEpisode,
   seedOptions,
   selectedSeed,
-  policyMode,
-  runState,
+  runningCurrent,
   onSelectCheckpointEpisode,
   onSelectSeed,
   onStart,
+  onRunCurrent,
   disabled,
   fastMode,
   onFastModeChange,
@@ -32,11 +32,7 @@ export function ControlBar({
       <div className="controls-card__header">
         <div>
           <p className="eyebrow">Controls</p>
-          <h2>Current replay</h2>
-        </div>
-        <div className="pill-row">
-          <span className="pill">{policyMode}</span>
-          <span className="pill pill--muted">{runState}</span>
+          <h2>Replay</h2>
         </div>
       </div>
 
@@ -85,7 +81,10 @@ export function ControlBar({
       </div>
 
       <div className="button-row">
-        <button type="button" className="button-row__primary" onClick={onStart} disabled={disabled}>
+        <button type="button" className="button-row__primary" onClick={onRunCurrent} disabled={runningCurrent}>
+          {runningCurrent ? "Running current dogs..." : "Run current dogs"}
+        </button>
+        <button type="button" className="button-row__secondary" onClick={onStart} disabled={disabled || !selectedSeed}>
           Start replay
         </button>
       </div>

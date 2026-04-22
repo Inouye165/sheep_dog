@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from sheepdog.config import EnvironmentConfig, LabConfig, RewardConfig, TrainingConfig
 from sheepdog.evaluation.evaluator import Evaluator
-from sheepdog.policies.heuristic import HeuristicPolicy
-from sheepdog.policies.trainable import PolicyWeights
+from sheepdog.policies.heuristic import HeuristicExpertPolicy
+from sheepdog.policies.trainable import PolicyWeights, TrainableLinearPolicy
+from sheepdog.server import _build_training_job_config, _load_playable_policy, TrainingManager
 from sheepdog.training.trainer import Trainer
 
 
@@ -49,7 +51,7 @@ def test_evaluation_writes_json_and_csv(tmp_path: Path) -> None:
     evaluator = Evaluator(config, tmp_path / "evaluations")
 
     summary, json_path, csv_path = evaluator.evaluate(
-        HeuristicPolicy(), (11, 13), checkpoint_episode=0
+        HeuristicExpertPolicy(), (11, 13), checkpoint_episode=0
     )
 
     assert json_path.exists()
@@ -62,7 +64,7 @@ def test_evaluation_summary_includes_success_timeout_and_completion_metrics(tmp_
     config = make_config(tmp_path)
     evaluator = Evaluator(config, tmp_path / "evaluations")
 
-    summary, _, _ = evaluator.evaluate(HeuristicPolicy(), (11, 13), checkpoint_episode=0)
+    summary, _, _ = evaluator.evaluate(HeuristicExpertPolicy(), (11, 13), checkpoint_episode=0)
 
     assert 0.0 <= summary.success_rate <= 1.0
     assert 0.0 <= summary.timeout_rate <= 1.0
@@ -112,3 +114,67 @@ def test_hill_climber_training_saves_role_aware_weights(tmp_path: Path) -> None:
     assert "rear_drive" in payload["weights"]
     assert "collector_focus" in payload["weights"]
     assert summary.final_weights.collector_focus == payload["weights"]["collector_focus"]
+
+
+def test_build_training_job_config_applies_fast_mode_and_curriculum() -> None:
+    config = _build_training_job_config(
+        4,
+        True,
+        enable_instinct_rewards=True,
+        curriculum_stage=2,
+        debug_reward_breakdown=True,
+    )
+
+    assert config.training.episodes == 3
+    assert config.training.evaluation_seeds == (11,)
+    assert config.rewards.instincts.enable_instinct_rewards is True
+    assert config.rewards.instincts.curriculum_stage == 2
+    assert config.environment.dogs == 1
+
+
+def test_load_playable_policy_reads_checkpoint_weights(tmp_path: Path) -> None:
+    config = replace(make_config(tmp_path), training=replace(make_config(tmp_path).training))
+    checkpoint_root = tmp_path / "checkpoints"
+    checkpoint_root.mkdir(parents=True)
+    (checkpoint_root / "checkpoint-000003.json").write_text(
+        json.dumps(
+            {
+                "checkpoint_episode": 3,
+                "policy_weights": {"rear_drive": 2.5, "collector_focus": 1.9},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    policy = _load_playable_policy(config, checkpoint_episode=3, policy_mode="trained_policy")
+
+    assert isinstance(policy, TrainableLinearPolicy)
+    assert policy.weights.rear_drive == 2.5
+    assert policy.weights.collector_focus == 1.9
+
+
+def test_training_manager_live_replay_writes_latest_replay(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    generated = tmp_path / "web" / "generated"
+    config = replace(
+        make_config(artifacts),
+        training=replace(make_config(artifacts).training, output_dir=str(artifacts), web_export_dir=str(generated)),
+    )
+    manager = TrainingManager()
+
+    import sheepdog.server as server_module
+
+    original_config = server_module.LabConfig
+
+    class TestConfig:
+        def __new__(cls):
+            return config
+
+    server_module.LabConfig = TestConfig
+    try:
+        replay = manager.run_live_replay(11)
+    finally:
+        server_module.LabConfig = original_config
+
+    assert replay["seed"] == 11
+    assert (generated / "latest-replay.json").exists()

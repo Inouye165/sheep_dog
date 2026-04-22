@@ -2,7 +2,7 @@
 
 ## Environment Loop
 
-The environment is a deterministic grid simulation. A reset call seeds the random generator, places dogs and sheep, and defines the pen location. Each step applies dog actions, then moves sheep based on nearby dog pressure, flock cohesion, wall avoidance, and deterministic tie-breaking.
+The environment is a deterministic seeded grid simulation on a denser logical field than the original release. A reset call seeds the random generator, places dogs and sheep into unique open cells, and defines the pen location. Each step applies dog actions, resolves occupancy conflicts deterministically, then moves sheep based on nearby dog pressure, flock cohesion, wall avoidance, and small seed-driven tie-break jitter.
 
 Episodes end when all sheep are penned, the step limit is reached, or the no-progress guard trips.
 
@@ -10,8 +10,18 @@ Episodes end when all sheep are penned, the step limit is reached, or the no-pro
 
 - Dogs are shared-policy agents.
 - Sheep are reactive agents that flee pressure and try to remain near the flock.
+- Dogs, sheep, and other dogs do not share a logical cell.
 - The pen is a rectangular goal region.
 - The field is configurable so the scenario can scale beyond a toy map.
+
+## Movement Resolution
+
+- Dogs move one logical cell per simulation step.
+- Sheep move one logical cell per simulation step.
+- The field resolution is increased instead of relying on multi-cell jumps.
+- Occupancy conflicts are deterministic: lower-index agents keep priority for a contested target cell, and blocked agents stay put.
+- Sheep randomness is intentionally small and only used to break otherwise equivalent local options.
+- Deadlock handling watches for wall-pinned sheep, repeated two-position dog loops, and stalled progress, then increases the value of lateral/flank positioning relative to straight-line pressure.
 
 ## Reward Design
 
@@ -32,11 +42,14 @@ The total reward is the sum of these components.
 
 ## Policy Modes
 
-- Random baseline
-- Heuristic baseline
-- Shared trainable linear policy
+- `random_untrained` is a pure legal-action baseline with no flock strategy.
+- `instinct_only` uses sheep-local spacing, circling, and straggler recovery without reading the pen target.
+- `heuristic_expert` is a pen-aware scripted controller that computes pressure positions behind the flock relative to the pen.
+- `trained_policy` is the shared linear policy learned through hill climbing.
 
 The trainable policy uses a simple hill-climbing loop. That keeps the first version honest without pretending a larger RL stack exists yet.
+
+Reward shaping may still include target-progress terms during training. That signal is deliberately separated from no-training action selection so the default dog team does not inherit an expert pen controller for free.
 
 ## Checkpoint and Evaluation Flow
 
@@ -44,4 +57,4 @@ Training runs the policy across scheduled checkpoints and evaluates each checkpo
 
 ## UI State Flow
 
-The React app does not simulate the environment itself. It reads checkpoint and replay JSON files from `web/public/generated/`, then plays them back in the browser. The controls manage playback state and data selection, not live simulation state.
+The React app does not simulate the environment itself. It reads checkpoint and replay JSON files from `web/public/generated/`, then plays them back in the browser. The viewer scales icon sizes relative to logical grid density so a denser field does not make the dogs and sheep visually tiny, and it applies short transitions to make one-cell motion read as smoother movement.

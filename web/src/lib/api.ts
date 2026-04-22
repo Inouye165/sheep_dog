@@ -1,18 +1,44 @@
-import type { CheckpointIndex, ReplayBundle, TrainingStartRequest, TrainingStatus } from "../state/types";
+import type { CheckpointIndex, ReplayBundle, ReplayRunRequest, TrainingStartRequest, TrainingStatus } from "../state/types";
 
 const API_BASE_URL = "http://127.0.0.1:8000";
+
+function isJsonResponse(response: Response): boolean {
+  const contentType = response.headers.get("content-type") ?? "";
+  return contentType.toLowerCase().includes("application/json");
+}
 
 async function fetchJson<T>(path: string, init?: RequestInit, baseUrl?: string): Promise<T> {
   const requestUrl = baseUrl ? new URL(path, baseUrl) : path;
   const response = await fetch(requestUrl, { cache: "no-store", ...init });
   if (!response.ok) {
-    throw new Error(`Failed to fetch ${path}: ${response.status}`);
+    const error = new Error(`Failed to fetch ${path}: ${response.status}`) as Error & { status?: number };
+    error.status = response.status;
+    throw error;
   }
+
+  if (!isJsonResponse(response)) {
+    const error = new Error(`Expected JSON from ${path}, received ${response.headers.get("content-type") ?? "unknown content type"}`) as Error & { status?: number; contentType?: string };
+    error.status = response.status;
+    error.contentType = response.headers.get("content-type") ?? undefined;
+    throw error;
+  }
+
   return (await response.json()) as T;
 }
 
-export async function loadCheckpointIndex(): Promise<CheckpointIndex> {
-  return fetchJson<CheckpointIndex>("/generated/checkpoint-index.json");
+export async function loadCheckpointIndex(): Promise<CheckpointIndex | null> {
+  try {
+    return await fetchJson<CheckpointIndex>("/generated/checkpoint-index.json");
+  } catch (error) {
+    const fetchError = error as { status?: number; contentType?: string };
+    if (fetchError.status === 404) {
+      return null;
+    }
+    if (fetchError.status === 200 && fetchError.contentType?.toLowerCase().includes("text/html")) {
+      return null;
+    }
+    throw error;
+  }
 }
 
 export async function loadReplay(path: string): Promise<ReplayBundle> {
@@ -39,3 +65,16 @@ export async function clearTraining(): Promise<TrainingStatus> {
   }, API_BASE_URL);
 }
 
+export async function resetTraining(): Promise<TrainingStatus> {
+  return clearTraining();
+}
+
+export async function runReplay(request: ReplayRunRequest): Promise<ReplayBundle> {
+  return fetchJson<ReplayBundle>("/api/replay/run", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(request),
+  }, API_BASE_URL);
+}

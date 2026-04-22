@@ -4,10 +4,12 @@
 
 from __future__ import annotations
 
-from sheepdog.config import EnvironmentConfig, LabConfig, RewardConfig, TrainingConfig
+from dataclasses import replace
+
+from sheepdog.config import EnvironmentConfig, LabConfig, PolicyConfig, RewardConfig, TrainingConfig
 from sheepdog.entities import DogRole
 from sheepdog.environment import SheepdogEnvironment
-from sheepdog.policies.heuristic import HeuristicPolicy
+from sheepdog.policies.heuristic import HeuristicExpertPolicy
 
 
 def make_config(**environment_overrides):
@@ -59,6 +61,13 @@ def test_sheep_flee_from_nearby_dog() -> None:
 
     after = environment.sheep[0].position
     assert after.x >= before.x
+
+
+def test_snapshot_exposes_field_dimension_aliases() -> None:
+    snapshot = SheepdogEnvironment(make_config()).reset(seed=2)
+
+    assert snapshot.field_width == snapshot.grid_width
+    assert snapshot.field_height == snapshot.grid_height
 
 
 def test_default_environment_uses_doubled_grid_resolution() -> None:
@@ -318,7 +327,7 @@ def test_sheep_uses_side_escape_when_pressed_against_wall() -> None:
 def test_replay_frames_include_dog_roles() -> None:
     config = make_config(dogs=3, sheep=3)
     environment = SheepdogEnvironment(config)
-    result = environment.run_policy(HeuristicPolicy(), seed=14, capture_replay=True)
+    result = environment.run_policy(HeuristicExpertPolicy(), seed=14, capture_replay=True)
 
     assert result.replay
     assert all(frame.snapshot.dogs[0].role for frame in result.replay)
@@ -327,11 +336,51 @@ def test_replay_frames_include_dog_roles() -> None:
 def test_heuristic_policy_runs_to_completion_or_stop() -> None:
     config = make_config()
     environment = SheepdogEnvironment(config)
-    result = environment.run_policy(HeuristicPolicy(), seed=13, capture_replay=True)
+    result = environment.run_policy(HeuristicExpertPolicy(), seed=13, capture_replay=True)
 
     assert result.stats.terminated is True
     assert result.final_snapshot.status in {"success", "timeout", "no-progress", "stopped"}
     assert isinstance(result.stats.role_distribution, dict)
+
+
+def test_instinct_only_action_score_is_pen_invariant_without_target_awareness() -> None:
+    base_config = make_config(dogs=1, sheep=1)
+    narrow_pen_config = replace(
+        base_config,
+        environment=replace(base_config.environment, pen_width=6, pen_height=6),
+        policy=PolicyConfig(policy_mode="instinct_only"),
+    )
+
+    first = SheepdogEnvironment(base_config)
+    second = SheepdogEnvironment(narrow_pen_config)
+    first.reset(seed=4)
+    second.reset(seed=4)
+
+    for environment in (first, second):
+        dog = environment.dogs[0]
+        sheep = environment.sheep[0]
+        sheep.position = sheep.position.__class__(10, 10)
+        dog.position = dog.position.__class__(6, 10)
+
+    assert first.score_action_for_dog(0, "right", policy_mode="instinct_only") == second.score_action_for_dog(
+        0,
+        "right",
+        policy_mode="instinct_only",
+    )
+
+
+def test_debug_snapshot_contains_pressure_payload_when_enabled() -> None:
+    config = replace(
+        make_config(),
+        rewards=replace(
+            RewardConfig(),
+            instincts=replace(RewardConfig().instincts, debug_reward_breakdown=True),
+        ),
+    )
+    snapshot = SheepdogEnvironment(config).reset(seed=5)
+
+    assert snapshot.debug["policy_mode"] == config.policy.policy_mode
+    assert len(snapshot.debug["dogs"]) == config.environment.dogs
 
 
 def test_pen_has_three_closed_fences_and_one_opening() -> None:
