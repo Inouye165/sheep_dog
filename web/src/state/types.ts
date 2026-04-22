@@ -50,6 +50,9 @@ export interface PressureDebugDog {
 export interface ReplayDebugSnapshot {
   curriculum_stage: number;
   enable_instinct_rewards: boolean;
+  policy_mode?: string;
+  allow_instinct_target_awareness?: boolean;
+  handler_target_enabled?: boolean;
   flock_center?: Point | null;
   dogs: PressureDebugDog[];
 }
@@ -106,6 +109,9 @@ export interface TrainingStatus {
   running: boolean;
   fast_mode: boolean;
   enable_instinct_rewards: boolean;
+  policy_mode?: string;
+  allow_instinct_target_awareness?: boolean;
+  handler_target_enabled?: boolean;
   debug_reward_breakdown: boolean;
   curriculum_stage: number;
   requested_episodes: number;

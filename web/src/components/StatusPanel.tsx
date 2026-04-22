@@ -1,5 +1,35 @@
 import type { ReplayBundle, ReplaySnapshot } from "../state/types";
 
+function policyLabel(policyName: string | undefined): string {
+  switch (policyName) {
+    case "random_untrained":
+      return "Random untrained";
+    case "instinct_only":
+      return "Instinct only";
+    case "heuristic_expert":
+      return "Heuristic expert";
+    case "trained_policy":
+      return "Trained policy";
+    default:
+      return policyName ?? "-";
+  }
+}
+
+function policyExplanation(policyName: string | undefined): string | null {
+  switch (policyName) {
+    case "random_untrained":
+      return "Random untrained dogs have no herding strategy and no knowledge of the pen.";
+    case "instinct_only":
+      return "Instinct-only dogs can chase, circle, avoid diving into the flock, and recover nearby sheep, but they do not know where the pen is.";
+    case "heuristic_expert":
+      return "This expert heuristic is pen-aware and uses scripted pressure positioning toward the target.";
+    case "trained_policy":
+      return "Pen-directed behavior here comes from learned training weights rather than default instinct.";
+    default:
+      return null;
+  }
+}
+
 interface StatusPanelProps {
   snapshot: ReplaySnapshot | null;
   replay: ReplayBundle | null;
@@ -18,6 +48,7 @@ export function StatusPanel({
   const sheepPenned = snapshot?.penned_count ?? 0;
   const totalSheep = snapshot?.sheep?.length ?? replay?.final_snapshot?.sheep?.length ?? 0;
   const completion = totalSheep === 0 ? 0 : sheepPenned / totalSheep;
+  const explanation = policyExplanation(replay?.policy_name);
 
   return (
     <section className="status-card" aria-label="Run status">
@@ -53,7 +84,7 @@ export function StatusPanel({
         </div>
         <div>
           <span>Policy</span>
-          <strong>{replay?.policy_name ?? "-"}</strong>
+          <strong>{policyLabel(replay?.policy_name)}</strong>
         </div>
       </div>
 
@@ -64,6 +95,12 @@ export function StatusPanel({
       {(replay?.stats?.no_progress_steps ?? 0) > 0 || snapshot?.status === "no-progress" ? (
         <div className="warning-box" role="status">
           No-progress guard is active. The episode should stop if progress stalls.
+        </div>
+      ) : null}
+
+      {explanation ? (
+        <div className="warning-box" role="note">
+          {explanation}
         </div>
       ) : null}
     </section>

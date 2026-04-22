@@ -48,6 +48,15 @@ The trainer uses a simple shared trainable policy with hill climbing. It does no
 
 The web app is a viewer, not a second simulation engine. It loads exported checkpoint and replay JSON files from `web/public/generated/` and plays them back frame by frame.
 
+## Policy Modes
+
+- `random_untrained` picks legal moves uniformly and has no herding intelligence.
+- `instinct_only` can chase, circle, avoid diving into the flock, and recover nearby sheep, but it does not know where the pen is.
+- `heuristic_expert` is a scripted, pen-aware expert that uses pressure positioning behind the flock relative to the target.
+- `trained_policy` uses learned weights from training checkpoints.
+
+By default the no-training playback path uses `instinct_only`, not the expert heuristic. Pen-directed behavior now requires training, `heuristic_expert`, or an explicit handler target command.
+
 ## Simulation Concepts
 
 - Dogs are AI-controlled and share one policy.
@@ -106,6 +115,8 @@ reward shaping that simulates instinct, plus a curriculum that starts simple
 and grows harder. The dog still selects its own actions through the existing
 policy; instincts only shape the reward signal and the training scenario.
 
+Training reward shaping may still use target progress toward the pen. That is separate from action selection: untrained action choice no longer gets a hidden pen-aware controller through the default playback policy.
+
 Configurable instinct reward terms (`InstinctRewardConfig` in
 `src/sheepdog/config.py`):
 
@@ -122,6 +133,12 @@ Toggles:
 - `enable_instinct_rewards` – off by default. Turn on to add the instinct terms to training.
 - `debug_reward_breakdown` – flag for downstream tooling to surface per-term values.
 - `curriculum_stage` – non-zero to apply a curriculum-stage environment override.
+
+Policy config (`PolicyConfig` in `src/sheepdog/config.py`):
+
+- `policy_mode` – select `random_untrained`, `instinct_only`, `heuristic_expert`, or `trained_policy`.
+- `allow_instinct_target_awareness` – off by default. Leave disabled unless you explicitly want instinct mode to read a target.
+- `handler_target_enabled` – off by default. Reserved for explicit handler-driven pen targeting.
 
 Curriculum stages (`CURRICULUM_STAGES` in `src/sheepdog/curriculum.py`):
 

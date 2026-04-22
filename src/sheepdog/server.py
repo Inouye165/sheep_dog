@@ -14,7 +14,8 @@ from typing import Any
 from sheepdog.config import LabConfig, TrainingConfig
 from sheepdog.curriculum import apply_training_profile
 from sheepdog.environment import EpisodeResult, SheepdogEnvironment
-from sheepdog.policies.heuristic import HeuristicPolicy
+from sheepdog.policies.heuristic import HeuristicExpertPolicy, InstinctOnlyPolicy
+from sheepdog.policies.random_policy import RandomPolicy
 from sheepdog.policies.trainable import PolicyWeights, TrainableLinearPolicy
 from sheepdog.training.trainer import Trainer
 
@@ -94,20 +95,30 @@ def _clear_training_outputs(config: LabConfig) -> None:
 def _load_playable_policy(config: LabConfig) -> tuple[object, str]:
     """Prefer trained weights when they exist; otherwise fall back to instinct-only play."""
 
+    fallback_policy: object
+    fallback_name = config.policy.policy_mode
+    if config.policy.policy_mode == "random_untrained":
+        fallback_policy = RandomPolicy()
+    elif config.policy.policy_mode == "heuristic_expert":
+        fallback_policy = HeuristicExpertPolicy()
+    else:
+        fallback_policy = InstinctOnlyPolicy()
+        fallback_name = "instinct_only"
+
     state_path = Path(config.training.output_dir) / Trainer.STATE_FILENAME
     if not state_path.exists():
-        return HeuristicPolicy(), "instinct-only"
+        return fallback_policy, fallback_name
     try:
         payload = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, ValueError):
-        return HeuristicPolicy(), "instinct-only"
+        return fallback_policy, fallback_name
 
     total_episodes = int(payload.get("total_episodes_trained", 0))
     weights_payload = payload.get("weights")
     if total_episodes > 0 and weights_payload:
         weights = PolicyWeights.from_dict(weights_payload)
-        return TrainableLinearPolicy(weights), "trained-checkpoint"
-    return HeuristicPolicy(), "instinct-only"
+        return TrainableLinearPolicy(weights), "trained_policy"
+    return fallback_policy, fallback_name
 
 
 def _replay_payload(result: EpisodeResult, policy_name: str) -> dict[str, Any]:
@@ -144,6 +155,9 @@ class TrainingManager:
             "running": False,
             "fast_mode": True,
             "enable_instinct_rewards": True,
+            "policy_mode": "instinct_only",
+            "allow_instinct_target_awareness": False,
+            "handler_target_enabled": False,
             "debug_reward_breakdown": False,
             "curriculum_stage": 1,
             "requested_episodes": 0,
@@ -187,6 +201,9 @@ class TrainingManager:
                     "running": True,
                     "fast_mode": fast_mode,
                     "enable_instinct_rewards": instincts_enabled,
+                    "policy_mode": "trained_policy",
+                    "allow_instinct_target_awareness": config.policy.allow_instinct_target_awareness,
+                    "handler_target_enabled": config.policy.handler_target_enabled,
                     "debug_reward_breakdown": debug_reward_breakdown,
                     "curriculum_stage": stage,
                     "requested_episodes": requested_episodes,
@@ -262,6 +279,9 @@ class TrainingManager:
                 "phase": payload.get("phase", "running"),
                 "fast_mode": fast_mode,
                 "enable_instinct_rewards": enable_instinct_rewards,
+                "policy_mode": "trained_policy",
+                "allow_instinct_target_awareness": config.policy.allow_instinct_target_awareness,
+                "handler_target_enabled": config.policy.handler_target_enabled,
                 "debug_reward_breakdown": debug_reward_breakdown,
                 "curriculum_stage": curriculum_stage,
                 "requested_episodes": batch_total,
@@ -289,6 +309,9 @@ class TrainingManager:
                     "phase": "training",
                     "fast_mode": fast_mode,
                     "enable_instinct_rewards": enable_instinct_rewards,
+                    "policy_mode": "trained_policy",
+                    "allow_instinct_target_awareness": config.policy.allow_instinct_target_awareness,
+                    "handler_target_enabled": config.policy.handler_target_enabled,
                     "debug_reward_breakdown": debug_reward_breakdown,
                     "curriculum_stage": curriculum_stage,
                     "requested_episodes": total_episodes,

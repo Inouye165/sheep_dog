@@ -105,7 +105,8 @@ export function FieldView({ snapshot }: FieldViewProps) {
         ) : (
           <div className="field-stage__empty">
             <p>No replay loaded yet.</p>
-            <p>Use Run current dogs to watch instinct-only or trained behavior.</p>
+            <p>Use Run current dogs to watch the current dog team.</p>
+            <p>Instinct-only dogs do not know the pen. Pen-directed behavior requires training, heuristic expert mode, or a handler target command.</p>
           </div>
         )}
       </div>

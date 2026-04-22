@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from sheepdog.policies.base import PolicyMode
+
 
 @dataclass(frozen=True, slots=True)
 class EnvironmentConfig:
@@ -93,12 +95,22 @@ class TrainingConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class PolicyConfig:
+    """Runtime policy controls for demo, evaluation, and untrained playback."""
+
+    policy_mode: PolicyMode = "instinct_only"
+    allow_instinct_target_awareness: bool = False
+    handler_target_enabled: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class LabConfig:
     """Bundle of environment, reward, and training settings."""
 
     environment: EnvironmentConfig = field(default_factory=EnvironmentConfig)
     rewards: RewardConfig = field(default_factory=RewardConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
+    policy: PolicyConfig = field(default_factory=PolicyConfig)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -107,15 +119,18 @@ class LabConfig:
     def from_dict(cls, payload: dict[str, Any]) -> LabConfig:
         rewards_payload = dict(payload["rewards"])
         instincts_payload = rewards_payload.pop("instincts", None)
+        policy_payload = payload.get("policy")
         instincts = (
             InstinctRewardConfig(**instincts_payload)
             if isinstance(instincts_payload, dict)
             else InstinctRewardConfig()
         )
+        policy = PolicyConfig(**policy_payload) if isinstance(policy_payload, dict) else PolicyConfig()
         return cls(
             environment=EnvironmentConfig(**payload["environment"]),
             rewards=RewardConfig(instincts=instincts, **rewards_payload),
             training=TrainingConfig(**payload["training"]),
+            policy=policy,
         )
 
 

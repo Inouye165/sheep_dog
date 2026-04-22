@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from sheepdog.config import EnvironmentConfig, LabConfig, RewardConfig, TrainingConfig
+from sheepdog.config import EnvironmentConfig, LabConfig, PolicyConfig, RewardConfig, TrainingConfig
 from sheepdog.environment import SheepdogEnvironment
-from sheepdog.policies.heuristic import HeuristicPolicy
+from sheepdog.policies.heuristic import HeuristicExpertPolicy, InstinctOnlyPolicy
+from sheepdog.policies.random_policy import RandomPolicy
 
 
 def make_config(**environment_overrides):
@@ -134,10 +135,10 @@ def test_action_score_prefers_behind_flock_over_pen_side_position() -> None:
     dog = environment._dogs[0]
 
     dog.position = dog.position.__class__(14, 10)
-    behind_score = environment.score_action_for_dog(0, "wait")
+    behind_score = environment.score_action_for_dog(0, "wait", policy_mode="heuristic_expert")
 
     dog.position = dog.position.__class__(22, 10)
-    pen_side_score = environment.score_action_for_dog(0, "wait")
+    pen_side_score = environment.score_action_for_dog(0, "wait", policy_mode="heuristic_expert")
 
     assert behind_score > pen_side_score
 
@@ -152,8 +153,8 @@ def test_action_score_penalizes_positions_inside_or_too_close_to_flock() -> None
     dog = environment._dogs[0]
     dog.position = dog.position.__class__(7, 10)
 
-    safer_pressure = environment.score_action_for_dog(0, "wait")
-    too_close = environment.score_action_for_dog(0, "right")
+    safer_pressure = environment.score_action_for_dog(0, "wait", policy_mode="heuristic_expert")
+    too_close = environment.score_action_for_dog(0, "right", policy_mode="heuristic_expert")
 
     assert safer_pressure > too_close
 
@@ -168,8 +169,8 @@ def test_action_score_no_longer_rewards_diving_toward_flock_center() -> None:
     dog = environment._dogs[0]
     dog.position = dog.position.__class__(7, 10)
 
-    hold_pressure = environment.score_action_for_dog(0, "wait")
-    step_toward_center = environment.score_action_for_dog(0, "right")
+    hold_pressure = environment.score_action_for_dog(0, "wait", policy_mode="heuristic_expert")
+    step_toward_center = environment.score_action_for_dog(0, "right", policy_mode="heuristic_expert")
 
     assert hold_pressure > step_toward_center
 
@@ -185,8 +186,8 @@ def test_anti_oscillation_penalty_lowers_immediate_reverse_actions() -> None:
     dog.position = dog.position.__class__(7, 10)
     dog.last_action = "right"
 
-    reverse_score = environment.score_action_for_dog(0, "left")
-    hold_score = environment.score_action_for_dog(0, "wait")
+    reverse_score = environment.score_action_for_dog(0, "left", policy_mode="heuristic_expert")
+    hold_score = environment.score_action_for_dog(0, "wait", policy_mode="heuristic_expert")
 
     assert hold_score > reverse_score
 
@@ -253,10 +254,88 @@ def test_dog_action_score_prefers_spread_out_team_positions() -> None:
 def test_heuristic_policy_runs_to_completion_or_stop() -> None:
     config = make_config()
     environment = SheepdogEnvironment(config)
-    result = environment.run_policy(HeuristicPolicy(), seed=13, capture_replay=True)
+    result = environment.run_policy(HeuristicExpertPolicy(), seed=13, capture_replay=True)
 
     assert result.stats.terminated is True
     assert result.final_snapshot.status in {"success", "timeout", "no-progress", "stopped"}
+
+
+def test_instinct_only_action_scoring_does_not_depend_on_pen_position() -> None:
+    left_pen_config = LabConfig(
+        environment=EnvironmentConfig(dogs=1, sheep=1),
+        rewards=RewardConfig(),
+        training=TrainingConfig(episodes=0, checkpoint_episodes=(0,), evaluation_seeds=(11,)),
+        policy=PolicyConfig(policy_mode="instinct_only"),
+    )
+    right_pen_config = LabConfig(
+        environment=EnvironmentConfig(dogs=1, sheep=1, pen_opening="right"),
+        rewards=RewardConfig(),
+        training=TrainingConfig(episodes=0, checkpoint_episodes=(0,), evaluation_seeds=(11,)),
+        policy=PolicyConfig(policy_mode="instinct_only"),
+    )
+    left_environment = SheepdogEnvironment(left_pen_config)
+    right_environment = SheepdogEnvironment(right_pen_config)
+    left_environment.reset(seed=21)
+    right_environment.reset(seed=21)
+
+    for environment in (left_environment, right_environment):
+        sheep = environment._sheep[0]
+        dog = environment._dogs[0]
+        sheep.position = sheep.position.__class__(10, 10)
+        dog.position = dog.position.__class__(7, 10)
+
+    left_score = left_environment.score_action_for_dog(0, "wait", policy_mode="instinct_only")
+    right_score = right_environment.score_action_for_dog(0, "wait", policy_mode="instinct_only")
+
+    assert left_score == right_score
+
+
+def test_heuristic_expert_scoring_depends_on_pen_position() -> None:
+    left_pen_config = make_config(dogs=1, sheep=1, width=40)
+    right_pen_config = make_config(dogs=1, sheep=1, width=60)
+    left_environment = SheepdogEnvironment(left_pen_config)
+    right_environment = SheepdogEnvironment(right_pen_config)
+    left_environment.reset(seed=22)
+    right_environment.reset(seed=22)
+
+    for environment in (left_environment, right_environment):
+        sheep = environment._sheep[0]
+        dog = environment._dogs[0]
+        sheep.position = sheep.position.__class__(18, 10)
+        dog.position = dog.position.__class__(14, 10)
+
+    left_score = left_environment.score_action_for_dog(0, "wait", policy_mode="heuristic_expert")
+    right_score = right_environment.score_action_for_dog(0, "wait", policy_mode="heuristic_expert")
+
+    assert left_score != right_score
+
+
+def test_random_untrained_policy_does_not_reliably_pick_pen_directed_action() -> None:
+    config = make_config(dogs=1, sheep=1)
+    pen_directed_actions = 0
+
+    for seed in range(60):
+        environment = SheepdogEnvironment(config)
+        environment.reset(seed=seed)
+        sheep = environment._sheep[0]
+        dog = environment._dogs[0]
+        sheep.position = sheep.position.__class__(10, 10)
+        dog.position = dog.position.__class__(7, 10)
+        action = RandomPolicy(seed=seed).select_actions(environment)[0]
+        if action == "right":
+            pen_directed_actions += 1
+
+    assert pen_directed_actions < 25
+
+
+def test_instinct_only_policy_runs_without_pen_target_knowledge() -> None:
+    config = make_config()
+    environment = SheepdogEnvironment(config)
+
+    result = environment.run_policy(InstinctOnlyPolicy(), seed=17, capture_replay=True)
+
+    assert result.policy_name == "instinct_only"
+    assert result.stats.terminated is True
 
 
 def test_pen_has_three_closed_fences_and_one_opening() -> None:

@@ -70,7 +70,7 @@ const checkpointIndex = {
   ],
   latest: {
     checkpoint_episode: 0,
-    policy_name: "trained-checkpoint",
+    policy_name: "trained_policy",
     records: [
       {
         seed: 11,
@@ -110,7 +110,7 @@ const checkpointIndex = {
 
 const replay = {
   seed: 11,
-  policy_name: "trained-checkpoint",
+  policy_name: "trained_policy",
   final_snapshot: {
     step: 3,
     simulated_seconds: 3,
@@ -241,7 +241,8 @@ describe("App", () => {
     await waitFor(() => expect(screen.getByText("Replay")).toBeInTheDocument());
     await waitFor(() => expect(within(screen.getByLabelText("Run status")).getByText("Live run")).toBeInTheDocument());
     expect(screen.getByLabelText("Run status")).toBeInTheDocument();
-    expect(screen.getByText("trained-checkpoint")).toBeInTheDocument();
+    expect(screen.getByText("Trained policy")).toBeInTheDocument();
+    expect(screen.getByText("Pen-directed behavior here comes from learned training weights rather than default instinct.")).toBeInTheDocument();
     expect(screen.getByText(/No-progress guard is active/)).toBeInTheDocument();
   });
 
@@ -298,7 +299,7 @@ describe("App", () => {
         return new Response(
           JSON.stringify({
             ...replay,
-            policy_name: "instinct-only",
+            policy_name: "instinct_only",
             seed: 11,
           }),
           { status: 200 },
@@ -309,10 +310,11 @@ describe("App", () => {
 
     render(<App />);
 
-    await waitFor(() => expect(screen.getByText("Use Run current dogs to watch instinct-only or trained behavior.")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Instinct-only dogs do not know the pen. Pen-directed behavior requires training, heuristic expert mode, or a handler target command.")).toBeInTheDocument());
     await userEvent.click(screen.getByRole("button", { name: "Run current dogs" }));
 
-    await waitFor(() => expect(screen.getByText("instinct-only")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Instinct only")).toBeInTheDocument());
+    expect(screen.getByText("Instinct-only dogs can chase, circle, avoid diving into the flock, and recover nearby sheep, but they do not know where the pen is.")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith(
       new URL("/api/replay/run", "http://127.0.0.1:8000"),
       expect.objectContaining({ cache: "no-store", method: "POST" }),

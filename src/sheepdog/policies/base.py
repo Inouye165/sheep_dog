@@ -5,6 +5,12 @@ from __future__ import annotations
 from typing import Literal, Protocol
 
 Action = Literal["up", "down", "left", "right", "wait"]
+PolicyMode = Literal[
+    "random_untrained",
+    "instinct_only",
+    "heuristic_expert",
+    "trained_policy",
+]
 
 
 class Policy(Protocol):

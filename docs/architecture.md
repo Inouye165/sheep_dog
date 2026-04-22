@@ -32,11 +32,14 @@ The total reward is the sum of these components.
 
 ## Policy Modes
 
-- Random baseline
-- Heuristic baseline
-- Shared trainable linear policy
+- `random_untrained` is a pure legal-action baseline with no flock strategy.
+- `instinct_only` uses sheep-local spacing, circling, and straggler recovery without reading the pen target.
+- `heuristic_expert` is a pen-aware scripted controller that computes pressure positions behind the flock relative to the pen.
+- `trained_policy` is the shared linear policy learned through hill climbing.
 
 The trainable policy uses a simple hill-climbing loop. That keeps the first version honest without pretending a larger RL stack exists yet.
+
+Reward shaping may still include target-progress terms during training. That signal is deliberately separated from no-training action selection so the default dog team does not inherit an expert pen controller for free.
 
 ## Checkpoint and Evaluation Flow
 

@@ -13,10 +13,12 @@ from sheepdog.config import LabConfig
 from sheepdog.curriculum import apply_training_profile
 from sheepdog.environment import SheepdogEnvironment
 from sheepdog.evaluation.evaluator import Evaluator
-from sheepdog.policies.heuristic import HeuristicPolicy
+from sheepdog.policies.heuristic import HeuristicExpertPolicy, InstinctOnlyPolicy
 from sheepdog.policies.random_policy import RandomPolicy
 from sheepdog.policies.trainable import PolicyWeights, TrainableLinearPolicy
 from sheepdog.training.trainer import Trainer
+
+POLICY_CHOICES = ["random_untrained", "instinct_only", "heuristic_expert", "trained_policy"]
 
 
 def _load_config(path: str | None) -> LabConfig:
@@ -76,7 +78,7 @@ def train_command() -> None:
 def evaluate_command() -> None:
     parser = argparse.ArgumentParser(description="Evaluate a checkpoint policy.")
     parser.add_argument("--config", default=None, help="Optional JSON config file.")
-    parser.add_argument("--policy", choices=["heuristic", "random", "trained"], default="heuristic")
+    parser.add_argument("--policy", choices=POLICY_CHOICES, default="instinct_only")
     parser.add_argument("--seeds", nargs="*", type=int, default=None)
     _add_profile_args(parser)
     args = parser.parse_args()
@@ -91,7 +93,7 @@ def export_demo_command() -> None:
     parser = argparse.ArgumentParser(description="Export a playable demo replay for the UI.")
     parser.add_argument("--config", default=None, help="Optional JSON config file.")
     parser.add_argument("--seed", type=int, default=11, help="Replay seed.")
-    parser.add_argument("--policy", choices=["heuristic", "random", "trained"], default="heuristic")
+    parser.add_argument("--policy", choices=POLICY_CHOICES, default="instinct_only")
     parser.add_argument("--output", default=None, help="Replay output file path.")
     _add_profile_args(parser)
     args = parser.parse_args()
@@ -115,10 +117,12 @@ def export_demo_command() -> None:
 
 
 def _policy_from_name(policy_name: str):
-    if policy_name == "heuristic":
-        return HeuristicPolicy()
-    if policy_name == "random":
+    if policy_name == "random_untrained":
         return RandomPolicy()
+    if policy_name == "heuristic_expert":
+        return HeuristicExpertPolicy()
+    if policy_name == "instinct_only":
+        return InstinctOnlyPolicy()
     return TrainableLinearPolicy(PolicyWeights())
 
 

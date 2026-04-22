@@ -57,7 +57,7 @@ class PolicyWeights:
 class TrainableLinearPolicy:
     """A transparent baseline that can be improved through hill climbing."""
 
-    name = "trained-checkpoint"
+    name = "trained_policy"
 
     def __init__(self, weights: PolicyWeights | None = None) -> None:
         self.weights = weights or PolicyWeights()
@@ -66,13 +66,18 @@ class TrainableLinearPolicy:
         actions: list[Action] = []
         for dog_index in range(environment.dog_count):
             current_dog_index = dog_index
-            mask = environment.action_mask_for_dog(dog_index)
+            mask = environment.action_mask_for_dog(
+                dog_index,
+                policy_mode=self.name,
+                weights=self.weights,
+            )
             candidates = [action for action, allowed in mask.items() if allowed]
             ranked = sorted(
                 candidates,
                 key=lambda action: environment.score_action_for_dog(
                     current_dog_index,
                     action,
+                    policy_mode=self.name,
                     weights=self.weights,
                 ),
                 reverse=True,
