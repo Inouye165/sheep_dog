@@ -102,6 +102,50 @@ def test_maskable_ppo_trainer_writes_checkpoint_and_model(tmp_path: Path) -> Non
     assert (tmp_path / "artifacts" / "checkpoints" / "checkpoint-000000.json").exists()
 
 
+def test_maskable_ppo_trainer_emits_progress_updates(tmp_path: Path) -> None:
+    config = make_experiment_config(tmp_path)
+    trainer = create_trainer(config, config.training.output_dir)
+    payloads: list[dict[str, object]] = []
+
+    trainer.train(progress_callback=payloads.append)
+
+    phases = {str(payload.get("phase")) for payload in payloads}
+    assert "starting" in phases
+    assert "learning" in phases
+    assert "checkpoint" in phases
+    assert "complete" in phases
+    assert any(payload.get("checkpoint_episode") == 0 for payload in payloads)
+
+
+def test_maskable_ppo_trainer_resets_incompatible_saved_action_space(tmp_path: Path) -> None:
+        config = make_experiment_config(tmp_path)
+        artifacts_dir = Path(config.training.output_dir)
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        (artifacts_dir / "training-state.json").write_text(
+                """
+                {
+                    "total_episodes_trained": 5,
+                    "total_timesteps": 123,
+                    "policy_state_path": "old-model.zip",
+                    "policy_config": {
+                        "hidden_sizes": [64, 64],
+                        "observation_size": 10,
+                        "action_size": 5
+                    }
+                }
+                """.strip(),
+                encoding="utf-8",
+        )
+
+        trainer = create_trainer(config, config.training.output_dir)
+        summary = trainer.train()
+        state_payload = (artifacts_dir / "training-state.json").read_text(encoding="utf-8")
+
+        assert summary.checkpoints
+        assert '"total_episodes_trained": 1' in state_payload
+        assert '"total_timesteps": 16' in state_payload
+
+
 def test_neural_checkpoint_loads_for_playback(tmp_path: Path) -> None:
     config = make_experiment_config(tmp_path)
     trainer = create_trainer(config, config.training.output_dir)
