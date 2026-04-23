@@ -1,13 +1,13 @@
 # Sheepdog Herding Lab
 
-Sheepdog Herding Lab is a deterministic reinforcement-learning simulation where a team of dogs learns to herd multiple sheep into a pen.
+Sheepdog Herding Lab is a deterministic sheepdog-herding simulation where a team of dogs learns to herd multiple sheep into a pen.
 
 The project is split into two parts:
 
 - A Python simulation, training, and evaluation pipeline.
 - A React + TypeScript replay viewer that reads exported checkpoint data.
 
-The first version is intentionally honest about what it does. It trains a simple shared policy with hill climbing, measures real checkpoint results, and exports replays that the UI can inspect.
+The current baseline is intentionally honest about what it does. It trains a role-aware shared linear policy with hill climbing, measures real checkpoint results, and exports replays that the UI can inspect.
 
 ## Why This Exists
 
@@ -67,9 +67,11 @@ python -m sheepdog.cli export-demo
 
 The simulation is grid based and deterministic for a fixed seed. Dogs act first, sheep react to nearby pressure, and the environment tracks progress toward the pen. Rewards are decomposed into named pieces so the total can be audited.
 
-The trainer uses a simple shared trainable policy with hill climbing. It does not pretend to be PPO or another full RL algorithm. Checkpoints are real evaluation snapshots, not fabricated milestones.
+The trainer uses hill climbing to optimize a simple shared linear policy. Hill climbing is the training algorithm, not the model. This baseline is not PPO, not MaskablePPO, and not a neural network. Checkpoints are real evaluation snapshots, not fabricated milestones.
 
-The current baseline now adds dynamic team roles on top of that same hill-climbing policy. Dogs still share one linear weight vector, but each step the environment assigns tactical jobs such as rear pressure, flanking, collecting strays, and blocking near the pen, then scores actions against those temporary responsibilities.
+The current baseline adds dynamic scripted team roles on top of that same hill-climbing trainer. Dogs still share one linear weight vector, but each step the team strategy assigns tactical jobs such as rear pressure, flanking, collecting strays, and blocking near the pen, then the role-aware linear policy scores actions against those temporary responsibilities.
+
+Future PPO or MaskablePPO work can be compared against this baseline later, but that is not what is running today.
 
 The web app is a viewer, not a second simulation engine. It loads exported checkpoint and replay JSON files from `web/public/generated/` and plays them back frame by frame.
 
@@ -84,8 +86,8 @@ By default the no-training playback path uses `instinct_only`, not the expert he
 
 ## Simulation Concepts
 
-- Dogs are AI-controlled and share one policy.
-- Dogs can switch dynamic tactical roles each step while still using the shared linear hill-climbing policy.
+- Dogs are AI-controlled and share one role-aware linear policy.
+- Dogs can switch dynamic tactical roles each step while still using the same shared linear policy.
 - Sheep flee from nearby dogs, stay loosely flocked, and avoid walls.
 - The pen is a goal area inside the field.
 - Episodes succeed only when every sheep is penned.
@@ -182,6 +184,12 @@ Policy config (`PolicyConfig` in `src/sheepdog/config.py`):
 - `allow_instinct_target_awareness` – off by default. Leave disabled unless you explicitly want instinct mode to read a target.
 - `handler_target_enabled` – off by default. Reserved for explicit handler-driven pen targeting.
 
+Training config (`TrainingConfig` in `src/sheepdog/config.py`):
+
+- `candidate_evaluation_seeds` – fixed seeds used to score hill-climber candidates before promotion.
+- `candidate_pool_size` – number of mutated candidate policies considered each training episode.
+- `mutation_scale` – per-weight mutation magnitude for the hill climber.
+
 Curriculum stages (`CURRICULUM_STAGES` in `src/sheepdog/curriculum.py`):
 
 1. One dog, one sheep, dense open field, one-cell motion, nearby pen.
@@ -196,8 +204,8 @@ log spam. To compare shaped vs. unshaped training, run with
 `enable_instinct_rewards=False` (the default) and again with it set to
 `True`.
 
-The UI training path now sends `enable_instinct_rewards`, `curriculum_stage`,
-and `debug_reward_breakdown` to the backend. By default the Train panel starts
+The UI training path sends `enable_instinct_rewards`, `curriculum_stage`,
+and `debug_reward_breakdown` to the backend API server. By default the Train panel starts
 new runs with instinct rewards enabled and curriculum stage 1 unless you
 override them.
 

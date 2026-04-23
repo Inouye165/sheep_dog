@@ -7,6 +7,7 @@ import random
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from statistics import fmean
 from typing import Any
 
 from sheepdog.checkpoints.store import CheckpointMetadata, CheckpointStore
@@ -25,6 +26,32 @@ class TrainingRunSummary:
 
     def to_dict(self) -> dict[str, Any]:
         return {"checkpoints": self.checkpoints, "final_weights": asdict(self.final_weights)}
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateEvaluationSummary:
+    """Aggregate score components for one candidate policy."""
+
+    seeds: tuple[int, ...]
+    average_reward: float
+    success_rate: float
+    timeout_rate: float
+    stopped_rate: float
+    average_sheep_penned: float
+    average_distance_to_pen: float
+    average_flock_spread: float
+
+    @property
+    def score(self) -> float:
+        return (
+            self.average_reward
+            + self.success_rate * 20.0
+            + self.average_sheep_penned * 2.5
+            - self.timeout_rate * 8.0
+            - self.stopped_rate * 5.0
+            - self.average_distance_to_pen * 0.12
+            - self.average_flock_spread * 0.35
+        )
 
 
 class Trainer:
@@ -68,13 +95,33 @@ class Trainer:
     def total_episodes_trained(self) -> int:
         return self._loaded_state.get("total_episodes_trained", 0)
 
-    def _evaluate_score(self, policy: TrainableLinearPolicy) -> float:
-        result = SheepdogEnvironment(self.config).run_policy(
-            policy,
-            seed=self.config.training.evaluation_seed,
-            capture_replay=False,
+    def _candidate_evaluation_seeds(self) -> tuple[int, ...]:
+        configured = tuple(self.config.training.candidate_evaluation_seeds)
+        if configured:
+            return configured
+        return (self.config.training.evaluation_seed,)
+
+    def _evaluate_candidate(self, policy: TrainableLinearPolicy) -> CandidateEvaluationSummary:
+        results = [
+            SheepdogEnvironment(self.config).run_policy(
+                policy,
+                seed=seed,
+                capture_replay=False,
+            )
+            for seed in self._candidate_evaluation_seeds()
+        ]
+        return CandidateEvaluationSummary(
+            seeds=tuple(result.seed for result in results),
+            average_reward=fmean(result.stats.reward_total for result in results),
+            success_rate=fmean(1.0 if result.stats.success else 0.0 for result in results),
+            timeout_rate=fmean(1.0 if result.stats.timeout else 0.0 for result in results),
+            stopped_rate=fmean(1.0 if result.stats.stopped else 0.0 for result in results),
+            average_sheep_penned=fmean(result.stats.sheep_penned for result in results),
+            average_distance_to_pen=fmean(
+                result.final_snapshot.average_distance_to_pen for result in results
+            ),
+            average_flock_spread=fmean(result.final_snapshot.flock_spread for result in results),
         )
-        return result.stats.reward_total
 
     def train(
         self,
@@ -87,12 +134,12 @@ class Trainer:
         best_policy = TrainableLinearPolicy(weights=starting_weights)
         best_score: float | None = self._loaded_state.get("best_score")
         if best_score is None:
-            best_score = self._evaluate_score(best_policy)
+            best_score = self._evaluate_candidate(best_policy).score
         checkpoint_payloads: list[dict[str, Any]] = list(self._load_summary_checkpoints())
         web_export_dir = Path(train_config.web_export_dir)
         web_export_dir.mkdir(parents=True, exist_ok=True)
         batch_total = train_config.episodes + 1
-        candidate_pool_size = 4
+        candidate_pool_size = train_config.candidate_pool_size
 
         def emit(payload: dict[str, Any]) -> None:
             if progress_callback is None:
@@ -125,7 +172,7 @@ class Trainer:
                     for _ in range(candidate_pool_size)
                 ]
                 for candidate_policy in candidate_policies:
-                    candidate_score = self._evaluate_score(candidate_policy)
+                    candidate_score = self._evaluate_candidate(candidate_policy).score
                     if candidate_score > best_score:
                         best_score = candidate_score
                         best_policy = candidate_policy

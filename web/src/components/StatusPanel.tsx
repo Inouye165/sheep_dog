@@ -1,5 +1,18 @@
 import type { ReplayBundle, ReplaySnapshot } from "../state/types";
 
+function formatRoleDistribution(roleDistribution: Record<string, number> | undefined): string {
+  if (!roleDistribution) {
+    return "-";
+  }
+
+  const entries = Object.entries(roleDistribution).filter(([, count]) => count > 0);
+  if (entries.length === 0) {
+    return "-";
+  }
+
+  return entries.map(([role, count]) => `${role}: ${count}`).join(" | ");
+}
+
 function policyLabel(policyName: string | undefined): string {
   switch (policyName) {
     case "random_untrained":
@@ -50,10 +63,10 @@ export function StatusPanel({
   const completion = totalSheep === 0 ? 0 : sheepPenned / totalSheep;
   const activeRoles = snapshot?.dogs?.map((dog) => dog.role).filter(Boolean) ?? [];
   const activeRoleSummary = activeRoles.length > 0 ? activeRoles.join(", ") : "-";
-  const gridWidth = snapshot?.grid_width ?? replay?.final_snapshot?.grid_width ?? 40;
-  const gridHeight = snapshot?.grid_height ?? replay?.final_snapshot?.grid_height ?? 30;
+  const roleDistributionSummary = formatRoleDistribution(replay?.stats.role_distribution);
   const explanation = policyExplanation(replay?.policy_name);
-  const explanation = policyExplanation(replay?.policy_name);
+  const averageDistanceToPen = snapshot?.average_distance_to_pen ?? replay?.stats.final_avg_distance_to_pen ?? 0;
+  const flockSpread = snapshot?.flock_spread ?? replay?.stats.final_flock_spread ?? 0;
   const gridWidth =
     snapshot?.grid_width ??
     snapshot?.field_width ??
@@ -133,6 +146,30 @@ export function StatusPanel({
         <div>
           <span>Role switches</span>
           <strong>{replay?.stats.role_switches ?? 0}</strong>
+        </div>
+        <div>
+          <span>Role distribution</span>
+          <strong>{roleDistributionSummary}</strong>
+        </div>
+        <div>
+          <span>Collector activations</span>
+          <strong>{replay?.stats.collector_activations ?? 0}</strong>
+        </div>
+        <div>
+          <span>Blocker activations</span>
+          <strong>{replay?.stats.blocker_activations ?? 0}</strong>
+        </div>
+        <div>
+          <span>Sheep split events</span>
+          <strong>{replay?.stats.sheep_split_events ?? 0}</strong>
+        </div>
+        <div>
+          <span>Avg distance to pen</span>
+          <strong>{averageDistanceToPen.toFixed(1)}</strong>
+        </div>
+        <div>
+          <span>Flock spread</span>
+          <strong>{flockSpread.toFixed(1)}</strong>
         </div>
       </div>
       {(replay?.stats?.no_progress_steps ?? 0) > 0 || snapshot?.status === "no-progress" ? (

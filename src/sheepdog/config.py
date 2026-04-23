@@ -89,6 +89,8 @@ class TrainingConfig:
     evaluation_seeds: tuple[int, ...] = (11, 23, 37, 41, 53)
     train_seed: int = 7
     evaluation_seed: int = 91
+    candidate_evaluation_seeds: tuple[int, ...] = (91, 92, 93, 94, 95)
+    candidate_pool_size: int = 4
     mutation_scale: float = 0.08
     output_dir: str = "artifacts"
     web_export_dir: str = "web/public/generated"
@@ -120,6 +122,16 @@ class LabConfig:
         rewards_payload = dict(payload["rewards"])
         instincts_payload = rewards_payload.pop("instincts", None)
         policy_payload = payload.get("policy")
+        training_payload = dict(payload["training"])
+        if "checkpoint_episodes" in training_payload:
+            training_payload["checkpoint_episodes"] = tuple(training_payload["checkpoint_episodes"])
+        if "evaluation_seeds" in training_payload:
+            training_payload["evaluation_seeds"] = tuple(training_payload["evaluation_seeds"])
+        candidate_seeds = training_payload.get("candidate_evaluation_seeds")
+        if candidate_seeds is not None:
+            training_payload["candidate_evaluation_seeds"] = tuple(candidate_seeds)
+        elif "evaluation_seed" in training_payload:
+            training_payload["candidate_evaluation_seeds"] = ()
         instincts = (
             InstinctRewardConfig(**instincts_payload)
             if isinstance(instincts_payload, dict)
@@ -131,7 +143,7 @@ class LabConfig:
         return cls(
             environment=EnvironmentConfig(**payload["environment"]),
             rewards=RewardConfig(instincts=instincts, **rewards_payload),
-            training=TrainingConfig(**payload["training"]),
+            training=TrainingConfig(**training_payload),
             policy=policy,
         )
 

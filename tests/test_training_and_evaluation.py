@@ -3,15 +3,25 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
+from types import SimpleNamespace
 
 from sheepdog.config import EnvironmentConfig, LabConfig, RewardConfig, TrainingConfig
 from sheepdog.evaluation.evaluator import Evaluator
-from sheepdog.policies.heuristic import HeuristicExpertPolicy
+from sheepdog.policies.heuristic import HeuristicExpertPolicy, InstinctOnlyPolicy
+from sheepdog.policies.random_policy import RandomPolicy
 from sheepdog.policies.trainable import PolicyWeights, TrainableLinearPolicy
-from sheepdog.server import _build_training_job_config, _load_playable_policy, TrainingManager
-from sheepdog.training.trainer import Trainer
+from sheepdog.server import TrainingManager, _build_training_job_config, _load_playable_policy
+from sheepdog.training.trainer import CandidateEvaluationSummary, Trainer
+
+
+class TrainerProbe(Trainer):
+    def candidate_evaluation_seeds(self) -> tuple[int, ...]:
+        return self._candidate_evaluation_seeds()
+
+    def evaluate_candidate(self, policy: TrainableLinearPolicy) -> CandidateEvaluationSummary:
+        return self._evaluate_candidate(policy)
 
 
 def make_config(output_dir: Path) -> LabConfig:
@@ -101,6 +111,25 @@ def test_policy_weights_load_legacy_state_payload() -> None:
     assert weights.nearest_sheep == 1.0
     assert weights.team_formation == PolicyWeights().team_formation
     assert weights.collector_focus == PolicyWeights().collector_focus
+    assert weights.rear_behind_flock == PolicyWeights().rear_behind_flock
+    assert weights.blocker_gate_control == PolicyWeights().blocker_gate_control
+
+
+def test_policy_weights_serialize_new_role_specific_fields() -> None:
+    weights = PolicyWeights(
+        rear_behind_flock=1.7,
+        flank_side_control=1.6,
+        collector_stray_focus=1.8,
+        blocker_gate_control=1.4,
+    )
+
+    payload = asdict(weights)
+    restored = PolicyWeights.from_dict(payload)
+
+    assert restored.rear_behind_flock == 1.7
+    assert restored.flank_side_control == 1.6
+    assert restored.collector_stray_focus == 1.8
+    assert restored.blocker_gate_control == 1.4
 
 
 def test_hill_climber_training_saves_role_aware_weights(tmp_path: Path) -> None:
@@ -127,9 +156,127 @@ def test_build_training_job_config_applies_fast_mode_and_curriculum() -> None:
 
     assert config.training.episodes == 3
     assert config.training.evaluation_seeds == (11,)
+    assert config.training.candidate_evaluation_seeds == TrainingConfig().candidate_evaluation_seeds
+    assert config.training.candidate_pool_size == TrainingConfig().candidate_pool_size
     assert config.rewards.instincts.enable_instinct_rewards is True
     assert config.rewards.instincts.curriculum_stage == 2
     assert config.environment.dogs == 1
+
+
+def test_lab_config_old_training_payload_falls_back_to_single_candidate_seed(
+    tmp_path: Path,
+) -> None:
+    payload = make_config(tmp_path).to_dict()
+    del payload["training"]["candidate_evaluation_seeds"]
+
+    config = LabConfig.from_dict(payload)
+    trainer = TrainerProbe(config, tmp_path)
+
+    assert trainer.candidate_evaluation_seeds() == (config.training.evaluation_seed,)
+
+
+def test_candidate_evaluation_uses_multiple_seeds_and_averages_scores(tmp_path: Path) -> None:
+    base_config = make_config(tmp_path)
+    config = replace(
+        base_config,
+        training=replace(
+            base_config.training,
+            candidate_evaluation_seeds=(91, 92, 93),
+        ),
+    )
+    trainer = TrainerProbe(config, tmp_path)
+    seen_seeds: list[int] = []
+
+    def fake_result(seed: int) -> SimpleNamespace:
+        seen_seeds.append(seed)
+        reward_total = float(seed - 90)
+        success = seed != 91
+        timeout = seed == 91
+        stopped = seed == 93
+        return SimpleNamespace(
+            seed=seed,
+            final_snapshot=SimpleNamespace(
+                average_distance_to_pen=float(seed) / 10.0,
+                flock_spread=float(seed) / 100.0,
+            ),
+            stats=SimpleNamespace(
+                reward_total=reward_total,
+                success=success,
+                timeout=timeout,
+                stopped=stopped,
+                sheep_penned=2,
+            ),
+        )
+
+    import sheepdog.training.trainer as trainer_module
+
+    original_environment = trainer_module.SheepdogEnvironment
+
+    class FakeEnvironment:
+        def __init__(self, _config: LabConfig) -> None:
+            pass
+
+        def run_policy(
+            self,
+            _policy: TrainableLinearPolicy,
+            seed: int,
+            capture_replay: bool = False,
+        ) -> SimpleNamespace:
+            del capture_replay
+            return fake_result(seed)
+
+    trainer_module.SheepdogEnvironment = FakeEnvironment
+    try:
+        summary = trainer.evaluate_candidate(TrainableLinearPolicy())
+    finally:
+        trainer_module.SheepdogEnvironment = original_environment
+
+    assert seen_seeds == [91, 92, 93]
+    assert summary.seeds == (91, 92, 93)
+    assert summary.average_reward == 2.0
+    assert round(summary.success_rate, 4) == round(2 / 3, 4)
+    assert round(summary.timeout_rate, 4) == round(1 / 3, 4)
+    assert round(summary.stopped_rate, 4) == round(1 / 3, 4)
+
+
+def test_candidate_evaluation_summary_score_uses_averages() -> None:
+    summary = CandidateEvaluationSummary(
+        seeds=(91, 92, 93),
+        average_reward=5.0,
+        success_rate=0.5,
+        timeout_rate=0.25,
+        stopped_rate=0.0,
+        average_sheep_penned=3.0,
+        average_distance_to_pen=8.0,
+        average_flock_spread=2.0,
+    )
+
+    assert summary.score == 18.84
+
+
+def test_training_evaluation_keeps_fixed_checkpoint_seeds(tmp_path: Path) -> None:
+    base_config = make_config(tmp_path)
+    config = replace(
+        base_config,
+        training=replace(
+            base_config.training,
+            evaluation_seeds=(11, 13),
+            candidate_evaluation_seeds=(91, 92),
+        ),
+    )
+    trainer = Trainer(config, tmp_path)
+    captured: list[tuple[int, ...]] = []
+    original_evaluate = trainer.evaluator.evaluate
+
+    def wrapped_evaluate(policy: object, seeds: tuple[int, ...], checkpoint_episode: int):
+        captured.append(seeds)
+        return original_evaluate(policy, seeds, checkpoint_episode)
+
+    trainer.evaluator.evaluate = wrapped_evaluate  # type: ignore[method-assign]
+
+    trainer.train()
+
+    assert captured == [(11, 13)]
 
 
 def test_load_playable_policy_reads_checkpoint_weights(tmp_path: Path) -> None:
@@ -153,12 +300,40 @@ def test_load_playable_policy_reads_checkpoint_weights(tmp_path: Path) -> None:
     assert policy.weights.collector_focus == 1.9
 
 
+def test_load_playable_policy_uses_random_untrained_mode(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+
+    policy = _load_playable_policy(config, policy_mode="random_untrained")
+
+    assert isinstance(policy, RandomPolicy)
+
+
+def test_load_playable_policy_keeps_random_policy_alias(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+
+    policy = _load_playable_policy(config, policy_mode="random_policy")
+
+    assert isinstance(policy, RandomPolicy)
+
+
+def test_load_playable_policy_uses_instinct_only_mode(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+
+    policy = _load_playable_policy(config, policy_mode="instinct_only")
+
+    assert isinstance(policy, InstinctOnlyPolicy)
+
+
 def test_training_manager_live_replay_writes_latest_replay(tmp_path: Path) -> None:
     artifacts = tmp_path / "artifacts"
     generated = tmp_path / "web" / "generated"
     config = replace(
         make_config(artifacts),
-        training=replace(make_config(artifacts).training, output_dir=str(artifacts), web_export_dir=str(generated)),
+        training=replace(
+            make_config(artifacts).training,
+            output_dir=str(artifacts),
+            web_export_dir=str(generated),
+        ),
     )
     manager = TrainingManager()
 

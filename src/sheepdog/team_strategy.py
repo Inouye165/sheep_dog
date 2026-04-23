@@ -52,7 +52,9 @@ class TeamStrategy:
 
         flock_center = self._flock_center(unpenned)
         flock_spread = self._flock_spread(unpenned, flock_center)
-        average_distance_to_pen = fmean(animal.position.distance_to(pen.center) for animal in unpenned)
+        average_distance_to_pen = fmean(
+            animal.position.distance_to(pen.center) for animal in unpenned
+        )
         stray = self._stray_sheep(unpenned, flock_center, flock_spread)
         near_pen = average_distance_to_pen <= max(pen.width, pen.height) + 4
         wall_pressure = any(self._wall_margin(animal.position) <= 2 for animal in unpenned)

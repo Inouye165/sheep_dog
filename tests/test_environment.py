@@ -4,12 +4,14 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import asdict, replace
 
 from sheepdog.config import EnvironmentConfig, LabConfig, PolicyConfig, RewardConfig, TrainingConfig
-from sheepdog.entities import DogRole
+from sheepdog.entities import DogRole, Point
 from sheepdog.environment import SheepdogEnvironment
 from sheepdog.policies.heuristic import HeuristicExpertPolicy
+from sheepdog.policies.trainable import PolicyWeights
+from sheepdog.team_strategy import RoleAssignment
 
 
 def make_config(**environment_overrides):
@@ -25,6 +27,12 @@ def make_config(**environment_overrides):
             web_export_dir="web/public/generated",
         ),
     )
+
+
+def role_weights(**overrides):
+    payload = {name: 0.0 for name in asdict(PolicyWeights())}
+    payload.update(overrides)
+    return PolicyWeights(**payload)
 
 
 def test_reset_is_deterministic_for_fixed_seed() -> None:
@@ -167,7 +175,10 @@ def test_near_pen_flock_assigns_blocker_and_flanker() -> None:
     roles = environment.current_role_assignments()
 
     assert DogRole.BLOCKER.value in roles.values()
-    assert any(role in roles.values() for role in (DogRole.LEFT_FLANKER.value, DogRole.RIGHT_FLANKER.value))
+    assert any(
+        role in roles.values()
+        for role in (DogRole.LEFT_FLANKER.value, DogRole.RIGHT_FLANKER.value)
+    )
 
 
 def test_roles_change_when_flock_state_changes() -> None:
@@ -295,6 +306,138 @@ def test_dogs_avoid_stacking_when_target_cells_conflict() -> None:
     assert len(positions) == 2
 
 
+def test_rear_pressure_behavior_prefers_behind_flock_positions() -> None:
+    config = make_config(dogs=1, sheep=3)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=30)
+    environment.dogs[0].position = Point(16, 20)
+    environment.sheep[0].position = Point(20, 20)
+    environment.sheep[1].position = Point(20, 21)
+    environment.sheep[2].position = Point(21, 20)
+    environment._role_assignments = {
+        0: RoleAssignment(0, DogRole.REAR_PRESSURE, Point(15, 20), reason="test_rear")
+    }
+    environment._roles_prepared_step = environment._step_count
+
+    weights = role_weights(
+        rear_drive=0.8,
+        rear_behind_flock=2.0,
+        rear_drive_to_pen=1.2,
+        rear_avoid_overpressure=1.0,
+    )
+
+    behind = environment.score_action_for_dog(0, "left", weights=weights)
+    overpush = environment.score_action_for_dog(0, "right", weights=weights)
+
+    assert behind > overpush
+
+
+def test_flanker_behavior_prefers_side_control_positions() -> None:
+    config = make_config(dogs=1, sheep=3)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=31)
+    environment.dogs[0].position = Point(17, 20)
+    environment.sheep[0].position = Point(20, 20)
+    environment.sheep[1].position = Point(21, 20)
+    environment.sheep[2].position = Point(20, 21)
+    environment._role_assignments = {
+        0: RoleAssignment(0, DogRole.LEFT_FLANKER, Point(17, 24), reason="test_flank")
+    }
+    environment._roles_prepared_step = environment._step_count
+
+    weights = role_weights(
+        flank_control=0.8,
+        flank_side_control=2.0,
+        flank_escape_blocking=1.0,
+        flank_wall_margin=0.1,
+    )
+
+    side_control = environment.score_action_for_dog(0, "down", weights=weights)
+    straight_drive = environment.score_action_for_dog(0, "right", weights=weights)
+
+    assert side_control > straight_drive
+
+
+def test_collector_behavior_prioritizes_stray_sheep() -> None:
+    config = make_config(dogs=1, sheep=3)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=32)
+    environment.dogs[0].position = Point(10, 20)
+    environment.sheep[0].position = Point(8, 20)
+    environment.sheep[1].position = Point(20, 20)
+    environment.sheep[2].position = Point(21, 20)
+    environment._role_assignments = {
+        0: RoleAssignment(
+            0,
+            DogRole.COLLECTOR,
+            Point(6, 20),
+            target_sheep_index=0,
+            reason="test_collect",
+        )
+    }
+    environment._roles_prepared_step = environment._step_count
+
+    weights = role_weights(
+        collector_focus=0.6,
+        collector_stray_focus=2.4,
+        collector_return_to_flock=0.4,
+        collector_rejoin_angle=0.7,
+    )
+
+    toward_stray = environment.score_action_for_dog(0, "left", weights=weights)
+    abandon_stray = environment.score_action_for_dog(0, "right", weights=weights)
+
+    assert toward_stray > abandon_stray
+
+
+def test_blocker_behavior_prefers_gate_control_positions() -> None:
+    config = make_config(dogs=1, sheep=3)
+    environment = SheepdogEnvironment(config)
+    snapshot = environment.reset(seed=33)
+    pen = snapshot.pen
+    environment.dogs[0].position = Point(pen.origin.x - 4, pen.center.y)
+    environment.sheep[0].position = Point(pen.origin.x - 6, pen.center.y - 1)
+    environment.sheep[1].position = Point(pen.origin.x - 6, pen.center.y)
+    environment.sheep[2].position = Point(pen.origin.x - 5, pen.center.y + 1)
+    environment._role_assignments = {
+        0: RoleAssignment(
+            0,
+            DogRole.BLOCKER,
+            Point(pen.origin.x - 2, pen.center.y),
+            reason="test_block",
+        )
+    }
+    environment._roles_prepared_step = environment._step_count
+
+    weights = role_weights(
+        blocker_cover=0.8,
+        blocker_escape_route_cover=1.0,
+        blocker_gate_control=2.2,
+        blocker_hold_position=0.6,
+    )
+
+    toward_gate = environment.score_action_for_dog(0, "right", weights=weights)
+    drift_away = environment.score_action_for_dog(0, "left", weights=weights)
+
+    assert toward_gate > drift_away
+
+
+def test_oscillation_penalty_changes_action_score() -> None:
+    config = make_config(dogs=1, sheep=0)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=34)
+    dog = environment.dogs[0]
+    dog.position = Point(6, 5)
+    dog.recent_positions = [Point(5, 5), Point(6, 5), Point(5, 5), Point(6, 5)]
+
+    weights = role_weights(oscillation_penalty=4.0)
+
+    revisiting_loop = environment.score_action_for_dog(0, "left", weights=weights)
+    breaking_loop = environment.score_action_for_dog(0, "up", weights=weights)
+
+    assert breaking_loop > revisiting_loop
+
+
 def test_sheep_do_not_stack_when_fleeing_into_same_cell() -> None:
     config = make_config(dogs=1, sheep=2, dog_vision=20, sheep_speed=1)
     environment = SheepdogEnvironment(config)
@@ -362,7 +505,11 @@ def test_instinct_only_action_score_is_pen_invariant_without_target_awareness() 
         sheep.position = sheep.position.__class__(10, 10)
         dog.position = dog.position.__class__(6, 10)
 
-    assert first.score_action_for_dog(0, "right", policy_mode="instinct_only") == second.score_action_for_dog(
+    assert first.score_action_for_dog(
+        0,
+        "right",
+        policy_mode="instinct_only",
+    ) == second.score_action_for_dog(
         0,
         "right",
         policy_mode="instinct_only",

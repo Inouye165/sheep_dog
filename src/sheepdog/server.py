@@ -56,6 +56,8 @@ def _build_training_job_config(
         evaluation_seeds=evaluation_seeds,
         train_seed=config.training.train_seed,
         evaluation_seed=config.training.evaluation_seed,
+        candidate_evaluation_seeds=config.training.candidate_evaluation_seeds,
+        candidate_pool_size=config.training.candidate_pool_size,
         mutation_scale=config.training.mutation_scale,
         output_dir=config.training.output_dir,
         web_export_dir=config.training.web_export_dir,
@@ -78,7 +80,7 @@ def _load_playable_policy(
     """Return a runnable policy for replay requests."""
 
     selected_mode = policy_mode or config.policy.policy_mode
-    if selected_mode == "random_policy":
+    if selected_mode in {"random_untrained", "random_policy"}:
         return RandomPolicy()
     if selected_mode == "heuristic_expert":
         return HeuristicExpertPolicy()
@@ -113,17 +115,6 @@ def _replay_payload(result: Any) -> dict[str, Any]:
     }
 
 
-def _baseline_score(config: LabConfig, policy: TrainableLinearPolicy) -> float:
-    """Evaluate one policy using the training evaluation seed."""
-
-    result = SheepdogEnvironment(config).run_policy(
-        policy,
-        seed=config.training.evaluation_seed,
-        capture_replay=False,
-    )
-    return result.stats.reward_total
-
-
 class _BaselineExportTrainer(Trainer):
     """Expose the baseline export flow through one public helper."""
 
@@ -144,7 +135,11 @@ class _BaselineExportTrainer(Trainer):
             checkpoint_path,
         )
         self._export_training_summary([checkpoint_payload], baseline_policy.weights, 0)
-        self._save_state(0, baseline_policy.weights, _baseline_score(config, baseline_policy))
+        self._save_state(
+            0,
+            baseline_policy.weights,
+            self._evaluate_candidate(baseline_policy).score,
+        )
 
 
 class TrainingManager:
@@ -413,7 +408,9 @@ class TrainingManager:
                     "fast_mode": fast_mode,
                     "enable_instinct_rewards": job_config.rewards.instincts.enable_instinct_rewards,
                     "policy_mode": job_config.policy.policy_mode,
-                    "allow_instinct_target_awareness": job_config.policy.allow_instinct_target_awareness,
+                    "allow_instinct_target_awareness": (
+                        job_config.policy.allow_instinct_target_awareness
+                    ),
                     "handler_target_enabled": job_config.policy.handler_target_enabled,
                     "debug_reward_breakdown": job_config.rewards.instincts.debug_reward_breakdown,
                     "curriculum_stage": job_config.rewards.instincts.curriculum_stage,

@@ -45,16 +45,20 @@ The total reward is the sum of these components.
 - `random_untrained` is a pure legal-action baseline with no flock strategy.
 - `instinct_only` uses sheep-local spacing, circling, and straggler recovery without reading the pen target.
 - `heuristic_expert` is a pen-aware scripted controller that computes pressure positions behind the flock relative to the pen.
-- `trained_policy` is the shared linear policy learned through hill climbing.
+- `trained_policy` is the shared role-aware linear policy learned through hill climbing.
 
-The trainable policy uses a simple hill-climbing loop. That keeps the first version honest without pretending a larger RL stack exists yet.
+The trainable baseline uses a simple hill-climbing loop. Hill climbing is the optimization algorithm, not the model. The model itself is a shared linear policy with explicit role-aware weights. This is not PPO and not a neural network.
+
+Dynamic roles are assigned by a scripted team strategy each step. Once a role is assigned, the shared linear policy scores legal actions with both global herding weights and role-specific linear weight groups for rear pressure, flankers, collectors, and blockers.
+
+Future PPO or MaskablePPO agents can be compared against this baseline later, but those agents are not part of the current architecture.
 
 Reward shaping may still include target-progress terms during training. That signal is deliberately separated from no-training action selection so the default dog team does not inherit an expert pen controller for free.
 
 ## Checkpoint and Evaluation Flow
 
-Training runs the policy across scheduled checkpoints and evaluates each checkpoint on fixed seeds. Evaluation writes JSON summaries, CSV rows, and replay files for every seed. Training also writes a compact checkpoint index for the UI.
+Training runs the hill climber across scheduled checkpoints and evaluates each checkpoint on fixed comparison seeds. Candidate mutations can be scored on a separate fixed candidate seed set so policy promotion is less sensitive to a single rollout. Evaluation writes JSON summaries, CSV rows, and replay files for every seed. Training also writes a compact checkpoint index for the UI.
 
 ## UI State Flow
 
-The React app does not simulate the environment itself. It reads checkpoint and replay JSON files from `web/public/generated/`, then plays them back in the browser. The viewer scales icon sizes relative to logical grid density so a denser field does not make the dogs and sheep visually tiny, and it applies short transitions to make one-cell motion read as smoother movement.
+The React app does not simulate the environment itself. A Python API server manages training control and replay generation, and the viewer reads checkpoint and replay JSON files from `web/public/generated/`, then plays them back in the browser. The viewer scales icon sizes relative to logical grid density so a denser field does not make the dogs and sheep visually tiny, and it applies short transitions to make one-cell motion read as smoother movement.

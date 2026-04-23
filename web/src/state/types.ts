@@ -65,10 +65,6 @@ export interface ReplaySnapshot {
   grid_height?: number;
   field_width?: number;
   field_height?: number;
-  grid_width?: number;
-  grid_height?: number;
-  field_width?: number;
-  field_height?: number;
   dogs: AgentSnapshot[];
   sheep: AgentSnapshot[];
   pen: Pen;

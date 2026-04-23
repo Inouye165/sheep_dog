@@ -54,7 +54,61 @@ describe("FieldView", () => {
           success: false,
           status: "running",
         }}
-        replay={null}
+        replay={{
+          seed: 11,
+          policy_name: "trained_policy",
+          final_snapshot: {
+            step: 1,
+            simulated_seconds: 1,
+            grid_width: 80,
+            grid_height: 60,
+            dogs: [{ index: 0, x: 2, y: 3, last_action: "right", role: "rear_pressure" }],
+            sheep: [{ index: 0, x: 10, y: 5, penned: false }],
+            pen: { origin: { x: 15, y: 2 }, width: 4, height: 4 },
+            penned_count: 0,
+            average_distance_to_pen: 12,
+            flock_spread: 1,
+            no_progress_steps: 0,
+            terminated: false,
+            timeout: false,
+            stopped: false,
+            success: false,
+            status: "running",
+          },
+          stats: {
+            steps: 1,
+            simulated_seconds: 1,
+            sheep_penned: 0,
+            timeout: false,
+            terminated: false,
+            success: false,
+            stopped: false,
+            stop_reason: "",
+            reward_total: 0,
+            no_progress_steps: 0,
+            final_avg_distance_to_pen: 12,
+            final_flock_spread: 1,
+            role_distribution: { rear_pressure: 1 },
+            role_switches: 0,
+            collector_activations: 0,
+            blocker_activations: 0,
+            sheep_split_events: 0,
+            final_reward_breakdown: {
+              progress_to_pen: 0,
+              sheep_penned: 0,
+              flock_cohesion: 0,
+              scatter_penalty: 0,
+              time_penalty: 0,
+              no_progress_penalty: 0,
+              wall_pressure_penalty: 0,
+              wait_penalty: 0,
+              terminal_success: 0,
+              terminal_failure: 0,
+              total: 0,
+            },
+          },
+          frames: [],
+        }}
         selectedCheckpointEpisode={0}
         selectedSeed={11}
         runState="running"
@@ -63,6 +117,9 @@ describe("FieldView", () => {
 
     expect(screen.getByText("Grid size")).toBeInTheDocument();
     expect(screen.getByText("80 x 60")).toBeInTheDocument();
+    expect(screen.getByText("Role distribution")).toBeInTheDocument();
+    expect(screen.getByText("rear_pressure: 1")).toBeInTheDocument();
+    expect(screen.getByText("Avg distance to pen")).toBeInTheDocument();
   });
 
   it("uses fixed field dimensions instead of scaling to group positions", () => {

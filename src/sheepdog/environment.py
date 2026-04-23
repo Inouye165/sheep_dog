@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from math import inf
 from pathlib import Path
 from random import Random
 from statistics import fmean
-from typing import Any, Sequence, cast
+from typing import Any, cast
 
 from sheepdog.config import EnvironmentConfig, LabConfig
 from sheepdog.entities import DogRole, DogState, EpisodeStats, Pen, Point, SheepState
@@ -845,9 +846,7 @@ class SheepdogEnvironment:
             return True
         if candidate in self._fence_cells and not self._pen.contains(position):
             return True
-        if candidate in dog_positions or candidate in blocked_positions:
-            return True
-        return False
+        return candidate in dog_positions or candidate in blocked_positions
 
     def _score_sheep_candidate(
         self,
@@ -942,6 +941,8 @@ class SheepdogEnvironment:
             pen_center,
             weights,
             active_policy_mode,
+            candidate_debug,
+            teammate_spacing,
         )
         stack_penalty = 0.0
         if reserved_positions and action != "wait" and candidate in reserved_positions:
@@ -985,18 +986,53 @@ class SheepdogEnvironment:
         pen_center: Point,
         weights: Any,
         policy_mode: PolicyMode,
+        candidate_debug: dict[str, Any],
+        teammate_spacing: float,
     ) -> float:
         if policy_mode == "instinct_only" and not self._instinct_target_awareness_enabled(
             policy_mode
         ):
             return 0.0
+
+        def value(name: str) -> float:
+            return float(getattr(weights, name, 0.0))
+
         target_distance = candidate.distance_to(assignment.target)
         if assignment.role == DogRole.REAR_PRESSURE:
-            return weights.rear_drive * (-target_distance)
+            behind_term = candidate_debug["pressure_side_alignment"]
+            overpressure_term = -1.0 if candidate_debug["inside_or_too_close_to_flock"] else 0.0
+            spacing_term = -teammate_spacing
+            return (
+                value("rear_drive") * (-target_distance)
+                + value("rear_behind_flock") * behind_term
+                + value("rear_drive_to_pen")
+                * self._alignment_score(candidate, flock_center, pen_center)
+                + value("rear_avoid_overpressure") * overpressure_term
+                + value("rear_spacing") * spacing_term
+            )
         if assignment.role in {DogRole.LEFT_FLANKER, DogRole.RIGHT_FLANKER}:
-            return weights.flank_control * (-target_distance)
+            return (
+                value("flank_control") * (-target_distance)
+                + value("flank_side_control")
+                * self._flank_score(candidate, flock_center, pen_center)
+                + value("flank_escape_blocking")
+                * self._alignment_score(candidate, assignment.target, pen_center)
+                + value("flank_spacing") * (-teammate_spacing)
+                + value("flank_wall_margin") * self._wall_margin(candidate)
+            )
         if assignment.role == DogRole.COLLECTOR:
             focus = 0.0
+            return_to_flock = -candidate.distance_to(flock_center)
+            avoid_scatter = max(
+                -1.0,
+                1.0
+                - max(
+                    0.0,
+                    candidate_debug["distance_to_flock"]
+                    - candidate_debug["flock_buffer_radius"],
+                ),
+            )
+            rejoin_angle = 0.0
             if assignment.target_sheep_index is not None:
                 stray = next(
                     (
@@ -1007,11 +1043,34 @@ class SheepdogEnvironment:
                     None,
                 )
                 if stray is not None:
-                    focus -= candidate.distance_to(stray.position)
-                    focus += self._alignment_score(candidate, stray.position, flock_center)
-            return weights.collector_focus * ((-target_distance) + focus)
+                    focus = -candidate.distance_to(stray.position)
+                    rejoin_angle = self._alignment_score(candidate, stray.position, flock_center)
+            return (
+                value("collector_focus") * (-target_distance)
+                + value("collector_stray_focus") * focus
+                + value("collector_return_to_flock") * return_to_flock
+                + value("collector_avoid_scatter") * avoid_scatter
+                + value("collector_rejoin_angle") * rejoin_angle
+            )
         guard = self._alignment_score(candidate, assignment.target, pen_center)
-        return weights.blocker_cover * ((-target_distance) + guard)
+        gate_position = self._gate_position().clamp(self.env_config.width, self.env_config.height)
+        hold_term = -target_distance if candidate_debug["holding_pressure_position"] else 0.0
+        return (
+            value("blocker_cover") * (-target_distance)
+            + value("blocker_escape_route_cover") * guard
+            + value("blocker_gate_control") * (-candidate.distance_to(gate_position))
+            + value("blocker_hold_position") * hold_term
+            + value("blocker_spacing") * (-teammate_spacing)
+        )
+
+    def _gate_position(self) -> Point:
+        if self._pen.opening == "left":
+            return Point(self._pen.origin.x - 1, self._pen.center.y)
+        if self._pen.opening == "right":
+            return Point(self._pen.origin.x + self._pen.width, self._pen.center.y)
+        if self._pen.opening == "top":
+            return Point(self._pen.center.x, self._pen.origin.y - 1)
+        return Point(self._pen.center.x, self._pen.origin.y + self._pen.height)
 
     def _formation_target(
         self,
@@ -1216,6 +1275,22 @@ class SheepdogEnvironment:
                     "flank_control": 0.95,
                     "collector_focus": 1.15,
                     "blocker_cover": 1.0,
+                    "rear_behind_flock": 1.0,
+                    "rear_drive_to_pen": 1.0,
+                    "rear_avoid_overpressure": 0.9,
+                    "rear_spacing": 0.55,
+                    "flank_side_control": 1.1,
+                    "flank_escape_blocking": 0.85,
+                    "flank_spacing": 0.65,
+                    "flank_wall_margin": 0.35,
+                    "collector_stray_focus": 1.15,
+                    "collector_return_to_flock": 0.9,
+                    "collector_avoid_scatter": 0.85,
+                    "collector_rejoin_angle": 0.75,
+                    "blocker_escape_route_cover": 1.0,
+                    "blocker_gate_control": 1.1,
+                    "blocker_hold_position": 0.8,
+                    "blocker_spacing": 0.55,
                     "anti_stack_penalty": 2.0,
                     "oscillation_penalty": 0.8,
                 },
@@ -1236,6 +1311,22 @@ class SheepdogEnvironment:
                 "flank_control": 0.0,
                 "collector_focus": 0.0,
                 "blocker_cover": 0.0,
+                "rear_behind_flock": 0.0,
+                "rear_drive_to_pen": 0.0,
+                "rear_avoid_overpressure": 0.0,
+                "rear_spacing": 0.0,
+                "flank_side_control": 0.0,
+                "flank_escape_blocking": 0.0,
+                "flank_spacing": 0.0,
+                "flank_wall_margin": 0.0,
+                "collector_stray_focus": 0.0,
+                "collector_return_to_flock": 0.0,
+                "collector_avoid_scatter": 0.0,
+                "collector_rejoin_angle": 0.0,
+                "blocker_escape_route_cover": 0.0,
+                "blocker_gate_control": 0.0,
+                "blocker_hold_position": 0.0,
+                "blocker_spacing": 0.0,
                 "anti_stack_penalty": 2.0,
                 "oscillation_penalty": 0.8,
             },
@@ -1456,7 +1547,11 @@ class SheepdogEnvironment:
             "dogs": [
                 {
                     "index": dog.index,
-                    **self._action_context_debug(self.config.policy.policy_mode, dog.index, dog.position),
+                    **self._action_context_debug(
+                        self.config.policy.policy_mode,
+                        dog.index,
+                        dog.position,
+                    ),
                 }
                 for dog in self._dogs
             ],
