@@ -34,6 +34,12 @@ class BenchmarkResult:
     average_role_switches: float
     average_collector_activations: float
     average_blocker_activations: float
+    average_gate_progress: float
+    average_controlled_stall_steps: float
+    average_left_flank_occupancy_steps: float
+    average_right_flank_occupancy_steps: float
+    average_gate_corridor_occupancy_peak: float
+    average_gate_corridor_failure_steps: float
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -80,6 +86,24 @@ class BenchmarkHarness:
             average_blocker_activations=fmean(
                 result.stats.blocker_activations for result in results
             ),
+            average_gate_progress=fmean(
+                result.stats.cumulative_gate_progress for result in results
+            ),
+            average_controlled_stall_steps=fmean(
+                result.stats.controlled_stall_steps for result in results
+            ),
+            average_left_flank_occupancy_steps=fmean(
+                result.stats.left_flank_occupancy_steps for result in results
+            ),
+            average_right_flank_occupancy_steps=fmean(
+                result.stats.right_flank_occupancy_steps for result in results
+            ),
+            average_gate_corridor_occupancy_peak=fmean(
+                result.stats.gate_corridor_occupancy_peak for result in results
+            ),
+            average_gate_corridor_failure_steps=fmean(
+                result.stats.gate_corridor_failure_steps for result in results
+            ),
         )
 
     def compare(
@@ -120,6 +144,13 @@ class BenchmarkHarness:
                     f"- stopped_rate: {result.stopped_rate:.3f}",
                     f"- average_flock_spread: {result.average_flock_spread:.3f}",
                     f"- average_distance_to_pen: {result.average_distance_to_pen:.3f}",
+                    f"- average_gate_progress: {result.average_gate_progress:.3f}",
+                    "- average_controlled_stall_steps: "
+                    f"{result.average_controlled_stall_steps:.3f}",
+                    "- average_gate_corridor_peak: "
+                    f"{result.average_gate_corridor_occupancy_peak:.3f}",
+                    "- average_gate_corridor_failures: "
+                    f"{result.average_gate_corridor_failure_steps:.3f}",
                     "",
                 ]
             )

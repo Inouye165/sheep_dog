@@ -217,6 +217,26 @@ def test_roles_change_when_flock_state_changes() -> None:
     assert DogRole.COLLECTOR.value in second_roles.values()
 
 
+def test_roles_stay_stable_when_flock_only_moves_slightly() -> None:
+    config = make_config(dogs=3, sheep=3)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=15)
+    environment.dogs[0].position = Point(14, 16)
+    environment.dogs[1].position = Point(13, 21)
+    environment.dogs[2].position = Point(13, 11)
+    for index, sheep in enumerate(environment.sheep):
+        sheep.position = Point(20 + index, 16)
+
+    first_roles = environment.current_role_assignments()
+
+    environment.invalidate_role_assignments()
+    for sheep in environment.sheep:
+        sheep.position = Point(sheep.position.x, sheep.position.y + 1)
+    second_roles = environment.current_role_assignments()
+
+    assert first_roles == second_roles
+
+
 def test_dog_speed_is_used_for_clear_moves() -> None:
     config = make_config(dogs=1, dog_speed=2, sheep=0)
     environment = SheepdogEnvironment(config)
@@ -378,6 +398,36 @@ def test_flanker_behavior_prefers_side_control_positions() -> None:
     assert side_control > straight_drive
 
 
+def test_flank_handedness_bias_differs_for_left_and_right_roles() -> None:
+    config = make_config(dogs=1, sheep=3)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=35)
+    environment.dogs[0].position = Point(16, 20)
+    environment.sheep[0].position = Point(20, 20)
+    environment.sheep[1].position = Point(21, 20)
+    environment.sheep[2].position = Point(20, 21)
+
+    left_weights = role_weights(flank_control=0.0, flank_side_control=0.0, flank_handedness=3.0)
+    right_weights = role_weights(flank_control=0.0, flank_side_control=0.0, flank_handedness=3.0)
+
+    environment._role_assignments = {
+        0: RoleAssignment(0, DogRole.LEFT_FLANKER, Point(17, 24), reason="left_flank")
+    }
+    environment._roles_prepared_step = environment._step_count
+    left_clockwise = environment.score_action_for_dog(0, "down", weights=left_weights)
+    left_counter_clockwise = environment.score_action_for_dog(0, "up", weights=left_weights)
+
+    environment._role_assignments = {
+        0: RoleAssignment(0, DogRole.RIGHT_FLANKER, Point(17, 16), reason="right_flank")
+    }
+    environment._roles_prepared_step = environment._step_count
+    right_counter_clockwise = environment.score_action_for_dog(0, "up", weights=right_weights)
+    right_clockwise = environment.score_action_for_dog(0, "down", weights=right_weights)
+
+    assert left_clockwise > left_counter_clockwise
+    assert right_counter_clockwise > right_clockwise
+
+
 def test_collector_behavior_prioritizes_stray_sheep() -> None:
     config = make_config(dogs=1, sheep=3)
     environment = SheepdogEnvironment(config)
@@ -440,6 +490,57 @@ def test_blocker_behavior_prefers_gate_control_positions() -> None:
     drift_away = environment.score_action_for_dog(0, "left", weights=weights)
 
     assert toward_gate > drift_away
+
+
+def test_blocker_target_stays_off_gate_center_to_preserve_funnel_lane() -> None:
+    config = make_config(dogs=3, sheep=3)
+    environment = SheepdogEnvironment(config)
+    snapshot = environment.reset(seed=36)
+    pen = snapshot.pen
+    for index, sheep in enumerate(environment.sheep):
+        sheep.position = Point(pen.origin.x - 5, pen.center.y - 1 + index)
+
+    environment.prepare_policy_step()
+    blocker_assignment = next(
+        assignment
+        for assignment in environment._role_assignments.values()
+        if assignment.role == DogRole.BLOCKER
+    )
+    gate_position = environment._gate_position()
+
+    assert blocker_assignment.target != gate_position
+    assert blocker_assignment.target.distance_to(gate_position) <= 3.5
+
+
+def test_controlled_stall_metrics_and_penalty_trigger_away_from_gate() -> None:
+    config = make_config(dogs=1, sheep=3, stalled_control_activation_steps=2)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=37)
+    environment.dogs[0].position = Point(4, 4)
+    environment.sheep[0].position = Point(1, 1)
+    environment.sheep[1].position = Point(1, 2)
+    environment.sheep[2].position = Point(2, 1)
+
+    _, first_breakdown = environment.step(["wait"])
+    _, second_breakdown = environment.step(["wait"])
+
+    assert first_breakdown.wrong_hold_penalty == 0.0
+    assert second_breakdown.wrong_hold_penalty < 0
+    assert environment._stats.controlled_stall_steps >= 2
+
+
+def test_short_hold_near_gate_is_not_penalized_as_wrong_hold() -> None:
+    config = make_config(dogs=1, sheep=2)
+    environment = SheepdogEnvironment(config)
+    snapshot = environment.reset(seed=38)
+    pen = snapshot.pen
+    environment.dogs[0].position = Point(pen.origin.x - 3, pen.center.y)
+    environment.sheep[0].position = Point(pen.origin.x - 2, pen.center.y)
+    environment.sheep[1].position = Point(pen.origin.x - 2, pen.center.y + 1)
+
+    _, breakdown = environment.step(["wait"])
+
+    assert breakdown.wrong_hold_penalty == 0.0
 
 
 def test_oscillation_penalty_changes_action_score() -> None:

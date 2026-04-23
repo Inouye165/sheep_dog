@@ -129,16 +129,28 @@ class SheepdogEnvironment:
         self._stop_reason = ""
         self._history: list[StepRecord] = []
         self._stats = EpisodeStats()
-        self._team_strategy = TeamStrategy(self.env_config.width, self.env_config.height)
+        self._team_strategy = TeamStrategy(
+            self.env_config.width,
+            self.env_config.height,
+            self.env_config,
+        )
         self._observation_builder = RoleAwareObservationBuilder()
         self._role_assignments: dict[int, RoleAssignment] = {}
         self._strategy_snapshot = StrategySnapshot(None, 0.0, 0.0, None, False, False)
         self._roles_prepared_step: int | None = None
         self._role_distribution: dict[str, int] = {role.value: 0 for role in DogRole}
+        self._dog_role_occupancy: dict[str, dict[str, int]] = {}
         self._role_switches = 0
         self._collector_activations = 0
         self._blocker_activations = 0
         self._sheep_split_events = 0
+        self._cumulative_gate_progress = 0.0
+        self._controlled_stall_steps = 0
+        self._controlled_stall_streak = 0
+        self._left_flank_occupancy_steps = 0
+        self._right_flank_occupancy_steps = 0
+        self._gate_corridor_occupancy_peak = 0.0
+        self._gate_corridor_failure_steps = 0
 
     @property
     def dog_count(self) -> int:
@@ -185,10 +197,21 @@ class SheepdogEnvironment:
         self._strategy_snapshot = StrategySnapshot(None, 0.0, 0.0, None, False, False)
         self._roles_prepared_step = None
         self._role_distribution = {role.value: 0 for role in DogRole}
+        self._dog_role_occupancy = {
+            str(index): {role.value: 0 for role in DogRole}
+            for index in range(self.env_config.dogs)
+        }
         self._role_switches = 0
         self._collector_activations = 0
         self._blocker_activations = 0
         self._sheep_split_events = 0
+        self._cumulative_gate_progress = 0.0
+        self._controlled_stall_steps = 0
+        self._controlled_stall_streak = 0
+        self._left_flank_occupancy_steps = 0
+        self._right_flank_occupancy_steps = 0
+        self._gate_corridor_occupancy_peak = 0.0
+        self._gate_corridor_failure_steps = 0
         pen_origin = Point(self.env_config.width - self.env_config.pen_width, 1)
         self._pen = Pen(
             pen_origin,
@@ -384,6 +407,14 @@ class SheepdogEnvironment:
             self._role_distribution[assignment.role.value] = (
                 self._role_distribution.get(assignment.role.value, 0) + 1
             )
+            self._dog_role_occupancy.setdefault(
+                str(dog.index),
+                {role.value: 0 for role in DogRole},
+            )[assignment.role.value] += 1
+            if assignment.role == DogRole.LEFT_FLANKER:
+                self._left_flank_occupancy_steps += 1
+            if assignment.role == DogRole.RIGHT_FLANKER:
+                self._right_flank_occupancy_steps += 1
         if any(assignment.role == DogRole.COLLECTOR for assignment in assignments.values()):
             self._collector_activations += 1
         if any(assignment.role == DogRole.BLOCKER for assignment in assignments.values()):
@@ -444,6 +475,9 @@ class SheepdogEnvironment:
 
         previous_snapshot = self.get_state_snapshot()
         previous_flock_centroid = self._flock_center()
+        previous_gate_distance = self._flock_gate_distance(previous_flock_centroid)
+        previous_gate_corridor_distance = self._average_gate_corridor_distance()
+        previous_gate_corridor_occupancy = self._gate_corridor_occupancy()
         self._apply_dog_actions(validated_actions)
         self._move_sheep()
         self._step_count += 1
@@ -482,6 +516,49 @@ class SheepdogEnvironment:
         )
 
         current_flock_centroid = self._flock_center()
+        current_gate_distance = self._flock_gate_distance(current_flock_centroid)
+        current_gate_corridor_distance = self._average_gate_corridor_distance()
+        current_gate_corridor_occupancy = self._gate_corridor_occupancy()
+        gate_progress_delta = previous_gate_distance - current_gate_distance
+        gate_corridor_delta = previous_gate_corridor_distance - current_gate_corridor_distance
+        progressing_to_gate = (
+            newly_penned > 0
+            or gate_progress_delta >= self.env_config.gate_progress_epsilon
+            or gate_corridor_delta >= self.env_config.gate_progress_epsilon / 2.0
+            or current_gate_corridor_occupancy > previous_gate_corridor_occupancy + 1e-6
+        )
+        tactically_valid_hold = bool(
+            current_gate_distance <= self.env_config.gate_hold_safe_distance
+            and current_gate_corridor_occupancy > 0.0
+        )
+        wrong_hold_active = False
+        if (
+            self._is_controlled_state(current_flock_centroid)
+            and newly_penned == 0
+            and not progressing_to_gate
+            and not tactically_valid_hold
+        ):
+            self._controlled_stall_steps += 1
+            self._controlled_stall_streak += 1
+            wall_pinned = self._wall_pinned_sheep_ratio() >= 0.34
+            if (
+                self._controlled_stall_streak
+                >= self.env_config.stalled_control_activation_steps
+            ) and (
+                wall_pinned
+                or current_gate_distance > self.env_config.gate_hold_safe_distance
+                or current_gate_corridor_occupancy == 0.0
+            ):
+                wrong_hold_active = True
+        else:
+            self._controlled_stall_streak = 0
+        self._cumulative_gate_progress += gate_progress_delta
+        self._gate_corridor_occupancy_peak = max(
+            self._gate_corridor_occupancy_peak,
+            current_gate_corridor_occupancy,
+        )
+        if current_gate_corridor_occupancy > 0.0 and newly_penned == 0 and not progressing_to_gate:
+            self._gate_corridor_failure_steps += 1
         unpenned_sheep_positions = tuple(
             (float(sheep.position.x), float(sheep.position.y))
             for sheep in self._sheep
@@ -497,6 +574,15 @@ class SheepdogEnvironment:
                 no_progress_step=not progress_made,
                 touched_wall=self._touched_wall_this_step(validated_actions),
                 waited_without_reason=self._waited_without_reason(validated_actions),
+                previous_gate_distance=previous_gate_distance,
+                current_gate_distance=current_gate_distance,
+                previous_gate_corridor_distance=previous_gate_corridor_distance,
+                current_gate_corridor_distance=current_gate_corridor_distance,
+                previous_gate_corridor_occupancy=previous_gate_corridor_occupancy,
+                current_gate_corridor_occupancy=current_gate_corridor_occupancy,
+                controlled_stall_steps=self._controlled_stall_streak,
+                wrong_hold_active=wrong_hold_active,
+                tactically_valid_hold=tactically_valid_hold,
                 terminated=self._terminated,
                 timeout=self._timeout,
                 success=self._success,
@@ -537,10 +623,20 @@ class SheepdogEnvironment:
             final_avg_distance_to_pen=final_snapshot.average_distance_to_pen,
             final_flock_spread=final_snapshot.flock_spread,
             role_distribution=dict(self._role_distribution),
+            dog_role_occupancy={
+                dog_index: dict(occupancy)
+                for dog_index, occupancy in self._dog_role_occupancy.items()
+            },
             role_switches=self._role_switches,
             collector_activations=self._collector_activations,
             blocker_activations=self._blocker_activations,
             sheep_split_events=self._sheep_split_events,
+            cumulative_gate_progress=self._cumulative_gate_progress,
+            controlled_stall_steps=self._controlled_stall_steps,
+            left_flank_occupancy_steps=self._left_flank_occupancy_steps,
+            right_flank_occupancy_steps=self._right_flank_occupancy_steps,
+            gate_corridor_occupancy_peak=self._gate_corridor_occupancy_peak,
+            gate_corridor_failure_steps=self._gate_corridor_failure_steps,
             final_reward_breakdown=breakdown.to_dict(),
         )
 
@@ -1022,6 +1118,8 @@ class SheepdogEnvironment:
                 value("flank_control") * (-target_distance)
                 + value("flank_side_control")
                 * self._flank_score(candidate, flock_center, pen_center)
+                + value("flank_handedness")
+                * self._flank_handedness_score(candidate, flock_center, pen_center, assignment.role)
                 + value("flank_escape_blocking")
                 * self._alignment_score(candidate, assignment.target, pen_center)
                 + value("flank_spacing") * (-teammate_spacing)
@@ -1066,6 +1164,7 @@ class SheepdogEnvironment:
             value("blocker_cover") * (-target_distance)
             + value("blocker_escape_route_cover") * guard
             + value("blocker_gate_control") * (-candidate.distance_to(gate_position))
+            + value("blocker_funnel_lane") * self._blocker_funnel_score(candidate, gate_position)
             + value("blocker_hold_position") * hold_term
             + value("blocker_spacing") * (-teammate_spacing)
         )
@@ -1287,6 +1386,7 @@ class SheepdogEnvironment:
                     "rear_avoid_overpressure": 0.9,
                     "rear_spacing": 0.55,
                     "flank_side_control": 1.1,
+                    "flank_handedness": 0.75,
                     "flank_escape_blocking": 0.85,
                     "flank_spacing": 0.65,
                     "flank_wall_margin": 0.35,
@@ -1296,6 +1396,7 @@ class SheepdogEnvironment:
                     "collector_rejoin_angle": 0.75,
                     "blocker_escape_route_cover": 1.0,
                     "blocker_gate_control": 1.1,
+                    "blocker_funnel_lane": 0.9,
                     "blocker_hold_position": 0.8,
                     "blocker_spacing": 0.55,
                     "anti_stack_penalty": 2.0,
@@ -1323,6 +1424,7 @@ class SheepdogEnvironment:
                 "rear_avoid_overpressure": 0.0,
                 "rear_spacing": 0.0,
                 "flank_side_control": 0.0,
+                "flank_handedness": 0.0,
                 "flank_escape_blocking": 0.0,
                 "flank_spacing": 0.0,
                 "flank_wall_margin": 0.0,
@@ -1332,6 +1434,7 @@ class SheepdogEnvironment:
                 "collector_rejoin_angle": 0.0,
                 "blocker_escape_route_cover": 0.0,
                 "blocker_gate_control": 0.0,
+                "blocker_funnel_lane": 0.0,
                 "blocker_hold_position": 0.0,
                 "blocker_spacing": 0.0,
                 "anti_stack_penalty": 2.0,
@@ -1548,6 +1651,9 @@ class SheepdogEnvironment:
             "policy_mode": self.config.policy.policy_mode,
             "allow_instinct_target_awareness": self.config.policy.allow_instinct_target_awareness,
             "handler_target_enabled": self.config.policy.handler_target_enabled,
+            "cumulative_gate_progress": self._cumulative_gate_progress,
+            "controlled_stall_steps": self._controlled_stall_steps,
+            "gate_corridor_occupancy": self._gate_corridor_occupancy(),
             "flock_center": (
                 {"x": flock_center.x, "y": flock_center.y} if flock_center is not None else None
             ),
@@ -1584,6 +1690,80 @@ class SheepdogEnvironment:
         candidate_norm = max(1.0, (candidate_dx**2 + candidate_dy**2) ** 0.5)
         cross = abs(target_dx * candidate_dy - target_dy * candidate_dx)
         return cross / (target_norm * candidate_norm)
+
+    def _flank_handedness_score(
+        self,
+        candidate: Point,
+        flock_center: Point,
+        target: Point,
+        role: DogRole,
+    ) -> float:
+        target_dx = target.x - flock_center.x
+        target_dy = target.y - flock_center.y
+        candidate_dx = candidate.x - flock_center.x
+        candidate_dy = candidate.y - flock_center.y
+        target_norm = max(1.0, (target_dx**2 + target_dy**2) ** 0.5)
+        candidate_norm = max(1.0, (candidate_dx**2 + candidate_dy**2) ** 0.5)
+        signed_cross = (target_dx * candidate_dy - target_dy * candidate_dx) / (
+            target_norm * candidate_norm
+        )
+        preferred_sign = 1.0 if role == DogRole.LEFT_FLANKER else -1.0
+        return preferred_sign * signed_cross
+
+    def _blocker_funnel_score(self, candidate: Point, gate_position: Point) -> float:
+        del gate_position
+        along_distance, lateral_distance = self._gate_axis_distances(candidate)
+        lane_fit = 1.0 - min(1.0, abs(lateral_distance - 2.0) / 2.0)
+        approach_fit = 1.0 - min(1.0, abs(along_distance - 1.0) / 3.0)
+        return max(-1.0, lane_fit + approach_fit - 1.0)
+
+    def _is_controlled_state(self, flock_center: Point | None) -> bool:
+        if flock_center is None:
+            return False
+        if self._flock_spread() > self.env_config.controlled_flock_spread_threshold:
+            return False
+        return any(
+            dog.position.distance_to(flock_center) <= self._flock_buffer_radius() + 3.0
+            for dog in self._dogs
+        )
+
+    def _flock_gate_distance(self, flock_center: Point | None) -> float:
+        if flock_center is None:
+            return 0.0
+        return flock_center.distance_to(self._gate_position())
+
+    def _average_gate_corridor_distance(self) -> float:
+        unpenned = [sheep.position for sheep in self._sheep if not sheep.penned]
+        if not unpenned:
+            return 0.0
+        return fmean(self._gate_axis_distances(position)[1] for position in unpenned)
+
+    def _gate_corridor_occupancy(self) -> float:
+        unpenned = [sheep.position for sheep in self._sheep if not sheep.penned]
+        if not unpenned:
+            return 0.0
+        occupied = sum(1 for position in unpenned if self._is_in_gate_corridor(position))
+        return occupied / len(unpenned)
+
+    def _is_in_gate_corridor(self, position: Point) -> bool:
+        along_distance, lateral_distance = self._gate_axis_distances(position)
+        return (
+            lateral_distance <= self.env_config.gate_corridor_half_width
+            and along_distance <= self.env_config.gate_approach_distance
+        )
+
+    def _gate_axis_distances(self, position: Point) -> tuple[float, float]:
+        gate = self._gate_position()
+        if self._pen.opening in {"left", "right"}:
+            return abs(gate.x - position.x), abs(gate.y - position.y)
+        return abs(gate.y - position.y), abs(gate.x - position.x)
+
+    def _wall_pinned_sheep_ratio(self) -> float:
+        unpenned = [sheep.position for sheep in self._sheep if not sheep.penned]
+        if not unpenned:
+            return 0.0
+        pinned = sum(1 for position in unpenned if self._wall_margin(position) <= 1.0)
+        return pinned / len(unpenned)
 
     def _deadlock_action_adjustment(
         self,

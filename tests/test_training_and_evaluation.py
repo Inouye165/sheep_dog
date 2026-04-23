@@ -121,8 +121,10 @@ def test_policy_weights_serialize_new_role_specific_fields() -> None:
     weights = PolicyWeights(
         rear_behind_flock=1.7,
         flank_side_control=1.6,
+        flank_handedness=0.8,
         collector_stray_focus=1.8,
         blocker_gate_control=1.4,
+        blocker_funnel_lane=0.9,
     )
 
     payload = asdict(weights)
@@ -130,8 +132,10 @@ def test_policy_weights_serialize_new_role_specific_fields() -> None:
 
     assert restored.rear_behind_flock == 1.7
     assert restored.flank_side_control == 1.6
+    assert restored.flank_handedness == 0.8
     assert restored.collector_stray_focus == 1.8
     assert restored.blocker_gate_control == 1.4
+    assert restored.blocker_funnel_lane == 0.9
 
 
 def test_hill_climber_training_saves_role_aware_weights(tmp_path: Path) -> None:

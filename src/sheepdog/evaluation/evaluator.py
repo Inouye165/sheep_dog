@@ -33,6 +33,13 @@ class EvaluationRecord:
     role_switches: int
     collector_activations: int
     blocker_activations: int
+    cumulative_gate_progress: float
+    controlled_stall_steps: int
+    left_flank_occupancy_steps: int
+    right_flank_occupancy_steps: int
+    gate_corridor_occupancy_peak: float
+    gate_corridor_failure_steps: int
+    dog_role_occupancy: dict[str, dict[str, int]]
     reward_breakdown: dict[str, float]
     replay_path: str
 
@@ -61,6 +68,12 @@ class EvaluationSummary:
     average_role_switches: float = 0.0
     average_collector_activations: float = 0.0
     average_blocker_activations: float = 0.0
+    average_gate_progress: float = 0.0
+    average_controlled_stall_steps: float = 0.0
+    average_left_flank_occupancy_steps: float = 0.0
+    average_right_flank_occupancy_steps: float = 0.0
+    average_gate_corridor_occupancy_peak: float = 0.0
+    average_gate_corridor_failure_steps: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -133,6 +146,24 @@ class Evaluator:
             average_blocker_activations=fmean(
                 result.stats.blocker_activations for result in results
             ),
+            average_gate_progress=fmean(
+                result.stats.cumulative_gate_progress for result in results
+            ),
+            average_controlled_stall_steps=fmean(
+                result.stats.controlled_stall_steps for result in results
+            ),
+            average_left_flank_occupancy_steps=fmean(
+                result.stats.left_flank_occupancy_steps for result in results
+            ),
+            average_right_flank_occupancy_steps=fmean(
+                result.stats.right_flank_occupancy_steps for result in results
+            ),
+            average_gate_corridor_occupancy_peak=fmean(
+                result.stats.gate_corridor_occupancy_peak for result in results
+            ),
+            average_gate_corridor_failure_steps=fmean(
+                result.stats.gate_corridor_failure_steps for result in results
+            ),
         )
 
         json_path = self.output_root / f"evaluation-checkpoint-{checkpoint_episode:06d}.json"
@@ -164,6 +195,13 @@ class Evaluator:
             role_switches=result.stats.role_switches,
             collector_activations=result.stats.collector_activations,
             blocker_activations=result.stats.blocker_activations,
+            cumulative_gate_progress=result.stats.cumulative_gate_progress,
+            controlled_stall_steps=result.stats.controlled_stall_steps,
+            left_flank_occupancy_steps=result.stats.left_flank_occupancy_steps,
+            right_flank_occupancy_steps=result.stats.right_flank_occupancy_steps,
+            gate_corridor_occupancy_peak=result.stats.gate_corridor_occupancy_peak,
+            gate_corridor_failure_steps=result.stats.gate_corridor_failure_steps,
+            dog_role_occupancy=result.stats.dog_role_occupancy,
             reward_breakdown=result.stats.final_reward_breakdown,
             replay_path="",
         )

@@ -150,8 +150,15 @@ class EpisodeStats:
     final_avg_distance_to_pen: float = 0.0
     final_flock_spread: float = 0.0
     role_distribution: dict[str, int] = field(default_factory=dict)
+    dog_role_occupancy: dict[str, dict[str, int]] = field(default_factory=dict)
     role_switches: int = 0
     collector_activations: int = 0
     blocker_activations: int = 0
     sheep_split_events: int = 0
+    cumulative_gate_progress: float = 0.0
+    controlled_stall_steps: int = 0
+    left_flank_occupancy_steps: int = 0
+    right_flank_occupancy_steps: int = 0
+    gate_corridor_occupancy_peak: float = 0.0
+    gate_corridor_failure_steps: int = 0
     final_reward_breakdown: dict[str, float] = field(default_factory=dict)

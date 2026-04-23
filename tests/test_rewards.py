@@ -81,3 +81,75 @@ def test_reward_penalizes_scattering() -> None:
     )
 
     assert breakdown.scatter_penalty > 0
+
+
+def test_gate_progress_reward_is_positive_when_flock_moves_toward_opening() -> None:
+    breakdown = RewardComputer(RewardConfig()).compute(
+        RewardInputs(
+            previous_average_distance=10.0,
+            current_average_distance=9.5,
+            previous_flock_spread=2.0,
+            current_flock_spread=2.0,
+            newly_penned=0,
+            no_progress_step=False,
+            touched_wall=False,
+            waited_without_reason=False,
+            terminated=False,
+            timeout=False,
+            success=False,
+            previous_gate_distance=8.0,
+            current_gate_distance=5.5,
+            previous_gate_corridor_distance=3.0,
+            current_gate_corridor_distance=1.5,
+            previous_gate_corridor_occupancy=0.0,
+            current_gate_corridor_occupancy=0.5,
+        )
+    )
+
+    assert breakdown.gate_progress > 0
+    assert breakdown.gate_corridor_progress > 0
+    assert breakdown.gate_alignment > 0
+
+
+def test_wrong_hold_penalty_triggers_only_for_stalled_control() -> None:
+    penalty_breakdown = RewardComputer(RewardConfig()).compute(
+        RewardInputs(
+            previous_average_distance=8.0,
+            current_average_distance=8.0,
+            previous_flock_spread=2.0,
+            current_flock_spread=2.0,
+            newly_penned=0,
+            no_progress_step=True,
+            touched_wall=False,
+            waited_without_reason=False,
+            terminated=False,
+            timeout=False,
+            success=False,
+            controlled_stall_steps=7,
+            wrong_hold_active=True,
+        )
+    )
+    valid_hold_breakdown = RewardComputer(RewardConfig()).compute(
+        RewardInputs(
+            previous_average_distance=4.0,
+            current_average_distance=4.0,
+            previous_flock_spread=2.0,
+            current_flock_spread=2.0,
+            newly_penned=0,
+            no_progress_step=True,
+            touched_wall=False,
+            waited_without_reason=False,
+            terminated=False,
+            timeout=False,
+            success=False,
+            controlled_stall_steps=3,
+            wrong_hold_active=True,
+            tactically_valid_hold=True,
+            current_gate_corridor_occupancy=0.5,
+        )
+    )
+
+    assert penalty_breakdown.stalled_control_penalty < 0
+    assert penalty_breakdown.wrong_hold_penalty < 0
+    assert valid_hold_breakdown.stalled_control_penalty == 0.0
+    assert valid_hold_breakdown.wrong_hold_penalty == 0.0

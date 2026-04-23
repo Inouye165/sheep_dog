@@ -22,6 +22,11 @@ class RewardBreakdown:
     no_progress_penalty: float = 0.0
     wall_pressure_penalty: float = 0.0
     wait_penalty: float = 0.0
+    gate_progress: float = 0.0
+    gate_corridor_progress: float = 0.0
+    gate_alignment: float = 0.0
+    stalled_control_penalty: float = 0.0
+    wrong_hold_penalty: float = 0.0
     terminal_success: float = 0.0
     terminal_failure: float = 0.0
     pressure_zone: float = 0.0
@@ -58,6 +63,15 @@ class RewardInputs:
     terminated: bool
     timeout: bool
     success: bool
+    previous_gate_distance: float = 0.0
+    current_gate_distance: float = 0.0
+    previous_gate_corridor_distance: float = 0.0
+    current_gate_corridor_distance: float = 0.0
+    previous_gate_corridor_occupancy: float = 0.0
+    current_gate_corridor_occupancy: float = 0.0
+    controlled_stall_steps: int = 0
+    wrong_hold_active: bool = False
+    tactically_valid_hold: bool = False
     dog_positions: tuple[Position, ...] = field(default_factory=tuple)
     sheep_positions: tuple[Position, ...] = field(default_factory=tuple)
     flock_centroid: Position | None = None
@@ -120,6 +134,27 @@ class RewardComputer:
         no_progress_penalty = -self._config.no_progress_penalty if inputs.no_progress_step else 0.0
         wall_pressure_penalty = -self._config.wall_pressure_penalty if inputs.touched_wall else 0.0
         wait_penalty = -self._config.wait_penalty if inputs.waited_without_reason else 0.0
+        gate_progress = (
+            inputs.previous_gate_distance - inputs.current_gate_distance
+        ) * self._config.gate_progress_scale
+        gate_corridor_progress = (
+            (inputs.previous_gate_corridor_distance - inputs.current_gate_corridor_distance)
+            * self._config.gate_corridor_progress_scale
+        )
+        gate_alignment = (
+            inputs.current_gate_corridor_occupancy - inputs.previous_gate_corridor_occupancy
+        ) * self._config.gate_alignment_scale
+        stalled_control_penalty = 0.0
+        if inputs.controlled_stall_steps > 0 and not inputs.tactically_valid_hold:
+            stalled_control_penalty = -self._config.stalled_control_penalty * min(
+                2.0,
+                inputs.controlled_stall_steps / 4.0,
+            )
+        wrong_hold_penalty = (
+            -self._config.wrong_hold_penalty
+            if inputs.wrong_hold_active and not inputs.tactically_valid_hold
+            else 0.0
+        )
         terminal_success = self._config.terminal_success_reward if inputs.success else 0.0
         terminal_failure = -self._config.terminal_failure_penalty if inputs.timeout else 0.0
         instincts = self._compute_instincts(inputs)
@@ -132,6 +167,11 @@ class RewardComputer:
             + no_progress_penalty
             + wall_pressure_penalty
             + wait_penalty
+            + gate_progress
+            + gate_corridor_progress
+            + gate_alignment
+            + stalled_control_penalty
+            + wrong_hold_penalty
             + terminal_success
             + terminal_failure
             + instincts["pressure_zone"]
@@ -151,6 +191,11 @@ class RewardComputer:
             no_progress_penalty=no_progress_penalty,
             wall_pressure_penalty=wall_pressure_penalty,
             wait_penalty=wait_penalty,
+            gate_progress=gate_progress,
+            gate_corridor_progress=gate_corridor_progress,
+            gate_alignment=gate_alignment,
+            stalled_control_penalty=stalled_control_penalty,
+            wrong_hold_penalty=wrong_hold_penalty,
             terminal_success=terminal_success,
             terminal_failure=terminal_failure,
             pressure_zone=instincts["pressure_zone"],

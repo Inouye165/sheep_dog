@@ -29,6 +29,7 @@ class PolicyWeights:
     rear_avoid_overpressure: float = 0.9
     rear_spacing: float = 0.55
     flank_side_control: float = 1.1
+    flank_handedness: float = 0.75
     flank_escape_blocking: float = 0.85
     flank_spacing: float = 0.65
     flank_wall_margin: float = 0.35
@@ -38,6 +39,7 @@ class PolicyWeights:
     collector_rejoin_angle: float = 0.75
     blocker_escape_route_cover: float = 1.0
     blocker_gate_control: float = 1.1
+    blocker_funnel_lane: float = 0.9
     blocker_hold_position: float = 0.8
     blocker_spacing: float = 0.55
     anti_stack_penalty: float = 2.0
@@ -77,6 +79,7 @@ class PolicyWeights:
             flank_side_control=float(
                 payload.get("flank_side_control", defaults.flank_side_control)
             ),
+            flank_handedness=float(payload.get("flank_handedness", defaults.flank_handedness)),
             flank_escape_blocking=float(
                 payload.get("flank_escape_blocking", defaults.flank_escape_blocking)
             ),
@@ -104,6 +107,9 @@ class PolicyWeights:
             ),
             blocker_gate_control=float(
                 payload.get("blocker_gate_control", defaults.blocker_gate_control)
+            ),
+            blocker_funnel_lane=float(
+                payload.get("blocker_funnel_lane", defaults.blocker_funnel_lane)
             ),
             blocker_hold_position=float(
                 payload.get("blocker_hold_position", defaults.blocker_hold_position)
@@ -137,6 +143,7 @@ class PolicyWeights:
             rear_avoid_overpressure=self.rear_avoid_overpressure + rng.uniform(-scale, scale),
             rear_spacing=self.rear_spacing + rng.uniform(-scale, scale),
             flank_side_control=self.flank_side_control + rng.uniform(-scale, scale),
+            flank_handedness=self.flank_handedness + rng.uniform(-scale, scale),
             flank_escape_blocking=self.flank_escape_blocking + rng.uniform(-scale, scale),
             flank_spacing=self.flank_spacing + rng.uniform(-scale, scale),
             flank_wall_margin=self.flank_wall_margin + rng.uniform(-scale, scale),
@@ -148,6 +155,7 @@ class PolicyWeights:
             blocker_escape_route_cover=self.blocker_escape_route_cover
             + rng.uniform(-scale, scale),
             blocker_gate_control=self.blocker_gate_control + rng.uniform(-scale, scale),
+            blocker_funnel_lane=self.blocker_funnel_lane + rng.uniform(-scale, scale),
             blocker_hold_position=self.blocker_hold_position + rng.uniform(-scale, scale),
             blocker_spacing=self.blocker_spacing + rng.uniform(-scale, scale),
             anti_stack_penalty=self.anti_stack_penalty + rng.uniform(-scale, scale),

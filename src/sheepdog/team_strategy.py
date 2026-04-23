@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from statistics import fmean
 
+from sheepdog.config import EnvironmentConfig
 from sheepdog.entities import DogRole, DogState, Pen, Point, SheepState
 
 
@@ -34,9 +35,10 @@ class StrategySnapshot:
 class TeamStrategy:
     """Assign dynamic cooperative roles from current flock state."""
 
-    def __init__(self, width: int, height: int) -> None:
+    def __init__(self, width: int, height: int, config: EnvironmentConfig | None = None) -> None:
         self._width = width
         self._height = height
+        self._config = config or EnvironmentConfig(width=width, height=height)
 
     def assign_roles(
         self,
@@ -95,7 +97,11 @@ class TeamStrategy:
         remaining = list(dogs)
         if stray is not None:
             collector_target = self._collector_target(stray.position, flock_center)
-            collector = self._closest_dog(remaining, collector_target)
+            collector = self._best_dog_for_role(
+                remaining,
+                collector_target,
+                DogRole.COLLECTOR,
+            )
             assignments[collector.index] = RoleAssignment(
                 dog_index=collector.index,
                 role=DogRole.COLLECTOR,
@@ -106,7 +112,11 @@ class TeamStrategy:
             remaining = [dog for dog in remaining if dog.index != collector.index]
 
         if (near_pen or wall_pressure) and remaining:
-            blocker = self._closest_dog(remaining, blocker_target)
+            blocker = self._best_dog_for_role(
+                remaining,
+                blocker_target,
+                DogRole.BLOCKER,
+            )
             assignments[blocker.index] = RoleAssignment(
                 dog_index=blocker.index,
                 role=DogRole.BLOCKER,
@@ -122,7 +132,7 @@ class TeamStrategy:
         ):
             if not remaining:
                 break
-            dog = self._closest_dog(remaining, target)
+            dog = self._best_dog_for_role(remaining, target, role)
             assignments[dog.index] = RoleAssignment(
                 dog_index=dog.index,
                 role=role,
@@ -211,21 +221,56 @@ class TeamStrategy:
         lateral_y: int,
     ) -> Point:
         if pen.opening == "left":
-            base = Point(pen.origin.x - 2, pen.center.y)
+            gate = Point(pen.origin.x - 1, pen.center.y)
         elif pen.opening == "right":
-            base = Point(pen.origin.x + pen.width + 1, pen.center.y)
+            gate = Point(pen.origin.x + pen.width, pen.center.y)
         elif pen.opening == "top":
-            base = Point(pen.center.x, pen.origin.y - 2)
+            gate = Point(pen.center.x, pen.origin.y - 1)
         else:
-            base = Point(pen.center.x, pen.origin.y + pen.height + 1)
-        direction = self._axis_sign(flock_center.y - pen.center.y) or 1
+            gate = Point(pen.center.x, pen.origin.y + pen.height)
+        approach_x = self._axis_sign(gate.x - flock_center.x)
+        approach_y = self._axis_sign(gate.y - flock_center.y)
+        if approach_x == 0 and approach_y == 0:
+            approach_x = -lateral_y or 1
+            approach_y = lateral_x
+        escape_side = self._axis_sign(
+            (flock_center.x - gate.x) * lateral_x + (flock_center.y - gate.y) * lateral_y
+        ) or 1
         return Point(
-            base.x + lateral_x * direction * 2,
-            base.y + lateral_y * direction * 2,
+            gate.x - approach_x + lateral_x * escape_side * 2,
+            gate.y - approach_y + lateral_y * escape_side * 2,
         ).clamp(self._width, self._height)
 
-    def _closest_dog(self, dogs: list[DogState], target: Point) -> DogState:
-        return min(dogs, key=lambda dog: (dog.position.distance_to(target), dog.index))
+    def _best_dog_for_role(
+        self,
+        dogs: list[DogState],
+        target: Point,
+        role: DogRole,
+    ) -> DogState:
+        return min(
+            dogs,
+            key=lambda dog: (self._role_assignment_cost(dog, target, role), dog.index),
+        )
+
+    def _role_assignment_cost(self, dog: DogState, target: Point, role: DogRole) -> float:
+        distance = dog.position.distance_to(target)
+        if not self._should_keep_role(dog, target, role):
+            return distance
+        return max(0.0, distance - self._role_stickiness_bonus(role))
+
+    def _should_keep_role(self, dog: DogState, target: Point, role: DogRole) -> bool:
+        if dog.current_role != role:
+            return False
+        if role == DogRole.COLLECTOR:
+            return dog.position.distance_to(target) <= self._config.role_stickiness_distance + 1.5
+        return dog.position.distance_to(target) <= self._config.role_stickiness_distance
+
+    def _role_stickiness_bonus(self, role: DogRole) -> float:
+        if role in {DogRole.LEFT_FLANKER, DogRole.RIGHT_FLANKER}:
+            return self._config.flank_role_stickiness_bonus
+        if role == DogRole.BLOCKER:
+            return self._config.blocker_role_stickiness_bonus
+        return self._config.role_stickiness_bonus
 
     def _wall_margin(self, position: Point) -> int:
         return min(
