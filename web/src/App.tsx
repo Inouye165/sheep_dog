@@ -321,8 +321,17 @@ export function App() {
     setRunState("running");
   }
 
+  function handleEndEpisode() {
+    if (!replay) {
+      return;
+    }
+    setFrameIndex(Math.max(replay.frames.length - 1, 0));
+    setRunState(resolveRunState(replay.final_snapshot, "idle"));
+  }
+
   const statusLabel = resolveRunState(snapshot, runState);
   const statusMessage = trainingStatus?.message ?? "Idle";
+  const canEndEpisode = Boolean(replay) && (runState === "running" || frameIndex < (replay?.frames.length ?? 0) - 1);
 
   return (
     <main className="app-shell">
@@ -377,9 +386,11 @@ export function App() {
             seedOptions={seedOptions}
             selectedSeed={selectedSeed}
             runningCurrent={runningCurrentReplay}
+            canEndEpisode={canEndEpisode}
             onSelectCheckpointEpisode={handleCheckpointChange}
             onSelectSeed={handleSeedChange}
             onStart={handleStart}
+            onEndEpisode={handleEndEpisode}
             onRunCurrent={handleRunCurrentReplay}
             disabled={loading}
             fastMode={playbackFastMode}

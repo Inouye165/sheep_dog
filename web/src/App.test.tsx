@@ -264,70 +264,65 @@ describe("App", () => {
   it("clears training artifacts from the UI", async () => {
     const user = userEvent.setup();
     const fetchMock = vi.mocked(fetch);
+    vi.stubGlobal("confirm", vi.fn(() => true));
     fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
       const path = String(input);
       if (path.includes("/api/training/clear")) {
-        return new Response(
-          JSON.stringify({
-            running: false,
-            fast_mode: true,
-            requested_episodes: 0,
-            completed_episodes: 0,
-            batch_total_episodes: 0,
-            batch_completed_episodes: 0,
-            total_episodes_trained: 0,
-            current_episode: null,
-            checkpoint_episode: null,
-            latest_checkpoint_episode: null,
-            latest_seed: null,
-            latest_replay_path: null,
-            best_score: null,
-            phase: "idle",
-            message: "Training cleared. Baseline replay restored",
-            error: null,
-          }),
-          { status: 200 },
-        );
+        return jsonResponse({
+          running: false,
+          fast_mode: true,
+          requested_episodes: 0,
+          completed_episodes: 0,
+          batch_total_episodes: 0,
+          batch_completed_episodes: 0,
+          total_episodes_trained: 0,
+          current_episode: null,
+          checkpoint_episode: null,
+          latest_checkpoint_episode: null,
+          latest_seed: null,
+          latest_replay_path: null,
+          best_score: null,
+          phase: "idle",
+          message: "Training cleared. Baseline replay restored",
+          error: null,
+        });
       }
       if (path.includes("/api/training/status")) {
-        return new Response(
-          JSON.stringify({
-            running: false,
-            fast_mode: true,
-            requested_episodes: 0,
-            completed_episodes: 0,
-            batch_total_episodes: 0,
-            batch_completed_episodes: 0,
-            total_episodes_trained: 0,
-            current_episode: null,
-            checkpoint_episode: null,
-            latest_checkpoint_episode: null,
-            latest_seed: null,
-            latest_replay_path: null,
-            best_score: null,
-            phase: "idle",
-            message: "Idle",
-            error: null,
-          }),
-          { status: 200 },
-        );
+        return jsonResponse({
+          running: false,
+          fast_mode: true,
+          requested_episodes: 0,
+          completed_episodes: 0,
+          batch_total_episodes: 0,
+          batch_completed_episodes: 0,
+          total_episodes_trained: 0,
+          current_episode: null,
+          checkpoint_episode: null,
+          latest_checkpoint_episode: null,
+          latest_seed: null,
+          latest_replay_path: null,
+          best_score: null,
+          phase: "idle",
+          message: "Idle",
+          error: null,
+        });
       }
       if (path.includes("checkpoint-index.json")) {
-        return new Response(JSON.stringify(checkpointIndex), { status: 200 });
+        return jsonResponse(checkpointIndex);
       }
       if (path.includes("checkpoint-000000-seed-000011.json")) {
-        return new Response(JSON.stringify(replay), { status: 200 });
+        return jsonResponse(replay);
       }
       return new Response("not found", { status: 404 });
     });
 
     render(<App />);
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Clear training" })).toBeInTheDocument());
-    await user.click(screen.getByRole("button", { name: "Clear training" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Clear training data" })).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Clear training data" }));
 
     await waitFor(() => expect(screen.getByText("Training cleared. Baseline replay restored")).toBeInTheDocument());
-    expect(within(screen.getByLabelText("Checkpoint summary")).getByText(/Episode 0/)).toBeInTheDocument();
+    expect(within(screen.getByLabelText("Run status")).getByText("11")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Start replay" })).toBeInTheDocument();
   });
 
@@ -335,7 +330,7 @@ describe("App", () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
       const path = String(input);
-      if (path.includes("/api/training/reset")) {
+      if (path.includes("/api/training/clear")) {
         return jsonResponse({
           ...idleTrainingStatus,
           message: "Training history cleared",
@@ -362,7 +357,7 @@ describe("App", () => {
 
     await waitFor(() => expect(screen.getByText("Training history cleared")).toBeInTheDocument());
     expect(fetchMock).toHaveBeenCalledWith(
-      new URL("/api/training/reset", "http://127.0.0.1:8000"),
+      new URL("/api/training/clear", "http://127.0.0.1:8000"),
       expect.objectContaining({ cache: "no-store", method: "POST" }),
     );
   });
@@ -473,5 +468,44 @@ describe("App", () => {
         }),
       }),
     );
+  });
+
+  it("ends the current replay immediately when the episode is clearly bad", async () => {
+    const skippableReplay = {
+      ...replay,
+      frames: [
+        ...replay.frames,
+        {
+          step: replay.final_snapshot.step,
+          actions: ["wait", "wait"],
+          snapshot: replay.final_snapshot,
+          reward: replay.stats.final_reward_breakdown,
+        },
+      ],
+    };
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.includes("/api/training/status")) {
+        return jsonResponse(idleTrainingStatus);
+      }
+      if (path.includes("checkpoint-index.json")) {
+        return jsonResponse(checkpointIndex);
+      }
+      if (path.includes("checkpoint-000000-seed-000011.json")) {
+        return jsonResponse(skippableReplay);
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "End episode" })).toBeEnabled());
+
+    await userEvent.click(screen.getByRole("button", { name: "End episode" }));
+
+    const statusPanel = screen.getByLabelText("Run status");
+    expect(within(statusPanel).getByText("3")).toBeInTheDocument();
+    expect(within(statusPanel).getAllByText("timeout")).toHaveLength(2);
   });
 });

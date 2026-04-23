@@ -4,9 +4,11 @@ interface ControlBarProps {
   seedOptions: number[];
   selectedSeed: number | null;
   runningCurrent: boolean;
+  canEndEpisode: boolean;
   onSelectCheckpointEpisode: (episode: number) => void;
   onSelectSeed: (seed: number) => void;
   onStart: () => void;
+  onEndEpisode: () => void;
   onRunCurrent: () => void;
   disabled?: boolean;
   fastMode: boolean;
@@ -19,9 +21,11 @@ export function ControlBar({
   seedOptions,
   selectedSeed,
   runningCurrent,
+  canEndEpisode,
   onSelectCheckpointEpisode,
   onSelectSeed,
   onStart,
+  onEndEpisode,
   onRunCurrent,
   disabled,
   fastMode,
@@ -86,6 +90,14 @@ export function ControlBar({
         </button>
         <button type="button" className="button-row__secondary" onClick={onStart} disabled={disabled || !selectedSeed}>
           Start replay
+        </button>
+        <button
+          type="button"
+          className="button-row__secondary"
+          onClick={onEndEpisode}
+          disabled={disabled || !canEndEpisode}
+        >
+          End episode
         </button>
       </div>
     </section>
