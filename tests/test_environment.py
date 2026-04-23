@@ -249,6 +249,31 @@ def test_dog_speed_is_used_for_clear_moves() -> None:
     assert environment.dogs[0].position.x == 7
 
 
+def test_sprint_action_moves_farther_than_walk() -> None:
+    config = make_config(dogs=1, sheep=0)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=31)
+    environment.dogs[0].position = Point(5, 5)
+
+    environment.step(["sprint_right"])
+
+    assert environment.dogs[0].position.x == 7
+
+
+def test_action_mask_blocks_sprint_into_walls() -> None:
+    config = make_config(dogs=1, sheep=0)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=32)
+    environment.dogs[0].position = Point(0, 0)
+
+    mask = environment.action_mask_for_dog(0)
+
+    assert mask["up"] is False
+    assert mask["left"] is False
+    assert mask["sprint_up"] is False
+    assert mask["sprint_left"] is False
+
+
 def test_default_dog_speed_moves_one_cell() -> None:
     config = make_config(dogs=1, sheep=0)
     environment = SheepdogEnvironment(config)
@@ -292,6 +317,19 @@ def test_dog_action_score_prefers_herding_standoff() -> None:
     too_far = environment.score_action_for_dog(0, "left")
 
     assert better_spacing > too_far
+
+
+def test_sprint_near_sheep_is_scored_lower_than_walk() -> None:
+    config = make_config(dogs=1, sheep=1)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=33)
+    environment.dogs[0].position = Point(6, 10)
+    environment.sheep[0].position = Point(10, 10)
+
+    walk_score = environment.score_action_for_dog(0, "right")
+    sprint_score = environment.score_action_for_dog(0, "sprint_right")
+
+    assert walk_score > sprint_score
 
 
 def test_dog_action_score_prefers_spread_out_team_positions() -> None:

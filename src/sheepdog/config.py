@@ -26,15 +26,17 @@ class EnvironmentConfig:
     sheep_vision: int = 12
     flock_radius: int = 10
     dog_speed: float = 1.0
+    dog_sprint_multiplier: float = 2.0
     sheep_speed: float = 0.75
     no_progress_window: int = 80
     no_progress_distance_delta: float = 0.15
     no_progress_penned_delta: int = 0
     no_progress_timeout_penalty_steps: int = 80
-    role_stickiness_distance: float = 4.5
-    role_stickiness_bonus: float = 2.5
-    flank_role_stickiness_bonus: float = 3.5
-    blocker_role_stickiness_bonus: float = 2.0
+    role_stickiness_distance: float = 12.0
+    role_stickiness_bonus: float = 6.0
+    flank_role_stickiness_bonus: float = 7.5
+    blocker_role_stickiness_bonus: float = 5.0
+    role_minimum_hold_steps: int = 6
     gate_corridor_half_width: float = 2.5
     gate_approach_distance: float = 10.0
     gate_hold_safe_distance: float = 6.0
@@ -87,9 +89,14 @@ class RewardConfig:
     terminal_failure_penalty: float = 12.0
     wall_pressure_penalty: float = 0.4
     wait_penalty: float = 0.05
+    sprint_cost_scale: float = 0.12
     gate_progress_scale: float = 1.6
     gate_corridor_progress_scale: float = 0.8
     gate_alignment_scale: float = 1.0
+    lane_crowding_penalty_scale: float = 0.9
+    lane_crowding_activation_distance: float = 14.0
+    lane_crowding_forward_distance: float = 6.0
+    lane_crowding_lateral_tolerance: float = 1.75
     stalled_control_penalty: float = 0.45
     wrong_hold_penalty: float = 0.8
     instincts: InstinctRewardConfig = field(default_factory=InstinctRewardConfig)

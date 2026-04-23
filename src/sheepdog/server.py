@@ -262,6 +262,8 @@ def _build_training_job_config(
     checkpoint_episodes = tuple(range(total_episodes))
     evaluation_seeds = (11,) if fast_mode else config.training.evaluation_seeds
     training_config = TrainingConfig(
+        trainer_type="maskable_ppo",
+        policy_type="neural",
         episodes=training_episodes,
         checkpoint_episodes=checkpoint_episodes,
         evaluation_seeds=evaluation_seeds,

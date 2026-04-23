@@ -22,11 +22,25 @@ ACTION_DELTAS: dict[Action, tuple[int, int]] = {
     "down": (0, 1),
     "left": (-1, 0),
     "right": (1, 0),
+    "sprint_up": (0, -1),
+    "sprint_down": (0, 1),
+    "sprint_left": (-1, 0),
+    "sprint_right": (1, 0),
     "wait": (0, 0),
 }
 
-ACTION_ORDER: tuple[Action, ...] = ("up", "down", "left", "right", "wait")
-OPPOSITE_ACTIONS: dict[Action, Action] = {
+ACTION_ORDER: tuple[Action, ...] = (
+    "up",
+    "down",
+    "left",
+    "right",
+    "sprint_up",
+    "sprint_down",
+    "sprint_left",
+    "sprint_right",
+    "wait",
+)
+OPPOSITE_DIRECTIONS: dict[str, str] = {
     "up": "down",
     "down": "up",
     "left": "right",
@@ -259,6 +273,20 @@ class SheepdogEnvironment:
         steps = int(budget)
         return steps, budget - steps
 
+    def _is_sprint_action(self, action: Action | str) -> bool:
+        return str(action).startswith("sprint_")
+
+    def _base_action(self, action: Action | str) -> str:
+        text = str(action)
+        if text.startswith("sprint_"):
+            return text.removeprefix("sprint_")
+        return text
+
+    def _dog_action_speed(self, action: Action) -> float:
+        if self._is_sprint_action(action):
+            return self.env_config.dog_speed * self.env_config.dog_sprint_multiplier
+        return self.env_config.dog_speed
+
     def get_state_snapshot(self) -> EnvironmentSnapshot:
         debug_payload = self._snapshot_debug_payload()
         return EnvironmentSnapshot(
@@ -337,13 +365,13 @@ class SheepdogEnvironment:
             weights=weights,
             reserved_positions=reserved_positions,
         )
-        return {
-            "up": self.project_dog_action(dog_index, "up") != dog.position,
-            "down": self.project_dog_action(dog_index, "down") != dog.position,
-            "left": self.project_dog_action(dog_index, "left") != dog.position,
-            "right": self.project_dog_action(dog_index, "right") != dog.position,
-            "wait": wait_allowed,
+        mask = {
+            action: self.project_dog_action(dog_index, action) != dog.position
+            for action in ACTION_ORDER
+            if action != "wait"
         }
+        mask["wait"] = wait_allowed
+        return mask
 
     def ranked_actions_for_dog(
         self,
@@ -378,7 +406,7 @@ class SheepdogEnvironment:
             other.position for other in self._dogs if other.index != dog_index
         )
         steps, _ = self._movement_steps(
-            self.env_config.dog_speed,
+            self._dog_action_speed(action),
             dog.movement_budget,
             allow_accumulation=action != "wait",
         )
@@ -403,6 +431,9 @@ class SheepdogEnvironment:
             )
             if dog.current_role != assignment.role:
                 self._role_switches += 1
+                dog.steps_in_role = 0
+            else:
+                dog.steps_in_role += 1
             dog.current_role = assignment.role
             self._role_distribution[assignment.role.value] = (
                 self._role_distribution.get(assignment.role.value, 0) + 1
@@ -574,6 +605,9 @@ class SheepdogEnvironment:
                 no_progress_step=not progress_made,
                 touched_wall=self._touched_wall_this_step(validated_actions),
                 waited_without_reason=self._waited_without_reason(validated_actions),
+                sprint_count=sum(
+                    1 for action in validated_actions if self._is_sprint_action(action)
+                ),
                 previous_gate_distance=previous_gate_distance,
                 current_gate_distance=current_gate_distance,
                 previous_gate_corridor_distance=previous_gate_corridor_distance,
@@ -768,7 +802,7 @@ class SheepdogEnvironment:
                 position for position in occupied_positions if position != dog.position
             }
             steps, remaining_budget = self._movement_steps(
-                self.env_config.dog_speed,
+                self._dog_action_speed(action),
                 dog.movement_budget,
                 allow_accumulation=action != "wait",
             )
@@ -923,9 +957,11 @@ class SheepdogEnvironment:
                 vector_y,
             )
             if primary_blocked and action in edge_escape_actions:
-                score += 0.75
+                # When the natural flee direction is blocked, sheep should
+                # aggressively try lateral openings rather than stand still.
+                score += 1.6
             if action in edge_escape_actions:
-                score += 0.15
+                score += 0.4
             if primary_action is not None and action == primary_action:
                 score += 0.2
             if score > best_score + 1e-9:
@@ -972,9 +1008,14 @@ class SheepdogEnvironment:
 
     def _edge_escape_actions(self, position: Point) -> tuple[Action, ...]:
         actions: list[Action] = []
-        if position.x in {0, self.env_config.width - 1}:
+        # A sheep cornered against (or one cell from) a wall should consider
+        # lateral escape along the wall as a real option, not just when
+        # exactly on the boundary.
+        max_x = self.env_config.width - 1
+        max_y = self.env_config.height - 1
+        if position.x <= 1 or position.x >= max_x - 1:
             actions.extend(("up", "down"))
-        if position.y in {0, self.env_config.height - 1}:
+        if position.y <= 1 or position.y >= max_y - 1:
             actions.extend(("left", "right"))
         return tuple(dict.fromkeys(actions))
 
@@ -1074,6 +1115,7 @@ class SheepdogEnvironment:
             candidate_debug,
         )
         score += self._loop_penalty(dog, candidate)
+        score -= self._sprint_action_penalty(dog, action, candidate, assignment, candidate_debug)
         if self._is_reverse_action(dog.last_action, action) and not self._reverse_is_clearly_better(
             current_debug,
             candidate_debug,
@@ -1621,8 +1663,38 @@ class SheepdogEnvironment:
             penalty += dog.blocked_steps * 0.1
         return penalty
 
+    def _sprint_action_penalty(
+        self,
+        dog: DogState,
+        action: Action,
+        candidate: Point,
+        assignment: RoleAssignment,
+        candidate_debug: dict[str, Any],
+    ) -> float:
+        if not self._is_sprint_action(action):
+            return 0.0
+        penalty = 0.35
+        target_gain = dog.position.distance_to(assignment.target) - candidate.distance_to(
+            assignment.target
+        )
+        if target_gain < 1.5:
+            penalty += 0.45
+        focus_distance = candidate_debug.get("distance_to_focus_sheep")
+        if isinstance(focus_distance, (int, float)) and focus_distance <= 2.5:
+            penalty += 0.9
+        if candidate_debug["holding_pressure_position"]:
+            penalty += 0.8
+        if candidate_debug["inside_or_too_close_to_flock"]:
+            penalty += 0.75
+        return penalty
+
     def _is_reverse_action(self, previous: str, action: Action) -> bool:
-        return previous in OPPOSITE_ACTIONS and OPPOSITE_ACTIONS[previous] == action
+        previous_direction = self._base_action(previous)
+        action_direction = self._base_action(action)
+        return (
+            previous_direction in OPPOSITE_DIRECTIONS
+            and OPPOSITE_DIRECTIONS[previous_direction] == action_direction
+        )
 
     def _reverse_is_clearly_better(
         self,

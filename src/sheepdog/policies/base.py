@@ -4,7 +4,17 @@ from __future__ import annotations
 
 from typing import Literal, Protocol
 
-Action = Literal["up", "down", "left", "right", "wait"]
+Action = Literal[
+    "up",
+    "down",
+    "left",
+    "right",
+    "sprint_up",
+    "sprint_down",
+    "sprint_left",
+    "sprint_right",
+    "wait",
+]
 PolicyMode = Literal[
     "random_untrained",
     "random_policy",

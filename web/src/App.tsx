@@ -45,7 +45,7 @@ export function App() {
   const [trainingEpisodes, setTrainingEpisodes] = useState(5);
   const [trainingFastMode, setTrainingFastMode] = useState(true);
   const [trainingEnableInstincts, setTrainingEnableInstincts] = useState(true);
-  const [trainingCurriculumStage, setTrainingCurriculumStage] = useState(1);
+  const [trainingCurriculumStage, setTrainingCurriculumStage] = useState(0);
   const [trainingDebugRewardBreakdown, setTrainingDebugRewardBreakdown] = useState(false);
   const [playbackFastMode, setPlaybackFastMode] = useState(false);
   const [trainingStatus, setTrainingStatus] = useState<TrainingStatus | null>(null);

@@ -52,6 +52,7 @@ class DogState:
     blocked_steps: int = 0
     movement_budget: float = 0.0
     recent_positions: list[Point] = field(default_factory=list)
+    steps_in_role: int = 0
 
 
 @dataclass(slots=True)

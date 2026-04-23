@@ -47,7 +47,19 @@ def test_neural_policy_initializes_and_acts(tmp_path: Path) -> None:
     actions = policy.select_actions(adapter._environment)  # pylint: disable=protected-access
 
     assert len(actions) == config.environment.dogs
-    assert set(actions).issubset({"up", "down", "left", "right", "wait"})
+    assert set(actions).issubset(
+        {
+            "up",
+            "down",
+            "left",
+            "right",
+            "sprint_up",
+            "sprint_down",
+            "sprint_left",
+            "sprint_right",
+            "wait",
+        }
+    )
 
 
 def test_rl_adapter_produces_expected_observation_shape_and_masks_invalid_actions(
@@ -62,9 +74,11 @@ def test_rl_adapter_produces_expected_observation_shape_and_masks_invalid_action
 
     assert observation.shape == adapter.observation_space.shape
     assert info["current_dog_index"] == 0
-    assert mask.shape == (5,)
+    assert mask.shape == (9,)
     assert bool(mask[0]) is False
     assert bool(mask[2]) is False
+    assert bool(mask[4]) is False
+    assert bool(mask[6]) is False
 
 
 def test_rl_adapter_fixed_seed_sequence_is_deterministic(tmp_path: Path) -> None:

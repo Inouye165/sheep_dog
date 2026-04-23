@@ -580,7 +580,7 @@ describe("App", () => {
           episodes: 5,
           fast_mode: true,
           enable_instinct_rewards: true,
-          curriculum_stage: 1,
+          curriculum_stage: 0,
           debug_reward_breakdown: false,
         }),
       }),

@@ -254,16 +254,23 @@ class TeamStrategy:
 
     def _role_assignment_cost(self, dog: DogState, target: Point, role: DogRole) -> float:
         distance = dog.position.distance_to(target)
-        if not self._should_keep_role(dog, target, role):
-            return distance
-        return max(0.0, distance - self._role_stickiness_bonus(role))
-
-    def _should_keep_role(self, dog: DogState, target: Point, role: DogRole) -> bool:
         if dog.current_role != role:
-            return False
-        if role == DogRole.COLLECTOR:
-            return dog.position.distance_to(target) <= self._config.role_stickiness_distance + 1.5
-        return dog.position.distance_to(target) <= self._config.role_stickiness_distance
+            return distance
+        # Reward dogs that already hold this role: a base bonus plus a
+        # hold-time ramp so role assignments remain stable across small flock
+        # shifts. The graduated bonus prevents per-step oscillation between
+        # near-equally-good candidates while still letting roles re-shuffle
+        # when an event (stray, collector trigger) genuinely demands it.
+        bonus = self._role_stickiness_bonus(role)
+        hold_steps = max(0, getattr(dog, "steps_in_role", 0))
+        # Saturate the hold ramp so it cannot dominate truly bad fits.
+        ramp = min(hold_steps, self._config.role_minimum_hold_steps) * 0.5
+        cap = self._config.role_stickiness_distance
+        if distance > cap * 2.0:
+            # Dog has drifted very far from its current target; let a fresh
+            # assignment win so the team doesn't strand a role-holder.
+            return distance
+        return max(0.0, distance - bonus - ramp)
 
     def _role_stickiness_bonus(self, role: DogRole) -> float:
         if role in {DogRole.LEFT_FLANKER, DogRole.RIGHT_FLANKER}:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from math import hypot
+from math import hypot, inf
 
 from sheepdog.config import InstinctRewardConfig, RewardConfig
 
@@ -22,9 +22,11 @@ class RewardBreakdown:
     no_progress_penalty: float = 0.0
     wall_pressure_penalty: float = 0.0
     wait_penalty: float = 0.0
+    sprint_cost: float = 0.0
     gate_progress: float = 0.0
     gate_corridor_progress: float = 0.0
     gate_alignment: float = 0.0
+    lane_crowding_penalty: float = 0.0
     stalled_control_penalty: float = 0.0
     wrong_hold_penalty: float = 0.0
     terminal_success: float = 0.0
@@ -63,6 +65,7 @@ class RewardInputs:
     terminated: bool
     timeout: bool
     success: bool
+    sprint_count: int = 0
     previous_gate_distance: float = 0.0
     current_gate_distance: float = 0.0
     previous_gate_corridor_distance: float = 0.0
@@ -117,6 +120,21 @@ def _max_sheep_offset(centroid: Position, sheep_positions: tuple[Position, ...])
     return max(_distance(centroid, sheep) for sheep in sheep_positions)
 
 
+def _lane_projection(sheep: Position, target: Position, dog: Position) -> tuple[float, float, float]:
+    lane_dx = target[0] - sheep[0]
+    lane_dy = target[1] - sheep[1]
+    lane_length = hypot(lane_dx, lane_dy)
+    if lane_length < 1e-6:
+        return 0.0, inf, 0.0
+    unit_x = lane_dx / lane_length
+    unit_y = lane_dy / lane_length
+    dog_dx = dog[0] - sheep[0]
+    dog_dy = dog[1] - sheep[1]
+    forward_distance = dog_dx * unit_x + dog_dy * unit_y
+    lateral_distance = abs(dog_dx * unit_y - dog_dy * unit_x)
+    return forward_distance, lateral_distance, lane_length
+
+
 class RewardComputer:
     """Compute a structured reward breakdown."""
 
@@ -134,6 +152,7 @@ class RewardComputer:
         no_progress_penalty = -self._config.no_progress_penalty if inputs.no_progress_step else 0.0
         wall_pressure_penalty = -self._config.wall_pressure_penalty if inputs.touched_wall else 0.0
         wait_penalty = -self._config.wait_penalty if inputs.waited_without_reason else 0.0
+        sprint_cost = -inputs.sprint_count * self._config.sprint_cost_scale
         gate_progress = (
             inputs.previous_gate_distance - inputs.current_gate_distance
         ) * self._config.gate_progress_scale
@@ -144,6 +163,7 @@ class RewardComputer:
         gate_alignment = (
             inputs.current_gate_corridor_occupancy - inputs.previous_gate_corridor_occupancy
         ) * self._config.gate_alignment_scale
+        lane_crowding_penalty = self._lane_crowding_penalty(inputs)
         stalled_control_penalty = 0.0
         if inputs.controlled_stall_steps > 0 and not inputs.tactically_valid_hold:
             stalled_control_penalty = -self._config.stalled_control_penalty * min(
@@ -167,9 +187,11 @@ class RewardComputer:
             + no_progress_penalty
             + wall_pressure_penalty
             + wait_penalty
+            + sprint_cost
             + gate_progress
             + gate_corridor_progress
             + gate_alignment
+            + lane_crowding_penalty
             + stalled_control_penalty
             + wrong_hold_penalty
             + terminal_success
@@ -191,9 +213,11 @@ class RewardComputer:
             no_progress_penalty=no_progress_penalty,
             wall_pressure_penalty=wall_pressure_penalty,
             wait_penalty=wait_penalty,
+            sprint_cost=sprint_cost,
             gate_progress=gate_progress,
             gate_corridor_progress=gate_corridor_progress,
             gate_alignment=gate_alignment,
+            lane_crowding_penalty=lane_crowding_penalty,
             stalled_control_penalty=stalled_control_penalty,
             wrong_hold_penalty=wrong_hold_penalty,
             terminal_success=terminal_success,
@@ -277,3 +301,46 @@ class RewardComputer:
             "overpressure_penalty": overpressure_penalty,
             "split_flock_penalty": split_flock_penalty,
         }
+
+    def _lane_crowding_penalty(self, inputs: RewardInputs) -> float:
+        target = inputs.target_position
+        if target is None or not inputs.dog_positions or not inputs.sheep_positions:
+            return 0.0
+        active_sheep = [
+            sheep
+            for sheep in inputs.sheep_positions
+            if _distance(sheep, target) <= self._config.lane_crowding_activation_distance
+        ]
+        if not active_sheep:
+            return 0.0
+        blocking_score = 0.0
+        for sheep in active_sheep:
+            for dog in inputs.dog_positions:
+                forward_distance, lateral_distance, lane_length = _lane_projection(
+                    sheep,
+                    target,
+                    dog,
+                )
+                if forward_distance <= 0.0:
+                    continue
+                if forward_distance >= min(
+                    lane_length,
+                    self._config.lane_crowding_forward_distance,
+                ):
+                    continue
+                if lateral_distance >= self._config.lane_crowding_lateral_tolerance:
+                    continue
+                lateral_factor = 1.0 - min(
+                    1.0,
+                    lateral_distance / max(0.1, self._config.lane_crowding_lateral_tolerance),
+                )
+                forward_factor = 1.0 - min(
+                    1.0,
+                    forward_distance / max(0.1, self._config.lane_crowding_forward_distance),
+                )
+                blocking_score += 0.35 + 0.65 * lateral_factor * forward_factor
+        if blocking_score <= 0.0:
+            return 0.0
+        return -(
+            blocking_score / max(1, len(active_sheep))
+        ) * self._config.lane_crowding_penalty_scale

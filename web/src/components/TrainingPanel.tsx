@@ -118,6 +118,15 @@ export function TrainingPanel({
         Old weights trained without instinct rewards may not transfer cleanly. Clear training data before starting a new instincts curriculum run.
       </div>
 
+      {running ? (
+        <div className="warning-box" role="status" aria-live="polite">
+          Training runs server-side. You can switch tabs, minimize the browser, or
+          close this window — the backend keeps training and writes checkpoints
+          to disk. Progress here may pause when the tab is hidden because
+          browsers throttle background scripts; reopen the tab to resume polling.
+        </div>
+      ) : null}
+
       <div className="training-summary">
         <div>
           <span>Total episodes trained</span>
