@@ -4,7 +4,7 @@ import { FieldView } from "./components/FieldView";
 import { TrainingPanel } from "./components/TrainingPanel";
 import { StatusPanel } from "./components/StatusPanel";
 import { clearTraining, loadCheckpointIndex, loadReplay, loadTrainingStatus, runReplay, startTraining } from "./lib/api";
-import type { CheckpointIndex, ReplayBundle, ReplaySnapshot, TrainingStatus } from "./state/types";
+import type { CheckpointEntry, CheckpointIndex, ReplayBundle, ReplaySnapshot, TrainingStatus } from "./state/types";
 
 type RunState = "idle" | "running" | "paused" | "success" | "timeout" | "stopped";
 
@@ -62,6 +62,38 @@ export function App() {
   );
 
   const playbackDelay = playbackFastMode ? 24 : 220;
+  const effectiveEnableInstincts = trainingStatus?.enable_instinct_rewards ?? trainingEnableInstincts;
+  const effectiveCurriculumStage = trainingStatus?.curriculum_stage ?? trainingCurriculumStage;
+  const effectiveDebugRewardBreakdown =
+    trainingStatus?.debug_reward_breakdown ?? trainingDebugRewardBreakdown;
+
+  const currentReplaySelection = useMemo(() => {
+    const latestCheckpoint = checkpointIndex?.checkpoints[checkpointIndex.checkpoints.length - 1] ?? null;
+    const totalTrainingEpisodes =
+      latestCheckpoint?.total_training_episodes ?? trainingStatus?.total_episodes_trained ?? 0;
+    const latestPolicyMode = latestCheckpoint?.policy_mode ?? latestCheckpoint?.policy_name ?? null;
+
+    if (latestCheckpoint && totalTrainingEpisodes > 0) {
+      const resolvedPolicyMode = latestPolicyMode === "neural_policy" ? "neural_policy" : "trained_policy";
+      return {
+        checkpointEpisode: latestCheckpoint.checkpoint_episode,
+        trainerType:
+          latestCheckpoint.trainer_type ??
+          (resolvedPolicyMode === "neural_policy" ? "maskable_ppo" : "hill_climb"),
+        policyType:
+          latestCheckpoint.policy_type ??
+          (resolvedPolicyMode === "neural_policy" ? "neural" : "linear"),
+        policyMode: resolvedPolicyMode,
+      };
+    }
+
+    return {
+      checkpointEpisode: null,
+      trainerType: "baseline",
+      policyType: "instinct",
+      policyMode: "instinct_only",
+    };
+  }, [checkpointIndex, trainingStatus?.total_episodes_trained]);
 
   const currentFrame =
     replay?.frames?.[Math.min(frameIndex, Math.max((replay?.frames.length ?? 0) - 1, 0))] ?? null;
@@ -300,7 +332,18 @@ export function App() {
     setError(null);
     setTrainingError(null);
     try {
-      const bundle = await runReplay({ seed: selectedSeed ?? 11 });
+      const bundle = await runReplay({
+        seed: selectedSeed ?? 11,
+        checkpoint_episode: currentReplaySelection.checkpointEpisode,
+        trainer_type: currentReplaySelection.trainerType,
+        policy_type: currentReplaySelection.policyType,
+        policy_mode: currentReplaySelection.policyMode,
+        effective_config: {
+          enable_instinct_rewards: effectiveEnableInstincts,
+          curriculum_stage: effectiveCurriculumStage,
+          debug_reward_breakdown: effectiveDebugRewardBreakdown,
+        },
+      });
       setReplay(bundle);
       setSelectedCheckpointEpisode(null);
       setSelectedSeed(bundle.seed);
@@ -352,9 +395,9 @@ export function App() {
           <TrainingPanel
             episodes={trainingEpisodes}
             fastMode={trainingFastMode}
-            enableInstincts={trainingStatus?.enable_instinct_rewards ?? trainingEnableInstincts}
-            curriculumStage={trainingStatus?.curriculum_stage ?? trainingCurriculumStage}
-            debugRewardBreakdown={trainingStatus?.debug_reward_breakdown ?? trainingDebugRewardBreakdown}
+            enableInstincts={effectiveEnableInstincts}
+            curriculumStage={effectiveCurriculumStage}
+            debugRewardBreakdown={effectiveDebugRewardBreakdown}
             running={trainingStatus?.running ?? false}
             clearing={clearingTraining}
             batchCompletedEpisodes={trainingStatus?.batch_completed_episodes ?? trainingStatus?.completed_episodes ?? 0}
@@ -375,6 +418,7 @@ export function App() {
           <StatusPanel
             snapshot={snapshot}
             replay={replay}
+            selectedCheckpoint={selectedCheckpoint as CheckpointEntry | null}
             selectedCheckpointEpisode={selectedCheckpointEpisode}
             selectedSeed={selectedSeed}
             runState={statusLabel}

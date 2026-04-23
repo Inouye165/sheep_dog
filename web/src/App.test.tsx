@@ -15,7 +15,11 @@ function jsonResponse(payload: unknown, status = 200): Response {
 const idleTrainingStatus = {
   running: false,
   fast_mode: true,
+  trainer_type: "baseline",
+  policy_type: "instinct",
   enable_instinct_rewards: true,
+  policy_mode: "instinct_only",
+  replay_mode: "baseline",
   debug_reward_breakdown: false,
   curriculum_stage: 1,
   requested_episodes: 0,
@@ -41,6 +45,24 @@ const checkpointIndex = {
       checkpoint: "checkpoint-000000.json",
       evaluation: "evaluation-checkpoint-000000.json",
       replay: "/generated/replays/checkpoint-000000-seed-000011.json",
+      policy_name: "trained_policy",
+      trainer_type: "hill_climb",
+      policy_type: "linear",
+      policy_mode: "trained_policy",
+      replay_mode: "trained_linear",
+      total_training_episodes: 4,
+      environment_config: {
+        dogs: 2,
+        sheep: 2,
+        width: 80,
+        height: 60,
+      },
+      reward_config: {
+        instincts: {
+          curriculum_stage: 1,
+          enable_instinct_rewards: true,
+        },
+      },
       success_rate: 0,
       timeout_rate: 1,
       average_completion_steps: 300,
@@ -80,6 +102,8 @@ const checkpointIndex = {
   latest: {
     checkpoint_episode: 0,
     policy_name: "trained_policy",
+    trainer_type: "hill_climb",
+    policy_type: "linear",
     records: [
       {
         seed: 11,
@@ -120,6 +144,18 @@ const checkpointIndex = {
 const replay = {
   seed: 11,
   policy_name: "trained_policy",
+  trainer_type: "hill_climb",
+  policy_type: "linear",
+  policy_mode: "trained_policy",
+  replay_mode: "trained_linear",
+  environment: {
+    dogs: 2,
+    sheep: 2,
+    width: 80,
+    height: 60,
+    curriculum_stage: 1,
+    enable_instinct_rewards: true,
+  },
   final_snapshot: {
     step: 3,
     simulated_seconds: 3,
@@ -376,6 +412,19 @@ describe("App", () => {
         return jsonResponse({
           ...replay,
           policy_name: "instinct_only",
+          trainer_type: "baseline",
+          policy_type: "instinct",
+          policy_mode: "instinct_only",
+          replay_mode: "baseline",
+          checkpoint_episode: null,
+          environment: {
+            dogs: 2,
+            sheep: 2,
+            width: 80,
+            height: 60,
+            curriculum_stage: 1,
+            enable_instinct_rewards: true,
+          },
           seed: 11,
         });
       }
@@ -392,6 +441,74 @@ describe("App", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       new URL("/api/replay/run", "http://127.0.0.1:8000"),
       expect.objectContaining({ cache: "no-store", method: "POST" }),
+    );
+    const runReplayCall = fetchMock.mock.calls.find(([request]) => String(request).includes("/api/replay/run"));
+    expect(runReplayCall?.[1]).toEqual(
+      expect.objectContaining({
+        body: JSON.stringify({
+          seed: 11,
+          checkpoint_episode: null,
+          trainer_type: "baseline",
+          policy_type: "instinct",
+          policy_mode: "instinct_only",
+          effective_config: {
+            enable_instinct_rewards: true,
+            curriculum_stage: 1,
+            debug_reward_breakdown: false,
+          },
+        }),
+      }),
+    );
+  });
+
+  it("runs the current dogs with the latest trained checkpoint when trained artifacts exist", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.includes("/api/training/status")) {
+        return jsonResponse({
+          ...idleTrainingStatus,
+          trainer_type: "hill_climb",
+          policy_type: "linear",
+          policy_mode: "trained_policy",
+          replay_mode: "trained_linear",
+          total_episodes_trained: 4,
+        });
+      }
+      if (path.includes("checkpoint-index.json")) {
+        return jsonResponse(checkpointIndex);
+      }
+      if (path.includes("checkpoint-000000-seed-000011.json")) {
+        return jsonResponse(replay);
+      }
+      if (path.includes("/api/replay/run")) {
+        return jsonResponse(replay);
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Run current dogs" })).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Run current dogs" }));
+
+    const runReplayCall = fetchMock.mock.calls.find(([request]) => String(request).includes("/api/replay/run"));
+    expect(runReplayCall?.[1]).toEqual(
+      expect.objectContaining({
+        body: JSON.stringify({
+          seed: 11,
+          checkpoint_episode: 0,
+          trainer_type: "hill_climb",
+          policy_type: "linear",
+          policy_mode: "trained_policy",
+          effective_config: {
+            enable_instinct_rewards: true,
+            curriculum_stage: 1,
+            debug_reward_breakdown: false,
+          },
+        }),
+      }),
     );
   });
 

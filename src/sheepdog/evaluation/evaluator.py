@@ -15,6 +15,32 @@ from sheepdog.policies.base import Policy
 from sheepdog.replay.store import ReplayStore
 
 
+def _policy_metadata(policy_name: str, *, trainer_type: str | None, policy_type: str | None) -> tuple[str, str, str]:
+    """Return normalized trainer, policy, and replay-mode labels for replay export."""
+
+    normalized_trainer = trainer_type or "baseline"
+    normalized_policy_type = policy_type or "instinct"
+    replay_mode = "baseline"
+    if policy_name == "neural_policy" or normalized_trainer == "maskable_ppo":
+        normalized_trainer = "maskable_ppo"
+        normalized_policy_type = "neural"
+        replay_mode = "neural_ppo"
+    elif policy_name == "trained_policy":
+        normalized_trainer = "hill_climb"
+        normalized_policy_type = "linear"
+        replay_mode = "trained_linear"
+    elif policy_name == "heuristic_expert":
+        normalized_trainer = "baseline"
+        normalized_policy_type = "heuristic"
+    elif policy_name in {"random_untrained", "random_policy"}:
+        normalized_trainer = "baseline"
+        normalized_policy_type = "random"
+    else:
+        normalized_trainer = "baseline"
+        normalized_policy_type = "instinct"
+    return normalized_trainer, normalized_policy_type, replay_mode
+
+
 @dataclass(frozen=True, slots=True)
 class EvaluationRecord:
     """Per-seed evaluation results."""
@@ -101,13 +127,28 @@ class Evaluator:
             environment = SheepdogEnvironment(self.config)
             result = environment.run_policy(policy, seed, capture_replay=True)
             results.append(result)
+            trainer_type, policy_type, replay_mode = _policy_metadata(
+                result.policy_name,
+                trainer_type=getattr(policy, "trainer_type", None),
+                policy_type=getattr(policy, "policy_type", None),
+            )
             replay_path = self.replay_store.write(
                 f"checkpoint-{checkpoint_episode:06d}-seed-{seed:06d}.json",
                 {
                     "seed": result.seed,
                     "policy_name": result.policy_name,
-                    "trainer_type": getattr(policy, "trainer_type", "hill_climb"),
-                    "policy_type": getattr(policy, "policy_type", "linear"),
+                    "trainer_type": trainer_type,
+                    "policy_type": policy_type,
+                    "policy_mode": result.policy_name,
+                    "replay_mode": replay_mode,
+                    "environment": {
+                        "dogs": self.config.environment.dogs,
+                        "sheep": self.config.environment.sheep,
+                        "width": self.config.environment.width,
+                        "height": self.config.environment.height,
+                        "curriculum_stage": self.config.rewards.instincts.curriculum_stage,
+                        "enable_instinct_rewards": self.config.rewards.instincts.enable_instinct_rewards,
+                    },
                     "final_snapshot": result.final_snapshot.to_dict(),
                     "stats": asdict(result.stats),
                     "frames": [frame.to_dict() for frame in result.replay],
@@ -122,11 +163,17 @@ class Evaluator:
                 )
             )
 
+        summary_trainer_type, summary_policy_type, _summary_replay_mode = _policy_metadata(
+            policy.name,
+            trainer_type=getattr(policy, "trainer_type", None),
+            policy_type=getattr(policy, "policy_type", None),
+        )
+
         summary = EvaluationSummary(
             checkpoint_episode=checkpoint_episode,
             policy_name=policy.name,
-            trainer_type=getattr(policy, "trainer_type", "hill_climb"),
-            policy_type=getattr(policy, "policy_type", "linear"),
+            trainer_type=summary_trainer_type,
+            policy_type=summary_policy_type,
             records=tuple(records),
             success_rate=fmean(1.0 if record.success else 0.0 for record in records),
             timeout_rate=fmean(1.0 if record.timeout else 0.0 for record in records),

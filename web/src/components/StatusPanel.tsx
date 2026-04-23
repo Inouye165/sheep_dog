@@ -1,4 +1,4 @@
-import type { ReplayBundle, ReplaySnapshot } from "../state/types";
+import type { CheckpointEntry, ReplayBundle, ReplaySnapshot } from "../state/types";
 
 function formatRoleDistribution(roleDistribution: Record<string, number> | undefined): string {
   if (!roleDistribution) {
@@ -23,8 +23,23 @@ function policyLabel(policyName: string | undefined): string {
       return "Heuristic expert";
     case "trained_policy":
       return "Trained policy";
+    case "neural_policy":
+      return "Neural PPO policy";
     default:
       return policyName ?? "-";
+  }
+}
+
+function replayModeLabel(replayMode: string | undefined): string {
+  switch (replayMode) {
+    case "trained_linear":
+      return "Trained linear";
+    case "neural_ppo":
+      return "Neural PPO";
+    case "baseline":
+      return "Baseline";
+    default:
+      return replayMode ?? "-";
   }
 }
 
@@ -38,6 +53,8 @@ function policyExplanation(policyName: string | undefined): string | null {
       return "This expert heuristic is pen-aware and uses scripted pressure positioning toward the target.";
     case "trained_policy":
       return "Pen-directed behavior here comes from learned training weights rather than default instinct.";
+    case "neural_policy":
+      return "This replay is using the learned neural PPO policy rather than the instinct-only baseline.";
     default:
       return null;
   }
@@ -46,6 +63,7 @@ function policyExplanation(policyName: string | undefined): string | null {
 interface StatusPanelProps {
   snapshot: ReplaySnapshot | null;
   replay: ReplayBundle | null;
+  selectedCheckpoint: CheckpointEntry | null;
   selectedCheckpointEpisode: number | null;
   selectedSeed: number | null;
   runState: string;
@@ -54,6 +72,7 @@ interface StatusPanelProps {
 export function StatusPanel({
   snapshot,
   replay,
+  selectedCheckpoint,
   selectedCheckpointEpisode,
   selectedSeed,
   runState,
@@ -65,6 +84,21 @@ export function StatusPanel({
   const activeRoleSummary = activeRoles.length > 0 ? activeRoles.join(", ") : "-";
   const roleDistributionSummary = formatRoleDistribution(replay?.stats.role_distribution);
   const explanation = policyExplanation(replay?.policy_name);
+  const trainerType = replay?.trainer_type ?? selectedCheckpoint?.trainer_type ?? "-";
+  const policyType = replay?.policy_type ?? selectedCheckpoint?.policy_type ?? "-";
+  const policyMode = replay?.policy_mode ?? selectedCheckpoint?.policy_mode ?? replay?.policy_name ?? "unloaded";
+  const replayMode = replay?.replay_mode ?? selectedCheckpoint?.replay_mode ?? "-";
+  const replayDogs = replay?.environment?.dogs ?? selectedCheckpoint?.environment_config?.dogs ?? snapshot?.dogs.length ?? replay?.final_snapshot?.dogs.length ?? 0;
+  const replaySheep = replay?.environment?.sheep ?? selectedCheckpoint?.environment_config?.sheep ?? snapshot?.sheep.length ?? replay?.final_snapshot?.sheep.length ?? 0;
+  const replayCurriculumStage =
+    replay?.environment?.curriculum_stage ??
+    selectedCheckpoint?.reward_config?.instincts?.curriculum_stage ??
+    snapshot?.debug?.curriculum_stage ??
+    0;
+  const replayUsesInstinctRewards =
+    replay?.environment?.enable_instinct_rewards ??
+    selectedCheckpoint?.reward_config?.instincts?.enable_instinct_rewards ??
+    false;
   const averageDistanceToPen = snapshot?.average_distance_to_pen ?? replay?.stats.final_avg_distance_to_pen ?? 0;
   const flockSpread = snapshot?.flock_spread ?? replay?.stats.final_flock_spread ?? 0;
   const gridWidth =
@@ -114,11 +148,23 @@ export function StatusPanel({
         </div>
         <div>
           <span>Policy</span>
-          <strong>{policyLabel(replay?.policy_name)}</strong>
+          <strong>{policyLabel(policyMode)}</strong>
         </div>
         <div>
           <span>Grid size</span>
           <strong>{`${gridWidth} x ${gridHeight}`}</strong>
+        </div>
+        <div>
+          <span>Replay kind</span>
+          <strong>{replayModeLabel(replayMode)}</strong>
+        </div>
+        <div>
+          <span>Dogs / sheep</span>
+          <strong>{`${replayDogs} / ${replaySheep}`}</strong>
+        </div>
+        <div>
+          <span>Curriculum stage</span>
+          <strong>{replayCurriculumStage}</strong>
         </div>
       </div>
 
@@ -132,8 +178,16 @@ export function StatusPanel({
           <strong>{snapshot?.no_progress_steps ?? replay?.stats.no_progress_steps ?? 0}</strong>
         </div>
         <div>
+          <span>Trainer type</span>
+          <strong>{trainerType}</strong>
+        </div>
+        <div>
+          <span>Policy type</span>
+          <strong>{policyType}</strong>
+        </div>
+        <div>
           <span>Policy mode</span>
-          <strong>{replay?.policy_name ?? "unloaded"}</strong>
+          <strong>{policyMode}</strong>
         </div>
         <div>
           <span>Active roles</span>
@@ -170,6 +224,10 @@ export function StatusPanel({
         <div>
           <span>Flock spread</span>
           <strong>{flockSpread.toFixed(1)}</strong>
+        </div>
+        <div>
+          <span>Instinct rewards</span>
+          <strong>{replayUsesInstinctRewards ? "enabled" : "disabled"}</strong>
         </div>
       </div>
       {(replay?.stats?.no_progress_steps ?? 0) > 0 || snapshot?.status === "no-progress" ? (

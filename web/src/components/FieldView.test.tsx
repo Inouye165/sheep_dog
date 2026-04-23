@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { FieldView } from "./FieldView";
 import { StatusPanel } from "./StatusPanel";
+import { dogColor } from "./dogPalette";
 
 describe("FieldView", () => {
   it("renders the pen and agents", () => {
@@ -12,7 +13,10 @@ describe("FieldView", () => {
           simulated_seconds: 1,
           grid_width: 80,
           grid_height: 60,
-          dogs: [{ index: 0, x: 2, y: 3, last_action: "right", role: "rear_pressure" }],
+          dogs: [
+            { index: 0, x: 2, y: 3, last_action: "right", role: "rear_pressure" },
+            { index: 1, x: 4, y: 3, last_action: "left", role: "left_flanker" },
+          ],
           sheep: [{ index: 0, x: 10, y: 5, penned: false }],
           pen: { origin: { x: 15, y: 2 }, width: 4, height: 4 },
           penned_count: 0,
@@ -30,7 +34,11 @@ describe("FieldView", () => {
 
     expect(screen.getByLabelText("Simulation field")).toBeInTheDocument();
     expect(screen.getByText("Herding field")).toBeInTheDocument();
-    expect(screen.getByText("RP")).toBeInTheDocument();
+    expect(screen.getByText("Dog 1 - Rear")).toBeInTheDocument();
+    expect(screen.getByText("Dog 2 - Left flank")).toBeInTheDocument();
+    expect(screen.getByText("D1")).toBeInTheDocument();
+    expect(screen.getByText("Left flank")).toBeInTheDocument();
+    expect(dogColor(0)).not.toBe(dogColor(1));
   });
 
   it("shows the grid size in status", () => {
@@ -57,6 +65,18 @@ describe("FieldView", () => {
         replay={{
           seed: 11,
           policy_name: "trained_policy",
+          trainer_type: "hill_climb",
+          policy_type: "linear",
+          policy_mode: "trained_policy",
+          replay_mode: "trained_linear",
+          environment: {
+            dogs: 1,
+            sheep: 1,
+            width: 80,
+            height: 60,
+            curriculum_stage: 1,
+            enable_instinct_rewards: true,
+          },
           final_snapshot: {
             step: 1,
             simulated_seconds: 1,
@@ -109,6 +129,7 @@ describe("FieldView", () => {
           },
           frames: [],
         }}
+        selectedCheckpoint={null}
         selectedCheckpointEpisode={0}
         selectedSeed={11}
         runState="running"
@@ -120,6 +141,14 @@ describe("FieldView", () => {
     expect(screen.getByText("Role distribution")).toBeInTheDocument();
     expect(screen.getByText("rear_pressure: 1")).toBeInTheDocument();
     expect(screen.getByText("Avg distance to pen")).toBeInTheDocument();
+    expect(screen.getByText("Trainer type")).toBeInTheDocument();
+    expect(screen.getByText("hill_climb")).toBeInTheDocument();
+    expect(screen.getByText("Policy type")).toBeInTheDocument();
+    expect(screen.getByText("linear")).toBeInTheDocument();
+    expect(screen.getByText("Replay kind")).toBeInTheDocument();
+    expect(screen.getByText("Trained linear")).toBeInTheDocument();
+    expect(screen.getByText("Dogs / sheep")).toBeInTheDocument();
+    expect(screen.getByText("1 / 1")).toBeInTheDocument();
   });
 
   it("uses fixed field dimensions instead of scaling to group positions", () => {

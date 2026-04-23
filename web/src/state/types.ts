@@ -91,6 +91,19 @@ export interface ReplayFrame {
 export interface ReplayBundle {
   seed: number;
   policy_name: string;
+  trainer_type?: string;
+  policy_type?: string;
+  policy_mode?: string;
+  replay_mode?: string;
+  checkpoint_episode?: number | null;
+  environment?: {
+    dogs: number;
+    sheep: number;
+    width: number;
+    height: number;
+    curriculum_stage: number;
+    enable_instinct_rewards: boolean;
+  };
   final_snapshot: ReplaySnapshot;
   stats: {
     steps: number;
@@ -118,8 +131,11 @@ export interface ReplayBundle {
 export interface TrainingStatus {
   running: boolean;
   fast_mode: boolean;
+  trainer_type?: string;
+  policy_type?: string;
   enable_instinct_rewards: boolean;
   policy_mode?: string;
+  replay_mode?: string;
   allow_instinct_target_awareness?: boolean;
   handler_target_enabled?: boolean;
   debug_reward_breakdown: boolean;
@@ -150,6 +166,15 @@ export interface TrainingStartRequest {
 
 export interface ReplayRunRequest {
   seed: number;
+  checkpoint_episode?: number | null;
+  policy_mode?: string;
+  trainer_type?: string;
+  policy_type?: string;
+  effective_config?: {
+    enable_instinct_rewards: boolean;
+    curriculum_stage: number;
+    debug_reward_breakdown: boolean;
+  };
 }
 
 export interface EvaluationRecord {
@@ -172,6 +197,24 @@ export interface CheckpointEntry {
   checkpoint: string;
   evaluation: string;
   replay: string;
+  policy_name?: string;
+  trainer_type?: string;
+  policy_type?: string;
+  policy_mode?: string;
+  replay_mode?: string;
+  total_training_episodes?: number;
+  environment_config?: {
+    dogs: number;
+    sheep: number;
+    width: number;
+    height: number;
+  };
+  reward_config?: {
+    instincts?: {
+      curriculum_stage?: number;
+      enable_instinct_rewards?: boolean;
+    };
+  };
   success_rate: number;
   timeout_rate: number;
   average_completion_steps: number;
@@ -184,6 +227,8 @@ export interface CheckpointEntry {
 export interface EvaluationSummary {
   checkpoint_episode: number;
   policy_name: string;
+  trainer_type?: string;
+  policy_type?: string;
   records: EvaluationRecord[];
   success_rate: number;
   timeout_rate: number;

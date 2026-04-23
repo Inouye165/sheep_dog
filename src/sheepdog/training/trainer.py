@@ -17,6 +17,16 @@ from sheepdog.evaluation.evaluator import Evaluator
 from sheepdog.policies.trainable import PolicyWeights, TrainableLinearPolicy
 
 
+def _checkpoint_replay_mode(policy_name: str, total_training_episodes: int) -> str:
+    """Return a truthfulness label for exported checkpoints."""
+
+    if policy_name == "neural_policy":
+        return "neural_ppo"
+    if policy_name == "trained_policy" and total_training_episodes > 0:
+        return "trained_linear"
+    return "baseline"
+
+
 @dataclass(frozen=True, slots=True)
 class TrainingRunSummary:
     """Metadata for a training run."""
@@ -222,6 +232,9 @@ class Trainer:
                     "policy_name": best_policy.name,
                     "trainer_type": "hill_climb",
                     "policy_type": "linear",
+                    "policy_mode": best_policy.name,
+                    "replay_mode": _checkpoint_replay_mode(best_policy.name, cumulative_episode),
+                    "total_training_episodes": cumulative_episode,
                     "success_rate": summary.success_rate,
                     "timeout_rate": summary.timeout_rate,
                     "average_completion_steps": summary.average_completion_steps,
@@ -230,6 +243,8 @@ class Trainer:
                     "average_reward": summary.average_reward,
                     "average_distance_to_pen": summary.average_distance_to_pen,
                     "average_flock_spread": summary.average_flock_spread,
+                    "environment_config": asdict(self.config.environment),
+                    "reward_config": asdict(self.config.rewards),
                     "records": [record.to_dict() for record in summary.records],
                 }
                 checkpoint_payloads = self._merge_checkpoint(
@@ -326,6 +341,8 @@ class Trainer:
             "final_weights": asdict(weights),
             "trainer_type": "hill_climb",
             "policy_type": "linear",
+            "policy_mode": "trained_policy" if total_episodes_trained > 0 else "instinct_only",
+            "replay_mode": "trained_linear" if total_episodes_trained > 0 else "baseline",
             "total_episodes_trained": total_episodes_trained,
         }
         path = self.output_root / "training-summary.json"

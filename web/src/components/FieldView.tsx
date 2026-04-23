@@ -1,4 +1,5 @@
 import type { ReplaySnapshot } from "../state/types";
+import { dogColor } from "./dogPalette";
 
 interface FieldViewProps {
   snapshot: ReplaySnapshot | null;
@@ -7,11 +8,11 @@ interface FieldViewProps {
 type Side = "top" | "bottom" | "left" | "right";
 
 const ROLE_LABELS: Record<string, string> = {
-  rear_pressure: "RP",
-  left_flanker: "LF",
-  right_flanker: "RF",
-  collector: "CO",
-  blocker: "BL",
+  rear_pressure: "Rear",
+  left_flanker: "Left flank",
+  right_flanker: "Right flank",
+  collector: "Collector",
+  blocker: "Blocker",
 };
 
 function fenceSegments(snapshot: ReplaySnapshot): Array<{ side: Side; x1: number; y1: number; x2: number; y2: number }> {
@@ -42,18 +43,16 @@ export function FieldView({ snapshot }: FieldViewProps) {
   const fenceStroke = 0.32 * densityScale;
   const gateRadius = 0.18 * densityScale;
   const penStroke = 0.08 * densityScale;
-  const fontSize = 0.34 * densityScale;
+  const fontSize = 0.46 * densityScale;
   const transitionStyle = {
     transition: "transform 150ms linear, cx 150ms linear, cy 150ms linear, x 150ms linear, y 150ms linear",
   };
-  const roleTagX = -0.62 * densityScale;
-  const roleTagY = 0.52 * densityScale;
-  const roleTagWidth = 1.24 * densityScale;
-  const roleTagHeight = 0.38 * densityScale;
+  const roleTagY = 0.66 * densityScale;
+  const roleTagHeight = 0.54 * densityScale;
   const roleTagRadius = 0.12 * densityScale;
   const roleTagStroke = 0.04 * densityScale;
-  const roleLabelY = 0.71 * densityScale;
-  const roleLabelSize = 0.22 * densityScale;
+  const roleLabelY = 0.94 * densityScale;
+  const roleLabelSize = 0.28 * densityScale;
 
   return (
     <section className="field-card" aria-label="Simulation field">
@@ -69,6 +68,28 @@ export function FieldView({ snapshot }: FieldViewProps) {
           </div>
         ) : null}
       </div>
+      {snapshot?.dogs.length ? (
+        <div className="field-card__meta" aria-label="Dog legend">
+          {snapshot.dogs.map((dog) => (
+            <span key={`legend-${dog.index}`}>
+              <span
+                aria-hidden="true"
+                style={{
+                  display: "inline-block",
+                  width: "0.85rem",
+                  height: "0.85rem",
+                  borderRadius: "999px",
+                  marginRight: "0.4rem",
+                  verticalAlign: "middle",
+                  backgroundColor: dogColor(dog.index),
+                  border: "1px solid rgba(255,255,255,0.55)",
+                }}
+              />
+              {`Dog ${dog.index + 1}${dog.role ? ` - ${ROLE_LABELS[dog.role] ?? dog.role}` : ""}`}
+            </span>
+          ))}
+        </div>
+      ) : null}
       <div className="field-stage">
         {snapshot ? (
           <svg className="field-stage__svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Sheepdog simulation map">
@@ -121,11 +142,25 @@ export function FieldView({ snapshot }: FieldViewProps) {
                 </text>
               </g>
             ))}
-            {snapshot.dogs.map((dog) => (
-              <g key={`dog-${dog.index}`} transform={`translate(${dog.x + 0.5}, ${dog.y + 0.5})`}>
-                <circle r={dogRadius} fill="#1d4ed8" stroke="#dbeafe" strokeWidth={penStroke} style={transitionStyle} />
-                <text textAnchor="middle" dominantBaseline="central" fill="#eff6ff" fontSize={fontSize} fontWeight={700} style={transitionStyle}>
-                  D
+            {snapshot.dogs.map((dog) => {
+              const roleLabel = ROLE_LABELS[dog.role ?? ""] ?? dog.role ?? "Dog";
+              const roleTagWidth = Math.max(1.9, roleLabel.length * 0.28) * densityScale;
+              const roleTagX = -roleTagWidth / 2;
+              return (
+              <g key={`dog-${dog.index}`} transform={`translate(${dog.x + 0.5}, ${dog.y + 0.5})`} aria-label={`Dog ${dog.index + 1}`}>
+                <circle r={dogRadius} fill={dogColor(dog.index)} stroke="rgba(255,255,255,0.82)" strokeWidth={penStroke} style={transitionStyle} />
+                <text
+                  textAnchor="middle"
+                  dominantBaseline="central"
+                  fill="#f8fafc"
+                  fontSize={fontSize}
+                  fontWeight={800}
+                  stroke="rgba(15, 23, 42, 0.72)"
+                  strokeWidth={0.08 * densityScale}
+                  paintOrder="stroke"
+                  style={transitionStyle}
+                >
+                  {`D${dog.index + 1}`}
                 </text>
                 {dog.role ? (
                   <>
@@ -136,24 +171,24 @@ export function FieldView({ snapshot }: FieldViewProps) {
                       height={roleTagHeight}
                       rx={roleTagRadius}
                       fill="rgba(15, 23, 42, 0.88)"
-                      stroke="rgba(219, 234, 254, 0.5)"
+                      stroke="rgba(248, 250, 252, 0.6)"
                       strokeWidth={roleTagStroke}
                     />
                     <text
                       textAnchor="middle"
                       dominantBaseline="middle"
                       y={roleLabelY}
-                      fill="#dbeafe"
+                      fill="#f8fafc"
                       fontSize={roleLabelSize}
-                      fontWeight={700}
+                      fontWeight={800}
                     >
-                      {ROLE_LABELS[dog.role] ?? dog.role.slice(0, 2).toUpperCase()}
+                      {roleLabel}
                     </text>
-                    <title>{`Dog ${dog.index}: ${dog.role.replaceAll("_", " ")}`}</title>
+                    <title>{`Dog ${dog.index + 1}: ${dog.role.replaceAll("_", " ")}`}</title>
                   </>
                 ) : null}
               </g>
-            ))}
+            );})}
           </svg>
         ) : (
           <div className="field-stage__empty">

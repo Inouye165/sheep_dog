@@ -5,21 +5,232 @@ from __future__ import annotations
 import json
 import shutil
 import threading
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
 from sheepdog.checkpoints.store import CheckpointMetadata
-from sheepdog.config import LabConfig, PolicyConfig, TrainingConfig
+from sheepdog.config import (
+    EnvironmentConfig,
+    InstinctRewardConfig,
+    LabConfig,
+    RewardConfig,
+    TrainingConfig,
+)
 from sheepdog.curriculum import apply_training_profile
 from sheepdog.environment import SheepdogEnvironment
 from sheepdog.policies.base import PolicyMode
 from sheepdog.policies.factory import load_playable_policy
-from sheepdog.policies.trainable import PolicyWeights, TrainableLinearPolicy
+from sheepdog.policies.heuristic import InstinctOnlyPolicy
 from sheepdog.training.factory import create_trainer
 from sheepdog.training.trainer import Trainer
+
+
+@dataclass(frozen=True, slots=True)
+class ReplaySelection:
+    """Resolved replay policy, config, and truthfulness metadata."""
+
+    config: LabConfig
+    checkpoint_episode: int | None
+    trainer_type: str
+    policy_type: str
+    policy_mode: str
+    replay_mode: str
+
+
+def _policy_metadata(
+    policy_mode: str,
+    trainer_type: str | None = None,
+    policy_type: str | None = None,
+    *,
+    trained: bool = False,
+) -> tuple[str, str, str]:
+    """Return normalized trainer, policy, and replay-mode labels."""
+
+    normalized_mode = policy_mode or "instinct_only"
+    normalized_trainer = trainer_type or "baseline"
+    normalized_policy_type = policy_type or "instinct"
+    replay_mode = "baseline"
+
+    if normalized_mode == "neural_policy" or normalized_trainer == "maskable_ppo":
+        normalized_trainer = "maskable_ppo"
+        normalized_policy_type = "neural"
+        replay_mode = "neural_ppo"
+    elif normalized_mode == "trained_policy" and trained:
+        normalized_trainer = "hill_climb"
+        normalized_policy_type = "linear"
+        replay_mode = "trained_linear"
+    elif normalized_mode == "heuristic_expert":
+        normalized_trainer = "baseline"
+        normalized_policy_type = "heuristic"
+    elif normalized_mode in {"random_untrained", "random_policy"}:
+        normalized_trainer = "baseline"
+        normalized_policy_type = "random"
+    else:
+        normalized_mode = "instinct_only"
+        normalized_trainer = "baseline"
+        normalized_policy_type = "instinct"
+
+    return normalized_trainer, normalized_policy_type, replay_mode
+
+
+def _reward_config_from_payload(payload: dict[str, Any]) -> RewardConfig:
+    reward_payload = dict(payload)
+    instincts_payload = reward_payload.pop("instincts", None)
+    instincts = (
+        InstinctRewardConfig(**instincts_payload)
+        if isinstance(instincts_payload, dict)
+        else InstinctRewardConfig()
+    )
+    return RewardConfig(instincts=instincts, **reward_payload)
+
+
+def _load_json(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _load_checkpoint_payload(output_root: Path, checkpoint_episode: int) -> dict[str, Any]:
+    checkpoint_path = output_root / "checkpoints" / f"checkpoint-{checkpoint_episode:06d}.json"
+    payload = _load_json(checkpoint_path)
+    if payload is None:
+        raise FileNotFoundError(f"Checkpoint {checkpoint_episode} not found")
+    return payload
+
+
+def _load_latest_checkpoint_payload(output_root: Path) -> dict[str, Any] | None:
+    summary_payload = _load_json(output_root / "training-summary.json")
+    if not isinstance(summary_payload, dict):
+        return None
+    checkpoints = summary_payload.get("checkpoints")
+    if not isinstance(checkpoints, list) or not checkpoints:
+        return None
+    latest = checkpoints[-1]
+    checkpoint_name = latest.get("checkpoint")
+    if isinstance(checkpoint_name, str):
+        payload = _load_json(output_root / "checkpoints" / checkpoint_name)
+        if isinstance(payload, dict):
+            return payload
+    checkpoint_episode = latest.get("checkpoint_episode")
+    if checkpoint_episode is None:
+        return None
+    return _load_checkpoint_payload(output_root, int(checkpoint_episode))
+
+
+def _config_from_checkpoint_payload(base_config: LabConfig, payload: dict[str, Any]) -> LabConfig:
+    environment_payload = payload.get("environment_config")
+    reward_payload = payload.get("reward_config")
+    environment = (
+        EnvironmentConfig(**environment_payload)
+        if isinstance(environment_payload, dict)
+        else base_config.environment
+    )
+    rewards = (
+        _reward_config_from_payload(reward_payload)
+        if isinstance(reward_payload, dict)
+        else base_config.rewards
+    )
+    return replace(base_config, environment=environment, rewards=rewards)
+
+
+def _resolve_replay_selection(
+    base_config: LabConfig,
+    *,
+    checkpoint_episode: int | None = None,
+    policy_mode: PolicyMode | None = None,
+    effective_config: dict[str, Any] | None = None,
+) -> ReplaySelection:
+    """Resolve the truthful replay mode and effective config for one run."""
+
+    output_root = Path(base_config.training.output_dir)
+    requested_mode = policy_mode
+    if checkpoint_episode is not None:
+        checkpoint_payload = _load_checkpoint_payload(output_root, checkpoint_episode)
+        resolved_mode = str(checkpoint_payload.get("policy_name") or requested_mode or "instinct_only")
+        trained = int(checkpoint_payload.get("total_training_episodes", 0)) > 0
+        trainer_type, policy_type, replay_mode = _policy_metadata(
+            resolved_mode,
+            str(checkpoint_payload.get("trainer_type") or ""),
+            str(checkpoint_payload.get("policy_type") or ""),
+            trained=trained,
+        )
+        replay_config = _config_from_checkpoint_payload(base_config, checkpoint_payload)
+        replay_config = replace(
+            replay_config,
+            policy=replace(replay_config.policy, policy_mode=resolved_mode),
+        )
+        return ReplaySelection(
+            config=replay_config,
+            checkpoint_episode=checkpoint_episode,
+            trainer_type=trainer_type,
+            policy_type=policy_type,
+            policy_mode=resolved_mode,
+            replay_mode=replay_mode,
+        )
+
+    latest_checkpoint_payload = _load_latest_checkpoint_payload(output_root)
+    if requested_mode in {None, "trained_policy", "neural_policy"} and latest_checkpoint_payload:
+        latest_total = int(latest_checkpoint_payload.get("total_training_episodes", 0))
+        latest_mode = str(latest_checkpoint_payload.get("policy_name") or requested_mode or "instinct_only")
+        if latest_total > 0 and (requested_mode is None or requested_mode == latest_mode):
+            latest_checkpoint_episode = int(latest_checkpoint_payload.get("checkpoint_episode", 0))
+            trainer_type, policy_type, replay_mode = _policy_metadata(
+                latest_mode,
+                str(latest_checkpoint_payload.get("trainer_type") or ""),
+                str(latest_checkpoint_payload.get("policy_type") or ""),
+                trained=True,
+            )
+            replay_config = _config_from_checkpoint_payload(base_config, latest_checkpoint_payload)
+            replay_config = replace(
+                replay_config,
+                policy=replace(replay_config.policy, policy_mode=latest_mode),
+            )
+            return ReplaySelection(
+                config=replay_config,
+                checkpoint_episode=latest_checkpoint_episode,
+                trainer_type=trainer_type,
+                policy_type=policy_type,
+                policy_mode=latest_mode,
+                replay_mode=replay_mode,
+            )
+
+    enable_instinct_rewards = None
+    curriculum_stage = None
+    debug_reward_breakdown = None
+    if isinstance(effective_config, dict):
+        enable_instinct_rewards = effective_config.get("enable_instinct_rewards")
+        curriculum_stage = effective_config.get("curriculum_stage")
+        debug_reward_breakdown = effective_config.get("debug_reward_breakdown")
+    replay_config = apply_training_profile(
+        base_config,
+        enable_instinct_rewards=(
+            None if enable_instinct_rewards is None else bool(enable_instinct_rewards)
+        ),
+        curriculum_stage=(None if curriculum_stage is None else int(curriculum_stage)),
+        debug_reward_breakdown=(
+            None if debug_reward_breakdown is None else bool(debug_reward_breakdown)
+        ),
+    )
+    resolved_mode = requested_mode or "instinct_only"
+    trainer_type, policy_type, replay_mode = _policy_metadata(resolved_mode, trained=False)
+    replay_config = replace(
+        replay_config,
+        policy=replace(replay_config.policy, policy_mode=resolved_mode),
+    )
+    return ReplaySelection(
+        config=replay_config,
+        checkpoint_episode=None,
+        trainer_type=trainer_type,
+        policy_type=policy_type,
+        policy_mode=resolved_mode,
+        replay_mode=replay_mode,
+    )
 
 
 def _read_persisted_total() -> int:
@@ -99,7 +310,7 @@ def _replay_payload(result: Any) -> dict[str, Any]:
 
 
 class _BaselineExportTrainer(Trainer):
-    """Expose the baseline export flow through one public helper."""
+    """Expose protected export helpers for the baseline flow."""
 
     def export_baseline_assets(
         self,
@@ -107,7 +318,6 @@ class _BaselineExportTrainer(Trainer):
         checkpoint_payload: dict[str, Any],
         representative_replay_path: Path,
         checkpoint_path: Path,
-        baseline_policy: TrainableLinearPolicy,
         summary: Any,
     ) -> None:
         self._export_web_assets(
@@ -116,12 +326,6 @@ class _BaselineExportTrainer(Trainer):
             summary,
             representative_replay_path,
             checkpoint_path,
-        )
-        self._export_training_summary([checkpoint_payload], baseline_policy.weights, 0)
-        self._save_state(
-            0,
-            baseline_policy.weights,
-            self._evaluate_candidate(baseline_policy).score,
         )
 
 
@@ -136,11 +340,15 @@ class TrainingManager:
     def _initial_status(self) -> dict[str, Any]:
         config = LabConfig()
         instincts = config.rewards.instincts
+        trainer_type, policy_type, replay_mode = _policy_metadata(config.policy.policy_mode)
         return {
             "running": False,
             "fast_mode": True,
+            "trainer_type": trainer_type,
+            "policy_type": policy_type,
             "enable_instinct_rewards": instincts.enable_instinct_rewards,
             "policy_mode": config.policy.policy_mode,
+            "replay_mode": replay_mode,
             "allow_instinct_target_awareness": config.policy.allow_instinct_target_awareness,
             "handler_target_enabled": config.policy.handler_target_enabled,
             "debug_reward_breakdown": instincts.debug_reward_breakdown,
@@ -247,7 +455,7 @@ class TrainingManager:
 
     def _export_untrained_baseline(self, config: LabConfig) -> None:
         trainer = _BaselineExportTrainer(config, config.training.output_dir)
-        baseline_policy = TrainableLinearPolicy(PolicyWeights())
+        baseline_policy = InstinctOnlyPolicy()
         checkpoint_episode = 0
         summary, evaluation_json, _csv_path = trainer.evaluator.evaluate(
             baseline_policy,
@@ -259,8 +467,8 @@ class TrainingManager:
             checkpoint_episode=checkpoint_episode,
             total_training_episodes=0,
             policy_name=baseline_policy.name,
-            trainer_type="hill_climb",
-            policy_type="linear",
+            trainer_type="baseline",
+            policy_type="instinct",
             seed=config.training.train_seed,
             success_rate=summary.success_rate,
             average_completion_steps=summary.average_completion_steps,
@@ -269,7 +477,6 @@ class TrainingManager:
             average_reward=summary.average_reward,
             environment_config=asdict(config.environment),
             reward_config=asdict(config.rewards),
-            policy_weights=asdict(baseline_policy.weights),
             evaluation_replay_path=str(representative_replay_path),
         )
         checkpoint_path = trainer.checkpoint_store.write(metadata)
@@ -279,8 +486,11 @@ class TrainingManager:
             "evaluation": evaluation_json.name,
             "replay": str(representative_replay_path),
             "policy_name": baseline_policy.name,
-            "trainer_type": "hill_climb",
-            "policy_type": "linear",
+            "trainer_type": "baseline",
+            "policy_type": "instinct",
+            "policy_mode": baseline_policy.name,
+            "replay_mode": "baseline",
+            "total_training_episodes": 0,
             "success_rate": summary.success_rate,
             "timeout_rate": summary.timeout_rate,
             "average_completion_steps": summary.average_completion_steps,
@@ -289,6 +499,8 @@ class TrainingManager:
             "average_reward": summary.average_reward,
             "average_distance_to_pen": summary.average_distance_to_pen,
             "average_flock_spread": summary.average_flock_spread,
+            "environment_config": asdict(config.environment),
+            "reward_config": asdict(config.rewards),
             "records": [record.to_dict() for record in summary.records],
         }
         trainer.export_baseline_assets(
@@ -296,8 +508,34 @@ class TrainingManager:
             checkpoint_payload,
             representative_replay_path,
             checkpoint_path,
-            baseline_policy,
             summary,
+        )
+        training_summary_path = Path(config.training.output_dir) / "training-summary.json"
+        training_summary_path.write_text(
+            json.dumps(
+                {
+                    "checkpoints": [checkpoint_payload],
+                    "trainer_type": "baseline",
+                    "policy_type": "instinct",
+                    "policy_mode": baseline_policy.name,
+                    "replay_mode": "baseline",
+                    "total_episodes_trained": 0,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        state_path = Path(config.training.output_dir) / Trainer.STATE_FILENAME
+        state_path.write_text(
+            json.dumps(
+                {
+                    "total_episodes_trained": 0,
+                    "weights": None,
+                    "best_score": None,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
         )
 
     def _remove_path(self, path: Path) -> None:
@@ -318,21 +556,45 @@ class TrainingManager:
         *,
         checkpoint_episode: int | None = None,
         policy_mode: PolicyMode | None = None,
+        effective_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         config = LabConfig()
-        effective_policy = policy_mode or config.policy.policy_mode
-        effective_config = replace(config, policy=PolicyConfig(policy_mode=effective_policy))
-        policy = _load_playable_policy(
-            effective_config,
+        selection = _resolve_replay_selection(
+            config,
             checkpoint_episode=checkpoint_episode,
-            policy_mode=effective_policy,
+            policy_mode=policy_mode,
+            effective_config=effective_config,
         )
-        result = SheepdogEnvironment(effective_config).run_policy(
+        policy = _load_playable_policy(
+            selection.config,
+            checkpoint_episode=selection.checkpoint_episode,
+            policy_mode=selection.policy_mode,
+        )
+        result = SheepdogEnvironment(selection.config).run_policy(
             policy,
             seed=seed,
             capture_replay=True,
         )
         payload = _replay_payload(result)
+        payload.update(
+            {
+                "trainer_type": selection.trainer_type,
+                "policy_type": selection.policy_type,
+                "policy_mode": selection.policy_mode,
+                "replay_mode": selection.replay_mode,
+                "checkpoint_episode": selection.checkpoint_episode,
+                "environment": {
+                    "dogs": selection.config.environment.dogs,
+                    "sheep": selection.config.environment.sheep,
+                    "width": selection.config.environment.width,
+                    "height": selection.config.environment.height,
+                    "curriculum_stage": selection.config.rewards.instincts.curriculum_stage,
+                    "enable_instinct_rewards": (
+                        selection.config.rewards.instincts.enable_instinct_rewards
+                    ),
+                },
+            }
+        )
         replay_path = Path(config.training.web_export_dir) / "latest-replay.json"
         replay_path.parent.mkdir(parents=True, exist_ok=True)
         replay_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -396,8 +658,11 @@ class TrainingManager:
                     "running": True,
                     "phase": "training",
                     "fast_mode": fast_mode,
+                    "trainer_type": job_config.training.trainer_type,
+                    "policy_type": job_config.training.policy_type,
                     "enable_instinct_rewards": job_config.rewards.instincts.enable_instinct_rewards,
                     "policy_mode": job_config.policy.policy_mode,
+                    "replay_mode": "baseline",
                     "allow_instinct_target_awareness": (
                         job_config.policy.allow_instinct_target_awareness
                     ),
@@ -474,6 +739,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             seed = int(payload.get("seed", 11))
             checkpoint_episode = payload.get("checkpoint_episode")
             policy_mode = payload.get("policy_mode")
+            effective_config = payload.get("effective_config")
             try:
                 replay = self.manager.run_live_replay(
                     seed,
@@ -481,6 +747,9 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                         None if checkpoint_episode is None else int(checkpoint_episode)
                     ),
                     policy_mode=policy_mode,
+                    effective_config=(
+                        effective_config if isinstance(effective_config, dict) else None
+                    ),
                 )
             except FileNotFoundError as exc:
                 self._json_response({"error": str(exc)}, status=HTTPStatus.NOT_FOUND)

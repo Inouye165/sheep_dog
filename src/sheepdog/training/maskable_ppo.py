@@ -118,6 +118,11 @@ class MaskablePPOTrainer(Trainer):
                 "policy_name": policy.name,
                 "trainer_type": policy.trainer_type,
                 "policy_type": policy.policy_type,
+                "policy_mode": policy.name,
+                "replay_mode": "neural_ppo",
+                "total_training_episodes": (
+                    self.total_episodes_trained + len(train_config.checkpoint_episodes)
+                ),
                 "policy_state_path": str(saved_model_path),
                 "success_rate": summary.success_rate,
                 "timeout_rate": summary.timeout_rate,
@@ -127,6 +132,8 @@ class MaskablePPOTrainer(Trainer):
                 "average_reward": summary.average_reward,
                 "average_distance_to_pen": summary.average_distance_to_pen,
                 "average_flock_spread": summary.average_flock_spread,
+                "environment_config": self.config.to_dict()["environment"],
+                "reward_config": self.config.to_dict()["rewards"],
                 "records": [record.to_dict() for record in summary.records],
             }
             checkpoint_payloads = self._merge_checkpoint(checkpoint_payloads, checkpoint_payload)
@@ -175,6 +182,8 @@ class MaskablePPOTrainer(Trainer):
             "policy_config": policy_config,
             "trainer_type": "maskable_ppo",
             "policy_type": "neural",
+            "policy_mode": "neural_policy",
+            "replay_mode": "neural_ppo",
             "total_episodes_trained": total_episodes_trained,
         }
         path = self.output_root / "training-summary.json"
