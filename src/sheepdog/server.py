@@ -16,9 +16,9 @@ from sheepdog.config import LabConfig, PolicyConfig, TrainingConfig
 from sheepdog.curriculum import apply_training_profile
 from sheepdog.environment import SheepdogEnvironment
 from sheepdog.policies.base import PolicyMode
-from sheepdog.policies.heuristic import HeuristicExpertPolicy, InstinctOnlyPolicy
-from sheepdog.policies.random_policy import RandomPolicy
+from sheepdog.policies.factory import load_playable_policy
 from sheepdog.policies.trainable import PolicyWeights, TrainableLinearPolicy
+from sheepdog.training.factory import create_trainer
 from sheepdog.training.trainer import Trainer
 
 
@@ -79,28 +79,11 @@ def _load_playable_policy(
 ) -> object:
     """Return a runnable policy for replay requests."""
 
-    selected_mode = policy_mode or config.policy.policy_mode
-    if selected_mode in {"random_untrained", "random_policy"}:
-        return RandomPolicy()
-    if selected_mode == "heuristic_expert":
-        return HeuristicExpertPolicy()
-    if selected_mode == "instinct_only":
-        return InstinctOnlyPolicy()
-
-    output_root = Path(config.training.output_dir)
-    weights_payload: dict[str, float] | None = None
-    if checkpoint_episode is not None:
-        checkpoint_path = output_root / "checkpoints" / f"checkpoint-{checkpoint_episode:06d}.json"
-        if not checkpoint_path.exists():
-            raise FileNotFoundError(f"Checkpoint {checkpoint_episode} not found")
-        payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-        weights_payload = payload.get("policy_weights")
-    else:
-        state_path = output_root / Trainer.STATE_FILENAME
-        if state_path.exists():
-            payload = json.loads(state_path.read_text(encoding="utf-8"))
-            weights_payload = payload.get("weights")
-    return TrainableLinearPolicy(PolicyWeights.from_dict(weights_payload))
+    return load_playable_policy(
+        config,
+        checkpoint_episode=checkpoint_episode,
+        policy_mode=policy_mode,
+    )
 
 
 def _replay_payload(result: Any) -> dict[str, Any]:
@@ -276,6 +259,8 @@ class TrainingManager:
             checkpoint_episode=checkpoint_episode,
             total_training_episodes=0,
             policy_name=baseline_policy.name,
+            trainer_type="hill_climb",
+            policy_type="linear",
             seed=config.training.train_seed,
             success_rate=summary.success_rate,
             average_completion_steps=summary.average_completion_steps,
@@ -293,12 +278,17 @@ class TrainingManager:
             "checkpoint": checkpoint_path.name,
             "evaluation": evaluation_json.name,
             "replay": str(representative_replay_path),
+            "policy_name": baseline_policy.name,
+            "trainer_type": "hill_climb",
+            "policy_type": "linear",
             "success_rate": summary.success_rate,
             "timeout_rate": summary.timeout_rate,
             "average_completion_steps": summary.average_completion_steps,
             "average_completion_seconds": summary.average_completion_seconds,
             "average_sheep_penned": summary.average_sheep_penned,
             "average_reward": summary.average_reward,
+            "average_distance_to_pen": summary.average_distance_to_pen,
+            "average_flock_spread": summary.average_flock_spread,
             "records": [record.to_dict() for record in summary.records],
         }
         trainer.export_baseline_assets(
@@ -365,7 +355,7 @@ class TrainingManager:
             debug_reward_breakdown=debug_reward_breakdown,
         )
         total_episodes = max(1, requested_episodes)
-        trainer = Trainer(job_config, job_config.training.output_dir)
+        trainer = create_trainer(job_config, job_config.training.output_dir)
 
         def progress_callback(payload: dict[str, Any]) -> None:
             checkpoint_episode = payload.get("checkpoint_episode")

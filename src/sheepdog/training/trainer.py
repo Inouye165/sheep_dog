@@ -200,6 +200,8 @@ class Trainer:
                     checkpoint_episode=cumulative_episode,
                     total_training_episodes=cumulative_episode,
                     policy_name=best_policy.name,
+                    trainer_type="hill_climb",
+                    policy_type="linear",
                     seed=train_config.train_seed,
                     success_rate=summary.success_rate,
                     average_completion_steps=summary.average_completion_steps,
@@ -217,12 +219,17 @@ class Trainer:
                     "checkpoint": checkpoint_path.name,
                     "evaluation": evaluation_json.name,
                     "replay": str(representative_replay_path),
+                    "policy_name": best_policy.name,
+                    "trainer_type": "hill_climb",
+                    "policy_type": "linear",
                     "success_rate": summary.success_rate,
                     "timeout_rate": summary.timeout_rate,
                     "average_completion_steps": summary.average_completion_steps,
                     "average_completion_seconds": summary.average_completion_seconds,
                     "average_sheep_penned": summary.average_sheep_penned,
                     "average_reward": summary.average_reward,
+                    "average_distance_to_pen": summary.average_distance_to_pen,
+                    "average_flock_spread": summary.average_flock_spread,
                     "records": [record.to_dict() for record in summary.records],
                 }
                 checkpoint_payloads = self._merge_checkpoint(
@@ -317,6 +324,8 @@ class Trainer:
         payload = {
             "checkpoints": checkpoints,
             "final_weights": asdict(weights),
+            "trainer_type": "hill_climb",
+            "policy_type": "linear",
             "total_episodes_trained": total_episodes_trained,
         }
         path = self.output_root / "training-summary.json"

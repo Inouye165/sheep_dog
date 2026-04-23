@@ -9,6 +9,8 @@ The project is split into two parts:
 
 The current baseline is intentionally honest about what it does. It trains a role-aware shared linear policy with hill climbing, measures real checkpoint results, and exports replays that the UI can inspect.
 
+This repository now also includes an experimental comparison path: a small role-aware neural policy trained with MaskablePPO. The baseline is still present and still first-class. The point of this round is comparison and benchmarking, not replacing the hill-climbing path.
+
 ## Why This Exists
 
 The goal is to make herd behavior visible, measurable, and comparable across checkpoints without hiding the actual results behind demo logic or hand-waved metrics.
@@ -55,6 +57,12 @@ python -m sheepdog.cli train
 python -m sheepdog.cli export-demo
 ```
 
+To run the experimental PPO path, install the RL extras once:
+
+```powershell
+python -m pip install -e .[dev,rl]
+```
+
 ## Repo Structure
 
 - `src/sheepdog/` Python simulation, policies, training, evaluation, checkpointing, and replay export.
@@ -67,11 +75,18 @@ python -m sheepdog.cli export-demo
 
 The simulation is grid based and deterministic for a fixed seed. Dogs act first, sheep react to nearby pressure, and the environment tracks progress toward the pen. Rewards are decomposed into named pieces so the total can be audited.
 
-The trainer uses hill climbing to optimize a simple shared linear policy. Hill climbing is the training algorithm, not the model. This baseline is not PPO, not MaskablePPO, and not a neural network. Checkpoints are real evaluation snapshots, not fabricated milestones.
+The trainer uses hill climbing to optimize a simple shared linear policy. Hill climbing is the training algorithm, not the model. The baseline is not PPO, not MaskablePPO, and not a neural network. Checkpoints are real evaluation snapshots, not fabricated milestones.
 
 The current baseline adds dynamic scripted team roles on top of that same hill-climbing trainer. Dogs still share one linear weight vector, but each step the team strategy assigns tactical jobs such as rear pressure, flanking, collecting strays, and blocking near the pen, then the role-aware linear policy scores actions against those temporary responsibilities.
 
-Future PPO or MaskablePPO work can be compared against this baseline later, but that is not what is running today.
+The experimental path keeps that scripted role assignment and swaps only the model and trainer pieces:
+
+- baseline model: role-aware linear policy
+- baseline trainer: hill climbing
+- experimental model: small neural policy
+- experimental trainer: MaskablePPO
+
+The role system is still scripted in this phase. The neural policy does not learn role assignment from scratch yet.
 
 The web app is a viewer, not a second simulation engine. It loads exported checkpoint and replay JSON files from `web/public/generated/` and plays them back frame by frame.
 
@@ -80,14 +95,15 @@ The web app is a viewer, not a second simulation engine. It loads exported check
 - `random_untrained` picks legal moves uniformly and has no herding intelligence.
 - `instinct_only` can chase, circle, avoid diving into the flock, and recover nearby sheep, but it does not know where the pen is.
 - `heuristic_expert` is a scripted, pen-aware expert that uses pressure positioning behind the flock relative to the target.
-- `trained_policy` uses learned weights from training checkpoints.
+- `trained_policy` uses learned linear-policy weights from hill-climb training checkpoints.
+- `neural_policy` uses a learned small neural-network policy from MaskablePPO checkpoints.
 
 By default the no-training playback path uses `instinct_only`, not the expert heuristic. Pen-directed behavior now requires training, `heuristic_expert`, or an explicit handler target command.
 
 ## Simulation Concepts
 
-- Dogs are AI-controlled and share one role-aware linear policy.
-- Dogs can switch dynamic tactical roles each step while still using the same shared linear policy.
+- Dogs are AI-controlled and share one role-aware policy implementation.
+- Dogs can switch dynamic tactical roles each step while still using the same shared policy instance.
 - Sheep flee from nearby dogs, stay loosely flocked, and avoid walls.
 - The pen is a goal area inside the field.
 - Episodes succeed only when every sheep is penned.
@@ -111,6 +127,13 @@ By default the no-training playback path uses `instinct_only`, not the expert he
 
 ## Training
 
+The project now supports two clean trainer/model combinations:
+
+- hill-climbing trainer plus role-aware linear policy baseline
+- MaskablePPO trainer plus role-aware neural policy experiment
+
+Hill climbing and MaskablePPO are trainers, not models. Linear and neural are models, not trainers.
+
 Run training with:
 
 ```powershell
@@ -118,6 +141,20 @@ python -m sheepdog.cli train
 ```
 
 This writes checkpoint JSON files under `artifacts/checkpoints/`, evaluation JSON and CSV files under `artifacts/evaluations/`, and web assets under `web/public/generated/`.
+
+Baseline hill-climb training:
+
+```powershell
+python -m sheepdog.cli train --trainer-type hill_climb --policy-type linear --output-dir artifacts/hill_climb
+```
+
+Experimental MaskablePPO training:
+
+```powershell
+python -m sheepdog.cli train --trainer-type maskable_ppo --policy-type neural --total-timesteps 20000 --output-dir artifacts/maskable_ppo
+```
+
+Using separate output roots is the recommended comparison workflow so the latest linear and neural artifacts do not overwrite each other.
 
 ## Checkpoints
 
@@ -129,7 +166,9 @@ Each checkpoint includes:
 
 - checkpoint episode
 - total training episodes so far
-- policy name and weights
+- policy name
+- trainer type and policy type
+- policy weights for linear checkpoints or model path plus policy config for neural checkpoints
 - environment configuration
 - reward configuration
 - success rate over evaluation seeds
@@ -150,6 +189,27 @@ The evaluator writes:
 - replay JSON files for each evaluated seed
 
 Those files live under `artifacts/evaluations/` and are copied to the web public folder for playback.
+
+Evaluate fixed seeds for one policy mode:
+
+```powershell
+python -m sheepdog.cli evaluate --policy trained_policy --seeds 11 23 37
+python -m sheepdog.cli evaluate --policy neural_policy --config path\to\ppo-config.json --seeds 11 23 37
+```
+
+Compare random, instinct, heuristic, hill-climb linear, and MaskablePPO neural policies on the same seeds:
+
+```powershell
+python -m sheepdog.cli benchmark --seeds 11 23 37 41 53 --linear-output-dir artifacts/hill_climb --neural-output-dir artifacts/maskable_ppo
+```
+
+The benchmark command writes:
+
+- machine-readable JSON
+- machine-readable CSV
+- human-readable Markdown summary
+
+by default under `artifacts/benchmarks/`.
 
 ## Herding Instincts and Curriculum
 
@@ -255,6 +315,8 @@ The UI shows:
 - reward breakdown
 - no-progress warning
 - start, pause, resume, stop, reset, evaluation refresh, and export controls
+
+Replay exports keep the dynamic role labels. Evaluation and benchmark replays now also preserve policy and trainer identity through the exported metadata so baseline and experimental runs can be distinguished during review.
 
 ## Interactive Training
 

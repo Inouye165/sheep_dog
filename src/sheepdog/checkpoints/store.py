@@ -23,7 +23,11 @@ class CheckpointMetadata:
     average_reward: float
     environment_config: dict[str, Any]
     reward_config: dict[str, Any]
+    trainer_type: str = "hill_climb"
+    policy_type: str = "linear"
     policy_weights: dict[str, float] | None = None
+    policy_state_path: str | None = None
+    policy_config: dict[str, Any] | None = None
     evaluation_replay_path: str | None = None
 
     def to_dict(self) -> dict[str, Any]:

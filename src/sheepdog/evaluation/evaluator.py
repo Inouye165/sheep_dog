@@ -27,8 +27,12 @@ class EvaluationRecord:
     simulated_seconds: float
     sheep_penned: int
     final_sheep_distance_to_pen: float
+    final_flock_spread: float
     no_progress_steps: int
     reward_total: float
+    role_switches: int
+    collector_activations: int
+    blocker_activations: int
     reward_breakdown: dict[str, float]
     replay_path: str
 
@@ -49,6 +53,14 @@ class EvaluationSummary:
     average_completion_seconds: float
     average_sheep_penned: float
     average_reward: float
+    trainer_type: str = "hill_climb"
+    policy_type: str = "linear"
+    average_distance_to_pen: float = 0.0
+    average_flock_spread: float = 0.0
+    stopped_rate: float = 0.0
+    average_role_switches: float = 0.0
+    average_collector_activations: float = 0.0
+    average_blocker_activations: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -69,16 +81,20 @@ class Evaluator:
         seeds: tuple[int, ...],
         checkpoint_episode: int,
     ) -> tuple[EvaluationSummary, Path, Path]:
+        results: list[EpisodeResult] = []
         records: list[EvaluationRecord] = []
 
         for seed in seeds:
             environment = SheepdogEnvironment(self.config)
             result = environment.run_policy(policy, seed, capture_replay=True)
+            results.append(result)
             replay_path = self.replay_store.write(
                 f"checkpoint-{checkpoint_episode:06d}-seed-{seed:06d}.json",
                 {
                     "seed": result.seed,
                     "policy_name": result.policy_name,
+                    "trainer_type": getattr(policy, "trainer_type", "hill_climb"),
+                    "policy_type": getattr(policy, "policy_type", "linear"),
                     "final_snapshot": result.final_snapshot.to_dict(),
                     "stats": asdict(result.stats),
                     "frames": [frame.to_dict() for frame in result.replay],
@@ -96,6 +112,8 @@ class Evaluator:
         summary = EvaluationSummary(
             checkpoint_episode=checkpoint_episode,
             policy_name=policy.name,
+            trainer_type=getattr(policy, "trainer_type", "hill_climb"),
+            policy_type=getattr(policy, "policy_type", "linear"),
             records=tuple(records),
             success_rate=fmean(1.0 if record.success else 0.0 for record in records),
             timeout_rate=fmean(1.0 if record.timeout else 0.0 for record in records),
@@ -103,6 +121,18 @@ class Evaluator:
             average_completion_seconds=fmean(record.simulated_seconds for record in records),
             average_sheep_penned=fmean(record.sheep_penned for record in records),
             average_reward=fmean(record.reward_total for record in records),
+            average_distance_to_pen=fmean(
+                record.final_sheep_distance_to_pen for record in records
+            ),
+            average_flock_spread=fmean(record.final_flock_spread for record in records),
+            stopped_rate=fmean(1.0 if record.stopped else 0.0 for record in records),
+            average_role_switches=fmean(result.stats.role_switches for result in results),
+            average_collector_activations=fmean(
+                result.stats.collector_activations for result in results
+            ),
+            average_blocker_activations=fmean(
+                result.stats.blocker_activations for result in results
+            ),
         )
 
         json_path = self.output_root / f"evaluation-checkpoint-{checkpoint_episode:06d}.json"
@@ -128,8 +158,12 @@ class Evaluator:
             simulated_seconds=result.stats.simulated_seconds,
             sheep_penned=result.stats.sheep_penned,
             final_sheep_distance_to_pen=snapshot.average_distance_to_pen,
+            final_flock_spread=snapshot.flock_spread,
             no_progress_steps=result.stats.no_progress_steps,
             reward_total=result.stats.reward_total,
+            role_switches=result.stats.role_switches,
+            collector_activations=result.stats.collector_activations,
+            blocker_activations=result.stats.blocker_activations,
             reward_breakdown=result.stats.final_reward_breakdown,
             replay_path="",
         )

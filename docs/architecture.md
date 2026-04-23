@@ -46,18 +46,33 @@ The total reward is the sum of these components.
 - `instinct_only` uses sheep-local spacing, circling, and straggler recovery without reading the pen target.
 - `heuristic_expert` is a pen-aware scripted controller that computes pressure positions behind the flock relative to the pen.
 - `trained_policy` is the shared role-aware linear policy learned through hill climbing.
+- `neural_policy` is the shared role-aware neural policy used by the MaskablePPO experiment.
 
 The trainable baseline uses a simple hill-climbing loop. Hill climbing is the optimization algorithm, not the model. The model itself is a shared linear policy with explicit role-aware weights. This is not PPO and not a neural network.
 
+The experimental path uses a small MLP policy trained with MaskablePPO. MaskablePPO is the optimization algorithm, not the model. The role assignment is still scripted so the linear and neural policies consume comparable role-aware observations.
+
 Dynamic roles are assigned by a scripted team strategy each step. Once a role is assigned, the shared linear policy scores legal actions with both global herding weights and role-specific linear weight groups for rear pressure, flankers, collectors, and blockers.
 
-Future PPO or MaskablePPO agents can be compared against this baseline later, but those agents are not part of the current architecture.
+The architecture is now split into modular layers so trainer and model swaps stay local:
+
+- environment: deterministic sheepdog simulation and action legality
+- observation builder: role-aware flat features for one dog
+- policy model: linear baseline or neural experiment
+- trainer: hill climbing or MaskablePPO
+- evaluation: fixed-seed checkpoint measurement
+- benchmark harness: same-seed policy comparison across modes
+- replay export: JSON artifacts consumed by the web viewer
+
+The PPO adapter uses a pragmatic first implementation: one shared policy acts for one dog at a time through a sequential gym wrapper, and the environment only advances after every dog has supplied an action for the current team step. Invalid action masking is exposed from the underlying environment legality rules.
 
 Reward shaping may still include target-progress terms during training. That signal is deliberately separated from no-training action selection so the default dog team does not inherit an expert pen controller for free.
 
 ## Checkpoint and Evaluation Flow
 
-Training runs the hill climber across scheduled checkpoints and evaluates each checkpoint on fixed comparison seeds. Candidate mutations can be scored on a separate fixed candidate seed set so policy promotion is less sensitive to a single rollout. Evaluation writes JSON summaries, CSV rows, and replay files for every seed. Training also writes a compact checkpoint index for the UI.
+Training runs the configured trainer across scheduled checkpoints and evaluates each checkpoint on fixed comparison seeds. Hill-climb candidate mutations can be scored on a separate fixed candidate seed set so policy promotion is less sensitive to a single rollout. Evaluation writes JSON summaries, CSV rows, and replay files for every seed. Training also writes a compact checkpoint index for the UI.
+
+Checkpoint metadata is backward-compatible with older linear checkpoints and now also carries trainer type, policy type, and optional neural policy state paths so playback and benchmarking can load either baseline or experiment artifacts.
 
 ## UI State Flow
 

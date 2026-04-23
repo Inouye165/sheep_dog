@@ -9,10 +9,12 @@ from types import SimpleNamespace
 
 from sheepdog.config import EnvironmentConfig, LabConfig, RewardConfig, TrainingConfig
 from sheepdog.evaluation.evaluator import Evaluator
+from sheepdog.policies.factory import create_policy_from_name
 from sheepdog.policies.heuristic import HeuristicExpertPolicy, InstinctOnlyPolicy
 from sheepdog.policies.random_policy import RandomPolicy
 from sheepdog.policies.trainable import PolicyWeights, TrainableLinearPolicy
 from sheepdog.server import TrainingManager, _build_training_job_config, _load_playable_policy
+from sheepdog.training.factory import create_trainer
 from sheepdog.training.trainer import CandidateEvaluationSummary, Trainer
 
 
@@ -306,6 +308,48 @@ def test_load_playable_policy_uses_random_untrained_mode(tmp_path: Path) -> None
     policy = _load_playable_policy(config, policy_mode="random_untrained")
 
     assert isinstance(policy, RandomPolicy)
+
+
+def test_create_trainer_defaults_to_hill_climb(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+
+    trainer = create_trainer(config, tmp_path)
+
+    assert isinstance(trainer, Trainer)
+
+
+def test_training_config_round_trips_neural_settings(tmp_path: Path) -> None:
+    payload = make_config(tmp_path).to_dict()
+    payload["training"].update(
+        {
+            "trainer_type": "maskable_ppo",
+            "policy_type": "neural",
+            "neural_hidden_sizes": [32, 16],
+            "learning_rate": 0.001,
+        }
+    )
+
+    config = LabConfig.from_dict(payload)
+
+    assert config.training.trainer_type == "maskable_ppo"
+    assert config.training.policy_type == "neural"
+    assert config.training.neural_hidden_sizes == (32, 16)
+
+
+def test_create_policy_from_name_preserves_baseline_linear_policy() -> None:
+    policy = create_policy_from_name("trained_policy", weights_payload={"rear_drive": 2.5})
+
+    assert isinstance(policy, TrainableLinearPolicy)
+    assert policy.weights.rear_drive == 2.5
+
+
+def test_create_policy_from_name_requires_config_for_neural_policy() -> None:
+    try:
+        create_policy_from_name("neural_policy")
+    except ValueError as exc:
+        assert "requires config" in str(exc)
+    else:
+        raise AssertionError("Expected neural policy creation without config to fail clearly")
 
 
 def test_load_playable_policy_keeps_random_policy_alias(tmp_path: Path) -> None:

@@ -15,11 +15,18 @@ dev = [
   "pytest>=8.0",
   "ruff>=0.6",
 ]
+rl = [
+  "numpy>=2.0",
+  "gymnasium>=1.2,<2",
+  "stable-baselines3>=2.8,<3",
+  "sb3-contrib>=2.8,<3",
+]
 
 [project.scripts]
 sheepdog-train = "sheepdog.cli:train_command"
 sheepdog-evaluate = "sheepdog.cli:evaluate_command"
 sheepdog-export-demo = "sheepdog.cli:export_demo_command"
+sheepdog-benchmark = "sheepdog.cli:benchmark_command"
 sheepdog-server = "sheepdog.server:main"
 
 [tool.setuptools]

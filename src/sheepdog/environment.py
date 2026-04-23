@@ -12,6 +12,7 @@ from typing import Any, cast
 
 from sheepdog.config import EnvironmentConfig, LabConfig
 from sheepdog.entities import DogRole, DogState, EpisodeStats, Pen, Point, SheepState
+from sheepdog.observations import DogObservation, RoleAwareObservationBuilder
 from sheepdog.policies.base import Action, PolicyMode
 from sheepdog.rewards import RewardBreakdown, RewardComputer, RewardInputs
 from sheepdog.team_strategy import RoleAssignment, StrategySnapshot, TeamStrategy
@@ -129,6 +130,7 @@ class SheepdogEnvironment:
         self._history: list[StepRecord] = []
         self._stats = EpisodeStats()
         self._team_strategy = TeamStrategy(self.env_config.width, self.env_config.height)
+        self._observation_builder = RoleAwareObservationBuilder()
         self._role_assignments: dict[int, RoleAssignment] = {}
         self._strategy_snapshot = StrategySnapshot(None, 0.0, 0.0, None, False, False)
         self._roles_prepared_step: int | None = None
@@ -396,6 +398,11 @@ class SheepdogEnvironment:
             dog_index: assignment.role.value
             for dog_index, assignment in self._role_assignments.items()
         }
+
+    def build_observation_for_dog(self, dog_index: int) -> DogObservation:
+        """Build the shared role-aware observation for one dog."""
+
+        return self._observation_builder.build(self, dog_index)
 
     def score_action_for_dog(
         self,

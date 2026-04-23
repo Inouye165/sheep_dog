@@ -7,10 +7,14 @@ from typing import Literal, Protocol
 Action = Literal["up", "down", "left", "right", "wait"]
 PolicyMode = Literal[
     "random_untrained",
+    "random_policy",
     "instinct_only",
     "heuristic_expert",
     "trained_policy",
+    "neural_policy",
 ]
+PolicyType = Literal["linear", "neural"]
+TrainerType = Literal["hill_climb", "maskable_ppo"]
 
 
 class Policy(Protocol):

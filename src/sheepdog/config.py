@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from sheepdog.policies.base import PolicyMode
+from sheepdog.policies.base import PolicyMode, PolicyType, TrainerType
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +84,8 @@ class RewardConfig:
 class TrainingConfig:
     """Training and checkpoint schedule settings."""
 
+    trainer_type: TrainerType = "hill_climb"
+    policy_type: PolicyType = "linear"
     episodes: int = 1_000
     checkpoint_episodes: tuple[int, ...] = (0, 5, 10, 25, 50, 100, 500, 1_000)
     evaluation_seeds: tuple[int, ...] = (11, 23, 37, 41, 53)
@@ -92,6 +94,17 @@ class TrainingConfig:
     candidate_evaluation_seeds: tuple[int, ...] = (91, 92, 93, 94, 95)
     candidate_pool_size: int = 4
     mutation_scale: float = 0.08
+    neural_hidden_sizes: tuple[int, ...] = (64, 64)
+    learning_rate: float = 3e-4
+    rollout_steps: int = 256
+    batch_size: int = 64
+    total_timesteps: int = 20_000
+    gamma: float = 0.99
+    gae_lambda: float = 0.95
+    clip_range: float = 0.2
+    entropy_coef: float = 0.01
+    value_coef: float = 0.5
+    invalid_action_masking: bool = True
     output_dir: str = "artifacts"
     web_export_dir: str = "web/public/generated"
 
@@ -132,6 +145,9 @@ class LabConfig:
             training_payload["candidate_evaluation_seeds"] = tuple(candidate_seeds)
         elif "evaluation_seed" in training_payload:
             training_payload["candidate_evaluation_seeds"] = ()
+        hidden_sizes = training_payload.get("neural_hidden_sizes")
+        if hidden_sizes is not None:
+            training_payload["neural_hidden_sizes"] = tuple(hidden_sizes)
         instincts = (
             InstinctRewardConfig(**instincts_payload)
             if isinstance(instincts_payload, dict)

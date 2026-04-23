@@ -1,0 +1,247 @@
+"""Role-aware observation building for shared sheepdog policies."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from math import hypot
+from typing import TYPE_CHECKING, Any
+
+from sheepdog.entities import DogRole, Point
+from sheepdog.team_strategy import RoleAssignment
+
+if TYPE_CHECKING:
+    from sheepdog.environment import SheepdogEnvironment
+
+
+ROLE_ORDER: tuple[DogRole, ...] = (
+    DogRole.REAR_PRESSURE,
+    DogRole.LEFT_FLANKER,
+    DogRole.RIGHT_FLANKER,
+    DogRole.COLLECTOR,
+    DogRole.BLOCKER,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class DogObservation:
+    """Flat, inspectable role-aware observation for one dog."""
+
+    dog_index: int
+    role: str
+    feature_names: tuple[str, ...]
+    values: tuple[float, ...]
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def as_feature_dict(self) -> dict[str, float]:
+        """Return feature values keyed by stable names."""
+
+        return dict(zip(self.feature_names, self.values, strict=True))
+
+
+class RoleAwareObservationBuilder:
+    """Build comparable dog observations for linear and neural policies."""
+
+    def build(self, environment: SheepdogEnvironment, dog_index: int) -> DogObservation:
+        """Return a flat observation vector for one dog."""
+
+        environment.prepare_policy_step()
+        dog = environment.dogs[dog_index]
+        flock_center = environment._flock_center() or dog.position
+        pen_center = environment.pen.center
+        assignment = environment._role_assignments.get(
+            dog_index,
+            RoleAssignment(dog_index, dog.current_role, dog.position),
+        )
+        focus_sheep = self._focus_sheep(environment, dog_index, flock_center)
+        stray_sheep = self._stray_sheep(environment)
+        diagonal = max(
+            1.0,
+            hypot(environment.env_config.width - 1, environment.env_config.height - 1),
+        )
+
+        feature_names: list[str] = []
+        values: list[float] = []
+
+        self._append_point(feature_names, values, "own", dog.position, environment)
+        self._append_point(feature_names, values, "pen", pen_center, environment)
+        self._append_point(feature_names, values, "flock_center", flock_center, environment)
+        self._append_point(feature_names, values, "target", assignment.target, environment)
+
+        feature_names.extend(
+            (
+                "distance_to_pen",
+                "distance_to_flock",
+                "distance_to_target",
+                "flock_spread",
+                "average_distance_to_pen",
+                "wall_left",
+                "wall_right",
+                "wall_top",
+                "wall_bottom",
+                "blocked_steps",
+                "no_progress_steps",
+                "revisits_recent_position",
+                "two_position_loop",
+                "stray_present",
+            )
+        )
+        values.extend(
+            (
+                dog.position.distance_to(pen_center) / diagonal,
+                dog.position.distance_to(flock_center) / diagonal,
+                dog.position.distance_to(assignment.target) / diagonal,
+                environment._flock_spread() / diagonal,
+                environment._average_distance_to_pen() / diagonal,
+                dog.position.x / max(1, environment.env_config.width - 1),
+                (environment.env_config.width - 1 - dog.position.x)
+                / max(1, environment.env_config.width - 1),
+                dog.position.y / max(1, environment.env_config.height - 1),
+                (environment.env_config.height - 1 - dog.position.y)
+                / max(1, environment.env_config.height - 1),
+                min(dog.blocked_steps, 10) / 10.0,
+                min(environment._no_progress_steps, environment.env_config.no_progress_window)
+                / max(1, environment.env_config.no_progress_window),
+                1.0
+                if environment._revisits_recent_position(dog.recent_positions, dog.position)
+                else 0.0,
+                1.0 if environment._in_two_position_loop(dog.recent_positions) else 0.0,
+                1.0 if stray_sheep is not None else 0.0,
+            )
+        )
+
+        for role in ROLE_ORDER:
+            feature_names.append(f"role_{role.value}")
+            values.append(1.0 if assignment.role == role else 0.0)
+
+        self._append_relative_point(
+            feature_names,
+            values,
+            "focus_sheep",
+            dog.position,
+            None if focus_sheep is None else focus_sheep.position,
+            environment,
+        )
+        feature_names.append("focus_sheep_distance")
+        values.append(
+            0.0
+            if focus_sheep is None
+            else dog.position.distance_to(focus_sheep.position) / diagonal
+        )
+        self._append_relative_point(
+            feature_names,
+            values,
+            "stray_sheep",
+            dog.position,
+            None if stray_sheep is None else stray_sheep.position,
+            environment,
+        )
+
+        sorted_sheep = sorted(
+            environment.sheep,
+            key=lambda sheep: (dog.position.distance_to(sheep.position), sheep.index),
+        )
+        for sheep_slot in range(environment.env_config.sheep):
+            sheep = sorted_sheep[sheep_slot] if sheep_slot < len(sorted_sheep) else None
+            prefix = f"sheep_{sheep_slot}"
+            self._append_relative_point(
+                feature_names,
+                values,
+                prefix,
+                dog.position,
+                None if sheep is None else sheep.position,
+                environment,
+            )
+            feature_names.append(f"{prefix}_penned")
+            values.append(0.0 if sheep is None else (1.0 if sheep.penned else 0.0))
+
+        other_dogs = [other for other in environment.dogs if other.index != dog_index]
+        for teammate_slot in range(max(0, environment.env_config.dogs - 1)):
+            other = other_dogs[teammate_slot] if teammate_slot < len(other_dogs) else None
+            prefix = f"other_dog_{teammate_slot}"
+            self._append_relative_point(
+                feature_names,
+                values,
+                prefix,
+                dog.position,
+                None if other is None else other.position,
+                environment,
+            )
+
+        return DogObservation(
+            dog_index=dog_index,
+            role=assignment.role.value,
+            feature_names=tuple(feature_names),
+            values=tuple(values),
+            metadata={
+                "assignment_reason": assignment.reason,
+                "target_sheep_index": assignment.target_sheep_index,
+                "stray_sheep_index": environment._strategy_snapshot.stray_sheep_index,
+            },
+        )
+
+    def _focus_sheep(
+        self,
+        environment: SheepdogEnvironment,
+        dog_index: int,
+        flock_center: Point,
+    ) -> Any | None:
+        assignment = environment._role_assignments.get(dog_index)
+        if assignment is not None and assignment.target_sheep_index is not None:
+            return next(
+                (
+                    sheep
+                    for sheep in environment.sheep
+                    if sheep.index == assignment.target_sheep_index and not sheep.penned
+                ),
+                None,
+            )
+        unpenned = [sheep for sheep in environment.sheep if not sheep.penned]
+        if not unpenned:
+            return None
+        dog = environment.dogs[dog_index]
+        return min(
+            unpenned,
+            key=lambda sheep: (dog.position.distance_to(sheep.position), sheep.index),
+        )
+
+    def _stray_sheep(self, environment: SheepdogEnvironment) -> Any | None:
+        stray_index = environment._strategy_snapshot.stray_sheep_index
+        if stray_index is None:
+            return None
+        return next((sheep for sheep in environment.sheep if sheep.index == stray_index), None)
+
+    def _append_point(
+        self,
+        feature_names: list[str],
+        values: list[float],
+        prefix: str,
+        point: Point,
+        environment: SheepdogEnvironment,
+    ) -> None:
+        feature_names.extend((f"{prefix}_x", f"{prefix}_y"))
+        values.extend(
+            (
+                point.x / max(1, environment.env_config.width - 1),
+                point.y / max(1, environment.env_config.height - 1),
+            )
+        )
+
+    def _append_relative_point(
+        self,
+        feature_names: list[str],
+        values: list[float],
+        prefix: str,
+        origin: Point,
+        point: Point | None,
+        environment: SheepdogEnvironment,
+    ) -> None:
+        feature_names.extend((f"{prefix}_dx", f"{prefix}_dy"))
+        if point is None:
+            values.extend((0.0, 0.0))
+            return
+        values.extend(
+            (
+                (point.x - origin.x) / max(1, environment.env_config.width - 1),
+                (point.y - origin.y) / max(1, environment.env_config.height - 1),
+            )
+        )

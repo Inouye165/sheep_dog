@@ -164,6 +164,26 @@ def test_split_sheep_assigns_collector() -> None:
     assert DogRole.COLLECTOR.value in roles.values()
 
 
+def test_role_aware_observation_includes_expected_features() -> None:
+    config = make_config(dogs=3, sheep=3)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=14)
+    environment.dogs[0].position = Point(10, 10)
+    environment.sheep[0].position = Point(18, 10)
+    environment.sheep[1].position = Point(20, 11)
+    environment.sheep[2].position = Point(6, 24)
+
+    observation = environment.build_observation_for_dog(0)
+    feature_map = observation.as_feature_dict()
+
+    assert observation.role in {role.value for role in DogRole}
+    assert feature_map["own_x"] == 10 / (config.environment.width - 1)
+    assert "role_collector" in feature_map
+    assert "focus_sheep_dx" in feature_map
+    assert "sheep_0_dx" in feature_map
+    assert "other_dog_0_dx" in feature_map
+
+
 def test_near_pen_flock_assigns_blocker_and_flanker() -> None:
     config = make_config(dogs=3, sheep=3)
     environment = SheepdogEnvironment(config)
