@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from dataclasses import asdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -85,11 +86,24 @@ class MaskablePPOTrainer(Trainer):
 
     MODEL_DIRNAME = "models"
 
+    def _training_signature(self) -> dict[str, Any]:
+        return {
+            "action_size": len(ACTION_ORDER),
+            "rewards": asdict(self.config.rewards),
+            "environment": {
+                "dogs": self.config.environment.dogs,
+                "sheep": self.config.environment.sheep,
+                "dog_speed": self.config.environment.dog_speed,
+                "dog_sprint_multiplier": self.config.environment.dog_sprint_multiplier,
+                "sheep_speed": self.config.environment.sheep_speed,
+            },
+        }
+
     def _has_compatible_policy_state(self) -> bool:
-        policy_config = self._loaded_state.get("policy_config")
-        if not isinstance(policy_config, dict):
+        stored_signature = self._loaded_state.get("training_signature")
+        if not isinstance(stored_signature, dict):
             return False
-        return int(policy_config.get("action_size", 0)) == len(ACTION_ORDER)
+        return stored_signature == self._training_signature()
 
     def _load_state(self) -> dict[str, Any]:
         if not self._state_path.exists():
@@ -113,6 +127,7 @@ class MaskablePPOTrainer(Trainer):
             "total_timesteps": int(payload.get("total_timesteps", 0)),
             "policy_state_path": payload.get("policy_state_path"),
             "policy_config": payload.get("policy_config"),
+            "training_signature": payload.get("training_signature"),
         }
 
     def train(
@@ -277,6 +292,7 @@ class MaskablePPOTrainer(Trainer):
             "total_timesteps": starting_total_timesteps + train_config.total_timesteps,
             "policy_state_path": str(saved_model_path),
             "policy_config": policy.config.to_dict(),
+            "training_signature": self._training_signature(),
         }
         self._state_path.write_text(json.dumps(state_payload, indent=2), encoding="utf-8")
         self._loaded_state = state_payload

@@ -118,32 +118,73 @@ def test_maskable_ppo_trainer_emits_progress_updates(tmp_path: Path) -> None:
 
 
 def test_maskable_ppo_trainer_resets_incompatible_saved_action_space(tmp_path: Path) -> None:
-        config = make_experiment_config(tmp_path)
-        artifacts_dir = Path(config.training.output_dir)
-        artifacts_dir.mkdir(parents=True, exist_ok=True)
-        (artifacts_dir / "training-state.json").write_text(
-                """
-                {
-                    "total_episodes_trained": 5,
-                    "total_timesteps": 123,
-                    "policy_state_path": "old-model.zip",
-                    "policy_config": {
-                        "hidden_sizes": [64, 64],
-                        "observation_size": 10,
-                        "action_size": 5
-                    }
+    config = make_experiment_config(tmp_path)
+    artifacts_dir = Path(config.training.output_dir)
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    (artifacts_dir / "training-state.json").write_text(
+        """
+        {
+            "total_episodes_trained": 5,
+            "total_timesteps": 123,
+            "policy_state_path": "old-model.zip",
+            "policy_config": {
+                "hidden_sizes": [64, 64],
+                "observation_size": 10,
+                "action_size": 5
+            }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
+
+    trainer = create_trainer(config, config.training.output_dir)
+    summary = trainer.train()
+    state_payload = (artifacts_dir / "training-state.json").read_text(encoding="utf-8")
+
+    assert summary.checkpoints
+    assert '"total_episodes_trained": 1' in state_payload
+    assert '"total_timesteps": 16' in state_payload
+
+
+def test_maskable_ppo_trainer_resets_when_reward_signature_changes(tmp_path: Path) -> None:
+    config = make_experiment_config(tmp_path)
+    artifacts_dir = Path(config.training.output_dir)
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    (artifacts_dir / "training-state.json").write_text(
+        """
+        {
+            "total_episodes_trained": 7,
+            "total_timesteps": 200,
+            "policy_state_path": "old-model.zip",
+            "policy_config": {
+                "hidden_sizes": [64, 64],
+                "observation_size": 10,
+                "action_size": 9
+            },
+            "training_signature": {
+                "action_size": 9,
+                "rewards": {
+                    "progress_scale": 999
+                },
+                "environment": {
+                    "dogs": 3,
+                    "sheep": 6,
+                    "dog_speed": 1,
+                    "dog_sprint_multiplier": 2,
+                    "sheep_speed": 0.75
                 }
-                """.strip(),
-                encoding="utf-8",
-        )
+            }
+        }
+        """.strip(),
+        encoding="utf-8",
+    )
 
-        trainer = create_trainer(config, config.training.output_dir)
-        summary = trainer.train()
-        state_payload = (artifacts_dir / "training-state.json").read_text(encoding="utf-8")
+    trainer = create_trainer(config, config.training.output_dir)
+    trainer.train()
+    state_payload = (artifacts_dir / "training-state.json").read_text(encoding="utf-8")
 
-        assert summary.checkpoints
-        assert '"total_episodes_trained": 1' in state_payload
-        assert '"total_timesteps": 16' in state_payload
+    assert '"total_episodes_trained": 1' in state_payload
+    assert '"total_timesteps": 16' in state_payload
 
 
 def test_neural_checkpoint_loads_for_playback(tmp_path: Path) -> None:

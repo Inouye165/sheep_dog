@@ -92,10 +92,28 @@ def _safe_pressure_score(distance: float, config: InstinctRewardConfig) -> float
     if distance < config.safe_pressure_min_distance:
         return -(config.safe_pressure_min_distance - distance)
     if distance > config.safe_pressure_max_distance:
-        return 0.0
+        far_overflow = distance - config.safe_pressure_max_distance
+        return -min(1.0, far_overflow / max(1e-6, config.safe_pressure_max_distance))
     band = max(1e-6, config.safe_pressure_max_distance - config.safe_pressure_min_distance)
     midpoint = (config.safe_pressure_min_distance + config.safe_pressure_max_distance) / 2.0
     return 1.0 - abs(distance - midpoint) / (band / 2.0)
+
+
+def _engagement_scale(distance: float, config: InstinctRewardConfig) -> float:
+    """Decay instinct alignment rewards when a dog is too far to influence the flock."""
+
+    if distance <= config.safe_pressure_max_distance:
+        return 1.0
+    fade_limit = max(
+        config.safe_pressure_max_distance + 1e-6,
+        config.safe_pressure_max_distance * 2.0,
+    )
+    if distance >= fade_limit:
+        return 0.0
+    return 1.0 - (
+        (distance - config.safe_pressure_max_distance)
+        / (fade_limit - config.safe_pressure_max_distance)
+    )
 
 
 def _pressure_zone_alignment(dog: Position, flock: Position, target: Position) -> float:
@@ -255,9 +273,14 @@ class RewardComputer:
         chaos_penalty = 0.0
         overpressure_penalty = 0.0
         for dog in inputs.dog_positions:
-            pressure_zone += _pressure_zone_alignment(dog, flock, target)
-            safe_pressure += _safe_pressure_score(_distance(dog, flock), instinct_config)
-            if _distance(dog, flock) <= instinct_config.chaos_inside_flock_distance:
+            distance_to_flock = _distance(dog, flock)
+            pressure_zone += _pressure_zone_alignment(
+                dog,
+                flock,
+                target,
+            ) * _engagement_scale(distance_to_flock, instinct_config)
+            safe_pressure += _safe_pressure_score(distance_to_flock, instinct_config)
+            if distance_to_flock <= instinct_config.chaos_inside_flock_distance:
                 chaos_penalty -= 1.0
             for sheep in inputs.sheep_positions:
                 if _distance(dog, sheep) <= instinct_config.overpressure_distance:

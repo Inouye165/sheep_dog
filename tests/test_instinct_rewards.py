@@ -94,6 +94,42 @@ def test_safe_pressure_penalizes_dog_too_close_to_flock() -> None:
     assert band_breakdown.safe_pressure > 0
 
 
+def test_safe_pressure_penalizes_dog_too_far_from_flock() -> None:
+    config = _instinct_config()
+    flock = (10.0, 10.0)
+    target = (20.0, 10.0)
+    too_far = _base_inputs(
+        dog_positions=((22.0, 10.0),),
+        flock_centroid=flock,
+        target_position=target,
+    )
+
+    far_breakdown = RewardComputer(config).compute(too_far)
+
+    assert far_breakdown.safe_pressure < 0
+
+
+def test_pressure_zone_reward_decays_for_disengaged_dog() -> None:
+    config = _instinct_config()
+    flock = (10.0, 10.0)
+    target = (20.0, 10.0)
+    engaged = _base_inputs(
+        dog_positions=((4.0, 10.0),),
+        flock_centroid=flock,
+        target_position=target,
+    )
+    disengaged = _base_inputs(
+        dog_positions=((-10.0, 10.0),),
+        flock_centroid=flock,
+        target_position=target,
+    )
+
+    engaged_breakdown = RewardComputer(config).compute(engaged)
+    disengaged_breakdown = RewardComputer(config).compute(disengaged)
+
+    assert engaged_breakdown.pressure_zone > disengaged_breakdown.pressure_zone
+
+
 def test_grouping_reward_tracks_flock_spread_change() -> None:
     config = _instinct_config()
     flock = (10.0, 10.0)
