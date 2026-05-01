@@ -111,7 +111,7 @@ class TeamStrategy:
             )
             remaining = [dog for dog in remaining if dog.index != collector.index]
 
-        if (near_pen or wall_pressure) and remaining:
+        if near_pen and remaining:
             blocker = self._best_dog_for_role(
                 remaining,
                 blocker_target,

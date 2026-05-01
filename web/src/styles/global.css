@@ -379,7 +379,8 @@ select {
 }
 
 .progress-shell {
-  height: 0.8rem;
+  position: relative;
+  height: 1.4rem;
   border-radius: 999px;
   background: rgba(148, 163, 184, 0.14);
   overflow: hidden;
@@ -391,6 +392,20 @@ select {
   border-radius: inherit;
   background: linear-gradient(90deg, var(--accent), #fb923c);
   transition: width 180ms ease;
+}
+
+.progress-shell__label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #f8fafc;
+  text-shadow: 0 1px 2px rgba(15, 23, 42, 0.55);
+  pointer-events: none;
+  letter-spacing: 0.02em;
 }
 
 .warning-box {
@@ -414,6 +429,100 @@ select {
   letter-spacing: 0.18em;
   font-size: 0.72rem;
   color: var(--accent);
+}
+
+/* Stage row — shown at the top of the training card */
+.stage-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.85rem;
+}
+
+.stage-chip {
+  flex: 1;
+  min-width: 0;
+  padding: 0.7rem 0.9rem;
+  border-radius: 1rem;
+  background: rgba(244, 197, 66, 0.08);
+  border: 1px solid rgba(244, 197, 66, 0.22);
+}
+
+.stage-chip__label {
+  display: block;
+  color: var(--accent);
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-weight: 600;
+}
+
+.stage-chip__desc {
+  display: block;
+  color: var(--text);
+  font-size: 0.95rem;
+  margin-top: 0.15rem;
+}
+
+/* Promote button */
+.button-row__promote {
+  border-color: rgba(74, 222, 128, 0.42);
+  background: linear-gradient(180deg, rgba(20, 80, 40, 0.96), rgba(10, 50, 22, 0.96));
+  white-space: nowrap;
+  font-size: 0.9rem;
+}
+
+/* Episodes input row */
+.training-primary {
+  margin-bottom: 0.75rem;
+}
+
+.training-primary label {
+  display: grid;
+  gap: 0.35rem;
+  color: var(--muted);
+}
+
+/* Advanced settings accordion */
+.training-advanced {
+  margin-top: 0.9rem;
+  border-radius: 1rem;
+  border: 1px solid var(--panel-border);
+  background: rgba(148, 163, 184, 0.04);
+  overflow: hidden;
+}
+
+.training-advanced summary {
+  padding: 0.75rem 1rem;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.88rem;
+  letter-spacing: 0.04em;
+  list-style: none;
+  user-select: none;
+}
+
+.training-advanced summary::-webkit-details-marker {
+  display: none;
+}
+
+.training-advanced summary::before {
+  content: "▶ ";
+  font-size: 0.7rem;
+  opacity: 0.7;
+}
+
+.training-advanced[open] summary::before {
+  content: "▼ ";
+}
+
+.training-advanced .training-grid {
+  padding: 0.25rem 1rem 0.75rem;
+}
+
+.training-advanced .warning-box {
+  margin: 0 1rem 0.75rem;
 }
 
 @keyframes fade-in {
@@ -473,6 +582,7 @@ select {
   .status-grid,
   .status-card__summary,
   .training-summary,
+  .training-primary,
   .reward-grid,
   .checkpoint-grid {
     grid-template-columns: 1fr;

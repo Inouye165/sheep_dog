@@ -66,6 +66,7 @@ class InstinctRewardConfig:
     chaos_penalty_weight: float = 0.5
     overpressure_penalty_weight: float = 0.4
     split_flock_penalty_weight: float = 0.3
+    dog_overshoot_penalty_hold: float = 0.5
 
     safe_pressure_min_distance: float = 2.0
     safe_pressure_max_distance: float = 6.0
@@ -124,7 +125,7 @@ class TrainingConfig:
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_range: float = 0.2
-    entropy_coef: float = 0.01
+    entropy_coef: float = 0.10
     value_coef: float = 0.5
     invalid_action_masking: bool = True
     output_dir: str = "artifacts"

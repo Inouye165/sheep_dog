@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -50,7 +51,19 @@ def test_clear_training_restores_untrained_baseline(tmp_path: Path) -> None:
         server_module.LabConfig = original_config
 
     assert status == 200
-    assert payload["message"] == "Training cleared. Baseline replay restored"
+    # clear() is async: it returns immediately with "Clearing..." and finishes
+    # the baseline export in a background thread.  Poll until the thread is done.
+    assert payload["message"] in {
+        "Clearing... restoring baseline replay",
+        "Training cleared. Baseline replay restored",
+    }
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        with manager._lock:  # type: ignore[attr-defined]
+            phase = manager._status.get("phase")  # type: ignore[attr-defined]
+        if phase == "idle":
+            break
+        time.sleep(0.1)
     assert (artifacts / "training-state.json").exists()
     assert (artifacts / "training-summary.json").exists()
     assert (artifacts / "checkpoints" / "checkpoint-000000.json").exists()

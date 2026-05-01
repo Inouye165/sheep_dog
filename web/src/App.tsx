@@ -26,10 +26,26 @@ function resolveRunState(snapshot: ReplaySnapshot | null, currentState: RunState
 }
 
 function mergeTrainingStatus(previous: TrainingStatus | null, next: TrainingStatus): TrainingStatus {
+  let merged = next;
   if (next.phase === "idle" && next.message === "Idle" && previous?.message === CLEAR_TRAINING_MESSAGE) {
-    return { ...next, message: previous.message };
+    merged = { ...next, message: previous.message };
   }
-  return next;
+  // Prevent batch progress from oscillating backwards while a batch is in flight.
+  if (
+    previous &&
+    previous.running &&
+    merged.running &&
+    previous.batch_total_episodes === merged.batch_total_episodes &&
+    previous.batch_total_episodes > 0 &&
+    merged.batch_completed_episodes < previous.batch_completed_episodes
+  ) {
+    merged = {
+      ...merged,
+      batch_completed_episodes: previous.batch_completed_episodes,
+      completed_episodes: Math.max(previous.completed_episodes, merged.completed_episodes),
+    };
+  }
+  return merged;
 }
 
 export function App() {
@@ -45,7 +61,7 @@ export function App() {
   const [trainingEpisodes, setTrainingEpisodes] = useState(5);
   const [trainingFastMode, setTrainingFastMode] = useState(true);
   const [trainingEnableInstincts, setTrainingEnableInstincts] = useState(true);
-  const [trainingCurriculumStage, setTrainingCurriculumStage] = useState(0);
+  const [trainingCurriculumStage, setTrainingCurriculumStage] = useState(1);
   const [trainingDebugRewardBreakdown, setTrainingDebugRewardBreakdown] = useState(false);
   const [playbackFastMode, setPlaybackFastMode] = useState(false);
   const [trainingStatus, setTrainingStatus] = useState<TrainingStatus | null>(null);
@@ -62,10 +78,21 @@ export function App() {
   );
 
   const playbackDelay = playbackFastMode ? 24 : 220;
-  const effectiveEnableInstincts = trainingStatus?.enable_instinct_rewards ?? trainingEnableInstincts;
-  const effectiveCurriculumStage = trainingStatus?.curriculum_stage ?? trainingCurriculumStage;
-  const effectiveDebugRewardBreakdown =
-    trainingStatus?.debug_reward_breakdown ?? trainingDebugRewardBreakdown;
+  const trainingRunning = trainingStatus?.running ?? false;
+  const effectiveEnableInstincts = trainingRunning
+    ? trainingStatus?.enable_instinct_rewards ?? trainingEnableInstincts
+    : trainingEnableInstincts;
+  const effectiveCurriculumStage = trainingRunning
+    ? trainingStatus?.curriculum_stage ?? trainingCurriculumStage
+    : trainingCurriculumStage;
+  const effectiveDebugRewardBreakdown = trainingRunning
+    ? trainingStatus?.debug_reward_breakdown ?? trainingDebugRewardBreakdown
+    : trainingDebugRewardBreakdown;
+
+  const latestSuccessRate = useMemo(() => {
+    const latest = checkpointIndex?.checkpoints[checkpointIndex.checkpoints.length - 1] ?? null;
+    return latest?.success_rate ?? null;
+  }, [checkpointIndex]);
 
   const currentReplaySelection = useMemo(() => {
     const latestCheckpoint = checkpointIndex?.checkpoints[checkpointIndex.checkpoints.length - 1] ?? null;
@@ -169,9 +196,31 @@ export function App() {
       })();
     }, 500);
 
+    const refreshNow = () => {
+      if (document.visibilityState !== "visible") {
+        return;
+      }
+      void (async () => {
+        try {
+          const status = await loadTrainingStatus();
+          if (active) {
+            setTrainingStatus((previous) => mergeTrainingStatus(previous, status));
+          }
+        } catch {
+          if (active) {
+            setTrainingStatus(null);
+          }
+        }
+      })();
+    };
+    document.addEventListener("visibilitychange", refreshNow);
+    window.addEventListener("focus", refreshNow);
+
     return () => {
       active = false;
       window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshNow);
+      window.removeEventListener("focus", refreshNow);
     };
   }, []);
 
@@ -275,6 +324,10 @@ export function App() {
 
   function handleSeedChange(seed: number) {
     setSelectedSeed(seed);
+  }
+
+  function handlePromote() {
+    setTrainingCurriculumStage((prev) => Math.min(5, prev + 1));
   }
 
   async function handleStartTraining() {
@@ -402,10 +455,12 @@ export function App() {
             clearing={clearingTraining}
             batchCompletedEpisodes={trainingStatus?.batch_completed_episodes ?? trainingStatus?.completed_episodes ?? 0}
             batchTotalEpisodes={trainingStatus?.batch_total_episodes ?? trainingStatus?.requested_episodes ?? 0}
+            currentEpisode={trainingStatus?.current_episode ?? null}
             totalEpisodesTrained={trainingStatus?.total_episodes_trained ?? 0}
             phase={trainingStatus?.phase ?? "idle"}
             message={statusMessage}
             error={trainingStatus?.error ?? null}
+            successRate={latestSuccessRate}
             onEpisodesChange={setTrainingEpisodes}
             onFastModeChange={setTrainingFastMode}
             onEnableInstinctsChange={setTrainingEnableInstincts}
@@ -413,6 +468,7 @@ export function App() {
             onDebugRewardBreakdownChange={setTrainingDebugRewardBreakdown}
             onStartTraining={handleStartTraining}
             onClearTraining={handleClearTraining}
+            onPromote={handlePromote}
           />
 
           <StatusPanel

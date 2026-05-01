@@ -274,11 +274,13 @@ class RewardComputer:
         overpressure_penalty = 0.0
         for dog in inputs.dog_positions:
             distance_to_flock = _distance(dog, flock)
-            pressure_zone += _pressure_zone_alignment(
-                dog,
-                flock,
-                target,
-            ) * _engagement_scale(distance_to_flock, instinct_config)
+            alignment = _pressure_zone_alignment(dog, flock, target)
+            engagement = _engagement_scale(distance_to_flock, instinct_config)
+            # When the dog has overshot the flock toward the pen (alignment < 0),
+            # preserve a minimum penalty signal so distance decay cannot silence it.
+            if alignment < 0.0:
+                engagement = max(engagement, instinct_config.dog_overshoot_penalty_hold)
+            pressure_zone += alignment * engagement
             safe_pressure += _safe_pressure_score(distance_to_flock, instinct_config)
             if distance_to_flock <= instinct_config.chaos_inside_flock_distance:
                 chaos_penalty -= 1.0

@@ -261,6 +261,12 @@ def _build_training_job_config(
     training_episodes = max(0, total_episodes - 1)
     checkpoint_episodes = tuple(range(total_episodes))
     evaluation_seeds = (11,) if fast_mode else config.training.evaluation_seeds
+    # Scale total_timesteps with the number of checkpoints so each segment
+    # receives a meaningful training budget.  Use at least the config default.
+    # 8 000 steps/episode ensures ~31 PPO rollouts per checkpoint segment
+    # (rollout_steps=256), providing enough gradient signal for policy updates.
+    steps_per_episode = 2_000 if fast_mode else 8_000
+    total_timesteps = max(config.training.total_timesteps, total_episodes * steps_per_episode)
     training_config = TrainingConfig(
         trainer_type="maskable_ppo",
         policy_type="neural",
@@ -272,6 +278,7 @@ def _build_training_job_config(
         candidate_evaluation_seeds=config.training.candidate_evaluation_seeds,
         candidate_pool_size=config.training.candidate_pool_size,
         mutation_scale=config.training.mutation_scale,
+        total_timesteps=total_timesteps,
         output_dir=config.training.output_dir,
         web_export_dir=config.training.web_export_dir,
     )
@@ -434,12 +441,22 @@ class TrainingManager:
 
         config = LabConfig()
         self._clear_training_outputs(config)
-        self._export_untrained_baseline(config)
 
         with self._lock:
             self._thread = None
             self._status = self._initial_status()
-            self._status["message"] = "Training cleared. Baseline replay restored"
+            self._status["phase"] = "clearing"
+            self._status["message"] = "Clearing... restoring baseline replay"
+
+        def _restore_baseline() -> None:
+            self._export_untrained_baseline(config)
+            with self._lock:
+                self._status["phase"] = "idle"
+                self._status["message"] = "Training cleared. Baseline replay restored"
+
+        threading.Thread(target=_restore_baseline, daemon=True).start()
+
+        with self._lock:
             return dict(self._status), HTTPStatus.OK
 
     def _clear_training_outputs(self, config: LabConfig) -> None:
