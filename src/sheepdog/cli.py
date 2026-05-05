@@ -20,7 +20,7 @@ from sheepdog.server import _load_playable_policy
 from sheepdog.training.factory import create_trainer
 
 POLICY_CHOICES = list(POLICY_CHOICES)
-TRAINER_CHOICES = ["hill_climb", "maskable_ppo"]
+TRAINER_CHOICES = ["hill_climb", "maskable_ppo", "hierarchical_maskable_ppo"]
 POLICY_TYPE_CHOICES = ["linear", "neural"]
 
 
@@ -213,6 +213,90 @@ def replace_training_output(config: LabConfig, output_dir: str):
     )
 
 
+def train_hierarchical_command() -> None:
+    """Train the hierarchical shepherd + neural dog policy."""
+    parser = argparse.ArgumentParser(
+        description="Train the hierarchical shepherd + neural dog policy."
+    )
+    parser.add_argument("--config", default=None, help="Optional JSON config file.")
+    parser.add_argument("--output-dir", default=None, help="Override the artifact root.")
+    parser.add_argument("--total-timesteps", type=int, default=None)
+    _add_profile_args(parser)
+    args = parser.parse_args()
+    config = _apply_runtime_profile(args, _load_config(args.config))
+    config = _apply_training_overrides(args, config)
+    # Force hierarchical trainer and neural policy type.
+    config = replace(
+        config,
+        training=replace(
+            config.training,
+            trainer_type="hierarchical_maskable_ppo",
+            policy_type="neural",
+        ),
+    )
+    output_dir = args.output_dir or config.training.output_dir
+    if args.output_dir:
+        config = replace(
+            config,
+            training=replace(config.training, output_dir=output_dir),
+        )
+    from sheepdog.training.hierarchical_trainer import HierarchicalMaskablePPOTrainer
+
+    trainer = HierarchicalMaskablePPOTrainer(config, output_dir)
+    result = trainer.train()
+    print(json.dumps({"status": "done", "final_model_path": result.get("final_model_path")},
+                     indent=2))
+
+
+def herding_eval_command() -> None:
+    """Generate a proof-of-learning evaluation report comparing all policy types."""
+    parser = argparse.ArgumentParser(
+        description=(
+            "Compare random, scripted baseline, and hierarchical neural dog policies. "
+            "Outputs JSON + Markdown to reports/."
+        )
+    )
+    parser.add_argument("--config", default=None, help="Optional JSON config file.")
+    parser.add_argument("--seeds", nargs="*", type=int, default=None)
+    parser.add_argument(
+        "--hierarchical-model",
+        default=None,
+        help="Path to a trained ShepherdNeuralDogPolicy .zip checkpoint.",
+    )
+    parser.add_argument(
+        "--hierarchical-checkpoint",
+        type=int,
+        default=None,
+        help="Checkpoint episode label for the hierarchical model (default 0).",
+    )
+    parser.add_argument(
+        "--baseline-checkpoint",
+        type=int,
+        default=None,
+        help="Baseline checkpoint episode to include (optional).",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default="reports",
+        help="Directory to write herding_eval_latest.{json,md} (default: reports/).",
+    )
+    _add_profile_args(parser)
+    args = parser.parse_args()
+    config = _apply_runtime_profile(args, _load_config(args.config))
+    seeds = tuple(args.seeds or config.training.evaluation_seeds)
+    from sheepdog.evaluation.benchmark import run_herding_eval_report
+
+    json_path, md_path = run_herding_eval_report(
+        config,
+        args.output_dir,
+        seeds=seeds,
+        hierarchical_model_path=args.hierarchical_model,
+        hierarchical_checkpoint_episode=args.hierarchical_checkpoint,
+        baseline_checkpoint_episode=args.baseline_checkpoint,
+    )
+    print(json.dumps({"json": str(json_path), "markdown": str(md_path)}, indent=2))
+
+
 def main() -> None:
     if len(sys.argv) <= 1:
         train_command()
@@ -225,8 +309,14 @@ def main() -> None:
         if command == "train":
             train_command()
             return
+        if command in {"train-hierarchical", "train_hierarchical"}:
+            train_hierarchical_command()
+            return
         if command == "evaluate":
             evaluate_command()
+            return
+        if command in {"herding-eval", "herding_eval"}:
+            herding_eval_command()
             return
         if command == "benchmark":
             benchmark_command()

@@ -156,3 +156,158 @@ class BenchmarkHarness:
             )
         summary_path.write_text("\n".join(summary_lines), encoding="utf-8")
         return results, json_path, csv_path, summary_path
+
+
+# ---------------------------------------------------------------------------
+# Herding evaluation report: compare baseline + hierarchical neural policies
+# ---------------------------------------------------------------------------
+
+
+def run_herding_eval_report(
+    config: LabConfig,
+    output_dir: str | Path,
+    seeds: tuple[int, ...] | None = None,
+    *,
+    hierarchical_model_path: str | Path | None = None,
+    hierarchical_checkpoint_episode: int | None = None,
+    baseline_checkpoint_episode: int | None = None,
+) -> tuple[Path, Path]:
+    """Compare random, scripted baseline, and hierarchical neural dog policies.
+
+    This is the key proof-of-learning report.  Running it at different training
+    milestones shows whether the neural policy is improving over the baselines.
+
+    Parameters
+    ----------
+    config:
+        Lab configuration.
+    output_dir:
+        Directory to write the report files.
+    seeds:
+        Evaluation seeds.  Defaults to ``config.training.evaluation_seeds``.
+    hierarchical_model_path:
+        Path to a trained ``ShepherdNeuralDogPolicy`` ``.zip`` model file.
+        When ``None`` the hierarchical entry is an untrained (random-weight)
+        policy and labelled ``hierarchical_checkpoint_0``.
+    hierarchical_checkpoint_episode:
+        Checkpoint episode number for labelling (default: 0 if no model given).
+    baseline_checkpoint_episode:
+        Checkpoint episode to load for ``trained_policy`` / ``neural_policy``
+        baseline comparison.  When ``None`` the scripted baselines are used only.
+
+    Returns
+    -------
+    (json_path, markdown_path)
+        Paths to the generated report files.
+    """
+    import datetime
+
+    from sheepdog.policies.factory import create_policy_from_name, load_playable_policy
+    from sheepdog.policies.heuristic import HeuristicExpertPolicy, InstinctOnlyPolicy
+    from sheepdog.policies.random_policy import RandomPolicy
+
+    eval_seeds = seeds or config.training.evaluation_seeds
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    harness = BenchmarkHarness(config, out / "replays")
+
+    entries: list[tuple[str, Any]] = [
+        ("random_policy", RandomPolicy()),
+        ("instinct_only", InstinctOnlyPolicy()),
+        ("heuristic_expert", HeuristicExpertPolicy()),
+    ]
+
+    # Optionally add the trained baseline policy from a checkpoint.
+    if baseline_checkpoint_episode is not None:
+        try:
+            baseline_policy = load_playable_policy(
+                config, checkpoint_episode=baseline_checkpoint_episode
+            )
+            entries.append(
+                (f"baseline_checkpoint_{baseline_checkpoint_episode}", baseline_policy)
+            )
+        except FileNotFoundError:
+            pass  # Checkpoint not present – skip without crashing.
+
+    # Hierarchical neural dogs entry.
+    hier_label = f"hierarchical_checkpoint_{hierarchical_checkpoint_episode or 0}"
+    if hierarchical_model_path is not None:
+        from sheepdog.policies.hierarchical import ShepherdNeuralDogPolicy
+
+        hier_policy = ShepherdNeuralDogPolicy.load(
+            hierarchical_model_path, config
+        )
+    else:
+        from sheepdog.policies.hierarchical import ShepherdNeuralDogPolicy
+
+        hier_policy = ShepherdNeuralDogPolicy.initialize(config)
+    entries.append((hier_label, hier_policy))
+
+    results, _, _, _ = harness.compare(
+        entries,
+        tuple(eval_seeds),
+        output_stem="_herding_eval_tmp",
+    )
+
+    # Build custom report with proof-of-learning summary.
+    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    report: dict[str, Any] = {
+        "generated_at": timestamp,
+        "seeds": list(eval_seeds),
+        "policies": [r.to_dict() for r in results],
+    }
+    json_path = out / "herding_eval_latest.json"
+    json_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+    # Markdown proof-of-learning table.
+    md_lines = [
+        "# Herding Evaluation Report",
+        "",
+        f"Generated: {timestamp}",
+        f"Seeds: {', '.join(str(s) for s in eval_seeds)}",
+        "",
+        "## What is scripted vs learned",
+        "",
+        "| Component | Type |",
+        "|-----------|------|",
+        "| Sheep movement | Reactive (scripted) |",
+        "| Shepherd commands | Scripted (Phase A) |",
+        "| Dog movement – baseline policies | Scripted / hill-climbed |",
+        "| Dog movement – hierarchical_checkpoint_* | **Learned via PPO** |",
+        "",
+        "Dogs in the `hierarchical_checkpoint_*` row learned *only* from reward signals.",
+        "They were NOT given scripted movement targets.",
+        "",
+        "## Metrics",
+        "",
+        "| Policy | Success% | Avg Penned | Avg Reward | Timeout% | Dist to Pen |",
+        "|--------|----------|------------|------------|----------|-------------|",
+    ]
+    for r in results:
+        md_lines.append(
+            f"| {r.label} "
+            f"| {r.success_rate:.1%} "
+            f"| {r.average_sheep_penned:.2f} "
+            f"| {r.average_episode_reward:.2f} "
+            f"| {r.timeout_rate:.1%} "
+            f"| {r.average_distance_to_pen:.2f} |"
+        )
+    md_lines.extend(
+        [
+            "",
+            "## Interpretation",
+            "",
+            "Learning is demonstrated when `hierarchical_checkpoint_N` outperforms",
+            "`random_policy` and `instinct_only` on success rate and average reward,",
+            "and ideally approaches or exceeds `heuristic_expert`.",
+            "",
+            "A checkpoint that equals `random_policy` has not yet learned.",
+            "A checkpoint that matches `heuristic_expert` has learned well.",
+            "",
+        ]
+    )
+    md_path = out / "herding_eval_latest.md"
+    md_path.write_text("\n".join(md_lines), encoding="utf-8")
+
+    return json_path, md_path

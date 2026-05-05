@@ -19,6 +19,7 @@ POLICY_CHOICES: tuple[str, ...] = (
     "heuristic_expert",
     "trained_policy",
     "neural_policy",
+    "shepherd_neural_dogs",
 )
 
 
@@ -46,6 +47,16 @@ def create_policy_from_name(
         if policy_state_path:
             return NeuralPolicy.load(policy_state_path, config, policy_config)
         return NeuralPolicy.initialize(config)
+    if policy_name == "shepherd_neural_dogs":
+        from sheepdog.policies.hierarchical import ShepherdNeuralDogPolicy
+
+        if config is None:
+            raise ValueError("Hierarchical policy creation requires config")
+        if policy_state_path:
+            return ShepherdNeuralDogPolicy.load(
+                policy_state_path, config, policy_config_dict=policy_config
+            )
+        return ShepherdNeuralDogPolicy.initialize(config)
     return TrainableLinearPolicy(PolicyWeights.from_dict(weights_payload))
 
 

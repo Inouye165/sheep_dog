@@ -812,6 +812,14 @@ class SheepdogEnvironment:
                 steps,
                 blocked_positions=blocked_positions,
             )
+            # When a dog is stopped because a sheep occupies the immediate
+            # target cell, forfeit the accumulated fractional budget so it
+            # cannot build up sustained pressure against a cornered sheep.
+            if (
+                candidate == dog.position
+                and self._target_position(dog.position, action) in sheep_positions
+            ):
+                remaining_budget = 0.0
             claimed_positions.add(candidate)
             next_positions.append(candidate)
             next_budgets.append(remaining_budget)
@@ -1418,7 +1426,7 @@ class SheepdogEnvironment:
                     "team_formation": 2.8,
                     "dog_spacing": 0.6,
                     "wall_margin": 0.2,
-                    "wait_bias": -1.5,
+                    "wait_bias": 0.1,
                     "rear_drive": 1.05,
                     "flank_control": 0.95,
                     "collector_focus": 1.15,

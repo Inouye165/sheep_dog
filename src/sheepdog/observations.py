@@ -7,6 +7,7 @@ from math import hypot
 from typing import TYPE_CHECKING, Any
 
 from sheepdog.entities import DogRole, Point
+from sheepdog.shepherd import COMMAND_INDEX, COMMAND_ORDER, ShepherdCommand
 from sheepdog.team_strategy import RoleAssignment
 
 if TYPE_CHECKING:
@@ -244,4 +245,70 @@ class RoleAwareObservationBuilder:
                 (point.x - origin.x) / max(1, environment.env_config.width - 1),
                 (point.y - origin.y) / max(1, environment.env_config.height - 1),
             )
+        )
+
+
+# Maximum dog count supported in the hierarchical one-hot identity encoding.
+# Increasing this changes the observation vector size; retrain if changed.
+MAX_DOG_SLOTS: int = 5
+
+
+class HierarchicalObservationBuilder(RoleAwareObservationBuilder):
+    """Extend the role-aware builder with shepherd command + dog identity.
+
+    Additional features appended after the base role-aware vector:
+
+    Shepherd command (one-hot, 8 values)
+      shepherd_cmd_<name>  – 1.0 when this command is active
+
+    Dog identity (scalar + one-hot, MAX_DOG_SLOTS + 2 values)
+      dog_id_normalized    – dog_index / max(1, dog_count - 1)
+      dog_count_normalized – dog_count / max(1, MAX_DOG_SLOTS)
+      dog_id_slot_N        – one-hot slot for dog N (N = 0 … MAX_DOG_SLOTS-1)
+
+    These features let a single shared policy develop role-differentiated
+    behaviour without hard-coding which dog does what.
+    """
+
+    def build_hierarchical(
+        self,
+        environment: SheepdogEnvironment,
+        dog_index: int,
+        shepherd_command: ShepherdCommand | None = None,
+    ) -> DogObservation:
+        """Return a flat observation that includes command + identity appended
+        after the standard role-aware features."""
+        base = self.build(environment, dog_index)
+
+        feature_names: list[str] = list(base.feature_names)
+        values: list[float] = list(base.values)
+
+        # --- Shepherd command (one-hot, 8 values) ---
+        cmd = shepherd_command if shepherd_command is not None else ShepherdCommand.GATHER
+        cmd_idx = COMMAND_INDEX.get(cmd, 0)
+        for i, command in enumerate(COMMAND_ORDER):
+            feature_names.append(f"shepherd_cmd_{command.value}")
+            values.append(1.0 if i == cmd_idx else 0.0)
+
+        # --- Dog identity ---
+        dog_count = max(1, environment.env_config.dogs)
+        feature_names.append("dog_id_normalized")
+        values.append(dog_index / max(1, dog_count - 1) if dog_count > 1 else 0.0)
+
+        feature_names.append("dog_count_normalized")
+        values.append(dog_count / max(1, MAX_DOG_SLOTS))
+
+        for slot in range(MAX_DOG_SLOTS):
+            feature_names.append(f"dog_id_slot_{slot}")
+            values.append(1.0 if slot == dog_index else 0.0)
+
+        return DogObservation(
+            dog_index=dog_index,
+            role=base.role,
+            feature_names=tuple(feature_names),
+            values=tuple(values),
+            metadata={
+                **base.metadata,
+                "shepherd_command": cmd.value,
+            },
         )

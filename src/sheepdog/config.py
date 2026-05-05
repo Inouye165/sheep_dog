@@ -60,11 +60,11 @@ class InstinctRewardConfig:
     curriculum_stage: int = 0
 
     pressure_zone_weight: float = 0.6
-    safe_pressure_weight: float = 0.4
+    safe_pressure_weight: float = 0.9
     grouping_weight: float = 0.3
-    target_progress_weight: float = 0.5
+    target_progress_weight: float = 0.3
     chaos_penalty_weight: float = 0.5
-    overpressure_penalty_weight: float = 0.4
+    overpressure_penalty_weight: float = 1.5
     split_flock_penalty_weight: float = 0.3
     dog_overshoot_penalty_hold: float = 0.5
 

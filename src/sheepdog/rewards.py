@@ -301,6 +301,9 @@ class RewardComputer:
             target_progress = (
                 previous_distance - current_distance
             ) * instinct_config.target_progress_weight
+            # Cap the contribution so a single large flock movement cannot
+            # override safe-pressure and overpressure signals.
+            target_progress = max(-1.5, min(1.5, target_progress))
 
         scatter_delta = inputs.current_flock_spread - inputs.previous_flock_spread
         if scatter_delta > instinct_config.chaos_scatter_delta:
@@ -369,3 +372,288 @@ class RewardComputer:
         return -(
             blocking_score / max(1, len(active_sheep))
         ) * self._config.lane_crowding_penalty_scale
+
+
+# ---------------------------------------------------------------------------
+# Hierarchical reward system for autonomous neural-dog training
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class HierarchicalRewardConfig:
+    """Configurable reward terms for the shepherd + neural dog training path.
+
+    Goals
+    -----
+    Reward *outcomes* and good herding *principles*, not exact positions.
+    Weights are exposed so they can be tuned in config or curriculum without
+    touching code.  Disabling a term sets its weight to 0.
+
+    Positive signals
+    ----------------
+    sheep_closer_to_pen_scale   – reward when average distance to pen decreases
+    sheep_penned_reward         – flat reward per newly penned sheep
+    flock_grouped_scale         – reward when flock spread decreases (cohesion)
+    pressure_from_behind_scale  – dogs are behind flock relative to pen → reward
+    dog_spread_scale            – dogs are spread out (not stacked) → reward
+    dog_blocking_escape_scale   – dogs between sheep and escape direction
+    task_completion_reward      – bonus for penning all sheep
+    speed_bonus_scale           – per-step bonus ∝ (1 - t/max_t) when succeeding
+
+    Negative signals (penalties)
+    ----------------------------
+    scatter_penalty_scale       – flock spread increases
+    overpressure_penalty_scale  – any dog is too close (< overpressure_distance) to a sheep
+    gate_blocking_penalty_scale – any dog is directly in front of the pen entrance
+    dog_stack_penalty_scale     – dogs are bunched together (< stack_distance apart)
+    sheep_away_from_pen_scale   – average flock distance to pen increases
+    wandering_penalty           – time penalty (encourages task completion)
+    timeout_penalty             – terminal penalty on timeout
+    """
+
+    # Positive
+    sheep_closer_to_pen_scale: float = 2.5
+    sheep_penned_reward: float = 8.0
+    flock_grouped_scale: float = 0.4
+    pressure_from_behind_scale: float = 0.8
+    dog_spread_scale: float = 0.3
+    dog_blocking_escape_scale: float = 0.2
+    task_completion_reward: float = 25.0
+    speed_bonus_scale: float = 0.0  # disabled by default; enable for speed curriculum
+
+    # Negative
+    scatter_penalty_scale: float = 0.6
+    overpressure_penalty_scale: float = 1.2
+    gate_blocking_penalty_scale: float = 1.0
+    dog_stack_penalty_scale: float = 0.5
+    sheep_away_from_pen_scale: float = 0.5
+    wandering_penalty: float = 0.04
+    timeout_penalty: float = 15.0
+
+    # Thresholds
+    overpressure_distance: float = 1.5
+    dog_stack_distance: float = 2.0
+    gate_block_distance: float = 3.0
+    pressure_from_behind_min_cosine: float = 0.3
+
+
+@dataclass(frozen=True, slots=True)
+class HierarchicalRewardBreakdown:
+    """Named reward components for a single hierarchical environment step."""
+
+    sheep_closer_to_pen: float = 0.0
+    sheep_penned: float = 0.0
+    flock_grouped: float = 0.0
+    pressure_from_behind: float = 0.0
+    dog_spread: float = 0.0
+    dog_blocking_escape: float = 0.0
+    task_completion: float = 0.0
+    speed_bonus: float = 0.0
+    scatter_penalty: float = 0.0
+    overpressure_penalty: float = 0.0
+    gate_blocking_penalty: float = 0.0
+    dog_stack_penalty: float = 0.0
+    sheep_away_from_pen: float = 0.0
+    wandering_penalty: float = 0.0
+    timeout_penalty: float = 0.0
+    total: float = 0.0
+
+    def to_dict(self) -> dict[str, float]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class HierarchicalRewardInputs:
+    """Inputs consumed by HierarchicalRewardComputer.
+
+    All positions are (x, y) float tuples.  Distances are grid units.
+    """
+
+    previous_average_distance_to_pen: float
+    current_average_distance_to_pen: float
+    previous_flock_spread: float
+    current_flock_spread: float
+    newly_penned: int
+    success: bool
+    timeout: bool
+    # (x, y) positions of all dogs this step
+    dog_positions: tuple[Position, ...]
+    # (x, y) positions of unpenned sheep this step
+    sheep_positions: tuple[Position, ...]
+    # pen gate center – used for gate-blocking check
+    pen_gate_x: float
+    pen_gate_y: float
+    # flock centroid this step
+    flock_centroid: Position
+    # vector from flock centroid to pen center
+    flock_to_pen_dx: float
+    flock_to_pen_dy: float
+    # current step / max steps, for speed bonus
+    step_fraction: float = 0.0
+
+
+def _cos_similarity(ax: float, ay: float, bx: float, by: float) -> float:
+    """Cosine similarity between vectors (ax, ay) and (bx, by)."""
+    na = hypot(ax, ay)
+    nb = hypot(bx, by)
+    if na < 1e-6 or nb < 1e-6:
+        return 0.0
+    return max(-1.0, min(1.0, (ax * bx + ay * by) / (na * nb)))
+
+
+class HierarchicalRewardComputer:
+    """Compute a structured reward for the autonomous neural dog training path.
+
+    Design goals
+    ------------
+    - Reward herding *outcomes* (sheep moving toward pen, penned) heavily.
+    - Reward good herding *principles* (dogs behind flock, dogs spread) lightly.
+    - Penalise bad practices (overpressure, gate blocking, stacking) moderately.
+    - Do NOT tell dogs exactly where to stand.  The neural policy must learn positions.
+    """
+
+    def __init__(self, config: HierarchicalRewardConfig) -> None:
+        self._cfg = config
+
+    def compute(self, inputs: HierarchicalRewardInputs) -> HierarchicalRewardBreakdown:
+        cfg = self._cfg
+
+        # --- Progress: flock moving toward pen ---
+        dist_delta = (
+            inputs.previous_average_distance_to_pen - inputs.current_average_distance_to_pen
+        )
+        if dist_delta > 0:
+            sheep_closer = dist_delta * cfg.sheep_closer_to_pen_scale
+            sheep_away = 0.0
+        else:
+            sheep_closer = 0.0
+            sheep_away = -abs(dist_delta) * cfg.sheep_away_from_pen_scale
+
+        # --- Sheep penned ---
+        sheep_penned = inputs.newly_penned * cfg.sheep_penned_reward
+
+        # --- Flock cohesion ---
+        spread_delta = inputs.previous_flock_spread - inputs.current_flock_spread
+        if spread_delta > 0:
+            flock_grouped = spread_delta * cfg.flock_grouped_scale
+            scatter = 0.0
+        else:
+            flock_grouped = 0.0
+            scatter = -abs(spread_delta) * cfg.scatter_penalty_scale
+
+        # --- Dogs behind flock relative to pen ---
+        # A dog is "behind" when its vector from flock centroid is roughly
+        # *opposite* to the flock→pen vector; cosine < -threshold = behind.
+        pressure_from_behind = 0.0
+        if inputs.dog_positions and cfg.pressure_from_behind_scale > 0.0:
+            fc_x, fc_y = inputs.flock_centroid
+            for dog in inputs.dog_positions:
+                dog_dx = dog[0] - fc_x
+                dog_dy = dog[1] - fc_y
+                # Behind means dog is on the opposite side from pen.
+                cosine = _cos_similarity(
+                    dog_dx, dog_dy, inputs.flock_to_pen_dx, inputs.flock_to_pen_dy
+                )
+                if cosine < -cfg.pressure_from_behind_min_cosine:
+                    pressure_from_behind += abs(cosine) - cfg.pressure_from_behind_min_cosine
+            n_dogs = max(1, len(inputs.dog_positions))
+            pressure_from_behind = (
+                pressure_from_behind / n_dogs * cfg.pressure_from_behind_scale
+            )
+
+        # --- Dog spread: avoid stacking ---
+        dog_spread_score = 0.0
+        dog_stack_penalty = 0.0
+        if len(inputs.dog_positions) > 1:
+            pairs = [
+                _distance(inputs.dog_positions[i], inputs.dog_positions[j])
+                for i in range(len(inputs.dog_positions))
+                for j in range(i + 1, len(inputs.dog_positions))
+            ]
+            avg_pair_dist = sum(pairs) / len(pairs)
+            # Reward spread (capped at 20 grid units for normalisation)
+            dog_spread_score = min(20.0, avg_pair_dist) / 20.0 * cfg.dog_spread_scale
+            # Penalise stacking
+            stacked_pairs = sum(1 for d in pairs if d < cfg.dog_stack_distance)
+            dog_stack_penalty = -stacked_pairs * cfg.dog_stack_penalty_scale
+
+        # --- Dog blocking escape (light positive) ---
+        # A dog earns a small bonus when it is positioned between the flock
+        # and the edge opposite the pen (i.e., plugging an escape lane).
+        dog_blocking_escape = 0.0
+        if cfg.dog_blocking_escape_scale > 0.0 and inputs.dog_positions:
+            fc_x, fc_y = inputs.flock_centroid
+            # Escape direction is opposite pen direction.
+            esc_dx = -inputs.flock_to_pen_dx
+            esc_dy = -inputs.flock_to_pen_dy
+            for dog in inputs.dog_positions:
+                dog_dx = dog[0] - fc_x
+                dog_dy = dog[1] - fc_y
+                cosine = _cos_similarity(dog_dx, dog_dy, esc_dx, esc_dy)
+                if cosine > 0.5:
+                    dog_blocking_escape += cosine - 0.5
+            n_dogs = max(1, len(inputs.dog_positions))
+            dog_blocking_escape = (
+                dog_blocking_escape / n_dogs * cfg.dog_blocking_escape_scale
+            )
+
+        # --- Overpressure: dogs too close to sheep ---
+        overpressure = 0.0
+        for dog in inputs.dog_positions:
+            for sheep in inputs.sheep_positions:
+                if _distance(dog, sheep) < cfg.overpressure_distance:
+                    overpressure -= cfg.overpressure_penalty_scale
+
+        # --- Gate blocking: dog in front of pen opening ---
+        gate_blocking = 0.0
+        for dog in inputs.dog_positions:
+            d = hypot(dog[0] - inputs.pen_gate_x, dog[1] - inputs.pen_gate_y)
+            if d < cfg.gate_block_distance:
+                # Weight by proximity: closer = worse
+                gate_blocking -= (1.0 - d / cfg.gate_block_distance) * cfg.gate_blocking_penalty_scale
+
+        # --- Task completion + speed bonus ---
+        task_completion = cfg.task_completion_reward if inputs.success else 0.0
+        speed_bonus = 0.0
+        if inputs.success and cfg.speed_bonus_scale > 0.0:
+            speed_bonus = (1.0 - inputs.step_fraction) * cfg.speed_bonus_scale
+
+        # --- Time penalty + timeout ---
+        wandering = -cfg.wandering_penalty
+        timeout = -cfg.timeout_penalty if inputs.timeout else 0.0
+
+        total = (
+            sheep_closer
+            + sheep_penned
+            + flock_grouped
+            + pressure_from_behind
+            + dog_spread_score
+            + dog_blocking_escape
+            + task_completion
+            + speed_bonus
+            + scatter
+            + overpressure
+            + gate_blocking
+            + dog_stack_penalty
+            + sheep_away
+            + wandering
+            + timeout
+        )
+        return HierarchicalRewardBreakdown(
+            sheep_closer_to_pen=sheep_closer,
+            sheep_penned=sheep_penned,
+            flock_grouped=flock_grouped,
+            pressure_from_behind=pressure_from_behind,
+            dog_spread=dog_spread_score,
+            dog_blocking_escape=dog_blocking_escape,
+            task_completion=task_completion,
+            speed_bonus=speed_bonus,
+            scatter_penalty=scatter,
+            overpressure_penalty=overpressure,
+            gate_blocking_penalty=gate_blocking,
+            dog_stack_penalty=dog_stack_penalty,
+            sheep_away_from_pen=sheep_away,
+            wandering_penalty=wandering,
+            timeout_penalty=timeout,
+            total=total,
+        )
