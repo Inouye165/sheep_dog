@@ -22,6 +22,12 @@ ROLE_ORDER: tuple[DogRole, ...] = (
     DogRole.BLOCKER,
 )
 
+# Fixed observation-vector capacity across all curriculum stages.
+# Changing either constant is a breaking architecture change that requires
+# clearing training state and retraining from scratch.
+MAX_SHEEP_SLOTS: int = 6   # highest sheep count used in any curriculum stage
+HERD_DOG_SLOTS: int = 3    # highest dog count used in any curriculum stage
+
 
 @dataclass(frozen=True, slots=True)
 class DogObservation:
@@ -141,7 +147,7 @@ class RoleAwareObservationBuilder:
             environment.sheep,
             key=lambda sheep: (dog.position.distance_to(sheep.position), sheep.index),
         )
-        for sheep_slot in range(environment.env_config.sheep):
+        for sheep_slot in range(MAX_SHEEP_SLOTS):
             sheep = sorted_sheep[sheep_slot] if sheep_slot < len(sorted_sheep) else None
             prefix = f"sheep_{sheep_slot}"
             self._append_relative_point(
@@ -156,7 +162,7 @@ class RoleAwareObservationBuilder:
             values.append(0.0 if sheep is None else (1.0 if sheep.penned else 0.0))
 
         other_dogs = [other for other in environment.dogs if other.index != dog_index]
-        for teammate_slot in range(max(0, environment.env_config.dogs - 1)):
+        for teammate_slot in range(HERD_DOG_SLOTS - 1):
             other = other_dogs[teammate_slot] if teammate_slot < len(other_dogs) else None
             prefix = f"other_dog_{teammate_slot}"
             self._append_relative_point(

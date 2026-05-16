@@ -1,4 +1,4 @@
-import type { CheckpointIndex, ReplayBundle, ReplayRunRequest, TrainingStartRequest, TrainingStatus } from "../state/types";
+import type { CheckpointIndex, ConfigHistory, ConfigRevision, ReplayBundle, ReplayRunRequest, TrainingStartRequest, TrainingStatus } from "../state/types";
 
 const API_BASE_URL = "http://127.0.0.1:8000";
 
@@ -76,5 +76,23 @@ export async function runReplay(request: ReplayRunRequest): Promise<ReplayBundle
       "Content-Type": "application/json",
     },
     body: JSON.stringify(request),
+  }, API_BASE_URL);
+}
+
+export async function loadEffectiveConfig(): Promise<Record<string, unknown>> {
+  return fetchJson<Record<string, unknown>>("/api/config", undefined, API_BASE_URL);
+}
+
+export async function loadConfigHistory(): Promise<ConfigHistory> {
+  return fetchJson<ConfigHistory>("/api/config/history", undefined, API_BASE_URL);
+}
+
+export async function saveConfigRevision(
+  payload: Omit<ConfigRevision, "id" | "timestamp">,
+): Promise<ConfigHistory> {
+  return fetchJson<ConfigHistory>("/api/config/history", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
   }, API_BASE_URL);
 }

@@ -1,3 +1,5 @@
+import type { CheckpointEntry } from "../state/types";
+
 const MAX_STAGE = 5;
 
 const STAGE_DESCRIPTIONS: Record<number, string> = {
@@ -8,6 +10,19 @@ const STAGE_DESCRIPTIONS: Record<number, string> = {
   4: "2 dogs · 5 sheep · 132×90 grid",
   5: "3 dogs · 6 sheep · 144×96 grid",
 };
+
+/** Ideal episode count to run per curriculum stage before evaluating. */
+const RECOMMENDED_EPISODES: Record<number, number> = {
+  0: 50,
+  1: 50,
+  2: 100,
+  3: 150,
+  4: 200,
+  5: 300,
+};
+
+/** Success rate threshold above which promoting to the next stage is recommended. */
+const PROMOTE_THRESHOLD = 0.5;
 
 interface TrainingPanelProps {
   episodes: number;
@@ -21,10 +36,22 @@ interface TrainingPanelProps {
   batchTotalEpisodes: number;
   currentEpisode: number | null;
   totalEpisodesTrained: number;
+  stageHistory: Record<string, number>;
+  grandTotalEpisodes: number;
   phase: string;
   message: string;
   error: string | null;
   successRate: number | null;
+  activeTrainerType?: string | null;
+  activePolicyType?: string | null;
+  activeInstincts?: boolean | null;
+  activeCurriculumStage?: number | null;
+  latestSuccessRate?: number | null;
+  latestAvgSheepPenned?: number | null;
+  latestAvgReward?: number | null;
+  latestTimeoutRate?: number | null;
+  latestAvgDistanceToPen?: number | null;
+  latestCheckpointEpisode?: number | null;
   onEpisodesChange: (episodes: number) => void;
   onFastModeChange: (enabled: boolean) => void;
   onEnableInstinctsChange: (enabled: boolean) => void;
@@ -33,6 +60,8 @@ interface TrainingPanelProps {
   onStartTraining: () => void;
   onClearTraining: () => void;
   onPromote: () => void;
+  currentBestEntry?: CheckpointEntry | null;
+  previousBestEntry?: CheckpointEntry | null;
 }
 
 export function TrainingPanel({
@@ -47,10 +76,22 @@ export function TrainingPanel({
   batchTotalEpisodes,
   currentEpisode,
   totalEpisodesTrained,
+  stageHistory,
+  grandTotalEpisodes,
   phase,
   message,
   error,
   successRate,
+  activeTrainerType,
+  activePolicyType,
+  activeInstincts,
+  activeCurriculumStage,
+  latestSuccessRate,
+  latestAvgSheepPenned,
+  latestAvgReward,
+  latestTimeoutRate,
+  latestAvgDistanceToPen,
+  latestCheckpointEpisode,
   onEpisodesChange,
   onFastModeChange,
   onEnableInstinctsChange,
@@ -59,17 +100,68 @@ export function TrainingPanel({
   onStartTraining,
   onClearTraining,
   onPromote,
+  currentBestEntry,
+  previousBestEntry,
 }: TrainingPanelProps) {
   const denominator = batchTotalEpisodes || episodes;
   const progress = denominator === 0 ? 0 : Math.min(1, batchCompletedEpisodes / denominator);
   const progressPct = Math.round(progress * 100);
   const completedDisplay = Math.floor(batchCompletedEpisodes);
   const safeTotal = Number.isFinite(totalEpisodesTrained) ? totalEpisodesTrained : 0;
+  const safeGrand = Number.isFinite(grandTotalEpisodes) ? grandTotalEpisodes : 0;
+  const stageHistoryEntries = Object.entries(stageHistory)
+    .filter(([, v]) => v > 0)
+    .sort(([a], [b]) => Number(a) - Number(b));
   const busy = running || clearing;
   const canPromote = curriculumStage < MAX_STAGE && !busy;
   const stageDesc = STAGE_DESCRIPTIONS[curriculumStage] ?? `Stage ${curriculumStage}`;
   const successPct = successRate !== null ? `${Math.round(successRate * 100)}%` : "—";
   const successGood = successRate !== null && successRate >= 0.5;
+  const recommendedEpisodes = RECOMMENDED_EPISODES[curriculumStage] ?? 100;
+  const readyToPromote = successRate !== null && successRate >= PROMOTE_THRESHOLD && canPromote;
+
+  function formatTimestamp(iso: string | null | undefined): string | null {
+    if (!iso) return null;
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return null;
+    const diffMin = Math.floor((Date.now() - d.getTime()) / 60_000);
+    const timeStr = d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+    let ago: string;
+    if (diffMin < 1) ago = "just now";
+    else if (diffMin < 60) ago = `${diffMin}m ago`;
+    else {
+      const h = Math.floor(diffMin / 60);
+      const m = diffMin % 60;
+      ago = m > 0 ? `${h}h ${m}m ago` : `${h}h ago`;
+    }
+    return `${timeStr} · ${ago}`;
+  }
+
+  function bestEntryLabel(entry: CheckpointEntry): string {
+    const stage = entry.reward_config?.instincts?.curriculum_stage;
+    const stageStr = stage != null ? `S${stage} · ` : "";
+    return `${stageStr}Ep ${entry.checkpoint_episode}`;
+  }
+
+  // Active config — what the backend is actually using (or queued to use)
+  const hasActiveConfig =
+    activeTrainerType != null || activePolicyType != null || activeCurriculumStage != null;
+  const activeStageLabel =
+    activeCurriculumStage != null ? `Stage ${activeCurriculumStage}` : null;
+  const activeInstinctsLabel =
+    activeInstincts === true ? "instincts ON" : activeInstincts === false ? "instincts OFF" : null;
+
+  // Latest checkpoint metrics
+  const hasLatestMetrics =
+    latestSuccessRate != null ||
+    latestAvgSheepPenned != null ||
+    latestAvgReward != null ||
+    latestTimeoutRate != null ||
+    latestAvgDistanceToPen != null;
+  const fmtPct = (v: number | null | undefined) =>
+    v != null ? `${Math.round(v * 100)}%` : "—";
+  const fmtNum = (v: number | null | undefined, decimals = 2) =>
+    v != null ? v.toFixed(decimals) : "—";
 
   return (
     <section className="training-card" aria-label="Training controls">
@@ -96,6 +188,17 @@ export function TrainingPanel({
         ) : null}
       </div>
 
+      {readyToPromote ? (
+        <div className="warning-box warning-box--success" role="status">
+          ✓ {Math.round(successRate! * 100)}% success — ready to promote to Stage {curriculumStage + 1}
+        </div>
+      ) : successRate !== null && successRate < PROMOTE_THRESHOLD && !running && curriculumStage < MAX_STAGE ? (
+        <div className="warning-box" role="status">
+          {Math.round(successRate * 100)}% success — train more before promoting
+          (target ≥ {Math.round(PROMOTE_THRESHOLD * 100)}%)
+        </div>
+      ) : null}
+
       {curriculumStage === 0 ? (
         <div className="warning-box warning-box--error" role="status">
           Stage 0 is the full problem — dogs rarely discover the pen from scratch.
@@ -116,6 +219,18 @@ export function TrainingPanel({
             disabled={busy}
           />
         </label>
+        <div className="episodes-hint">
+          Suggested: {recommendedEpisodes} for Stage {curriculumStage}
+          {episodes !== recommendedEpisodes && !busy ? (
+            <button
+              type="button"
+              className="episodes-hint__use"
+              onClick={() => onEpisodesChange(recommendedEpisodes)}
+            >
+              Use suggested
+            </button>
+          ) : null}
+        </div>
       </div>
 
       <div
@@ -141,7 +256,7 @@ export function TrainingPanel({
         </div>
         <div>
           <span>Total trained</span>
-          <strong>{safeTotal.toLocaleString()}</strong>
+          <strong>{(safeGrand || safeTotal).toLocaleString()}</strong>
         </div>
         <div>
           <span>Batch</span>
@@ -154,6 +269,119 @@ export function TrainingPanel({
           <strong>{message}</strong>
         </div>
       </div>
+
+      {(currentBestEntry || previousBestEntry) ? (
+        <div className="best-perf">
+          <div className={`best-perf__col${currentBestEntry ? " best-perf__col--current" : ""}`}>
+            {currentBestEntry ? (
+              <>
+                <span className="best-perf__label">★ Best so far</span>
+                <span className="best-perf__ep">{bestEntryLabel(currentBestEntry)}</span>
+                <span
+                  className="best-perf__rate"
+                  style={{ color: currentBestEntry.success_rate >= 0.5 ? "var(--good)" : undefined }}
+                >
+                  {Math.round(currentBestEntry.success_rate * 100)}%
+                </span>
+                <span className="best-perf__reward">
+                  {currentBestEntry.average_reward.toFixed(1)} R
+                  {currentBestEntry.average_completion_steps != null
+                    ? ` · ${Math.round(currentBestEntry.average_completion_steps)} steps`
+                    : ""}
+                </span>
+                {formatTimestamp(currentBestEntry.recorded_at) ? (
+                  <span className="best-perf__time">{formatTimestamp(currentBestEntry.recorded_at)}</span>
+                ) : null}
+              </>
+            ) : null}
+          </div>
+          <div className="best-perf__col">
+            {previousBestEntry ? (
+              <>
+                <span className="best-perf__label">Previous best</span>
+                <span className="best-perf__ep">{bestEntryLabel(previousBestEntry)}</span>
+                <span
+                  className="best-perf__rate"
+                  style={{ color: previousBestEntry.success_rate >= 0.5 ? "var(--good)" : "var(--muted)" }}
+                >
+                  {Math.round(previousBestEntry.success_rate * 100)}%
+                </span>
+                <span className="best-perf__reward">
+                  {previousBestEntry.average_reward.toFixed(1)} R
+                  {previousBestEntry.average_completion_steps != null
+                    ? ` · ${Math.round(previousBestEntry.average_completion_steps)} steps`
+                    : ""}
+                </span>
+                {formatTimestamp(previousBestEntry.recorded_at) ? (
+                  <span className="best-perf__time">{formatTimestamp(previousBestEntry.recorded_at)}</span>
+                ) : null}
+              </>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
+      {stageHistoryEntries.length > 0 ? (
+        <div className="stage-history">
+          <span className="stage-history__label">Per-stage history</span>
+          <div className="stage-history__entries">
+            {stageHistoryEntries.map(([stage, eps]) => (
+              <span key={stage} className="stage-history__entry">
+                S{stage}: {eps.toLocaleString()}
+              </span>
+            ))}
+            {stageHistoryEntries.length > 1 ? (
+              <span className="stage-history__entry stage-history__entry--total">
+                Total: {stageHistoryEntries.reduce((s, [, v]) => s + v, 0).toLocaleString()}
+              </span>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
+      {hasLatestMetrics ? (
+        <details className="training-advanced">
+          <summary>Latest checkpoint metrics{latestCheckpointEpisode != null ? ` (ep ${latestCheckpointEpisode})` : ""}</summary>
+          <div className="training-summary">
+            <div>
+              <span>Success</span>
+              <strong style={{ color: latestSuccessRate != null && latestSuccessRate >= 0.5 ? "var(--good)" : undefined }}>
+                {fmtPct(latestSuccessRate)}
+              </strong>
+            </div>
+            <div>
+              <span>Avg penned</span>
+              <strong>{fmtNum(latestAvgSheepPenned)}</strong>
+            </div>
+            <div>
+              <span>Avg reward</span>
+              <strong>{fmtNum(latestAvgReward, 1)}</strong>
+            </div>
+            <div>
+              <span>Timeout</span>
+              <strong>{fmtPct(latestTimeoutRate)}</strong>
+            </div>
+            <div>
+              <span>Dist-to-pen</span>
+              <strong>{fmtNum(latestAvgDistanceToPen, 1)}</strong>
+            </div>
+          </div>
+        </details>
+      ) : null}
+
+      {hasActiveConfig ? (
+        <div className="active-config-banner" role="status">
+          <span className="active-config-banner__label">Active:</span>
+          {activeTrainerType ? <span>{activeTrainerType}</span> : null}
+          {activePolicyType ? <span>{activePolicyType}</span> : null}
+          {activeStageLabel ? <span>{activeStageLabel}</span> : null}
+          {activeInstinctsLabel ? (
+            <span style={{ color: activeInstincts ? "var(--good)" : "var(--muted)" }}>
+              {activeInstinctsLabel}
+            </span>
+          ) : null}
+        </div>
+      ) : null}
 
       {/* Advanced settings — collapsed by default */}
       <details className="training-advanced">

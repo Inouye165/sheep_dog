@@ -95,7 +95,10 @@ def load_playable_policy(
         if state_path.exists():
             payload = json.loads(state_path.read_text(encoding="utf-8"))
             weights_payload = payload.get("weights")
-            policy_state_path = payload.get("policy_state_path")
+            # Prefer the best-performing model over the most recently trained one
+            # when replaying — this prevents policy-collapse regressions from
+            # replacing the peak-performance model in the viewer.
+            policy_state_path = payload.get("best_model_path") or payload.get("policy_state_path")
             policy_config = payload.get("policy_config")
     return create_policy_from_name(
         selected_mode,

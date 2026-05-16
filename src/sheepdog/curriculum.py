@@ -25,36 +25,51 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "sheep": 1,
         "width": 60,
         "height": 45,
-        "pen_width": 18,
-        "pen_height": 18,
+        # Pen is 12×12 (~20% of field width). Previously 18×18 (30%) was so
+        # large that sheep wandered in passively — the dog learned to do
+        # nothing and still scored 100% success.
+        "pen_width": 12,
+        "pen_height": 12,
+        # Opening faces the field (bottom) so sheep pushed upward by the dog
+        # can enter directly.  The pen sits in the top-right corner at y=1..12;
+        # a bottom opening at y=13 aligns with the dog approaching from y>13.
+        "pen_opening": "bottom",
         "dog_speed": 1,
         "sheep_speed": 1,
         "max_steps": 600,
-        "no_progress_window": 100,
+        # Large window so the heuristic's flanking manoeuvres don't trigger
+        # early termination; no-progress condition fires only for policies
+        # that are completely stalled across almost the whole episode.
+        "no_progress_window": 300,
+        "no_progress_distance_delta": 0.15,
     },
     2: {
         "dogs": 1,
         "sheep": 3,
         "width": 72,
         "height": 54,
-        "pen_width": 18,
-        "pen_height": 18,
+        # Pen is 12×12 (~17% of field width).
+        "pen_width": 12,
+        "pen_height": 12,
         "dog_speed": 1,
         "sheep_speed": 1,
         "max_steps": 720,
         "no_progress_window": 110,
+        "no_progress_distance_delta": 0.30,
     },
     3: {
         "dogs": 1,
         "sheep": 3,
         "width": 120,
         "height": 84,
-        "pen_width": 15,
-        "pen_height": 15,
+        "pen_width": 12,
+        "pen_height": 12,
         "dog_speed": 1,
         "sheep_speed": 1,
         "max_steps": 840,
         "no_progress_window": 120,
+        # Slightly relaxed for the larger field — drives take longer.
+        "no_progress_distance_delta": 0.25,
     },
     4: {
         "dogs": 2,
@@ -67,6 +82,7 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "sheep_speed": 1,
         "max_steps": 960,
         "no_progress_window": 135,
+        "no_progress_distance_delta": 0.20,
     },
     5: {
         "dogs": 3,
@@ -79,6 +95,7 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "sheep_speed": 1,
         "max_steps": 1020,
         "no_progress_window": 150,
+        "no_progress_distance_delta": 0.20,
     },
 }
 

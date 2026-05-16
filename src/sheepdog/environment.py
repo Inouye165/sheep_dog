@@ -618,7 +618,7 @@ class SheepdogEnvironment:
                 wrong_hold_active=wrong_hold_active,
                 tactically_valid_hold=tactically_valid_hold,
                 terminated=self._terminated,
-                timeout=self._timeout,
+                timeout=self._timeout or self._stopped,
                 success=self._success,
                 dog_positions=tuple(
                     (float(dog.position.x), float(dog.position.y)) for dog in self._dogs
@@ -1560,7 +1560,12 @@ class SheepdogEnvironment:
                 "role_slot": self._pressure_role_offset(dog_index),
             }
 
-        target = self._formation_target(dog_index, flock_center, pen_center)
+        role_assignment = self._role_assignments.get(dog_index)
+        target = (
+            role_assignment.target
+            if role_assignment is not None
+            else self._formation_target(dog_index, flock_center, pen_center)
+        )
         alignment = self._alignment_score(position, flock_center, pen_center)
         focus_sheep, focus_mode = self._focus_sheep_for_dog(dog_index, flock_center, position)
         distance_to_flock = position.distance_to(flock_center)

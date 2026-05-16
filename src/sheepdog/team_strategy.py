@@ -32,6 +32,9 @@ class StrategySnapshot:
     wall_pressure: bool
 
 
+_LATERAL_DEAD_ZONE: int = 3
+
+
 class TeamStrategy:
     """Assign dynamic cooperative roles from current flock state."""
 
@@ -39,6 +42,12 @@ class TeamStrategy:
         self._width = width
         self._height = height
         self._config = config or EnvironmentConfig(width=width, height=height)
+        # Sticky pen-approach direction: only updated when the flock is clearly
+        # outside a dead zone around the pen axis.  This prevents LEFT/RIGHT
+        # flanker targets from swapping every step when the flock drifts ±1 cell
+        # across the pen centre line (the primary cause of dog oscillation).
+        self._sticky_pen_dx: int = 1
+        self._sticky_pen_dy: int = 0
 
     def assign_roles(
         self,
@@ -58,7 +67,13 @@ class TeamStrategy:
             animal.position.distance_to(pen.center) for animal in unpenned
         )
         stray = self._stray_sheep(unpenned, flock_center, flock_spread)
-        near_pen = average_distance_to_pen <= max(pen.width, pen.height) + 4
+        # Blocker is only useful once the flock is close enough to the gate
+        # that an escape guard provides real benefit.  Using the raw pen
+        # diagonal (max(w,h)+4) was far too broad: for an 18×18 pen it fired
+        # at ≤22 units, immediately stealing the only dog from rear-pressure
+        # and stalling all herding progress.  gate_approach_distance (default
+        # 10) matches the corridor logic and gives the dog time to herd first.
+        near_pen = average_distance_to_pen <= self._config.gate_approach_distance
         wall_pressure = any(self._wall_margin(animal.position) <= 2 for animal in unpenned)
         snapshot = StrategySnapshot(
             flock_center=flock_center,
@@ -69,27 +84,52 @@ class TeamStrategy:
             wall_pressure=wall_pressure,
         )
 
-        pen_dx = self._axis_sign(pen.center.x - flock_center.x)
-        pen_dy = self._axis_sign(pen.center.y - flock_center.y)
-        if pen_dx == 0 and pen_dy == 0:
-            pen_dx = 1
+        pen_dx_raw = self._axis_sign(pen.center.x - flock_center.x)
+        pen_dy_raw = self._axis_sign(pen.center.y - flock_center.y)
+        # Only move the sticky direction when the flock is clearly outside the
+        # dead zone.  Within ±_LATERAL_DEAD_ZONE cells of the pen centre line,
+        # keep the last known direction to prevent the lateral axis from
+        # flipping every step and bouncing LEFT/RIGHT flanker targets.
+        if abs(pen.center.x - flock_center.x) >= _LATERAL_DEAD_ZONE:
+            self._sticky_pen_dx = pen_dx_raw
+        elif self._sticky_pen_dx == 0:
+            self._sticky_pen_dx = pen_dx_raw or 1
+        if abs(pen.center.y - flock_center.y) >= _LATERAL_DEAD_ZONE:
+            self._sticky_pen_dy = pen_dy_raw
+        # pen_dx drives the rear-target offset (how far behind the flock to stand).
+        # Use the raw horizontal sign so we don't add a false horizontal offset when
+        # the pen is directly above/below (pen_dx_raw == 0 → no horizontal shift).
+        pen_dx = pen_dx_raw
+        pen_dy = self._sticky_pen_dy
+        # Lateral is perpendicular to the pen-approach direction.
+        # lateral_x = -pen_dy  (always correct: rotates pen direction 90°)
+        # lateral_y uses the RAW horizontal sign, not the sticky value.  The
+        # sticky is only consulted when the pen genuinely has a horizontal
+        # component; when the pen is directly above (pen_dx_raw == 0) the
+        # sticky value of 1 would introduce a false diagonal and cluster all
+        # three role targets below-and-to-the-side instead of spreading them
+        # to the true sides of the flock.
         lateral_x = -pen_dy
-        lateral_y = pen_dx
+        lateral_y = pen_dx_raw
         if lateral_x == 0 and lateral_y == 0:
             lateral_y = 1
 
-        flank_offset = max(3, round(flock_spread) + 2)
+        flank_offset = max(4, round(flock_spread) + 3)
         rear_target = Point(
             flock_center.x - pen_dx * 4,
             flock_center.y - pen_dy * 4,
         ).clamp(self._width, self._height)
+        # Flankers sit BESIDE the flock (same pen-axis depth as flock_center),
+        # not behind-and-to-the-side.  This puts them at the correct lateral
+        # position to prevent sideways escapes and avoids clustering all three
+        # role targets in the same rear quadrant.
         left_target = Point(
-            rear_target.x + lateral_x * flank_offset,
-            rear_target.y + lateral_y * flank_offset,
+            flock_center.x + lateral_x * flank_offset,
+            flock_center.y + lateral_y * flank_offset,
         ).clamp(self._width, self._height)
         right_target = Point(
-            rear_target.x - lateral_x * flank_offset,
-            rear_target.y - lateral_y * flank_offset,
+            flock_center.x - lateral_x * flank_offset,
+            flock_center.y - lateral_y * flank_offset,
         ).clamp(self._width, self._height)
         blocker_target = self._blocker_target(flock_center, pen, lateral_x, lateral_y)
 
@@ -111,7 +151,10 @@ class TeamStrategy:
             )
             remaining = [dog for dog in remaining if dog.index != collector.index]
 
-        if near_pen and remaining:
+        # Only assign a blocker when enough dogs remain to still push the flock.
+        # blocker_min_remaining_dogs (default 1) ensures at least one herder
+        # keeps applying rear-pressure after the blocker is stationed.
+        if near_pen and len(remaining) > self._config.blocker_min_remaining_dogs:
             blocker = self._best_dog_for_role(
                 remaining,
                 blocker_target,

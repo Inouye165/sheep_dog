@@ -490,6 +490,9 @@ class HierarchicalRewardInputs:
     flock_to_pen_dy: float
     # current step / max steps, for speed bonus
     step_fraction: float = 0.0
+    # Positions of dogs explicitly assigned the BLOCKER role.  These dogs are
+    # near the gate by design; exempting them avoids self-defeating penalties.
+    blocker_positions: tuple[Position, ...] = field(default_factory=tuple)
 
 
 def _cos_similarity(ax: float, ay: float, bx: float, by: float) -> float:
@@ -605,8 +608,13 @@ class HierarchicalRewardComputer:
                     overpressure -= cfg.overpressure_penalty_scale
 
         # --- Gate blocking: dog in front of pen opening ---
+        # Exempt any dog that is explicitly assigned the BLOCKER role: those
+        # dogs are near the gate by design and should not be penalised for it.
         gate_blocking = 0.0
+        blocker_set = set(inputs.blocker_positions)
         for dog in inputs.dog_positions:
+            if dog in blocker_set:
+                continue
             d = hypot(dog[0] - inputs.pen_gate_x, dog[1] - inputs.pen_gate_y)
             if d < cfg.gate_block_distance:
                 # Weight by proximity: closer = worse

@@ -96,6 +96,7 @@ export interface ReplayBundle {
   policy_mode?: string;
   replay_mode?: string;
   checkpoint_episode?: number | null;
+  total_training_episodes?: number | null;
   environment?: {
     dogs: number;
     sheep: number;
@@ -145,12 +146,19 @@ export interface TrainingStatus {
   batch_total_episodes: number;
   batch_completed_episodes: number;
   total_episodes_trained: number;
+  stage_history: Record<string, number>;
+  grand_total_episodes: number;
   current_episode: number | null;
   checkpoint_episode: number | null;
   latest_checkpoint_episode: number | null;
   latest_seed: number | null;
   latest_replay_path: string | null;
   best_score: number | null;
+  latest_success_rate: number | null;
+  latest_avg_sheep_penned: number | null;
+  latest_avg_reward: number | null;
+  latest_timeout_rate: number | null;
+  latest_avg_distance_to_pen: number | null;
   phase: string;
   message: string;
   error: string | null;
@@ -194,6 +202,7 @@ export interface EvaluationRecord {
 
 export interface CheckpointEntry {
   checkpoint_episode: number;
+  recorded_at?: string;
   checkpoint: string;
   evaluation: string;
   replay: string;
@@ -241,4 +250,25 @@ export interface EvaluationSummary {
 export interface CheckpointIndex {
   checkpoints: CheckpointEntry[];
   latest: EvaluationSummary | null;
+}
+
+export interface ConfigTrainingSettings {
+  episodes: number;
+  fast_mode: boolean;
+  enable_instinct_rewards: boolean;
+  curriculum_stage: number;
+  debug_reward_breakdown: boolean;
+}
+
+export interface ConfigRevision {
+  id: number;
+  timestamp: string;
+  label: string;
+  source: "training_start" | "manual";
+  training_settings: ConfigTrainingSettings;
+  config: Record<string, unknown>;
+}
+
+export interface ConfigHistory {
+  revisions: ConfigRevision[];
 }

@@ -6,6 +6,7 @@ import json
 import random
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from statistics import fmean
 from typing import Any
@@ -226,6 +227,7 @@ class Trainer:
                 checkpoint_path = self.checkpoint_store.write(metadata)
                 checkpoint_payload = {
                     "checkpoint_episode": cumulative_episode,
+                    "recorded_at": datetime.now(timezone.utc).isoformat(),
                     "checkpoint": checkpoint_path.name,
                     "evaluation": evaluation_json.name,
                     "replay": str(representative_replay_path),

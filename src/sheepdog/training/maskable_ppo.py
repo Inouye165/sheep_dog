@@ -6,6 +6,7 @@ import json
 from collections.abc import Callable
 from dataclasses import asdict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -92,23 +93,45 @@ class MaskablePPOTrainer(Trainer):
     MODEL_DIRNAME = "models"
 
     def _training_signature(self) -> dict[str, Any]:
+        # Deliberately excludes ``dogs`` and ``sheep`` counts: the observation
+        # vector is now padded to fixed MAX_SHEEP_SLOTS / HERD_DOG_SLOTS slots so
+        # the architecture is stable across curriculum promotions.  Speeds and
+        # sprint multiplier are kept because they change training dynamics.
         return {
             "action_size": len(ACTION_ORDER),
             "rewards": asdict(self.config.rewards),
             "environment": {
-                "dogs": self.config.environment.dogs,
-                "sheep": self.config.environment.sheep,
                 "dog_speed": self.config.environment.dog_speed,
                 "dog_sprint_multiplier": self.config.environment.dog_sprint_multiplier,
                 "sheep_speed": self.config.environment.sheep_speed,
             },
         }
 
+    @staticmethod
+    def _strip_non_architectural_fields(sig: dict[str, Any]) -> dict[str, Any]:
+        """Return a copy with stage/toggle metadata removed before comparison.
+
+        ``curriculum_stage``, ``debug_reward_breakdown``, and
+        ``enable_instinct_rewards`` are runtime toggles that do not affect the
+        neural-network architecture; stripping them lets stage promotions reuse
+        the trained model and accumulate ``total_episodes_trained`` correctly.
+        """
+        sig = dict(sig)
+        if "rewards" in sig:
+            rewards = dict(sig["rewards"])
+            instincts = dict(rewards.get("instincts", {}))
+            for key in ("curriculum_stage", "debug_reward_breakdown", "enable_instinct_rewards"):
+                instincts.pop(key, None)
+            rewards["instincts"] = instincts
+            sig["rewards"] = rewards
+        return sig
+
     def _has_compatible_policy_state(self) -> bool:
         stored_signature = self._loaded_state.get("training_signature")
         if not isinstance(stored_signature, dict):
             return False
-        return stored_signature == self._training_signature()
+        normalize = self._strip_non_architectural_fields
+        return normalize(stored_signature) == normalize(self._training_signature())
 
     def _load_state(self) -> dict[str, Any]:
         if not self._state_path.exists():
@@ -117,6 +140,7 @@ class MaskablePPOTrainer(Trainer):
                 "total_timesteps": 0,
                 "policy_state_path": None,
                 "policy_config": None,
+                "incomplete_batch": None,
             }
         try:
             payload = json.loads(self._state_path.read_text(encoding="utf-8"))
@@ -126,6 +150,7 @@ class MaskablePPOTrainer(Trainer):
                 "total_timesteps": 0,
                 "policy_state_path": None,
                 "policy_config": None,
+                "incomplete_batch": None,
             }
         return {
             "total_episodes_trained": int(payload.get("total_episodes_trained", 0)),
@@ -133,6 +158,12 @@ class MaskablePPOTrainer(Trainer):
             "policy_state_path": payload.get("policy_state_path"),
             "policy_config": payload.get("policy_config"),
             "training_signature": payload.get("training_signature"),
+            "best_model_path": payload.get("best_model_path"),
+            "best_model_curriculum_stage": payload.get("best_model_curriculum_stage"),
+            "best_success_rate": payload.get("best_success_rate"),
+            "best_average_reward": payload.get("best_average_reward"),
+            "best_completion_steps": payload.get("best_completion_steps"),
+            "incomplete_batch": payload.get("incomplete_batch"),
         }
 
     def train(
@@ -150,6 +181,41 @@ class MaskablePPOTrainer(Trainer):
         n_checkpoints = batch_total
         steps_per_segment = max(1, train_config.total_timesteps // n_checkpoints)
         starting_total_timesteps = int(self._loaded_state.get("total_timesteps", 0)) if resuming_policy else 0
+        # Resume an interrupted batch when the new job has the same segment count.
+        _incomplete = self._loaded_state.get("incomplete_batch") if resuming_policy else None
+        skip_segments: int = 0
+        if isinstance(_incomplete, dict):
+            if (
+                int(_incomplete.get("batch_total_segments", 0)) == n_checkpoints
+                and int(_incomplete.get("batch_steps_per_segment", 0)) == steps_per_segment
+                and 0 < int(_incomplete.get("batch_completed_segments", 0)) < n_checkpoints
+            ):
+                skip_segments = int(_incomplete["batch_completed_segments"])
+        best_success_rate: float = (
+            float(self._loaded_state["best_success_rate"])
+            if resuming_policy and self._loaded_state.get("best_success_rate") is not None
+            else -1.0
+        )
+        best_average_reward: float = (
+            float(self._loaded_state["best_average_reward"])
+            if resuming_policy and self._loaded_state.get("best_average_reward") is not None
+            else float("-inf")
+        )
+        best_completion_steps: float = (
+            float(self._loaded_state["best_completion_steps"])
+            if resuming_policy and self._loaded_state.get("best_completion_steps") is not None
+            else float("inf")
+        )
+        tracked_best_model_path: Path | None = (
+            Path(self._loaded_state["best_model_path"])
+            if resuming_policy and self._loaded_state.get("best_model_path")
+            else None
+        )
+        best_model_curriculum_stage: int = (
+            int(self._loaded_state["best_model_curriculum_stage"])
+            if resuming_policy and self._loaded_state.get("best_model_curriculum_stage") is not None
+            else self.config.rewards.instincts.curriculum_stage
+        )
 
         def emit(payload: dict[str, Any]) -> None:
             if progress_callback is None:
@@ -161,7 +227,7 @@ class MaskablePPOTrainer(Trainer):
         emit(
             {
                 "phase": "starting",
-                "batch_completed_episodes": 0,
+                "batch_completed_episodes": skip_segments,
                 "current_episode": None,
                 "total_episodes_trained": starting_total,
                 "checkpoint_episode": None,
@@ -174,10 +240,15 @@ class MaskablePPOTrainer(Trainer):
             }
         )
 
-        policy_state_path = self._loaded_state.get("policy_state_path")
-        if resuming_policy and policy_state_path:
+        # Prefer the best-scoring model when resuming so each new training batch
+        # continues from the highest-quality weights rather than the most recent
+        # (potentially degraded) checkpoint.  Fall back to policy_state_path when
+        # no best model has been recorded yet (e.g. first batch ever run).
+        best_model_path_str = self._loaded_state.get("best_model_path")
+        resume_path = best_model_path_str or self._loaded_state.get("policy_state_path")
+        if resuming_policy and resume_path:
             policy = NeuralPolicy.load(
-                policy_state_path,
+                resume_path,
                 self.config,
                 self._loaded_state.get("policy_config"),
             )
@@ -191,17 +262,31 @@ class MaskablePPOTrainer(Trainer):
         )
         saved_model_path: Path | None = None
 
-        for completed_checkpoints, checkpoint_episode in enumerate(
+        # Stamp an in-progress batch marker before the loop so a crash mid-batch
+        # is resumable on the next call with the same episode count.
+        _batch_marker_pre: dict[str, Any] = {
+            "batch_completed_segments": skip_segments,
+            "batch_total_segments": n_checkpoints,
+            "batch_steps_per_segment": steps_per_segment,
+        }
+        _pre_loop_state = dict(self._loaded_state)
+        _pre_loop_state["incomplete_batch"] = _batch_marker_pre
+        self._state_path.write_text(json.dumps(_pre_loop_state, indent=2), encoding="utf-8")
+
+        for completed_checkpoints, _checkpoint_slot in enumerate(
             train_config.checkpoint_episodes,
             start=1,
         ):
-            cumulative_ts = starting_total_timesteps + completed_checkpoints * steps_per_segment
+            if completed_checkpoints <= skip_segments:
+                continue
+            new_segments = completed_checkpoints - skip_segments
+            cumulative_ts = starting_total_timesteps + new_segments * steps_per_segment
             emit(
                 {
                     "phase": "learning",
                     "batch_completed_episodes": completed_checkpoints - 1,
                     "current_episode": None,
-                    "total_episodes_trained": starting_total + completed_checkpoints - 1,
+                    "total_episodes_trained": starting_total + new_segments - 1,
                     "checkpoint_episode": None,
                     "best_score": None,
                     "message": (
@@ -214,11 +299,21 @@ class MaskablePPOTrainer(Trainer):
                 emit,
                 report_interval=max(1, steps_per_segment // 4),
                 total_timesteps=steps_per_segment,
-                starting_total_episodes=starting_total + completed_checkpoints - 1,
+                starting_total_episodes=starting_total + new_segments - 1,
                 batch_total_episodes=batch_total,
                 completed_segments=completed_checkpoints - 1,
                 segment_index=completed_checkpoints - 1,
             )
+            # Linear LR annealing across the batch: full LR at segment 0,
+            # learning_rate_final at the last segment.  This keeps updates
+            # aggressive early (fast cliff recovery) and conservative late
+            # (prevents policy collapse near the end of a run).
+            _batch_done = completed_checkpoints - skip_segments - 1
+            _batch_span = max(1, n_checkpoints - skip_segments - 1)
+            _batch_progress = _batch_done / _batch_span
+            policy.model.learning_rate = train_config.learning_rate + (
+                train_config.learning_rate_final - train_config.learning_rate
+            ) * _batch_progress
             policy.model.learn(
                 total_timesteps=steps_per_segment,
                 reset_num_timesteps=True,
@@ -228,15 +323,15 @@ class MaskablePPOTrainer(Trainer):
             saved_model_path = policy.save(
                 model_root / f"maskable-ppo-{cumulative_ts:08d}"
             )
+            total_eps_this_checkpoint = starting_total + _checkpoint_slot
             summary, evaluation_json, _csv_path = self.evaluator.evaluate(
                 policy,
                 train_config.evaluation_seeds,
-                checkpoint_episode=checkpoint_episode,
+                checkpoint_episode=total_eps_this_checkpoint,
             )
             representative_replay_path = Path(summary.records[0].replay_path)
-            total_eps_this_checkpoint = starting_total + completed_checkpoints
             metadata = CheckpointMetadata(
-                checkpoint_episode=checkpoint_episode,
+                checkpoint_episode=total_eps_this_checkpoint,
                 total_training_episodes=total_eps_this_checkpoint,
                 policy_name=policy.name,
                 trainer_type=policy.trainer_type,
@@ -253,9 +348,36 @@ class MaskablePPOTrainer(Trainer):
                 policy_config=policy.config.to_dict(),
                 evaluation_replay_path=str(representative_replay_path),
             )
+            current_stage = self.config.rewards.instincts.curriculum_stage
+            is_new_best = (
+                # A higher curriculum stage always beats a lower one.
+                current_stage > best_model_curriculum_stage
+                or (
+                    current_stage == best_model_curriculum_stage
+                    and (
+                        summary.success_rate > best_success_rate
+                        or (
+                            summary.success_rate == best_success_rate
+                            and summary.average_reward > best_average_reward
+                        )
+                        or (
+                            summary.success_rate == best_success_rate
+                            and summary.average_reward == best_average_reward
+                            and summary.average_completion_steps < best_completion_steps
+                        )
+                    )
+                )
+            )
+            if is_new_best:
+                best_success_rate = summary.success_rate
+                best_average_reward = summary.average_reward
+                best_completion_steps = summary.average_completion_steps
+                best_model_curriculum_stage = current_stage
+                tracked_best_model_path = policy.save(model_root / "best-model")
             checkpoint_path = self.checkpoint_store.write(metadata)
             checkpoint_payload = {
-                "checkpoint_episode": checkpoint_episode,
+                "checkpoint_episode": total_eps_this_checkpoint,
+                "recorded_at": datetime.now(timezone.utc).isoformat(),
                 "checkpoint": checkpoint_path.name,
                 "evaluation": evaluation_json.name,
                 "replay": str(representative_replay_path),
@@ -279,6 +401,38 @@ class MaskablePPOTrainer(Trainer):
                 "records": [record.to_dict() for record in summary.records],
             }
             checkpoint_payloads = self._merge_checkpoint(checkpoint_payloads, checkpoint_payload)
+            # Persist state after every checkpoint so progress survives a
+            # restart or reboot mid-run.  Without this, only a fully-completed
+            # batch is durable; every in-flight episode is lost on crash.
+            intermediate_state: dict[str, Any] = {
+                "total_episodes_trained": total_eps_this_checkpoint,
+                "total_timesteps": cumulative_ts,
+                "policy_state_path": str(saved_model_path),
+                "best_model_path": str(tracked_best_model_path) if tracked_best_model_path else None,
+                "best_model_curriculum_stage": best_model_curriculum_stage,
+                "best_success_rate": best_success_rate,
+                "best_average_reward": best_average_reward,
+                "best_completion_steps": best_completion_steps,
+                "policy_config": policy.config.to_dict(),
+                "training_signature": self._training_signature(),
+                "incomplete_batch": {
+                    "batch_completed_segments": completed_checkpoints,
+                    "batch_total_segments": n_checkpoints,
+                    "batch_steps_per_segment": steps_per_segment,
+                },
+            }
+            self._state_path.write_text(
+                json.dumps(intermediate_state, indent=2), encoding="utf-8"
+            )
+            self._loaded_state = intermediate_state
+            # Also keep training-summary.json current so that checkpoint
+            # history is complete when a run resumes after a crash/reboot.
+            self._export_neural_training_summary(
+                checkpoint_payloads,
+                str(saved_model_path),
+                total_eps_this_checkpoint,
+                policy.config.to_dict(),
+            )
             self._export_web_assets(
                 web_export_dir,
                 checkpoint_payloads,
@@ -290,25 +444,31 @@ class MaskablePPOTrainer(Trainer):
                 {
                     "phase": "checkpoint",
                     "batch_completed_episodes": completed_checkpoints,
-                    "current_episode": checkpoint_episode,
+                    "current_episode": total_eps_this_checkpoint,
                     "total_episodes_trained": total_eps_this_checkpoint,
-                    "checkpoint_episode": checkpoint_episode,
+                    "checkpoint_episode": total_eps_this_checkpoint,
                     "checkpoint_path": str(checkpoint_path),
                     "replay_path": str(representative_replay_path),
                     "summary": summary.to_dict(),
                     "best_score": summary.average_reward,
-                    "message": f"Checkpoint {checkpoint_episode} exported",
+                    "message": f"Checkpoint {total_eps_this_checkpoint} exported",
                 }
             )
 
-        total_episodes_trained = starting_total + batch_total
+        total_episodes_trained = starting_total + (batch_total - skip_segments)
         final_model_path_str = str(saved_model_path) if saved_model_path is not None else ""
         state_payload = {
             "total_episodes_trained": total_episodes_trained,
-            "total_timesteps": starting_total_timesteps + train_config.total_timesteps,
+            "total_timesteps": starting_total_timesteps + (batch_total - skip_segments) * steps_per_segment,
             "policy_state_path": final_model_path_str,
+            "best_model_path": str(tracked_best_model_path) if tracked_best_model_path else None,
+            "best_model_curriculum_stage": best_model_curriculum_stage,
+            "best_success_rate": best_success_rate,
+            "best_average_reward": best_average_reward,
+            "best_completion_steps": best_completion_steps,
             "policy_config": policy.config.to_dict(),
             "training_signature": self._training_signature(),
+            "incomplete_batch": None,
         }
         self._state_path.write_text(json.dumps(state_payload, indent=2), encoding="utf-8")
         self._loaded_state = state_payload

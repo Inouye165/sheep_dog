@@ -131,6 +131,7 @@ describe("FieldView", () => {
         }}
         selectedCheckpoint={null}
         selectedCheckpointEpisode={0}
+        bestCheckpointEpisode={null}
         selectedSeed={11}
         runState="running"
       />,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 import shutil
 import threading
@@ -38,6 +39,7 @@ class ReplaySelection:
     policy_type: str
     policy_mode: str
     replay_mode: str
+    total_training_episodes: int = 0
 
 
 def _policy_metadata(
@@ -172,6 +174,7 @@ def _resolve_replay_selection(
             policy_type=policy_type,
             policy_mode=resolved_mode,
             replay_mode=replay_mode,
+            total_training_episodes=int(checkpoint_payload.get("total_training_episodes", 0)),
         )
 
     latest_checkpoint_payload = _load_latest_checkpoint_payload(output_root)
@@ -179,7 +182,6 @@ def _resolve_replay_selection(
         latest_total = int(latest_checkpoint_payload.get("total_training_episodes", 0))
         latest_mode = str(latest_checkpoint_payload.get("policy_name") or requested_mode or "instinct_only")
         if latest_total > 0 and (requested_mode is None or requested_mode == latest_mode):
-            latest_checkpoint_episode = int(latest_checkpoint_payload.get("checkpoint_episode", 0))
             trainer_type, policy_type, replay_mode = _policy_metadata(
                 latest_mode,
                 str(latest_checkpoint_payload.get("trainer_type") or ""),
@@ -191,13 +193,15 @@ def _resolve_replay_selection(
                 replay_config,
                 policy=replace(replay_config.policy, policy_mode=latest_mode),
             )
+            latest_episode = latest_checkpoint_payload.get("checkpoint_episode")
             return ReplaySelection(
                 config=replay_config,
-                checkpoint_episode=latest_checkpoint_episode,
+                checkpoint_episode=int(latest_episode) if latest_episode is not None else None,
                 trainer_type=trainer_type,
                 policy_type=policy_type,
                 policy_mode=latest_mode,
                 replay_mode=replay_mode,
+                total_training_episodes=latest_total,
             )
 
     enable_instinct_rewards = None
@@ -246,6 +250,64 @@ def _read_persisted_total() -> int:
         return 0
 
 
+STAGE_HISTORY_FILENAME = "stage-history.json"
+TRAINING_SETTINGS_FILENAME = "training-settings.json"
+
+
+def _read_persisted_settings(output_root: Path) -> dict[str, Any]:
+    """Best-effort read of persisted curriculum settings for initial status.
+
+    Reads the explicit settings file first.  If no settings file exists, falls
+    back to the highest stage that has recorded training episodes so the server
+    always reports the furthest stage reached rather than the default.
+    """
+    settings_path = output_root / TRAINING_SETTINGS_FILENAME
+    result: dict[str, Any] = {}
+    try:
+        payload = json.loads(settings_path.read_text(encoding="utf-8"))
+        if "curriculum_stage" in payload:
+            result["curriculum_stage"] = int(payload["curriculum_stage"])
+        if "enable_instinct_rewards" in payload:
+            result["enable_instinct_rewards"] = bool(payload["enable_instinct_rewards"])
+        if "debug_reward_breakdown" in payload:
+            result["debug_reward_breakdown"] = bool(payload["debug_reward_breakdown"])
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        pass
+    # Always promote curriculum_stage to the highest stage that has been
+    # trained — this corrects for a stale settings file from an accidental
+    # re-run of an earlier stage after a browser refresh reset the UI.
+    try:
+        history = _read_stage_history(output_root)
+        active_stages = [int(k) for k, v in history.items() if int(v) > 0]
+        if active_stages:
+            highest = max(active_stages)
+            if highest > result.get("curriculum_stage", 0):
+                result["curriculum_stage"] = highest
+    except (ValueError, TypeError):
+        pass
+    return result
+
+
+def _read_stage_history(output_root: Path) -> dict[str, int]:
+    """Read cumulative per-stage episode counts; returns empty dict on any error."""
+    path = output_root / STAGE_HISTORY_FILENAME
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return {str(k): int(v) for k, v in raw.items() if isinstance(v, (int, float))}
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+
+
+def _update_stage_history(output_root: Path, stage: int, episodes_added: int) -> dict[str, int]:
+    """Append *episodes_added* to the given *stage* bucket and persist."""
+    history = _read_stage_history(output_root)
+    key = str(stage)
+    history[key] = history.get(key, 0) + episodes_added
+    path = output_root / STAGE_HISTORY_FILENAME
+    path.write_text(json.dumps(history, indent=2), encoding="utf-8")
+    return history
+
+
 def _build_training_job_config(
     requested_episodes: int,
     fast_mode: bool,
@@ -260,12 +322,15 @@ def _build_training_job_config(
     total_episodes = max(1, requested_episodes)
     training_episodes = max(0, total_episodes - 1)
     checkpoint_episodes = tuple(range(total_episodes))
-    evaluation_seeds = (11,) if fast_mode else config.training.evaluation_seeds
     # Scale total_timesteps with the number of checkpoints so each segment
     # receives a meaningful training budget.  Use at least the config default.
-    # 8 000 steps/episode ensures ~31 PPO rollouts per checkpoint segment
-    # (rollout_steps=256), providing enough gradient signal for policy updates.
-    steps_per_episode = 2_000 if fast_mode else 8_000
+    # rollout_steps=2048 > max_steps=600 so each rollout spans 3+ complete
+    # Stage-1 episodes, giving clean non-truncated advantage estimates.
+    # Fast-mode uses 4 000 steps/ep (≥2 full rollouts per checkpoint).
+    # Full-mode keeps 25 000 for thorough exploration.
+    steps_per_episode = 4_000 if fast_mode else 25_000
+    # Fast mode uses a single evaluation seed to keep checkpoint latency low.
+    evaluation_seeds = (11,) if fast_mode else config.training.evaluation_seeds
     total_timesteps = max(config.training.total_timesteps, total_episodes * steps_per_episode)
     training_config = TrainingConfig(
         trainer_type="maskable_ppo",
@@ -350,29 +415,39 @@ class TrainingManager:
         config = LabConfig()
         instincts = config.rewards.instincts
         trainer_type, policy_type, replay_mode = _policy_metadata(config.policy.policy_mode)
+        output_root = Path(config.training.output_dir)
+        stage_history = _read_stage_history(output_root)
+        persisted = _read_persisted_settings(output_root)
         return {
             "running": False,
             "fast_mode": True,
             "trainer_type": trainer_type,
             "policy_type": policy_type,
-            "enable_instinct_rewards": instincts.enable_instinct_rewards,
+            "enable_instinct_rewards": persisted.get("enable_instinct_rewards", instincts.enable_instinct_rewards),
             "policy_mode": config.policy.policy_mode,
             "replay_mode": replay_mode,
             "allow_instinct_target_awareness": config.policy.allow_instinct_target_awareness,
             "handler_target_enabled": config.policy.handler_target_enabled,
-            "debug_reward_breakdown": instincts.debug_reward_breakdown,
-            "curriculum_stage": instincts.curriculum_stage,
+            "debug_reward_breakdown": persisted.get("debug_reward_breakdown", instincts.debug_reward_breakdown),
+            "curriculum_stage": persisted.get("curriculum_stage", instincts.curriculum_stage),
             "requested_episodes": 0,
             "completed_episodes": 0,
             "batch_total_episodes": 0,
             "batch_completed_episodes": 0,
             "total_episodes_trained": _read_persisted_total(),
+            "stage_history": stage_history,
+            "grand_total_episodes": sum(stage_history.values()),
             "current_episode": None,
             "checkpoint_episode": None,
             "latest_checkpoint_episode": None,
             "latest_seed": None,
             "latest_replay_path": None,
             "best_score": None,
+            "latest_success_rate": None,
+            "latest_avg_sheep_penned": None,
+            "latest_avg_reward": None,
+            "latest_timeout_rate": None,
+            "latest_avg_distance_to_pen": None,
             "phase": "idle",
             "message": "Idle",
             "error": None,
@@ -459,6 +534,35 @@ class TrainingManager:
         with self._lock:
             return dict(self._status), HTTPStatus.OK
 
+    # ── Config / history helpers ─────────────────────────────────────────────
+
+    def get_config(self) -> dict[str, Any]:
+        """Return the most-recently saved effective training config."""
+        output_root = Path(LabConfig().training.output_dir)
+        return _load_json(output_root / "effective-training-config.json") or {}
+
+    def get_config_history(self) -> dict[str, Any]:
+        """Return the config revision history."""
+        output_root = Path(LabConfig().training.output_dir)
+        return _load_json(output_root / "config-history.json") or {"revisions": []}
+
+    def save_config_revision(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Append *payload* as a new revision in config-history.json."""
+        output_root = Path(LabConfig().training.output_dir)
+        history_path = output_root / "config-history.json"
+        history = _load_json(history_path) or {"revisions": []}
+        revisions: list[dict[str, Any]] = history.get("revisions", [])
+        entry = {
+            "id": len(revisions) + 1,
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            **payload,
+        }
+        revisions.append(entry)
+        history["revisions"] = revisions
+        history_path.parent.mkdir(parents=True, exist_ok=True)
+        history_path.write_text(json.dumps(history, indent=2), encoding="utf-8")
+        return history
+
     def _clear_training_outputs(self, config: LabConfig) -> None:
         output_root = Path(config.training.output_dir)
         generated_root = Path(config.training.web_export_dir)
@@ -466,6 +570,8 @@ class TrainingManager:
         self._remove_path(output_root / "evaluations")
         self._remove_path(output_root / Trainer.STATE_FILENAME)
         self._remove_path(output_root / "training-summary.json")
+        self._remove_path(output_root / STAGE_HISTORY_FILENAME)
+        self._remove_path(output_root / TRAINING_SETTINGS_FILENAME)
         self._remove_path(generated_root / "replays")
         self._remove_path(generated_root / "latest-checkpoint.json")
         self._remove_path(generated_root / "latest-evaluation.json")
@@ -602,6 +708,7 @@ class TrainingManager:
                 "policy_mode": selection.policy_mode,
                 "replay_mode": selection.replay_mode,
                 "checkpoint_episode": selection.checkpoint_episode,
+                "total_training_episodes": selection.total_training_episodes,
                 "environment": {
                     "dogs": selection.config.environment.dogs,
                     "sheep": selection.config.environment.sheep,
@@ -669,9 +776,56 @@ class TrainingManager:
                 update["latest_checkpoint_episode"] = checkpoint_episode
                 update["latest_seed"] = latest_seed
                 update["latest_replay_path"] = replay_path
+            if isinstance(summary, dict) and payload.get("phase") == "checkpoint":
+                update["latest_success_rate"] = summary.get("success_rate")
+                update["latest_avg_sheep_penned"] = summary.get("average_sheep_penned")
+                update["latest_avg_reward"] = summary.get("average_reward")
+                update["latest_timeout_rate"] = summary.get("timeout_rate")
+                update["latest_avg_distance_to_pen"] = summary.get("average_distance_to_pen")
             self._update_status(update)
 
         try:
+            effective_config_path = (
+                Path(job_config.training.output_dir) / "effective-training-config.json"
+            )
+            effective_config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_dict = job_config.to_dict()
+            effective_config_path.write_text(
+                json.dumps(config_dict, indent=2), encoding="utf-8"
+            )
+            # Auto-record a config revision each time training starts
+            instincts_on = job_config.rewards.instincts.enable_instinct_rewards
+            stage = job_config.rewards.instincts.curriculum_stage
+            label = (
+                f"Stage {stage} \u00b7 "
+                f"{'instincts ON' if instincts_on else 'instincts OFF'} \u00b7 "
+                f"{'fast' if fast_mode else 'full'} mode \u00b7 "
+                f"{total_episodes} ep"
+            )
+            self.save_config_revision({
+                "source": "training_start",
+                "label": label,
+                "training_settings": {
+                    "episodes": total_episodes,
+                    "fast_mode": fast_mode,
+                    "enable_instinct_rewards": instincts_on,
+                    "curriculum_stage": stage,
+                    "debug_reward_breakdown": job_config.rewards.instincts.debug_reward_breakdown,
+                },
+                "config": config_dict,
+            })
+            settings_path = Path(job_config.training.output_dir) / TRAINING_SETTINGS_FILENAME
+            settings_path.write_text(
+                json.dumps(
+                    {
+                        "curriculum_stage": job_config.rewards.instincts.curriculum_stage,
+                        "enable_instinct_rewards": job_config.rewards.instincts.enable_instinct_rewards,
+                        "debug_reward_breakdown": job_config.rewards.instincts.debug_reward_breakdown,
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
             self._update_status(
                 {
                     "running": True,
@@ -702,10 +856,15 @@ class TrainingManager:
                 }
             )
             trainer.train(progress_callback=progress_callback)
+            stage = job_config.rewards.instincts.curriculum_stage
+            output_root = Path(job_config.training.output_dir)
+            history = _update_stage_history(output_root, stage, total_episodes)
             with self._lock:
                 self._status["running"] = False
                 self._status["phase"] = "complete"
                 self._status["message"] = "Training complete"
+                self._status["stage_history"] = history
+                self._status["grand_total_episodes"] = sum(history.values())
         except (OSError, RuntimeError, ValueError) as exc:  # pragma: no cover
             with self._lock:
                 self._status["running"] = False
@@ -745,12 +904,24 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         if self.path == "/api/health":
             self._json_response({"ok": True})
             return
+        if self.path == "/api/config":
+            self._json_response(self.manager.get_config())
+            return
+        if self.path == "/api/config/history":
+            self._json_response(self.manager.get_config_history())
+            return
         self._json_response({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:  # noqa: N802
         if self.path in {"/api/training/clear", "/api/training/reset"}:
             payload, status = self.manager.clear()
             self._json_response(payload, status=status)
+            return
+
+        if self.path == "/api/config/history":
+            body = self._read_json()
+            history = self.manager.save_config_revision(body)
+            self._json_response(history)
             return
 
         payload = self._read_json()

@@ -32,18 +32,22 @@ class EnvironmentConfig:
     no_progress_distance_delta: float = 0.15
     no_progress_penned_delta: int = 0
     no_progress_timeout_penalty_steps: int = 80
-    role_stickiness_distance: float = 12.0
-    role_stickiness_bonus: float = 6.0
-    flank_role_stickiness_bonus: float = 7.5
-    blocker_role_stickiness_bonus: float = 5.0
-    role_minimum_hold_steps: int = 6
+    role_stickiness_distance: float = 40.0
+    role_stickiness_bonus: float = 8.0
+    flank_role_stickiness_bonus: float = 9.0
+    blocker_role_stickiness_bonus: float = 6.0
+    role_minimum_hold_steps: int = 8
     gate_corridor_half_width: float = 2.5
-    gate_approach_distance: float = 10.0
+    gate_approach_distance: float = 12.0
     gate_hold_safe_distance: float = 6.0
     gate_progress_epsilon: float = 0.1
     controlled_flock_spread_threshold: float = 4.0
     stalled_control_activation_steps: int = 6
     seed_offset: int = 0
+    # Minimum number of dogs that must remain after assigning a blocker.
+    # Set to 1 to require at least one herder still pushing the flock;
+    # set to 0 to allow blocker even when it would be the only dog (legacy).
+    blocker_min_remaining_dogs: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,9 +66,9 @@ class InstinctRewardConfig:
     pressure_zone_weight: float = 0.6
     safe_pressure_weight: float = 0.9
     grouping_weight: float = 0.3
-    target_progress_weight: float = 0.3
+    target_progress_weight: float = 1.0
     chaos_penalty_weight: float = 0.5
-    overpressure_penalty_weight: float = 1.5
+    overpressure_penalty_weight: float = 0.5
     split_flock_penalty_weight: float = 0.3
     dog_overshoot_penalty_hold: float = 0.5
 
@@ -83,9 +87,9 @@ class RewardConfig:
     progress_scale: float = 2.0
     sheep_penned_reward: float = 8.0
     flock_cohesion_scale: float = 0.35
-    scatter_penalty_scale: float = 0.65
+    scatter_penalty_scale: float = 0.2
     time_penalty: float = 0.05
-    no_progress_penalty: float = 1.0
+    no_progress_penalty: float = 0.1
     terminal_success_reward: float = 20.0
     terminal_failure_penalty: float = 12.0
     wall_pressure_penalty: float = 0.4
@@ -117,15 +121,16 @@ class TrainingConfig:
     candidate_evaluation_seeds: tuple[int, ...] = (91, 92, 93, 94, 95)
     candidate_pool_size: int = 4
     mutation_scale: float = 0.08
-    neural_hidden_sizes: tuple[int, ...] = (64, 64)
-    learning_rate: float = 3e-4
-    rollout_steps: int = 256
+    neural_hidden_sizes: tuple[int, ...] = (128, 128)
+    learning_rate: float = 1e-4
+    learning_rate_final: float = 3e-5
+    rollout_steps: int = 512
     batch_size: int = 64
     total_timesteps: int = 20_000
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_range: float = 0.2
-    entropy_coef: float = 0.10
+    entropy_coef: float = 0.01
     value_coef: float = 0.5
     invalid_action_masking: bool = True
     output_dir: str = "artifacts"

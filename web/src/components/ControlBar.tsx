@@ -1,6 +1,9 @@
+import type { CheckpointEntry } from "../state/types";
+
 interface ControlBarProps {
-  checkpointEpisodes: number[];
+  checkpoints: CheckpointEntry[];
   selectedCheckpointEpisode: number | null;
+  bestCheckpointEpisode: number | null;
   seedOptions: number[];
   selectedSeed: number | null;
   runningCurrent: boolean;
@@ -10,14 +13,16 @@ interface ControlBarProps {
   onStart: () => void;
   onEndEpisode: () => void;
   onRunCurrent: () => void;
+  runningSelected?: boolean;
   disabled?: boolean;
   fastMode: boolean;
   onFastModeChange: (enabled: boolean) => void;
 }
 
 export function ControlBar({
-  checkpointEpisodes,
+  checkpoints,
   selectedCheckpointEpisode,
+  bestCheckpointEpisode,
   seedOptions,
   selectedSeed,
   runningCurrent,
@@ -27,33 +32,47 @@ export function ControlBar({
   onStart,
   onEndEpisode,
   onRunCurrent,
+  runningSelected,
   disabled,
   fastMode,
   onFastModeChange,
 }: ControlBarProps) {
+  const runBestLabel = runningCurrent
+    ? "Running best model…"
+    : bestCheckpointEpisode !== null
+      ? `Run best model (ep ${bestCheckpointEpisode})`
+      : "Run best model";
+
   return (
     <section className="controls-card" aria-label="Playback controls">
-      <div className="controls-card__header">
-        <div>
-          <p className="eyebrow">Controls</p>
-          <h2>Replay</h2>
-        </div>
-      </div>
-
       <div className="controls-grid">
         <label>
           <span>Checkpoint</span>
           <select
             value={selectedCheckpointEpisode ?? ""}
             onChange={(event) => onSelectCheckpointEpisode(Number(event.target.value))}
-            disabled={disabled || checkpointEpisodes.length === 0}
+            disabled={disabled || checkpoints.length === 0}
           >
-            {checkpointEpisodes.length === 0 ? <option value="">No checkpoints exported</option> : null}
-            {checkpointEpisodes.map((episode) => (
-              <option key={episode} value={episode}>
-                Episode {episode}
-              </option>
-            ))}
+            {checkpoints.length === 0 ? <option value="">No checkpoints exported</option> : null}
+            {checkpoints.map((entry) => {
+              const episode = entry.checkpoint_episode;
+              const isBest = episode === bestCheckpointEpisode;
+              const stage = entry.reward_config?.instincts?.curriculum_stage;
+              const stageStr = stage != null ? `S${stage} · ` : "";
+              const totalSeeds = entry.records.length;
+              const successCount = totalSeeds > 0 ? Math.round(entry.success_rate * totalSeeds) : Math.round(entry.success_rate * 100);
+              const successStr = totalSeeds > 0 ? `${successCount}/${totalSeeds} seeds` : `${Math.round(entry.success_rate * 100)}%`;
+              const steps = Math.round(entry.average_completion_steps);
+              const reward = entry.average_reward;
+              const rewardStr = (reward >= 0 ? "+" : "") + reward.toFixed(1);
+              let label = `${stageStr}Ep ${episode} · ${successStr} · ${steps} steps avg · ${rewardStr} R avg`;
+              if (isBest) label += " — ★ Best";
+              return (
+                <option key={episode} value={episode}>
+                  {label}
+                </option>
+              );
+            })}
           </select>
         </label>
 
@@ -65,11 +84,24 @@ export function ControlBar({
             disabled={disabled || seedOptions.length === 0}
           >
             {seedOptions.length === 0 ? <option value="">No seeds available</option> : null}
-            {seedOptions.map((seed) => (
-              <option key={seed} value={seed}>
-                Seed {seed}
-              </option>
-            ))}
+            {(() => {
+              const selectedEntry = checkpoints.find((c) => c.checkpoint_episode === selectedCheckpointEpisode) ?? null;
+              const totalSheep = selectedEntry?.environment_config?.sheep ?? null;
+              return seedOptions.map((seed) => {
+                const record = selectedEntry?.records.find((r) => r.seed === seed);
+                let seedLabel = `Seed ${seed}`;
+                if (record) {
+                  const outcome = record.success ? "success" : record.timeout ? "timeout" : "stopped";
+                  const sheepStr = totalSheep != null ? `${record.sheep_penned}/${totalSheep}` : `${record.sheep_penned} sheep`;
+                  seedLabel += ` — ${sheepStr} · ${record.steps} steps · ${outcome}`;
+                }
+                return (
+                  <option key={seed} value={seed}>
+                    {seedLabel}
+                  </option>
+                );
+              });
+            })()}
           </select>
         </label>
 
@@ -86,10 +118,10 @@ export function ControlBar({
 
       <div className="button-row">
         <button type="button" className="button-row__primary" onClick={onRunCurrent} disabled={runningCurrent}>
-          {runningCurrent ? "Running current dogs..." : "Run current dogs"}
+          {runBestLabel}
         </button>
-        <button type="button" className="button-row__secondary" onClick={onStart} disabled={disabled || !selectedSeed}>
-          Start replay
+        <button type="button" className="button-row__secondary" onClick={onStart} disabled={disabled || !selectedSeed || (runningSelected ?? false)}>
+          {runningSelected ? "Loading…" : "Replay selected"}
         </button>
         <button
           type="button"

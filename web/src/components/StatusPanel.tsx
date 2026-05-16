@@ -65,6 +65,7 @@ interface StatusPanelProps {
   replay: ReplayBundle | null;
   selectedCheckpoint: CheckpointEntry | null;
   selectedCheckpointEpisode: number | null;
+  bestCheckpointEpisode: number | null;
   selectedSeed: number | null;
   runState: string;
 }
@@ -74,6 +75,7 @@ export function StatusPanel({
   replay,
   selectedCheckpoint,
   selectedCheckpointEpisode,
+  bestCheckpointEpisode,
   selectedSeed,
   runState,
 }: StatusPanelProps) {
@@ -88,6 +90,7 @@ export function StatusPanel({
   const policyType = replay?.policy_type ?? selectedCheckpoint?.policy_type ?? "-";
   const policyMode = replay?.policy_mode ?? selectedCheckpoint?.policy_mode ?? replay?.policy_name ?? "unloaded";
   const replayMode = replay?.replay_mode ?? selectedCheckpoint?.replay_mode ?? "-";
+  const totalTrainingEpisodes = replay?.total_training_episodes ?? null;
   const replayDogs = replay?.environment?.dogs ?? selectedCheckpoint?.environment_config?.dogs ?? snapshot?.dogs.length ?? replay?.final_snapshot?.dogs.length ?? 0;
   const replaySheep = replay?.environment?.sheep ?? selectedCheckpoint?.environment_config?.sheep ?? snapshot?.sheep.length ?? replay?.final_snapshot?.sheep.length ?? 0;
   const replayCurriculumStage =
@@ -116,13 +119,11 @@ export function StatusPanel({
 
   return (
     <section className="status-card" aria-label="Run status">
-      <div className="status-card__header">
-        <div>
-          <p className="eyebrow">Watch now</p>
-          <h2>{snapshot ? "Live run" : "Waiting for replay"}</h2>
-        </div>
+      <div className="status-card__header status-card__header--compact">
         <div className="status-card__badges">
-          <span className="pill">{selectedCheckpointEpisode === null ? "Current dogs" : `Checkpoint ${selectedCheckpointEpisode}`}</span>
+          <span className="pill">{selectedCheckpointEpisode === null
+            ? (bestCheckpointEpisode !== null ? `Best model (ep ${bestCheckpointEpisode})` : "Best model")
+            : `Checkpoint ${selectedCheckpointEpisode}`}</span>
           <span className="pill pill--muted">{runState}</span>
         </div>
       </div>
@@ -143,28 +144,8 @@ export function StatusPanel({
           <strong>{snapshot?.step ?? 0}</strong>
         </div>
         <div>
-          <span>Seed</span>
-          <strong>{selectedSeed ?? "-"}</strong>
-        </div>
-        <div>
           <span>Policy</span>
           <strong>{policyLabel(policyMode)}</strong>
-        </div>
-        <div>
-          <span>Grid size</span>
-          <strong>{`${gridWidth} x ${gridHeight}`}</strong>
-        </div>
-        <div>
-          <span>Replay kind</span>
-          <strong>{replayModeLabel(replayMode)}</strong>
-        </div>
-        <div>
-          <span>Dogs / sheep</span>
-          <strong>{`${replayDogs} / ${replaySheep}`}</strong>
-        </div>
-        <div>
-          <span>Curriculum stage</span>
-          <strong>{replayCurriculumStage}</strong>
         </div>
       </div>
 
@@ -172,64 +153,90 @@ export function StatusPanel({
         <div className="progress-shell__bar" style={{ width: `${completion * 100}%` }} />
       </div>
 
-      <div className="status-card__summary">
-        <div>
-          <span>No-progress steps</span>
-          <strong>{snapshot?.no_progress_steps ?? replay?.stats.no_progress_steps ?? 0}</strong>
+      <details className="training-advanced">
+        <summary>Run details</summary>
+        <div className="status-card__summary">
+          <div>
+            <span>Dogs / sheep</span>
+            <strong>{`${replayDogs} / ${replaySheep}`}</strong>
+          </div>
+          <div>
+            <span>Grid size</span>
+            <strong>{`${gridWidth} x ${gridHeight}`}</strong>
+          </div>
+          <div>
+            <span>Curriculum stage</span>
+            <strong>{replayCurriculumStage}</strong>
+          </div>
+          <div>
+            <span>Replay kind</span>
+            <strong>{replayModeLabel(replayMode)}</strong>
+          </div>
+          <div>
+            <span>Seed</span>
+            <strong>{selectedSeed ?? "-"}</strong>
+          </div>
+          <div>
+            <span>Episode outcome</span>
+            <strong>{snapshot?.status ?? replay?.final_snapshot.status ?? "-"}</strong>
+          </div>
+          <div>
+            <span>Avg distance to pen</span>
+            <strong>{averageDistanceToPen.toFixed(1)}</strong>
+          </div>
+          <div>
+            <span>Flock spread</span>
+            <strong>{flockSpread.toFixed(1)}</strong>
+          </div>
+          <div>
+            <span>Active roles</span>
+            <strong>{activeRoleSummary}</strong>
+          </div>
+          <div>
+            <span>Role switches</span>
+            <strong>{replay?.stats.role_switches ?? 0}</strong>
+          </div>
+          <div>
+            <span>Role distribution</span>
+            <strong>{roleDistributionSummary}</strong>
+          </div>
+          <div>
+            <span>Collector activations</span>
+            <strong>{replay?.stats.collector_activations ?? 0}</strong>
+          </div>
+          <div>
+            <span>Blocker activations</span>
+            <strong>{replay?.stats.blocker_activations ?? 0}</strong>
+          </div>
+          <div>
+            <span>Sheep split events</span>
+            <strong>{replay?.stats.sheep_split_events ?? 0}</strong>
+          </div>
+          <div>
+            <span>No-progress steps</span>
+            <strong>{snapshot?.no_progress_steps ?? replay?.stats.no_progress_steps ?? 0}</strong>
+          </div>
+          <div>
+            <span>Instinct rewards</span>
+            <strong>{replayUsesInstinctRewards ? "enabled" : "disabled"}</strong>
+          </div>
+          <div>
+            <span>Trainer type</span>
+            <strong>{trainerType}</strong>
+          </div>
+          <div>
+            <span>Policy type</span>
+            <strong>{policyType}</strong>
+          </div>
+          {totalTrainingEpisodes != null ? (
+            <div>
+              <span>Total trained eps</span>
+              <strong>{totalTrainingEpisodes.toLocaleString()}</strong>
+            </div>
+          ) : null}
         </div>
-        <div>
-          <span>Trainer type</span>
-          <strong>{trainerType}</strong>
-        </div>
-        <div>
-          <span>Policy type</span>
-          <strong>{policyType}</strong>
-        </div>
-        <div>
-          <span>Policy mode</span>
-          <strong>{policyMode}</strong>
-        </div>
-        <div>
-          <span>Active roles</span>
-          <strong>{activeRoleSummary}</strong>
-        </div>
-        <div>
-          <span>Episode outcome</span>
-          <strong>{snapshot?.status ?? replay?.final_snapshot.status ?? "-"}</strong>
-        </div>
-        <div>
-          <span>Role switches</span>
-          <strong>{replay?.stats.role_switches ?? 0}</strong>
-        </div>
-        <div>
-          <span>Role distribution</span>
-          <strong>{roleDistributionSummary}</strong>
-        </div>
-        <div>
-          <span>Collector activations</span>
-          <strong>{replay?.stats.collector_activations ?? 0}</strong>
-        </div>
-        <div>
-          <span>Blocker activations</span>
-          <strong>{replay?.stats.blocker_activations ?? 0}</strong>
-        </div>
-        <div>
-          <span>Sheep split events</span>
-          <strong>{replay?.stats.sheep_split_events ?? 0}</strong>
-        </div>
-        <div>
-          <span>Avg distance to pen</span>
-          <strong>{averageDistanceToPen.toFixed(1)}</strong>
-        </div>
-        <div>
-          <span>Flock spread</span>
-          <strong>{flockSpread.toFixed(1)}</strong>
-        </div>
-        <div>
-          <span>Instinct rewards</span>
-          <strong>{replayUsesInstinctRewards ? "enabled" : "disabled"}</strong>
-        </div>
-      </div>
+      </details>
+
       {(replay?.stats?.no_progress_steps ?? 0) > 0 || snapshot?.status === "no-progress" ? (
         <div className="warning-box" role="status">
           No-progress guard is active. The episode should stop if progress stalls.
