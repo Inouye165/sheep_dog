@@ -153,9 +153,7 @@ class ScriptedShepherd:
         fc_x = _fmean(flock_xs)
         fc_y = _fmean(flock_ys)
 
-        spread = _fmean(
-            [hypot(s.position.x - fc_x, s.position.y - fc_y) for s in unpenned]
-        )
+        spread = _fmean([hypot(s.position.x - fc_x, s.position.y - fc_y) for s in unpenned])
         avg_dist_pen = _fmean(
             [hypot(s.position.x - pen_cx, s.position.y - pen_cy) for s in unpenned]
         )

@@ -26,6 +26,7 @@ def _stage_config(stage: int) -> LabConfig:
 # Pen entity tests
 # ---------------------------------------------------------------------------
 
+
 class TestPenFenceCells:
     """Unit tests for Pen.fence_cells() correctness."""
 
@@ -71,24 +72,16 @@ class TestPenFenceCells:
         fence_cells = env._fence_cells  # noqa: SLF001 (test-only access)
         opening = pen.opening
         if opening == "left":
-            gate_cells_in_fence = [
-                c for c in fence_cells if c.x == pen.origin.x - 1
-            ]
+            gate_cells_in_fence = [c for c in fence_cells if c.x == pen.origin.x - 1]
             location = f"column x={pen.origin.x - 1}"
         elif opening == "right":
-            gate_cells_in_fence = [
-                c for c in fence_cells if c.x == pen.origin.x + pen.width
-            ]
+            gate_cells_in_fence = [c for c in fence_cells if c.x == pen.origin.x + pen.width]
             location = f"column x={pen.origin.x + pen.width}"
         elif opening == "top":
-            gate_cells_in_fence = [
-                c for c in fence_cells if c.y == pen.origin.y - 1
-            ]
+            gate_cells_in_fence = [c for c in fence_cells if c.y == pen.origin.y - 1]
             location = f"row y={pen.origin.y - 1}"
         else:  # bottom
-            gate_cells_in_fence = [
-                c for c in fence_cells if c.y == pen.origin.y + pen.height
-            ]
+            gate_cells_in_fence = [c for c in fence_cells if c.y == pen.origin.y + pen.height]
             location = f"row y={pen.origin.y + pen.height}"
         assert gate_cells_in_fence == [], (
             f"Stage {stage}: gate {location} has {len(gate_cells_in_fence)} fence cells: "
@@ -113,6 +106,7 @@ class TestPenFenceCells:
 # Success condition tests
 # ---------------------------------------------------------------------------
 
+
 class TestSuccessCondition:
     """Verify that pen-entry mechanics and success detection work correctly."""
 
@@ -127,9 +121,7 @@ class TestSuccessCondition:
         # First interior cell: just inside the pen from the gate
         first_interior = Point(pen.center.x, pen.origin.y + pen.height - 1)
         # Sanity: first_interior must be inside pen
-        assert pen.contains(first_interior), (
-            f"first_interior {first_interior} should be inside pen"
-        )
+        assert pen.contains(first_interior), f"first_interior {first_interior} should be inside pen"
         # Should NOT be blocked (sheep coming from gate into pen)
         blocked = env._sheep_move_blocked(  # noqa: SLF001 (test-only access)
             position=gate_cell,
@@ -146,7 +138,7 @@ class TestSuccessCondition:
         """Sheep placed inside pen bounds should have penned=True after any step."""
         config = _stage_config(1)
         env = SheepdogEnvironment(config)
-        snapshot = env.reset(seed=0)
+        env.reset(seed=0)
 
         # Manually teleport sheep to pen center (bypassing environment movement)
         pen = env.pen

@@ -124,9 +124,9 @@ class TrainingConfig:
     neural_hidden_sizes: tuple[int, ...] = (128, 128)
     learning_rate: float = 1e-4
     learning_rate_final: float = 3e-5
-    rollout_steps: int = 512
+    rollout_steps: int = 2048
     batch_size: int = 64
-    total_timesteps: int = 20_000
+    total_timesteps: int = 500_000
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_range: float = 0.2

@@ -202,7 +202,7 @@ def run_herding_eval_report(
     """
     import datetime
 
-    from sheepdog.policies.factory import create_policy_from_name, load_playable_policy
+    from sheepdog.policies.factory import load_playable_policy
     from sheepdog.policies.heuristic import HeuristicExpertPolicy, InstinctOnlyPolicy
     from sheepdog.policies.random_policy import RandomPolicy
 
@@ -224,9 +224,7 @@ def run_herding_eval_report(
             baseline_policy = load_playable_policy(
                 config, checkpoint_episode=baseline_checkpoint_episode
             )
-            entries.append(
-                (f"baseline_checkpoint_{baseline_checkpoint_episode}", baseline_policy)
-            )
+            entries.append((f"baseline_checkpoint_{baseline_checkpoint_episode}", baseline_policy))
         except FileNotFoundError:
             pass  # Checkpoint not present – skip without crashing.
 
@@ -235,9 +233,7 @@ def run_herding_eval_report(
     if hierarchical_model_path is not None:
         from sheepdog.policies.hierarchical import ShepherdNeuralDogPolicy
 
-        hier_policy = ShepherdNeuralDogPolicy.load(
-            hierarchical_model_path, config
-        )
+        hier_policy = ShepherdNeuralDogPolicy.load(hierarchical_model_path, config)
     else:
         from sheepdog.policies.hierarchical import ShepherdNeuralDogPolicy
 
@@ -251,7 +247,7 @@ def run_herding_eval_report(
     )
 
     # Build custom report with proof-of-learning summary.
-    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    timestamp = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     report: dict[str, Any] = {
         "generated_at": timestamp,
         "seeds": list(eval_seeds),

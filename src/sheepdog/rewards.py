@@ -138,7 +138,9 @@ def _max_sheep_offset(centroid: Position, sheep_positions: tuple[Position, ...])
     return max(_distance(centroid, sheep) for sheep in sheep_positions)
 
 
-def _lane_projection(sheep: Position, target: Position, dog: Position) -> tuple[float, float, float]:
+def _lane_projection(
+    sheep: Position, target: Position, dog: Position
+) -> tuple[float, float, float]:
     lane_dx = target[0] - sheep[0]
     lane_dy = target[1] - sheep[1]
     lane_length = hypot(lane_dx, lane_dy)
@@ -175,9 +177,8 @@ class RewardComputer:
             inputs.previous_gate_distance - inputs.current_gate_distance
         ) * self._config.gate_progress_scale
         gate_corridor_progress = (
-            (inputs.previous_gate_corridor_distance - inputs.current_gate_corridor_distance)
-            * self._config.gate_corridor_progress_scale
-        )
+            inputs.previous_gate_corridor_distance - inputs.current_gate_corridor_distance
+        ) * self._config.gate_corridor_progress_scale
         gate_alignment = (
             inputs.current_gate_corridor_occupancy - inputs.previous_gate_corridor_occupancy
         ) * self._config.gate_alignment_scale
@@ -369,9 +370,9 @@ class RewardComputer:
                 blocking_score += 0.35 + 0.65 * lateral_factor * forward_factor
         if blocking_score <= 0.0:
             return 0.0
-        return -(
-            blocking_score / max(1, len(active_sheep))
-        ) * self._config.lane_crowding_penalty_scale
+        return (
+            -(blocking_score / max(1, len(active_sheep))) * self._config.lane_crowding_penalty_scale
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -560,9 +561,7 @@ class HierarchicalRewardComputer:
                 if cosine < -cfg.pressure_from_behind_min_cosine:
                     pressure_from_behind += abs(cosine) - cfg.pressure_from_behind_min_cosine
             n_dogs = max(1, len(inputs.dog_positions))
-            pressure_from_behind = (
-                pressure_from_behind / n_dogs * cfg.pressure_from_behind_scale
-            )
+            pressure_from_behind = pressure_from_behind / n_dogs * cfg.pressure_from_behind_scale
 
         # --- Dog spread: avoid stacking ---
         dog_spread_score = 0.0
@@ -596,9 +595,7 @@ class HierarchicalRewardComputer:
                 if cosine > 0.5:
                     dog_blocking_escape += cosine - 0.5
             n_dogs = max(1, len(inputs.dog_positions))
-            dog_blocking_escape = (
-                dog_blocking_escape / n_dogs * cfg.dog_blocking_escape_scale
-            )
+            dog_blocking_escape = dog_blocking_escape / n_dogs * cfg.dog_blocking_escape_scale
 
         # --- Overpressure: dogs too close to sheep ---
         overpressure = 0.0
@@ -618,7 +615,9 @@ class HierarchicalRewardComputer:
             d = hypot(dog[0] - inputs.pen_gate_x, dog[1] - inputs.pen_gate_y)
             if d < cfg.gate_block_distance:
                 # Weight by proximity: closer = worse
-                gate_blocking -= (1.0 - d / cfg.gate_block_distance) * cfg.gate_blocking_penalty_scale
+                gate_blocking -= (
+                    1.0 - d / cfg.gate_block_distance
+                ) * cfg.gate_blocking_penalty_scale
 
         # --- Task completion + speed bonus ---
         task_completion = cfg.task_completion_reward if inputs.success else 0.0

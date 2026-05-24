@@ -34,7 +34,7 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         # can enter directly.  The pen sits in the top-right corner at y=1..12;
         # a bottom opening at y=13 aligns with the dog approaching from y>13.
         "pen_opening": "bottom",
-        "dog_speed": 1,
+        "dog_speed": 2,
         "sheep_speed": 1,
         "max_steps": 600,
         # Large window so the heuristic's flanking manoeuvres don't trigger
@@ -51,7 +51,7 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         # Pen is 12×12 (~17% of field width).
         "pen_width": 12,
         "pen_height": 12,
-        "dog_speed": 1,
+        "dog_speed": 2,
         "sheep_speed": 1,
         "max_steps": 720,
         "no_progress_window": 110,
@@ -64,7 +64,7 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "height": 84,
         "pen_width": 12,
         "pen_height": 12,
-        "dog_speed": 1,
+        "dog_speed": 2,
         "sheep_speed": 1,
         "max_steps": 840,
         "no_progress_window": 120,
@@ -78,7 +78,7 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "height": 90,
         "pen_width": 15,
         "pen_height": 15,
-        "dog_speed": 1,
+        "dog_speed": 2,
         "sheep_speed": 1,
         "max_steps": 960,
         "no_progress_window": 135,
@@ -91,7 +91,7 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "height": 96,
         "pen_width": 15,
         "pen_height": 15,
-        "dog_speed": 1,
+        "dog_speed": 2,
         "sheep_speed": 1,
         "max_steps": 1020,
         "no_progress_window": 150,

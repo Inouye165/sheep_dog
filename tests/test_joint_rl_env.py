@@ -136,7 +136,7 @@ def test_multiple_steps_before_team_step():
     # The first (n_dogs - 1) steps collect actions; only the n_dogs-th step
     # fires the team step and yields a nonzero reward.  At minimum, the
     # observation returned should always be finite and correct shape.
-    for step_idx in range(n_dogs):
+    for _step_idx in range(n_dogs):
         obs, reward, terminated, truncated, info = env.step(8)
         assert obs.shape == env.observation_space.shape
         if terminated or truncated:

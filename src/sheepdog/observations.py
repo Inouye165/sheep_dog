@@ -25,8 +25,8 @@ ROLE_ORDER: tuple[DogRole, ...] = (
 # Fixed observation-vector capacity across all curriculum stages.
 # Changing either constant is a breaking architecture change that requires
 # clearing training state and retraining from scratch.
-MAX_SHEEP_SLOTS: int = 6   # highest sheep count used in any curriculum stage
-HERD_DOG_SLOTS: int = 3    # highest dog count used in any curriculum stage
+MAX_SHEEP_SLOTS: int = 6  # highest sheep count used in any curriculum stage
+HERD_DOG_SLOTS: int = 3  # highest dog count used in any curriculum stage
 
 
 @dataclass(frozen=True, slots=True)

@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from sheepdog.config import LabConfig, TrainingConfig
 from sheepdog.server import TrainingManager
@@ -26,10 +27,6 @@ def test_clear_training_restores_untrained_baseline(tmp_path: Path) -> None:
 
     manager = TrainingManager()
 
-    import sheepdog.server as server_module
-
-    original_config = server_module.LabConfig
-
     config = LabConfig(
         training=TrainingConfig(
             episodes=1,
@@ -44,11 +41,8 @@ def test_clear_training_restores_untrained_baseline(tmp_path: Path) -> None:
         def __new__(cls):
             return config
 
-    server_module.LabConfig = TestConfig
-    try:
+    with patch("sheepdog.server.LabConfig", TestConfig):
         payload, status = manager.clear()
-    finally:
-        server_module.LabConfig = original_config
 
     assert status == 200
     # clear() is async: it returns immediately with "Clearing..." and finishes
@@ -59,8 +53,7 @@ def test_clear_training_restores_untrained_baseline(tmp_path: Path) -> None:
     }
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
-        with manager._lock:  # type: ignore[attr-defined]
-            phase = manager._status.get("phase")  # type: ignore[attr-defined]
+        phase = manager.snapshot().get("phase")
         if phase == "idle":
             break
         time.sleep(0.1)
@@ -106,7 +99,9 @@ class _FakeStats:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "role_distribution", self.role_distribution or {})
-        object.__setattr__(self, "final_reward_breakdown", self.final_reward_breakdown or {"total": 0.0})
+        object.__setattr__(
+            self, "final_reward_breakdown", self.final_reward_breakdown or {"total": 0.0}
+        )
 
 
 class _FakeSnapshot:
@@ -119,8 +114,14 @@ class _FakeSnapshot:
             "simulated_seconds": 1,
             "grid_width": self._config.environment.width,
             "grid_height": self._config.environment.height,
-            "dogs": [{"index": index, "x": 1, "y": index + 1} for index in range(self._config.environment.dogs)],
-            "sheep": [{"index": index, "x": 2, "y": index + 2, "penned": False} for index in range(self._config.environment.sheep)],
+            "dogs": [
+                {"index": index, "x": 1, "y": index + 1}
+                for index in range(self._config.environment.dogs)
+            ],
+            "sheep": [
+                {"index": index, "x": 2, "y": index + 2, "penned": False}
+                for index in range(self._config.environment.sheep)
+            ],
             "pen": {"origin": {"x": 1, "y": 1}, "width": 4, "height": 4, "opening": "left"},
             "penned_count": 0,
             "average_distance_to_pen": 0,
@@ -200,12 +201,6 @@ def test_run_live_replay_prefers_latest_trained_linear_artifact(tmp_path: Path) 
 
     manager = TrainingManager()
 
-    import sheepdog.server as server_module
-
-    original_config = server_module.LabConfig
-    original_load_playable_policy = server_module._load_playable_policy
-    original_environment = server_module.SheepdogEnvironment
-
     config = LabConfig(
         training=TrainingConfig(
             output_dir=str(artifacts),
@@ -245,15 +240,12 @@ def test_run_live_replay_prefers_latest_trained_linear_artifact(tmp_path: Path) 
                 replay=[],
             )
 
-    server_module.LabConfig = TestConfig
-    server_module._load_playable_policy = fake_load_playable_policy
-    server_module.SheepdogEnvironment = FakeEnvironment
-    try:
+    with (
+        patch("sheepdog.server.LabConfig", TestConfig),
+        patch("sheepdog.server._load_playable_policy", fake_load_playable_policy),
+        patch("sheepdog.server.SheepdogEnvironment", FakeEnvironment),
+    ):
         payload = manager.run_live_replay(11)
-    finally:
-        server_module.LabConfig = original_config
-        server_module._load_playable_policy = original_load_playable_policy
-        server_module.SheepdogEnvironment = original_environment
 
     effective_config = captured["config"]
     assert isinstance(effective_config, LabConfig)
@@ -273,12 +265,6 @@ def test_run_live_replay_honors_effective_stage_for_baseline(tmp_path: Path) -> 
     generated.mkdir(parents=True)
 
     manager = TrainingManager()
-
-    import sheepdog.server as server_module
-
-    original_config = server_module.LabConfig
-    original_load_playable_policy = server_module._load_playable_policy
-    original_environment = server_module.SheepdogEnvironment
 
     config = LabConfig(
         training=TrainingConfig(
@@ -318,10 +304,11 @@ def test_run_live_replay_honors_effective_stage_for_baseline(tmp_path: Path) -> 
                 replay=[],
             )
 
-    server_module.LabConfig = TestConfig
-    server_module._load_playable_policy = fake_load_playable_policy
-    server_module.SheepdogEnvironment = FakeEnvironment
-    try:
+    with (
+        patch("sheepdog.server.LabConfig", TestConfig),
+        patch("sheepdog.server._load_playable_policy", fake_load_playable_policy),
+        patch("sheepdog.server.SheepdogEnvironment", FakeEnvironment),
+    ):
         payload = manager.run_live_replay(
             17,
             policy_mode="instinct_only",
@@ -331,10 +318,6 @@ def test_run_live_replay_honors_effective_stage_for_baseline(tmp_path: Path) -> 
                 "debug_reward_breakdown": False,
             },
         )
-    finally:
-        server_module.LabConfig = original_config
-        server_module._load_playable_policy = original_load_playable_policy
-        server_module.SheepdogEnvironment = original_environment
 
     effective_config = captured["config"]
     assert isinstance(effective_config, LabConfig)
@@ -344,3 +327,39 @@ def test_run_live_replay_honors_effective_stage_for_baseline(tmp_path: Path) -> 
     assert payload["replay_mode"] == "baseline"
     assert payload["environment"]["dogs"] == 1
     assert payload["environment"]["sheep"] == 1
+
+
+def test_initial_status_prefers_saved_stage_over_history_max(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    generated = tmp_path / "web" / "public" / "generated"
+    artifacts.mkdir(parents=True)
+    generated.mkdir(parents=True)
+    (artifacts / "training-settings.json").write_text(
+        json.dumps(
+            {
+                "curriculum_stage": 2,
+                "enable_instinct_rewards": True,
+                "debug_reward_breakdown": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifacts / "stage-history.json").write_text(json.dumps({"2": 50, "5": 300}), encoding="utf-8")
+
+    config = LabConfig(
+        training=TrainingConfig(
+            output_dir=str(artifacts),
+            web_export_dir=str(generated),
+        )
+    )
+
+    class TestConfig:
+        def __new__(cls):
+            return config
+
+    with patch("sheepdog.server.LabConfig", TestConfig):
+        manager = TrainingManager()
+        status = manager.snapshot()
+
+    assert status["curriculum_stage"] == 2
+    assert status["stage_history"] == {"2": 50, "5": 300}

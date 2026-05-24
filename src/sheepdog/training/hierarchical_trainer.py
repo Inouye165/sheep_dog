@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -43,7 +42,6 @@ from stable_baselines3.common.callbacks import BaseCallback
 from sheepdog.checkpoints.store import CheckpointMetadata
 from sheepdog.environment import ACTION_ORDER
 from sheepdog.policies.hierarchical import (
-    HierarchicalNeuralPolicyConfig,
     ShepherdNeuralDogPolicy,
 )
 from sheepdog.shepherd import ScriptedShepherd
@@ -90,8 +88,7 @@ class _HierarchicalProgressCallback(BaseCallback):
                 "checkpoint_episode": None,
                 "best_score": None,
                 "message": (
-                    f"[Hierarchical] PPO timesteps: {n}/{self._total_timesteps} "
-                    f"({completion:.0%})"
+                    f"[Hierarchical] PPO timesteps: {n}/{self._total_timesteps} ({completion:.0%})"
                 ),
                 "batch_total_episodes": self._batch_total,
             }
@@ -196,7 +193,6 @@ class HierarchicalMaskablePPOTrainer(Trainer):
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         """Train neural dogs; return a summary dict of saved checkpoints."""
-        from sb3_contrib import MaskablePPO
 
         train_config = self.config.training
         model_root = self.output_root / self.MODEL_DIRNAME
@@ -254,9 +250,7 @@ class HierarchicalMaskablePPOTrainer(Trainer):
         checkpoint_records: list[dict[str, Any]] = []
         saved_model_path: Path = model_root / "model-initial.zip"
 
-        for seg_idx, checkpoint_episode in enumerate(
-            train_config.checkpoint_episodes, start=1
-        ):
+        for seg_idx, checkpoint_episode in enumerate(train_config.checkpoint_episodes, start=1):
             cumulative_ts = starting_ts + seg_idx * steps_per_segment
             emit(
                 {
@@ -266,9 +260,7 @@ class HierarchicalMaskablePPOTrainer(Trainer):
                     "total_episodes_trained": starting_total + seg_idx - 1,
                     "checkpoint_episode": checkpoint_episode,
                     "best_score": None,
-                    "message": (
-                        f"[Hierarchical] Training toward checkpoint {checkpoint_episode}"
-                    ),
+                    "message": (f"[Hierarchical] Training toward checkpoint {checkpoint_episode}"),
                 }
             )
             callback = _HierarchicalProgressCallback(

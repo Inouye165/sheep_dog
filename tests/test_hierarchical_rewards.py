@@ -9,7 +9,6 @@ from sheepdog.rewards import (
     HierarchicalRewardInputs,
 )
 
-
 PEN_X = 40.0
 PEN_Y = 30.0
 

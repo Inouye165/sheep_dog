@@ -62,6 +62,8 @@ interface TrainingPanelProps {
   onPromote: () => void;
   currentBestEntry?: CheckpointEntry | null;
   previousBestEntry?: CheckpointEntry | null;
+  seedEpisode?: number | null;
+  startingEpisode?: number | null;
 }
 
 export function TrainingPanel({
@@ -102,6 +104,8 @@ export function TrainingPanel({
   onPromote,
   currentBestEntry,
   previousBestEntry,
+  seedEpisode,
+  startingEpisode,
 }: TrainingPanelProps) {
   const denominator = batchTotalEpisodes || episodes;
   const progress = denominator === 0 ? 0 : Math.min(1, batchCompletedEpisodes / denominator);
@@ -258,6 +262,12 @@ export function TrainingPanel({
           <span>Total trained</span>
           <strong>{(safeGrand || safeTotal).toLocaleString()}</strong>
         </div>
+        {startingEpisode != null ? (
+          <div>
+            <span>Starts from</span>
+            <strong>{startingEpisode.toLocaleString()}</strong>
+          </div>
+        ) : null}
         <div>
           <span>Batch</span>
           <strong>
@@ -268,6 +278,12 @@ export function TrainingPanel({
           <span>Status</span>
           <strong>{message}</strong>
         </div>
+        {seedEpisode != null ? (
+          <div>
+            <span>Seed ep</span>
+            <strong>{seedEpisode}</strong>
+          </div>
+        ) : null}
       </div>
 
       {(currentBestEntry || previousBestEntry) ? (

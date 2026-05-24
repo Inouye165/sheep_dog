@@ -17,7 +17,7 @@ const idleTrainingStatus = {
   fast_mode: true,
   trainer_type: "baseline",
   policy_type: "instinct",
-  enable_instinct_rewards: true,
+  enable_instinct_rewards: false,
   policy_mode: "instinct_only",
   replay_mode: "baseline",
   debug_reward_breakdown: false,
@@ -254,6 +254,7 @@ const replay = {
 };
 
 beforeEach(() => {
+  localStorage.clear();
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const path = String(input);
     if (path.includes("/api/training/status")) {
@@ -270,6 +271,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  window.localStorage.clear();
   vi.unstubAllGlobals();
 });
 
@@ -277,19 +279,50 @@ describe("App", () => {
   it("renders the simplified controls and run button", async () => {
     render(<App />);
 
-    await waitFor(() => expect(screen.getByText("Replay")).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("tab", { name: "Watch" }));
+    await waitFor(() => expect(screen.getByText("Live Replay")).toBeInTheDocument());
     expect(screen.getByLabelText("Playback controls")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Run current dogs" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Start replay" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Run best model (ep 0)" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Replay selected" })).toBeInTheDocument();
     expect(screen.getByText(/Checkpoint 0/)).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "Seed 11" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Seed 11/ })).toBeInTheDocument();
+  });
+
+  it("syncs the curriculum stage from the server even when local storage is stale", async () => {
+    window.localStorage.setItem("sheepdog_curriculum_stage", "5");
+
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.includes("/api/training/status")) {
+        return jsonResponse({
+          ...idleTrainingStatus,
+          curriculum_stage: 2,
+        });
+      }
+      if (path.includes("checkpoint-index.json")) {
+        return jsonResponse(checkpointIndex);
+      }
+      if (path.includes("checkpoint-000000-seed-000011.json")) {
+        return jsonResponse(replay);
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByLabelText("Training controls")).toBeInTheDocument());
+    expect(screen.getByText("Stage 2", { selector: ".stage-chip__label" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Promote → Stage 3" })).toBeInTheDocument();
+    expect(window.localStorage.getItem("sheepdog_curriculum_stage")).toBe("2");
   });
 
   it("shows current live run status from loaded replay data", async () => {
     render(<App />);
 
-    await waitFor(() => expect(screen.getByText("Replay")).toBeInTheDocument());
-    await waitFor(() => expect(within(screen.getByLabelText("Run status")).getByText("Live run")).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("tab", { name: "Watch" }));
+    await waitFor(() => expect(screen.getByText("Live Replay")).toBeInTheDocument());
+    await waitFor(() => expect(within(screen.getByLabelText("Run status")).getByText("idle")).toBeInTheDocument());
     expect(screen.getByLabelText("Run status")).toBeInTheDocument();
     expect(screen.getByText("Trained policy")).toBeInTheDocument();
     expect(screen.getByText("Pen-directed behavior here comes from learned training weights rather than default instinct.")).toBeInTheDocument();
@@ -354,12 +387,13 @@ describe("App", () => {
 
     render(<App />);
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Clear training data" })).toBeInTheDocument());
-    await user.click(screen.getByRole("button", { name: "Clear training data" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Clear" })).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Clear" }));
 
     await waitFor(() => expect(screen.getByText("Training cleared. Baseline replay restored")).toBeInTheDocument());
+    await user.click(screen.getByRole("tab", { name: "Watch" }));
     expect(within(screen.getByLabelText("Run status")).getByText("11")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Start replay" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Replay selected" })).toBeInTheDocument();
   });
 
   it("clears saved training data from the training panel", async () => {
@@ -389,7 +423,7 @@ describe("App", () => {
 
     await waitFor(() => expect(screen.getByLabelText("Training controls")).toBeInTheDocument());
 
-    await userEvent.click(screen.getByRole("button", { name: "Clear training data" }));
+    await userEvent.click(screen.getByRole("button", { name: "Clear" }));
 
     await waitFor(() => expect(screen.getByText("Training history cleared")).toBeInTheDocument());
     expect(fetchMock).toHaveBeenCalledWith(
@@ -433,8 +467,9 @@ describe("App", () => {
 
     render(<App />);
 
+    await userEvent.click(screen.getByRole("tab", { name: "Watch" }));
     await waitFor(() => expect(screen.getByText("Instinct-only dogs do not know the pen. Pen-directed behavior requires training, heuristic expert mode, or a handler target command.")).toBeInTheDocument());
-    await userEvent.click(screen.getByRole("button", { name: "Run current dogs" }));
+    await userEvent.click(screen.getByRole("button", { name: "Run best model" }));
 
     await waitFor(() => expect(screen.getByText("Instinct only")).toBeInTheDocument());
     expect(screen.getByText("Instinct-only dogs can chase, circle, avoid diving into the flock, and recover nearby sheep, but they do not know where the pen is.")).toBeInTheDocument();
@@ -452,7 +487,7 @@ describe("App", () => {
           policy_type: "instinct",
           policy_mode: "instinct_only",
           effective_config: {
-            enable_instinct_rewards: true,
+            enable_instinct_rewards: false,
             curriculum_stage: 1,
             debug_reward_breakdown: false,
           },
@@ -490,20 +525,21 @@ describe("App", () => {
 
     render(<App />);
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Run current dogs" })).toBeInTheDocument());
-    await user.click(screen.getByRole("button", { name: "Run current dogs" }));
+    await user.click(screen.getByRole("tab", { name: "Watch" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Run best model (ep 0)" })).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Run best model (ep 0)" }));
 
     const runReplayCall = fetchMock.mock.calls.find(([request]) => String(request).includes("/api/replay/run"));
     expect(runReplayCall?.[1]).toEqual(
       expect.objectContaining({
         body: JSON.stringify({
           seed: 11,
-          checkpoint_episode: 0,
+          checkpoint_episode: null,
           trainer_type: "hill_climb",
           policy_type: "linear",
           policy_mode: "trained_policy",
           effective_config: {
-            enable_instinct_rewards: true,
+            enable_instinct_rewards: false,
             curriculum_stage: 1,
             debug_reward_breakdown: false,
           },
@@ -536,7 +572,7 @@ describe("App", () => {
     expect(screen.queryByText(/Unexpected token/)).not.toBeInTheDocument();
   });
 
-  it("starts training with instincts enabled and curriculum stage one by default", async () => {
+  it("starts training with instincts disabled and curriculum stage one by default", async () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
       const path = String(input);
@@ -546,7 +582,7 @@ describe("App", () => {
           running: true,
           requested_episodes: 5,
           batch_total_episodes: 5,
-          enable_instinct_rewards: true,
+          enable_instinct_rewards: false,
           curriculum_stage: 1,
           message: "Queued training job",
         });
@@ -566,7 +602,7 @@ describe("App", () => {
     render(<App />);
 
     await waitFor(() => expect(screen.getByLabelText("Training controls")).toBeInTheDocument());
-    await userEvent.click(screen.getByRole("button", { name: "Train 5 more" }));
+    await userEvent.click(screen.getByRole("button", { name: "Train 50 more" }));
 
     const trainingStartCall = fetchMock.mock.calls.find(([request]) =>
       String(request).includes("/api/training/start"),
@@ -577,10 +613,10 @@ describe("App", () => {
         cache: "no-store",
         method: "POST",
         body: JSON.stringify({
-          episodes: 5,
+          episodes: 50,
           fast_mode: true,
-          enable_instinct_rewards: true,
-          curriculum_stage: 0,
+          enable_instinct_rewards: false,
+          curriculum_stage: 1,
           debug_reward_breakdown: false,
         }),
       }),
@@ -617,6 +653,7 @@ describe("App", () => {
 
     render(<App />);
 
+    await userEvent.click(screen.getByRole("tab", { name: "Watch" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "End episode" })).toBeEnabled());
 
     await userEvent.click(screen.getByRole("button", { name: "End episode" }));

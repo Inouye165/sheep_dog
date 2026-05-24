@@ -7,12 +7,15 @@ import pytest
 
 from sheepdog.config import LabConfig
 from sheepdog.environment import SheepdogEnvironment
-from sheepdog.observations import HierarchicalObservationBuilder, MAX_DOG_SLOTS, RoleAwareObservationBuilder
+from sheepdog.observations import (
+    MAX_DOG_SLOTS,
+    HierarchicalObservationBuilder,
+    RoleAwareObservationBuilder,
+)
 from sheepdog.shepherd import COMMAND_ORDER, ShepherdCommand
 
-
 NUM_SHEPHERD_FEATURES: int = len(COMMAND_ORDER)  # 8
-NUM_IDENTITY_FEATURES: int = 2 + MAX_DOG_SLOTS   # dog_id_normalized, dog_count_normalized, 5 one-hot
+NUM_IDENTITY_FEATURES: int = 2 + MAX_DOG_SLOTS  # dog_id_normalized, dog_count_normalized, 5 one-hot
 
 
 def _make_env(seed: int = 0) -> SheepdogEnvironment:
@@ -46,13 +49,11 @@ def test_shepherd_cmd_features_sum_to_one():
     """Shepherd command is one-hot encoded; exactly one value should be 1.0."""
     env = _make_env()
     builder = HierarchicalObservationBuilder()
-    obs = builder.build_hierarchical(env, dog_index=0,
-                                     shepherd_command=ShepherdCommand.DRIVE_TO_PEN)
+    obs = builder.build_hierarchical(
+        env, dog_index=0, shepherd_command=ShepherdCommand.DRIVE_TO_PEN
+    )
     names = obs.feature_names
-    cmd_vals = [
-        obs.values[names.index(f"shepherd_cmd_{cmd.value}")]
-        for cmd in COMMAND_ORDER
-    ]
+    cmd_vals = [obs.values[names.index(f"shepherd_cmd_{cmd.value}")] for cmd in COMMAND_ORDER]
     assert abs(sum(cmd_vals) - 1.0) < 1e-6
     hot = [v for v in cmd_vals if v > 0.5]
     assert len(hot) == 1
@@ -89,10 +90,7 @@ def test_dog_id_slot_is_one_hot():
     builder = HierarchicalObservationBuilder()
     obs = builder.build_hierarchical(env, dog_index=0)
     names = obs.feature_names
-    slot_vals = [
-        obs.values[names.index(f"dog_id_slot_{n}")]
-        for n in range(MAX_DOG_SLOTS)
-    ]
+    slot_vals = [obs.values[names.index(f"dog_id_slot_{n}")] for n in range(MAX_DOG_SLOTS)]
     assert abs(sum(slot_vals) - 1.0) < 1e-6
 
 

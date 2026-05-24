@@ -30,6 +30,11 @@ interface ChartPoint {
   y: number;
   stage?: number;
   isBest?: boolean;
+  isPrevBest?: boolean;
+  /** Custom text to show above a prev-best diamond instead of formatY(y). */
+  labelText?: string;
+  /** Optional secondary value (e.g. avg_completion_steps) for the right-axis overlay line. */
+  secondaryY?: number | null;
 }
 
 interface LineChartProps {
@@ -43,6 +48,13 @@ interface LineChartProps {
   referenceY?: number;
   referenceLabel?: string;
   bestEpisode?: number | null;
+  /** When true, draw the prev-best label above each diamond marker. */
+  showPrevBestLabels?: boolean;
+  /** Right-axis overlay line bounds. When provided, plots data[].secondaryY with fewer=top. */
+  secondaryYMin?: number;
+  secondaryYMax?: number;
+  secondaryLineColor?: string;
+  formatSecondaryY?: (v: number) => string;
 }
 
 function LineChart({
@@ -55,10 +67,21 @@ function LineChart({
   referenceY,
   referenceLabel,
   bestEpisode,
+  showPrevBestLabels = false,
+  secondaryYMin,
+  secondaryYMax,
+  secondaryLineColor,
+  formatSecondaryY,
 }: LineChartProps) {
   const W = 900;
   const H = 260;
-  const PAD = { top: 18, right: 32, bottom: 36, left: 62 };
+  const topPad = showPrevBestLabels ? 28 : 18;
+  const hasSecondary =
+    secondaryYMin !== undefined &&
+    secondaryYMax !== undefined &&
+    data.some((d) => d.secondaryY != null);
+  const effectiveSecColor = secondaryLineColor ?? "rgba(251,146,60,0.9)";
+  const PAD = { top: topPad, right: hasSecondary ? 58 : 32, bottom: 36, left: 62 };
   const plotW = W - PAD.left - PAD.right;
   const plotH = H - PAD.top - PAD.bottom;
 
@@ -69,11 +92,22 @@ function LineChart({
   const xRange = xMax - xMin || 1;
   const yRange = yMax - yMin || 1;
 
+  // Secondary scale — fewer steps = better = top of chart (inverted mapping)
+  const secYMin = secondaryYMin ?? 0;
+  const secYMax = secondaryYMax ?? 1;
+  const secRange = secYMax - secYMin || 1;
+  const secDataPoints = hasSecondary ? data.filter((d) => d.secondaryY != null) : [];
+  const secTicks = hasSecondary ? [secYMax, (secYMax + secYMin) / 2, secYMin] : [];
+
   function toSvgX(x: number): number {
     return PAD.left + ((x - xMin) / xRange) * plotW;
   }
   function toSvgY(y: number): number {
     return PAD.top + plotH - ((y - yMin) / yRange) * plotH;
+  }
+  function toSvgY2(y: number): number {
+    // Fewer steps → smaller y value → top of chart (PAD.top)
+    return PAD.top + ((y - secYMin) / secRange) * plotH;
   }
 
   const polyline = hasData
@@ -103,6 +137,7 @@ function LineChart({
         className="mini-chart__svg"
         aria-label={label}
         preserveAspectRatio="xMidYMid meet"
+        overflow="visible"
       >
         {/* Grid lines */}
         {yTicks.map((v, i) => {
@@ -184,18 +219,83 @@ function LineChart({
           />
         ) : null}
 
-        {/* Dots — colored by stage; best gets a ring */}
+        {/* Secondary line (steps) — dashed, right axis, fewer=top */}
+        {hasSecondary ? (
+          <>
+            {secTicks.map((v, i) => (
+              <text
+                key={i}
+                x={PAD.left + plotW + 6}
+                y={toSvgY2(v) + 3.5}
+                textAnchor="start"
+                fontSize={11}
+                fill={effectiveSecColor}
+                opacity={0.65}
+              >
+                {formatSecondaryY ? formatSecondaryY(v) : String(Math.round(v))}
+              </text>
+            ))}
+            {secDataPoints.length >= 2 ? (
+              <polyline
+                points={secDataPoints
+                  .map((d) => `${toSvgX(d.x).toFixed(1)},${toSvgY2(d.secondaryY!).toFixed(1)}`)
+                  .join(" ")}
+                fill="none"
+                stroke={effectiveSecColor}
+                strokeWidth={2}
+                strokeDasharray="5 3"
+                strokeLinejoin="round"
+                strokeLinecap="round"
+                opacity={0.75}
+              />
+            ) : null}
+            {secDataPoints.map((d) => (
+              <circle
+                key={`sec-${d.x}`}
+                cx={toSvgX(d.x)}
+                cy={toSvgY2(d.secondaryY!)}
+                r={3}
+                fill={effectiveSecColor}
+                stroke="rgba(8,17,27,0.7)"
+                strokeWidth={1}
+                opacity={0.8}
+              />
+            ))}
+          </>
+        ) : null}
+
+        {/* Dots — colored by stage; prev-bests get a diamond + label; best gets a ring */}
         {data.map((d) => {
           const cx = toSvgX(d.x);
           const cy = toSvgY(d.y);
           const fill = stageColor(d.stage);
           const isBest = d.x === bestEpisode;
+          const r = isBest ? 6 : d.isPrevBest ? 5 : 4;
+          const diamond = `${cx},${cy - r} ${cx + r},${cy} ${cx},${cy + r} ${cx - r},${cy}`;
           return (
             <g key={d.x}>
               {isBest ? (
                 <circle cx={cx} cy={cy} r={9} fill="none" stroke={fill} strokeWidth={2} opacity={0.6} />
               ) : null}
-              <circle cx={cx} cy={cy} r={isBest ? 6 : 4} fill={fill} stroke="rgba(8,17,27,0.7)" strokeWidth={1} />
+              {d.isPrevBest ? (
+                <polygon points={diamond} fill={fill} stroke="rgba(8,17,27,0.7)" strokeWidth={1} />
+              ) : (
+                <circle cx={cx} cy={cy} r={r} fill={fill} stroke="rgba(8,17,27,0.7)" strokeWidth={1} />
+              )}
+              {(d.isPrevBest || isBest) && showPrevBestLabels && d.labelText ? (
+                <text
+                  x={cx + 4}
+                  y={cy - r - 4}
+                  transform={`rotate(-90, ${cx + 4}, ${cy - r - 4})`}
+                  textAnchor="start"
+                  fontSize={10}
+                  fontWeight="600"
+                  fill={fill}
+                  style={{ pointerEvents: "none" }}
+                >
+                  {d.labelText}
+                </text>
+              ) : null}
             </g>
           );
         })}
@@ -211,32 +311,25 @@ function LineChart({
   );
 }
 
-// ── Stage legend ────────────────────────────────────────────────────────────
-
-function StageLegend({ stages }: { stages: number[] }) {
-  const unique = [...new Set(stages)].sort((a, b) => a - b);
-  if (unique.length <= 1) return null;
-  return (
-    <div className="diag-legend">
-      {unique.map((s) => (
-        <span key={s} className="diag-legend__item">
-          <span className="diag-legend__dot" style={{ background: stageColor(s) }} />
-          Stage {s}
-        </span>
-      ))}
-    </div>
-  );
-}
-
 // ── Chart sub-tab types & legend ───────────────────────────────────────────
 
 type ChartTab = "success" | "reward" | "sheep" | "history";
+type ViewWindow = "stage" | "all" | 25 | 50 | 100;
+
+const VIEW_WINDOW_OPTIONS: Array<{ value: ViewWindow; label: string }> = [
+  { value: "stage", label: "This stage" },
+  { value: 25, label: "Last 25" },
+  { value: 50, label: "Last 50" },
+  { value: 100, label: "Last 100" },
+  { value: "all", label: "All" },
+];
 
 type SymbolSpec =
   | { kind: "line"; color: string }
   | { kind: "dash"; color: string }
   | { kind: "dot"; color: string }
-  | { kind: "ring"; color: string };
+  | { kind: "ring"; color: string }
+  | { kind: "diamond"; color: string };
 
 interface LegendEntry {
   symbol: SymbolSpec;
@@ -268,6 +361,17 @@ function SymIcon({ sym }: { sym: SymbolSpec }) {
       <svg width={SW} height={SH} viewBox={`0 0 ${SW} ${SH}`} style={{ flexShrink: 0 }}>
         <circle cx={cx} cy={my} r={6} fill="none" stroke={sym.color} strokeWidth={1.8} opacity={0.75} />
         <circle cx={cx} cy={my} r={3.5} fill={sym.color} />
+      </svg>
+    );
+  }
+  if (sym.kind === "diamond") {
+    const r = 5;
+    return (
+      <svg width={SW} height={SH} viewBox={`0 0 ${SW} ${SH}`} style={{ flexShrink: 0 }}>
+        <polygon
+          points={`${cx},${my - r} ${cx + r},${my} ${cx},${my + r} ${cx - r},${my}`}
+          fill={sym.color}
+        />
       </svg>
     );
   }
@@ -339,6 +443,7 @@ interface DiagnosticsPanelProps {
   checkpointIndex: CheckpointIndex | null;
   bestCheckpointEpisode: number | null;
   trainingStatus: TrainingStatus | null;
+  effectiveCurriculumStage: number;
 }
 
 /** Diagnostics / Learning-Curve tab. */
@@ -346,47 +451,86 @@ export function DiagnosticsPanel({
   checkpointIndex,
   bestCheckpointEpisode,
   trainingStatus,
+  effectiveCurriculumStage,
 }: DiagnosticsPanelProps) {
-  const checkpoints = checkpointIndex?.checkpoints ?? [];
+  const checkpoints = useMemo(
+    () => checkpointIndex?.checkpoints ?? [],
+    [checkpointIndex?.checkpoints],
+  );
 
   const plateauInfo = useMemo(() => detectPlateau(checkpoints), [checkpoints]);
 
+  const [viewWindow, setViewWindow] = useState<ViewWindow>("stage");
+
+  const filteredCheckpoints = useMemo(() => {
+    if (viewWindow === "all") return checkpoints;
+    if (viewWindow === "stage")
+      return checkpoints.filter(
+        (c) =>
+          (c.reward_config?.instincts?.curriculum_stage ?? 0) === effectiveCurriculumStage,
+      );
+    return checkpoints.slice(-viewWindow);
+  }, [checkpoints, viewWindow, effectiveCurriculumStage]);
+
   const stages = useMemo(
-    () => checkpoints.map((c) => c.reward_config?.instincts?.curriculum_stage ?? 0),
-    [checkpoints],
+    () => filteredCheckpoints.map((c) => c.reward_config?.instincts?.curriculum_stage ?? 0),
+    [filteredCheckpoints],
   );
 
-  const successData: ChartPoint[] = useMemo(
-    () =>
-      checkpoints.map((c, i) => ({
+  const successData: ChartPoint[] = useMemo(() => {
+    let runningMaxRate = -Infinity;
+    let runningMinSteps = Infinity;
+    return filteredCheckpoints.map((c, i) => {
+      const rate = c.success_rate;
+      const steps = c.average_completion_steps ?? Infinity;
+      const betterRate = rate > runningMaxRate;
+      const betterSteps = rate === runningMaxRate && steps < runningMinSteps;
+      const isPrevBest = betterRate || betterSteps;
+      if (isPrevBest) {
+        if (betterRate) {
+          runningMaxRate = rate;
+          runningMinSteps = steps;
+        } else {
+          runningMinSteps = steps;
+        }
+      }
+      const labelText =
+        (isPrevBest || c.checkpoint_episode === bestCheckpointEpisode) &&
+        c.average_completion_steps != null
+          ? String(Math.round(c.average_completion_steps))
+          : undefined;
+      return {
         x: c.checkpoint_episode,
-        y: c.success_rate,
+        y: rate,
         stage: stages[i],
         isBest: c.checkpoint_episode === bestCheckpointEpisode,
-      })),
-    [checkpoints, stages, bestCheckpointEpisode],
-  );
+        isPrevBest,
+        labelText,
+        secondaryY: c.average_completion_steps ?? null,
+      };
+    });
+  }, [filteredCheckpoints, stages, bestCheckpointEpisode]);
 
   const rewardData: ChartPoint[] = useMemo(
     () =>
-      checkpoints.map((c, i) => ({
+      filteredCheckpoints.map((c, i) => ({
         x: c.checkpoint_episode,
         y: c.average_reward,
         stage: stages[i],
         isBest: c.checkpoint_episode === bestCheckpointEpisode,
       })),
-    [checkpoints, stages, bestCheckpointEpisode],
+    [filteredCheckpoints, stages, bestCheckpointEpisode],
   );
 
   const sheepData: ChartPoint[] = useMemo(
     () =>
-      checkpoints.map((c, i) => ({
+      filteredCheckpoints.map((c, i) => ({
         x: c.checkpoint_episode,
         y: c.average_sheep_penned,
         stage: stages[i],
         isBest: c.checkpoint_episode === bestCheckpointEpisode,
       })),
-    [checkpoints, stages, bestCheckpointEpisode],
+    [filteredCheckpoints, stages, bestCheckpointEpisode],
   );
 
   const rewardRange = useMemo(() => {
@@ -403,8 +547,19 @@ export function DiagnosticsPanel({
     return Math.max(...sheepData.map((d) => d.y), 1);
   }, [sheepData]);
 
+  const stepsRange = useMemo(() => {
+    const vals = filteredCheckpoints
+      .map((c) => c.average_completion_steps)
+      .filter((v): v is number => v != null && v > 0);
+    if (!vals.length) return { min: 0, max: 500 };
+    const minV = Math.min(...vals);
+    const maxV = Math.max(...vals);
+    const pad = (maxV - minV) * 0.15 || 30;
+    return { min: Math.max(0, minV - pad), max: maxV + pad };
+  }, [filteredCheckpoints]);
+
   // Reverse-order rows for the table (newest first)
-  const tableRows = useMemo(() => [...checkpoints].reverse(), [checkpoints]);
+  const tableRows = useMemo(() => [...filteredCheckpoints].reverse(), [filteredCheckpoints]);
 
   const isLiveTraining = trainingStatus?.running ?? false;
   const uniqueStages = useMemo(() => [...new Set(stages)].sort((a, b) => a - b), [stages]);
@@ -504,6 +659,22 @@ export function DiagnosticsPanel({
         </div>
       </details>
 
+      {/* View window filter */}
+      <div className="view-filter">
+        <span className="view-filter__label">Show</span>
+        <div className="chart-tabs" role="group" aria-label="Chart window">
+          {VIEW_WINDOW_OPTIONS.map(({ value, label }) => (
+            <button
+              key={String(value)}
+              className={`chart-tab${viewWindow === value ? " chart-tab--active" : ""}`}
+              onClick={() => setViewWindow(value)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* Chart sub-tabs */}
       <div className="chart-tabs" role="tablist">
         {(["success", "reward", "sheep", "history"] as ChartTab[]).map((id) => {
@@ -538,13 +709,20 @@ export function DiagnosticsPanel({
             referenceY={0.5}
             referenceLabel="50%"
             bestEpisode={bestCheckpointEpisode}
+            showPrevBestLabels
+            secondaryYMin={stepsRange.min}
+            secondaryYMax={stepsRange.max}
+            secondaryLineColor="rgba(251,146,60,0.85)"
+            formatSecondaryY={(v) => String(Math.round(v))}
           />
           <ChartLegend
             entries={[
               { symbol: { kind: "line", color: "var(--good)" }, label: "Success rate", detail: "fraction of eval episodes where all sheep were penned" },
+              { symbol: { kind: "dash", color: "rgba(251,146,60,0.85)" }, label: "Avg steps", detail: "average completion steps for successful episodes — fewer is faster (right axis, top = fewer)" },
               { symbol: { kind: "dash", color: "rgba(74,222,128,0.65)" }, label: "50% target", detail: "recommended threshold to promote to next curriculum stage" },
+              { symbol: { kind: "diamond", color: "#9ca3af" }, label: "Running best", detail: "each point where a new personal best success rate was set — label shows the rate" },
+              { symbol: { kind: "ring", color: "#9ca3af" }, label: "All-time best", detail: "the model currently loaded for inference — also shown with an outer ring" },
               ...uniqueStages.map((s) => ({ symbol: { kind: "dot" as const, color: stageColor(s) }, label: `Stage ${s}`, detail: s === 0 ? "no curriculum — base difficulty" : `curriculum stage ${s}` })),
-              { symbol: { kind: "ring", color: "#9ca3af" }, label: "Best checkpoint", detail: "the model currently loaded for inference — shown with an outer ring" },
             ]}
           />
         </div>

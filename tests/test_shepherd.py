@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from sheepdog.config import LabConfig
 from sheepdog.environment import SheepdogEnvironment
 from sheepdog.shepherd import (
@@ -12,7 +10,6 @@ from sheepdog.shepherd import (
     ScriptedShepherd,
     ShepherdCommand,
 )
-
 
 # ---------------------------------------------------------------------------
 # Enum & ordering
@@ -35,7 +32,7 @@ def test_command_order_is_stable():
     """Re-importing must give the same ordering (no randomisation)."""
     from sheepdog.shepherd import COMMAND_ORDER as order_again  # noqa: PLC0415
 
-    assert COMMAND_ORDER == order_again
+    assert order_again == COMMAND_ORDER
 
 
 def test_command_index_matches_order():
@@ -63,10 +60,7 @@ def _place_all_sheep_in_pen(env: SheepdogEnvironment) -> None:
         new_sheep.append(
             sheep.__class__(
                 **{
-                    **{
-                        f: getattr(sheep, f)
-                        for f in sheep.__dataclass_fields__
-                    },
+                    **{f: getattr(sheep, f) for f in sheep.__dataclass_fields__},
                     "penned": True,
                 }
             )
@@ -117,7 +111,6 @@ def test_issue_command_stop_when_all_penned():
     # If the env doesn't finish in 10 steps, at minimum verify STOP logic
     # by exercising it with a contrived path.
     # Check STOP returns for zero unpenned sheep.
-    ctx_all_penned = shepherd._build_context(env)
     # Rather than mutating private env state, patch via monkey-patching sheep.
     original_sheep = env.sheep
     # Temporarily replace sheep list with empty to simulate all penned.

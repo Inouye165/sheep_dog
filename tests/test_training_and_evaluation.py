@@ -213,6 +213,7 @@ def test_candidate_evaluation_uses_multiple_seeds_and_averages_scores(tmp_path: 
                 timeout=timeout,
                 stopped=stopped,
                 sheep_penned=2,
+                steps=seed,
             ),
         )
 
@@ -257,9 +258,10 @@ def test_candidate_evaluation_summary_score_uses_averages() -> None:
         average_sheep_penned=3.0,
         average_distance_to_pen=8.0,
         average_flock_spread=2.0,
+        average_steps=200.0,
     )
 
-    assert summary.score == 18.84
+    assert summary.score == 4904.34
 
 
 def test_training_evaluation_keeps_fixed_checkpoint_seeds(tmp_path: Path) -> None:

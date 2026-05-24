@@ -276,9 +276,12 @@ class TeamStrategy:
         if approach_x == 0 and approach_y == 0:
             approach_x = -lateral_y or 1
             approach_y = lateral_x
-        escape_side = self._axis_sign(
-            (flock_center.x - gate.x) * lateral_x + (flock_center.y - gate.y) * lateral_y
-        ) or 1
+        escape_side = (
+            self._axis_sign(
+                (flock_center.x - gate.x) * lateral_x + (flock_center.y - gate.y) * lateral_y
+            )
+            or 1
+        )
         return Point(
             gate.x - approach_x + lateral_x * escape_side * 2,
             gate.y - approach_y + lateral_y * escape_side * 2,

@@ -122,6 +122,7 @@ def export_demo_command() -> None:
             indent=2,
         )
 
+
 def benchmark_command() -> None:
     parser = argparse.ArgumentParser(description="Benchmark baseline and PPO policy variants.")
     parser.add_argument("--config", default=None, help="Optional JSON config file.")
@@ -244,8 +245,9 @@ def train_hierarchical_command() -> None:
 
     trainer = HierarchicalMaskablePPOTrainer(config, output_dir)
     result = trainer.train()
-    print(json.dumps({"status": "done", "final_model_path": result.get("final_model_path")},
-                     indent=2))
+    print(
+        json.dumps({"status": "done", "final_model_path": result.get("final_model_path")}, indent=2)
+    )
 
 
 def herding_eval_command() -> None:

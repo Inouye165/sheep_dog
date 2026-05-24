@@ -162,7 +162,7 @@ export interface TrainingStatus {
   phase: string;
   message: string;
   error: string | null;
-}
+  seed_episode?: number | null;  starting_episode: number | null;}
 
 export interface TrainingStartRequest {
   episodes: number;
@@ -170,6 +170,7 @@ export interface TrainingStartRequest {
   enable_instinct_rewards: boolean;
   curriculum_stage: number;
   debug_reward_breakdown: boolean;
+  promote_from_checkpoint_episode?: number | null;
 }
 
 export interface ReplayRunRequest {

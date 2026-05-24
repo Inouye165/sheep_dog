@@ -115,13 +115,76 @@ def test_episode_stops_when_no_progress_occurs() -> None:
 
 
 def test_action_mask_disallows_useless_wait_when_movement_exists() -> None:
+    # Heuristic modes must preserve the wait-scoring threshold gate.
     config = make_config()
     environment = SheepdogEnvironment(config)
     environment.reset(seed=3)
 
-    mask = environment.action_mask_for_dog(0)
+    mask = environment.action_mask_for_dog(0, policy_mode="instinct_only")
 
     assert mask["wait"] is False
+
+
+def test_wait_always_legal_in_neural_policy_mode() -> None:
+    # neural_policy must expose wait even when the heuristic score would suppress it.
+    config = make_config()
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=3)
+
+    # seed=3 is the same position where instinct_only suppresses wait;
+    # neural_policy must override that gate.
+    mask = environment.action_mask_for_dog(0, policy_mode="neural_policy")
+
+    assert mask["wait"] is True
+
+
+def test_wait_always_legal_in_shepherd_neural_dogs_mode() -> None:
+    config = make_config()
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=3)
+
+    mask = environment.action_mask_for_dog(0, policy_mode="shepherd_neural_dogs")
+
+    assert mask["wait"] is True
+
+
+def test_wait_always_legal_when_policy_mode_is_none() -> None:
+    # policy_mode=None is what both RL adapters use during training.
+    config = make_config()
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=3)
+
+    mask = environment.action_mask_for_dog(0, policy_mode=None)
+
+    assert mask["wait"] is True
+
+
+def test_heuristic_expert_mode_preserves_wait_threshold() -> None:
+    config = make_config()
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=3)
+
+    mask_heuristic = environment.action_mask_for_dog(0, policy_mode="heuristic_expert")
+    mask_instinct = environment.action_mask_for_dog(0, policy_mode="instinct_only")
+
+    # Both heuristic modes must agree: wait is gated by scoring threshold.
+    assert mask_heuristic["wait"] == mask_instinct["wait"]
+
+
+def test_non_wait_actions_unchanged_by_neural_mode() -> None:
+    # Switching to neural mode must not alter movement action legality.
+    config = make_config()
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=3)
+
+    mask_heuristic = environment.action_mask_for_dog(0, policy_mode="instinct_only")
+    mask_neural = environment.action_mask_for_dog(0, policy_mode="neural_policy")
+
+    non_wait_actions = [action for action in mask_heuristic if action != "wait"]
+    for action in non_wait_actions:
+        assert mask_neural[action] == mask_heuristic[action], (
+            f"action '{action}' legality changed between instinct_only and neural_policy"
+        )
 
 
 def test_multiple_dogs_keep_consistent_state_updates() -> None:
@@ -196,8 +259,7 @@ def test_near_pen_flock_assigns_blocker_and_flanker() -> None:
 
     assert DogRole.BLOCKER.value in roles.values()
     assert any(
-        role in roles.values()
-        for role in (DogRole.LEFT_FLANKER.value, DogRole.RIGHT_FLANKER.value)
+        role in roles.values() for role in (DogRole.LEFT_FLANKER.value, DogRole.RIGHT_FLANKER.value)
     )
 
 

@@ -212,8 +212,7 @@ class SheepdogEnvironment:
         self._roles_prepared_step = None
         self._role_distribution = {role.value: 0 for role in DogRole}
         self._dog_role_occupancy = {
-            str(index): {role.value: 0 for role in DogRole}
-            for index in range(self.env_config.dogs)
+            str(index): {role.value: 0 for role in DogRole} for index in range(self.env_config.dogs)
         }
         self._role_switches = 0
         self._collector_activations = 0
@@ -317,8 +316,7 @@ class SheepdogEnvironment:
             ),
             pen=self._pen,
             fence_cells=tuple(
-                (cell.x, cell.y)
-                for cell in sorted(self._fence_cells, key=lambda p: (p.y, p.x))
+                (cell.x, cell.y) for cell in sorted(self._fence_cells, key=lambda p: (p.y, p.x))
             ),
             penned_count=sum(1 for sheep in self._sheep if sheep.penned),
             average_distance_to_pen=self._average_distance_to_pen(),
@@ -370,7 +368,14 @@ class SheepdogEnvironment:
             for action in ACTION_ORDER
             if action != "wait"
         }
-        mask["wait"] = wait_allowed
+        # Neural / RL training modes must never have wait masked out: the
+        # heuristic scoring threshold creates an artificial exploration ceiling
+        # that prevents MaskablePPO from discovering hold-position strategies.
+        # Heuristic, linear, and hill-climbing modes keep the existing logic.
+        if policy_mode in {None, "neural_policy", "shepherd_neural_dogs"}:
+            mask["wait"] = True
+        else:
+            mask["wait"] = wait_allowed
         return mask
 
     def ranked_actions_for_dog(
@@ -402,9 +407,7 @@ class SheepdogEnvironment:
     def project_dog_action(self, dog_index: int, action: Action) -> Point:
         dog = self._dogs[dog_index]
         blocked_positions = {sheep.position for sheep in self._sheep if not sheep.penned}
-        blocked_positions.update(
-            other.position for other in self._dogs if other.index != dog_index
-        )
+        blocked_positions.update(other.position for other in self._dogs if other.index != dog_index)
         steps, _ = self._movement_steps(
             self._dog_action_speed(action),
             dog.movement_budget,
@@ -573,8 +576,7 @@ class SheepdogEnvironment:
             self._controlled_stall_streak += 1
             wall_pinned = self._wall_pinned_sheep_ratio() >= 0.34
             if (
-                self._controlled_stall_streak
-                >= self.env_config.stalled_control_activation_steps
+                self._controlled_stall_streak >= self.env_config.stalled_control_activation_steps
             ) and (
                 wall_pinned
                 or current_gate_distance > self.env_config.gate_hold_safe_distance
@@ -798,9 +800,11 @@ class SheepdogEnvironment:
         next_positions: list[Point] = []
         next_budgets: list[float] = []
         for dog, action in zip(self._dogs, actions, strict=True):
-            blocked_positions = sheep_positions | claimed_positions | {
-                position for position in occupied_positions if position != dog.position
-            }
+            blocked_positions = (
+                sheep_positions
+                | claimed_positions
+                | {position for position in occupied_positions if position != dog.position}
+            )
             steps, remaining_budget = self._movement_steps(
                 self._dog_action_speed(action),
                 dog.movement_budget,
@@ -855,9 +859,7 @@ class SheepdogEnvironment:
                 continue
             move = sheep.position
             blocked_positions = claimed_positions | {
-                position
-                for position in occupied_sheep_positions
-                if position != sheep.position
+                position for position in occupied_sheep_positions if position != sheep.position
             }
             steps, remaining_budget = self._movement_steps(
                 self.env_config.sheep_speed,
@@ -1054,9 +1056,7 @@ class SheepdogEnvironment:
         )
         teammate_spacing = self._teammate_spacing(candidate, dog_index)
         distance_to_sheep = candidate_debug["distance_to_focus_sheep"]
-        preferred_sheep_distance = (
-            2.5 if candidate_debug["focus_mode"] == "collect" else 3.5
-        )
+        preferred_sheep_distance = 2.5 if candidate_debug["focus_mode"] == "collect" else 3.5
         sheep_term = 0.0
         if distance_to_sheep is not None and (
             candidate_debug["pressure_side_alignment"] >= 0.25
@@ -1065,8 +1065,7 @@ class SheepdogEnvironment:
             sheep_term = -abs(distance_to_sheep - preferred_sheep_distance)
         inside_distance = max(
             0.0,
-            candidate_debug["flock_buffer_radius"] + 1.0
-            - candidate_debug["distance_to_flock"],
+            candidate_debug["flock_buffer_radius"] + 1.0 - candidate_debug["distance_to_flock"],
         )
         inside_flock_penalty = -inside_distance
         pen_side_penalty = -1.0 if candidate_debug["between_flock_and_pen"] else 0.0
@@ -1183,8 +1182,7 @@ class SheepdogEnvironment:
                 1.0
                 - max(
                     0.0,
-                    candidate_debug["distance_to_flock"]
-                    - candidate_debug["flock_buffer_radius"],
+                    candidate_debug["distance_to_flock"] - candidate_debug["flock_buffer_radius"],
                 ),
             )
             rejoin_angle = 0.0

@@ -84,7 +84,7 @@ def _load_latest_trained_checkpoint(config: LabConfig) -> tuple[object | None, s
     latest = checkpoints[-1]
     total_trained = int(latest.get("total_training_episodes", 0))
     if total_trained == 0:
-        return None, f"latest checkpoint has total_training_episodes=0 (baseline only)"
+        return None, "latest checkpoint has total_training_episodes=0 (baseline only)"
 
     checkpoint_episode = int(latest.get("checkpoint_episode", 0))
     policy_name = str(latest.get("policy_name", "trained_policy"))
@@ -154,10 +154,7 @@ def test_stage1_policy_benchmark() -> None:
         f"dogs={config.environment.dogs}, sheep={config.environment.sheep}, "
         f"instincts={config.rewards.instincts.enable_instinct_rewards})"
     )
-    print(
-        f"  {'Policy':<40} "
-        "success   penned  reward    timeout  dist-to-pen"
-    )
+    print(f"  {'Policy':<40} success   penned  reward    timeout  dist-to-pen")
     print("  " + "-" * 80)
 
     all_diagnoses: list[str] = []
@@ -195,15 +192,16 @@ def test_stage1_policy_benchmark() -> None:
             "environment or pen geometry needs investigation before training"
         )
     else:
-        print(f"\nheuristic_expert passes Stage 1 ({heuristic_success:.0%}) — "
-              "environment is solvable; training may need more episodes or config tuning.")
+        print(
+            f"\nheuristic_expert passes Stage 1 ({heuristic_success:.0%}) — "
+            "environment is solvable; training may need more episodes or config tuning."
+        )
 
 
 @pytest.mark.slow
 def test_stage1_reward_breakdown() -> None:
     """Verify instinct reward terms are active during a Stage 1 heuristic episode."""
     from dataclasses import replace as dc_replace
-    from sheepdog.config import RewardConfig
 
     config = _stage1_config(enable_instinct_rewards=True)
     debug_config = dc_replace(
@@ -248,23 +246,16 @@ def test_positive_reward_when_dog_behind_sheep() -> None:
     env = SheepdogEnvironment(config)
     result = env.run_policy(policy, seed=11, capture_replay=True)
 
-    positive_progress_steps = sum(
-        1 for r in result.replay if r.reward.progress_to_pen > 0.0
-    )
-    positive_pressure_steps = sum(
-        1 for r in result.replay if r.reward.pressure_zone > 0.0
-    )
+    positive_progress_steps = sum(1 for r in result.replay if r.reward.progress_to_pen > 0.0)
+    positive_pressure_steps = sum(1 for r in result.replay if r.reward.pressure_zone > 0.0)
     total_steps = len(result.replay)
 
-    print(
-        f"\nReward signal check (Stage 1, heuristic_expert, seed=11, {total_steps} steps):"
-    )
+    print(f"\nReward signal check (Stage 1, heuristic_expert, seed=11, {total_steps} steps):")
     print(f"  progress_to_pen > 0:  {positive_progress_steps}/{total_steps} steps")
     print(f"  pressure_zone > 0:    {positive_pressure_steps}/{total_steps} steps")
     print(f"  final success: {result.stats.success}")
     print(f"  total reward:  {result.stats.reward_total:+.1f}")
 
     assert positive_progress_steps > 0, (
-        "No steps with positive progress_to_pen reward — "
-        "sheep are never moving toward the pen"
+        "No steps with positive progress_to_pen reward — sheep are never moving toward the pen"
     )

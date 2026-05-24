@@ -554,9 +554,6 @@ select {
   line-height: 1;
 }
 
-/* Advanced settings accordion */
-.training-advanced {
-
 /* Stage history breakdown */
 .stage-history {
   margin-top: 0.6rem;
@@ -1230,6 +1227,23 @@ select {
   background: rgba(255, 255, 255, 0.08);
   color: var(--text);
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+}
+
+/* ── View window filter (Insights panel) ── */
+.view-filter {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin-bottom: 0.1rem;
+}
+
+.view-filter__label {
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  flex-shrink: 0;
 }
 
 .chart-view {

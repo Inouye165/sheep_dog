@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ControlBar } from "./components/ControlBar";
 import { ConfigPanel } from "./components/ConfigPanel";
 import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
@@ -10,6 +10,13 @@ import type { CheckpointEntry, CheckpointIndex, ReplayBundle, ReplaySnapshot, Tr
 
 type RunState = "idle" | "running" | "paused" | "success" | "timeout" | "stopped";
 type ActiveTab = "train" | "watch" | "insights" | "config";
+
+const APP_TABS: { id: ActiveTab; label: string }[] = [
+  { id: "train", label: "Train" },
+  { id: "watch", label: "Watch" },
+  { id: "insights", label: "Insights" },
+  { id: "config", label: "Config" },
+];
 
 const CLEAR_TRAINING_MESSAGE = "Training cleared. Baseline replay restored";
 
@@ -73,7 +80,7 @@ export function App() {
   const [loading, setLoading] = useState(true);
   const [trainingEpisodes, setTrainingEpisodes] = useState(50);
   const [trainingFastMode, setTrainingFastMode] = useState(true);
-  const [trainingEnableInstincts, setTrainingEnableInstincts] = useState(true);
+  const [trainingEnableInstincts, setTrainingEnableInstincts] = useState(false);
   const [trainingCurriculumStage, setTrainingCurriculumStage] = useState(() => {
     const saved = localStorage.getItem("sheepdog_curriculum_stage");
     const parsed = saved !== null ? parseInt(saved, 10) : NaN;
@@ -86,8 +93,21 @@ export function App() {
   const [runningCurrentReplay, setRunningCurrentReplay] = useState(false);
   const [loadingSelectedReplay, setLoadingSelectedReplay] = useState(false);
   const [activeTab, setActiveTab] = useState<ActiveTab>("train");
+  // Episode of the best-formal checkpoint for the current stage captured at
+  // promote time, so the next training start can seed from the correct policy.
+  const [promoteFromEpisode, setPromoteFromEpisode] = useState<number | null>(null);
   // Track previous running state so we can detect the running→idle transition.
   const prevTrainingRunning = useRef(false);
+
+  const syncTrainingStageFromStatus = useCallback((status: TrainingStatus | null): void => {
+    const reportedStage = status?.curriculum_stage;
+    if (reportedStage == null || reportedStage < 1) {
+      return;
+    }
+    setTrainingCurriculumStage(reportedStage);
+    localStorage.setItem("sheepdog_curriculum_stage", String(reportedStage));
+    setTrainingEpisodes(RECOMMENDED_EPISODES_BY_STAGE[reportedStage] ?? 50);
+  }, []);
 
   const selectedCheckpoint = useMemo(() => {
     return checkpointIndex?.checkpoints.find((entry) => entry.checkpoint_episode === selectedCheckpointEpisode) ?? null;
@@ -104,14 +124,11 @@ export function App() {
   // When training completes, lock the stage chip to the stage that was actually
   // trained and preset episodes to the recommended count for that stage.
   useEffect(() => {
-    if (prevTrainingRunning.current && !trainingRunning && trainingStatus?.curriculum_stage != null) {
-      const trainedStage = trainingStatus.curriculum_stage;
-      setTrainingCurriculumStage(trainedStage);
-      localStorage.setItem("sheepdog_curriculum_stage", String(trainedStage));
-      setTrainingEpisodes(RECOMMENDED_EPISODES_BY_STAGE[trainedStage] ?? 50);
+    if (!trainingRunning && trainingStatus?.curriculum_stage != null) {
+      syncTrainingStageFromStatus(trainingStatus);
     }
     prevTrainingRunning.current = trainingRunning;
-  }, [trainingRunning, trainingStatus?.curriculum_stage]);
+  }, [syncTrainingStageFromStatus, trainingRunning, trainingStatus]);
   const effectiveEnableInstincts = trainingRunning
     ? trainingStatus?.enable_instinct_rewards ?? trainingEnableInstincts
     : trainingEnableInstincts;
@@ -133,6 +150,27 @@ export function App() {
     );
     if (!stageCheckpoints.length) return null;
     return stageCheckpoints[stageCheckpoints.length - 1]?.success_rate ?? null;
+  }, [checkpointIndex, effectiveCurriculumStage]);
+
+  // Best formally-evaluated checkpoint for the current stage, using the same
+  // stage-aware ordering as isStrictlyBetterCheckpoint (success_rate primary,
+  // average_reward tie-breaker).  This drives the promote-readiness badge so
+  // the user sees the peak performance, not just the most recent run.
+  const bestStageFormalEntry = useMemo(() => {
+    const stageCheckpoints = checkpointIndex?.checkpoints.filter(
+      (c) => c.reward_config?.instincts?.curriculum_stage === effectiveCurriculumStage,
+    ) ?? [];
+    if (!stageCheckpoints.length) return null;
+    return stageCheckpoints.reduce((best, entry) => {
+      if (!best) return entry;
+      if (entry.success_rate > best.success_rate) return entry;
+      if (
+        entry.success_rate === best.success_rate &&
+        (entry.average_completion_steps ?? Infinity) < (best.average_completion_steps ?? Infinity)
+      )
+        return entry;
+      return best;
+    }, null as CheckpointEntry | null);
   }, [checkpointIndex, effectiveCurriculumStage]);
 
   const currentReplaySelection = useMemo(() => {
@@ -179,8 +217,7 @@ export function App() {
     if (cStage < curStage) return false;
     if (candidate.success_rate > current.success_rate) return true;
     if (candidate.success_rate < current.success_rate) return false;
-    if (candidate.average_reward > current.average_reward) return true;
-    if (candidate.average_reward < current.average_reward) return false;
+    // Fewer steps = faster completion = strictly better (reward not a tiebreaker).
     return (candidate.average_completion_steps ?? Infinity) < (current.average_completion_steps ?? Infinity);
   }
 
@@ -281,15 +318,7 @@ export function App() {
         const status = await loadTrainingStatus();
         if (active) {
           setTrainingStatus((previous) => mergeTrainingStatus(previous, status));
-          // Sync curriculum stage from server: trust the server when it reports
-          // a higher stage than localStorage (user promoted on another session).
-          if (status.curriculum_stage != null && status.curriculum_stage > 0) {
-            const localStage = parseInt(localStorage.getItem("sheepdog_curriculum_stage") ?? "0", 10);
-            if (status.curriculum_stage > localStage) {
-              setTrainingCurriculumStage(status.curriculum_stage);
-              localStorage.setItem("sheepdog_curriculum_stage", String(status.curriculum_stage));
-            }
-          }
+          syncTrainingStageFromStatus(status);
         }
       } catch {
         if (active) {
@@ -304,6 +333,11 @@ export function App() {
           const status = await loadTrainingStatus();
           if (active) {
             setTrainingStatus((previous) => mergeTrainingStatus(previous, status));
+            // Guard: only overwrite the UI stage while a batch is in flight.
+            // The running→idle useEffect handles locking the stage once done.
+            if (status.running) {
+              syncTrainingStageFromStatus(status);
+            }
           }
         } catch {
           if (active) {
@@ -322,6 +356,9 @@ export function App() {
           const status = await loadTrainingStatus();
           if (active) {
             setTrainingStatus((previous) => mergeTrainingStatus(previous, status));
+            if (status.running) {
+              syncTrainingStageFromStatus(status);
+            }
           }
         } catch {
           if (active) {
@@ -339,7 +376,7 @@ export function App() {
       document.removeEventListener("visibilitychange", refreshNow);
       window.removeEventListener("focus", refreshNow);
     };
-  }, []);
+  }, [syncTrainingStageFromStatus]);
 
   useEffect(() => {
     if (!trainingStatus?.running || trainingStatus.latest_checkpoint_episode === null) {
@@ -444,6 +481,11 @@ export function App() {
   }
 
   function handlePromote() {
+    // Capture the best formal checkpoint for this stage before bumping the
+    // stage counter.  The episode ID is sent with the next training request so
+    // the backend seeds Stage N+1 from the peak policy, not the hill-climbing
+    // tail which may have lower formal success rate.
+    setPromoteFromEpisode(bestStageFormalEntry?.checkpoint_episode ?? null);
     setTrainingCurriculumStage((prev) => {
       const next = prev >= 5 ? 1 : prev + 1;
       localStorage.setItem("sheepdog_curriculum_stage", String(next));
@@ -462,7 +504,10 @@ export function App() {
         enable_instinct_rewards: trainingEnableInstincts,
         curriculum_stage: trainingCurriculumStage,
         debug_reward_breakdown: trainingDebugRewardBreakdown,
+        promote_from_checkpoint_episode: promoteFromEpisode ?? undefined,
       });
+      // Clear the promote hint after it has been consumed by the training request.
+      setPromoteFromEpisode(null);
       setTrainingStatus(status);
     } catch (startError) {
       setTrainingError(startError instanceof Error ? startError.message : "Unable to start training.");
@@ -483,8 +528,7 @@ export function App() {
       setTrainingStatus(status);
       setTrainingCurriculumStage(1);
       localStorage.setItem("sheepdog_curriculum_stage", "1");
-      setTrainingEpisodes(RECOMMENDED_EPISODES_BY_STAGE[1] ?? 50);
-      applyCheckpointIndex(index);
+      setTrainingEpisodes(RECOMMENDED_EPISODES_BY_STAGE[1] ?? 50);      setPromoteFromEpisode(null);      applyCheckpointIndex(index);
       const latestCheckpoint = index?.checkpoints[index.checkpoints.length - 1] ?? null;
       const seed = latestCheckpoint?.records[0]?.seed ?? null;
       if (latestCheckpoint && seed !== null) {
@@ -573,6 +617,17 @@ export function App() {
   const statusLabel = resolveRunState(snapshot, runState);
   const statusMessage = trainingStatus?.message ?? "Idle";
   const canEndEpisode = Boolean(replay) && (runState === "running" || frameIndex < (replay?.frames.length ?? 0) - 1);
+  const tabButtons = APP_TABS.map(({ id, label }) => (
+    <button
+      key={id}
+      role="tab"
+      aria-selected={activeTab === id}
+      className={`tab${activeTab === id ? " tab--active" : ""}`}
+      onClick={() => setActiveTab(id)}
+    >
+      {label}
+    </button>
+  ));
 
   return (
     <main className="app-shell">
@@ -582,44 +637,14 @@ export function App() {
       {activeTab === "insights" || activeTab === "config" ? (
         <div className="insights-fullscreen">
           <div className="tab-bar insights-fullscreen__tabs" role="tablist">
-            <button
-              role="tab"
-              aria-selected={activeTab === "train"}
-              className={`tab${activeTab === "train" ? " tab--active" : ""}`}
-              onClick={() => setActiveTab("train")}
-            >
-              Train
-            </button>
-            <button
-              role="tab"
-              aria-selected={activeTab === "watch"}
-              className={`tab${activeTab === "watch" ? " tab--active" : ""}`}
-              onClick={() => setActiveTab("watch")}
-            >
-              Watch
-            </button>
-            <button
-              role="tab"
-              aria-selected={activeTab === "insights"}
-              className={`tab${activeTab === "insights" ? " tab--active" : ""}`}
-              onClick={() => setActiveTab("insights")}
-            >
-              Insights
-            </button>
-            <button
-              role="tab"
-              aria-selected={activeTab === "config"}
-              className={`tab${activeTab === "config" ? " tab--active" : ""}`}
-              onClick={() => setActiveTab("config")}
-            >
-              Config
-            </button>
+            {tabButtons}
           </div>
           {activeTab === "insights" ? (
             <DiagnosticsPanel
               checkpointIndex={checkpointIndex}
               bestCheckpointEpisode={bestCheckpointEpisode}
               trainingStatus={trainingStatus}
+              effectiveCurriculumStage={effectiveCurriculumStage}
             />
           ) : (
             <ConfigPanel />
@@ -630,38 +655,7 @@ export function App() {
           <FieldView snapshot={snapshot} />
           <aside className="side-column">
             <div className="tab-bar" role="tablist">
-              <button
-                role="tab"
-                aria-selected={activeTab === "train"}
-                className={`tab${activeTab === "train" ? " tab--active" : ""}`}
-                onClick={() => setActiveTab("train")}
-              >
-                Train
-              </button>
-              <button
-                role="tab"
-                aria-selected={activeTab === "watch"}
-                className={`tab${activeTab === "watch" ? " tab--active" : ""}`}
-                onClick={() => setActiveTab("watch")}
-              >
-                Watch
-              </button>
-              <button
-                role="tab"
-                aria-selected={activeTab === "insights"}
-                className={`tab${activeTab === "insights" ? " tab--active" : ""}`}
-                onClick={() => setActiveTab("insights")}
-              >
-                Insights
-              </button>
-              <button
-                role="tab"
-                aria-selected={activeTab === "config"}
-                className={`tab${activeTab === "config" ? " tab--active" : ""}`}
-                onClick={() => setActiveTab("config")}
-              >
-                Config
-              </button>
+              {tabButtons}
             </div>
             {activeTab === "train" ? (
               <TrainingPanel
@@ -676,17 +670,18 @@ export function App() {
                 batchTotalEpisodes={trainingStatus?.batch_total_episodes ?? trainingStatus?.requested_episodes ?? 0}
                 currentEpisode={trainingStatus?.current_episode ?? null}
                 totalEpisodesTrained={trainingStatus?.total_episodes_trained ?? 0}
+                startingEpisode={trainingStatus?.starting_episode ?? null}
                 stageHistory={trainingStatus?.stage_history ?? {}}
                 grandTotalEpisodes={trainingStatus?.grand_total_episodes ?? 0}
                 phase={trainingStatus?.phase ?? "idle"}
                 message={statusMessage}
                 error={trainingStatus?.error ?? null}
-                successRate={latestSuccessRate}
+                successRate={bestStageFormalEntry?.success_rate ?? null}
                 activeTrainerType={trainingStatus?.trainer_type ?? null}
                 activePolicyType={trainingStatus?.policy_type ?? null}
                 activeInstincts={trainingStatus?.enable_instinct_rewards ?? null}
                 activeCurriculumStage={trainingStatus?.curriculum_stage ?? null}
-                latestSuccessRate={trainingStatus?.latest_success_rate ?? null}
+                latestSuccessRate={trainingStatus?.latest_success_rate ?? latestSuccessRate}
                 latestAvgSheepPenned={trainingStatus?.latest_avg_sheep_penned ?? null}
                 latestAvgReward={trainingStatus?.latest_avg_reward ?? null}
                 latestTimeoutRate={trainingStatus?.latest_timeout_rate ?? null}
@@ -702,6 +697,7 @@ export function App() {
                 onPromote={handlePromote}
                 currentBestEntry={currentBestEntry}
                 previousBestEntry={previousBestEntry}
+                seedEpisode={trainingStatus?.seed_episode ?? null}
               />
             ) : (
               <>

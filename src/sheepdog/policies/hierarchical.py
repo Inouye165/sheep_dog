@@ -190,16 +190,10 @@ class ShepherdNeuralDogPolicy:
             obs_obj = self._obs_builder.build_hierarchical(env, dog_index, command)
             obs = np.asarray(obs_obj.values, dtype=np.float32)[np.newaxis]
             # Build action mask.
-            reserved = {
-                env.project_dog_action(i, actions[i]) for i in range(len(actions))
-            }
+            reserved = {env.project_dog_action(i, actions[i]) for i in range(len(actions))}
             mask_map = env.action_mask_for_dog(dog_index, reserved_positions=reserved)
-            mask = np.asarray(
-                [mask_map[a] for a in ACTION_ORDER], dtype=bool
-            )[np.newaxis]
-            action_idx, _ = self._model.predict(
-                obs, action_masks=mask, deterministic=True
-            )
+            mask = np.asarray([mask_map[a] for a in ACTION_ORDER], dtype=bool)[np.newaxis]
+            action_idx, _ = self._model.predict(obs, action_masks=mask, deterministic=True)
             action_name: Action = ACTION_ORDER[int(action_idx[0])]
             if not bool(mask[0][int(action_idx[0])]):
                 action_name = "wait"

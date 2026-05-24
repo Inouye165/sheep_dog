@@ -95,9 +95,7 @@ class JointActionRLEnv(gym.Env[np.ndarray, int]):
         # Probe observation size with a dummy reset so the space is stable.
         self._environment.reset(seed=config.training.train_seed)
         self._current_command: ShepherdCommand = self._shepherd.issue_command(self._environment)
-        probe = self._obs_builder.build_hierarchical(
-            self._environment, 0, self._current_command
-        )
+        probe = self._obs_builder.build_hierarchical(self._environment, 0, self._current_command)
         observation_size = len(probe.values)
 
         self.action_space = spaces.Discrete(len(ACTION_ORDER))
@@ -208,9 +206,7 @@ class JointActionRLEnv(gym.Env[np.ndarray, int]):
 
     def _next_seed(self) -> int:
         if self.fixed_seed_sequence:
-            seed = self.fixed_seed_sequence[
-                self._fixed_seed_index % len(self.fixed_seed_sequence)
-            ]
+            seed = self.fixed_seed_sequence[self._fixed_seed_index % len(self.fixed_seed_sequence)]
             self._fixed_seed_index += 1
             return int(seed)
         seed = self.config.training.train_seed + self._episode_counter

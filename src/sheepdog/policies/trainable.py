@@ -66,12 +66,8 @@ class PolicyWeights:
             flank_control=float(payload.get("flank_control", defaults.flank_control)),
             collector_focus=float(payload.get("collector_focus", defaults.collector_focus)),
             blocker_cover=float(payload.get("blocker_cover", defaults.blocker_cover)),
-            rear_behind_flock=float(
-                payload.get("rear_behind_flock", defaults.rear_behind_flock)
-            ),
-            rear_drive_to_pen=float(
-                payload.get("rear_drive_to_pen", defaults.rear_drive_to_pen)
-            ),
+            rear_behind_flock=float(payload.get("rear_behind_flock", defaults.rear_behind_flock)),
+            rear_drive_to_pen=float(payload.get("rear_drive_to_pen", defaults.rear_drive_to_pen)),
             rear_avoid_overpressure=float(
                 payload.get("rear_avoid_overpressure", defaults.rear_avoid_overpressure)
             ),
@@ -84,9 +80,7 @@ class PolicyWeights:
                 payload.get("flank_escape_blocking", defaults.flank_escape_blocking)
             ),
             flank_spacing=float(payload.get("flank_spacing", defaults.flank_spacing)),
-            flank_wall_margin=float(
-                payload.get("flank_wall_margin", defaults.flank_wall_margin)
-            ),
+            flank_wall_margin=float(payload.get("flank_wall_margin", defaults.flank_wall_margin)),
             collector_stray_focus=float(
                 payload.get("collector_stray_focus", defaults.collector_stray_focus)
             ),
@@ -148,12 +142,10 @@ class PolicyWeights:
             flank_spacing=self.flank_spacing + rng.uniform(-scale, scale),
             flank_wall_margin=self.flank_wall_margin + rng.uniform(-scale, scale),
             collector_stray_focus=self.collector_stray_focus + rng.uniform(-scale, scale),
-            collector_return_to_flock=self.collector_return_to_flock
-            + rng.uniform(-scale, scale),
+            collector_return_to_flock=self.collector_return_to_flock + rng.uniform(-scale, scale),
             collector_avoid_scatter=self.collector_avoid_scatter + rng.uniform(-scale, scale),
             collector_rejoin_angle=self.collector_rejoin_angle + rng.uniform(-scale, scale),
-            blocker_escape_route_cover=self.blocker_escape_route_cover
-            + rng.uniform(-scale, scale),
+            blocker_escape_route_cover=self.blocker_escape_route_cover + rng.uniform(-scale, scale),
             blocker_gate_control=self.blocker_gate_control + rng.uniform(-scale, scale),
             blocker_funnel_lane=self.blocker_funnel_lane + rng.uniform(-scale, scale),
             blocker_hold_position=self.blocker_hold_position + rng.uniform(-scale, scale),

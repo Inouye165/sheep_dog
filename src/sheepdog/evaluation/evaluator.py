@@ -15,7 +15,9 @@ from sheepdog.policies.base import Policy
 from sheepdog.replay.store import ReplayStore
 
 
-def _policy_metadata(policy_name: str, *, trainer_type: str | None, policy_type: str | None) -> tuple[str, str, str]:
+def _policy_metadata(
+    policy_name: str, *, trainer_type: str | None, policy_type: str | None
+) -> tuple[str, str, str]:
     """Return normalized trainer, policy, and replay-mode labels for replay export."""
 
     normalized_trainer = trainer_type or "baseline"
@@ -147,7 +149,9 @@ class Evaluator:
                         "width": self.config.environment.width,
                         "height": self.config.environment.height,
                         "curriculum_stage": self.config.rewards.instincts.curriculum_stage,
-                        "enable_instinct_rewards": self.config.rewards.instincts.enable_instinct_rewards,
+                        "enable_instinct_rewards": (
+                            self.config.rewards.instincts.enable_instinct_rewards
+                        ),
                     },
                     "final_snapshot": result.final_snapshot.to_dict(),
                     "stats": asdict(result.stats),
@@ -181,9 +185,7 @@ class Evaluator:
             average_completion_seconds=fmean(record.simulated_seconds for record in records),
             average_sheep_penned=fmean(record.sheep_penned for record in records),
             average_reward=fmean(record.reward_total for record in records),
-            average_distance_to_pen=fmean(
-                record.final_sheep_distance_to_pen for record in records
-            ),
+            average_distance_to_pen=fmean(record.final_sheep_distance_to_pen for record in records),
             average_flock_spread=fmean(record.final_flock_spread for record in records),
             stopped_rate=fmean(1.0 if record.stopped else 0.0 for record in records),
             average_role_switches=fmean(result.stats.role_switches for result in results),
