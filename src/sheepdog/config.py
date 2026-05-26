@@ -44,6 +44,10 @@ class EnvironmentConfig:
     controlled_flock_spread_threshold: float = 4.0
     stalled_control_activation_steps: int = 6
     seed_offset: int = 0
+    # Strength of per-sheep personality biases (0.0 disables, ~0.25-0.5 is mild,
+    # >1.0 becomes pronounced). Personalities are assigned at episode reset and
+    # held fixed for the entire episode. See ``entities.SHEEP_PERSONALITIES``.
+    sheep_personality_strength: float = 0.0
     # Minimum number of dogs that must remain after assigning a blocker.
     # Set to 1 to require at least one herder still pushing the flock;
     # set to 0 to allow blocker even when it would be the only dog (legacy).

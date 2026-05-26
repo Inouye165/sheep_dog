@@ -55,6 +55,24 @@ class DogState:
     steps_in_role: int = 0
 
 
+SHEEP_PERSONALITIES: tuple[str, ...] = (
+    "obedient",
+    "pen_curious",
+    "pen_shy",
+    "escapist",
+    "bold",
+)
+"""Available sheep personality archetypes.
+
+* ``obedient``   - neutral baseline; no extra bias.
+* ``pen_curious`` - mild pull toward the pen center.
+* ``pen_shy``    - mild push away from the pen center.
+* ``escapist``   - when panicked, breaks away from the flock instead of cohering.
+* ``bold``       - reduced flee response to dogs beyond close range; the dog
+  must get closer (or bark) to drive this sheep effectively.
+"""
+
+
 @dataclass(slots=True)
 class SheepState:
     """State for a single sheep agent."""
@@ -66,6 +84,7 @@ class SheepState:
     blocked_steps: int = 0
     movement_budget: float = 0.0
     recent_positions: list[Point] = field(default_factory=list)
+    personality: str = "obedient"
 
 
 @dataclass(frozen=True, slots=True)

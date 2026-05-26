@@ -13,7 +13,15 @@ from statistics import fmean
 from typing import Any, cast
 
 from sheepdog.config import EnvironmentConfig, LabConfig
-from sheepdog.entities import DogRole, DogState, EpisodeStats, Pen, Point, SheepState
+from sheepdog.entities import (
+    SHEEP_PERSONALITIES,
+    DogRole,
+    DogState,
+    EpisodeStats,
+    Pen,
+    Point,
+    SheepState,
+)
 from sheepdog.observations import DogObservation, RoleAwareObservationBuilder
 from sheepdog.policies.base import Action, PolicyMode
 from sheepdog.rewards import RewardBreakdown, RewardComputer, RewardInputs
@@ -61,6 +69,7 @@ class AgentSnapshot:
     role: str | None = None
     penned: bool = False
     last_action: str = "wait"
+    personality: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -325,6 +334,7 @@ class SheepdogEnvironment:
                     x=sheep.position.x,
                     y=sheep.position.y,
                     penned=sheep.penned,
+                    personality=sheep.personality,
                 )
                 for sheep in self._sheep
             ),
@@ -744,6 +754,10 @@ class SheepdogEnvironment:
         base_x = self.env_config.width // 3
         base_y = self.env_config.height // 2
         occupied = {dog.position for dog in self._dogs}
+        # Only consume RNG for personality assignment when the feature is
+        # enabled, so existing seeded behavior is preserved bit-for-bit when
+        # ``sheep_personality_strength`` is 0.
+        assign_personalities = self.env_config.sheep_personality_strength > 0.0
         for index in range(self.env_config.sheep):
             position = self._sample_unique_position(
                 preferred_x=base_x,
@@ -753,10 +767,14 @@ class SheepdogEnvironment:
                 jitter_y=2,
             )
             occupied.add(position)
+            personality = (
+                self._rng.choice(SHEEP_PERSONALITIES) if assign_personalities else "obedient"
+            )
             sheep.append(
                 SheepState(
                     index=index,
                     position=position,
+                    personality=personality,
                 )
             )
         return sheep
@@ -893,6 +911,7 @@ class SheepdogEnvironment:
                     flock_center,
                     sheep.panic_steps,
                     blocked_positions=blocked_positions,
+                    sheep=sheep,
                 )
                 if sheep.panic_steps > 0:
                     sheep.panic_steps = max(0, sheep.panic_steps - 1)
@@ -930,7 +949,10 @@ class SheepdogEnvironment:
         flock_center: Point | None,
         panic_steps: int,
         blocked_positions: set[Point] | None = None,
+        sheep: SheepState | None = None,
     ) -> Point:
+        personality = sheep.personality if sheep is not None else "obedient"
+        strength = max(0.0, float(self.env_config.sheep_personality_strength))
         vector_x = 0.0
         vector_y = 0.0
         nearest_dog_distance = inf
@@ -939,16 +961,38 @@ class SheepdogEnvironment:
             nearest_dog_distance = min(nearest_dog_distance, distance)
             if distance <= self.env_config.dog_vision:
                 weight = (self.env_config.dog_vision - distance + 1.0) / distance
+                # Bold sheep ignore distant dogs more readily, so the dog must
+                # close the gap (or bark) to apply meaningful pressure.
+                if personality == "bold" and strength > 0.0 and distance > 3.0:
+                    weight *= max(0.0, 1.0 - 0.4 * strength)
                 vector_x += (position.x - dog_position.x) * weight
                 vector_y += (position.y - dog_position.y) * weight
         if panic_steps <= 0 and flock_center is not None:
             vector_x += (flock_center.x - position.x) * 0.35
             vector_y += (flock_center.y - position.y) * 0.35
+        elif (
+            personality == "escapist"
+            and strength > 0.0
+            and flock_center is not None
+        ):
+            # When scared, an escapist sheep bolts away from the flock instead
+            # of cohering with it.
+            vector_x += (position.x - flock_center.x) * 0.35 * strength
+            vector_y += (position.y - flock_center.y) * 0.35 * strength
         if nearest_dog_distance <= self.env_config.dog_vision:
             vector_x *= 1.5
             vector_y *= 1.5
         vector_x += self._wall_avoidance(position, axis="x")
         vector_y += self._wall_avoidance(position, axis="y")
+        if strength > 0.0 and personality in ("pen_curious", "pen_shy"):
+            pen_center = self._pen.center
+            dx = pen_center.x - position.x
+            dy = pen_center.y - position.y
+            norm = max(1.0, (dx * dx + dy * dy) ** 0.5)
+            sign = 1.0 if personality == "pen_curious" else -1.0
+            magnitude = 1.0 * strength
+            vector_x += sign * (dx / norm) * magnitude
+            vector_y += sign * (dy / norm) * magnitude
         blocked = blocked_positions or set()
         candidate_actions = ("up", "down", "left", "right")
         primary_action: Action | None = None
