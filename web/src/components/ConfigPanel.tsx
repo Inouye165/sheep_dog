@@ -59,6 +59,57 @@ function Section({ title, children }: SectionProps) {
   );
 }
 
+interface OptionListRowProps {
+  label: string;
+  items: Array<{ name: string; description: string }>;
+}
+
+function OptionListRow({ label, items }: OptionListRowProps) {
+  return (
+    <tr className="config-param-row">
+      <td className="config-param-row__label">{label}</td>
+      <td className="config-param-row__value">
+        <ul style={{ margin: 0, paddingLeft: "1.1rem" }}>
+          {items.map((item) => (
+            <li key={item.name}>
+              <code>{item.name}</code>
+              <span className="config-param-row__note"> — {item.description}</span>
+            </li>
+          ))}
+        </ul>
+      </td>
+    </tr>
+  );
+}
+
+// ── catalogs ──────────────────────────────────────────────────────────────────
+// Mirrors backend definitions in src/sheepdog/entities.py and ACTION_DELTAS in
+// src/sheepdog/environment.py. Kept in sync manually; if you add a new
+// personality or dog action server-side, update the list here too.
+
+const DOG_ACTIONS: Array<{ name: string; description: string }> = [
+  { name: "up / down / left / right", description: "single-cell move in cardinal direction" },
+  { name: "sprint_up / sprint_down / sprint_left / sprint_right", description: "faster move (costs more), gated by dog_sprint_multiplier" },
+  { name: "wait", description: "hold position; used to apply patient pressure" },
+  { name: "bark", description: "no movement, but applies extra panic on nearby sheep" },
+];
+
+const DOG_ROLES: Array<{ name: string; description: string }> = [
+  { name: "rear_pressure", description: "drive the flock from behind toward the pen" },
+  { name: "left_flanker", description: "shape the flock from its left side" },
+  { name: "right_flanker", description: "shape the flock from its right side" },
+  { name: "collector", description: "gather scattered or stragglers back to the group" },
+  { name: "blocker", description: "stand on the far side of the pen opening to prevent escape" },
+];
+
+const SHEEP_PERSONALITIES: Array<{ name: string; description: string }> = [
+  { name: "obedient", description: "neutral baseline; no extra bias" },
+  { name: "pen_curious", description: "mild pull toward the pen center" },
+  { name: "pen_shy", description: "mild push away from the pen center" },
+  { name: "escapist", description: "when panicked, breaks away from the flock instead of cohering" },
+  { name: "bold", description: "ignores distant dogs more; the dog must close the gap (or bark) to apply real pressure" },
+];
+
 // ── revision card ─────────────────────────────────────────────────────────────
 
 interface RevisionCardProps {
@@ -189,11 +240,32 @@ export function ConfigPanel() {
         <div className="config-sections">
           <Section title="Environment">
             <ParamRow label="Grid size" value={env ? `${String(env.width)} × ${String(env.height)}` : "—"} />
-            <ParamRow label="Dogs" value={env?.dogs} />
-            <ParamRow label="Sheep" value={env?.sheep} />
             <ParamRow label="Max steps" value={env?.max_steps} />
-            <ParamRow label="Dog speed" value={env?.dog_speed} />
-            <ParamRow label="Sheep speed" value={env?.sheep_speed} />
+            <ParamRow label="Pen size" value={env ? `${String(env.pen_width)} × ${String(env.pen_height)}` : "—"} />
+            <ParamRow label="Pen opening" value={env?.pen_opening} />
+          </Section>
+
+          <Section title="Dogs">
+            <ParamRow label="Count" value={env?.dogs} />
+            <ParamRow label="Speed" value={env?.dog_speed} note="cells per step" />
+            <ParamRow label="Sprint multiplier" value={env?.dog_sprint_multiplier} note="speed boost for sprint_* actions" />
+            <ParamRow label="Vision" value={env?.dog_vision} note="cells; sheep react to dogs within this radius" />
+            <ParamRow label="Policy mode" value={policy?.policy_mode} note="how the dog selects its action each step" />
+            <OptionListRow label="Available actions" items={DOG_ACTIONS} />
+            <OptionListRow label="Available roles" items={DOG_ROLES} />
+          </Section>
+
+          <Section title="Sheep">
+            <ParamRow label="Count" value={env?.sheep} />
+            <ParamRow label="Speed" value={env?.sheep_speed} note="cells per step" />
+            <ParamRow label="Vision" value={env?.sheep_vision} />
+            <ParamRow label="Flock radius" value={env?.flock_radius} />
+            <ParamRow
+              label="Personality strength"
+              value={env?.sheep_personality_strength}
+              note="0.0 disables (uniform behavior); ~0.25–0.5 is mild; assigned at episode reset and held fixed"
+            />
+            <OptionListRow label="Available personalities" items={SHEEP_PERSONALITIES} />
           </Section>
 
           <Section title="Rewards">

@@ -17,6 +17,7 @@ export interface AgentSnapshot {
   penned?: boolean;
   last_action?: string;
   role?: string;
+  personality?: string | null;
 }
 
 export interface RewardBreakdown {
