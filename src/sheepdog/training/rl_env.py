@@ -93,7 +93,11 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
         )
         return observation, reward, terminated, truncated, info
 
+    def render(self) -> None:
+        """Rendering is not supported; this environment is headless."""
+
     def action_masks(self) -> np.ndarray:
+        """Return a boolean mask for the current dog's legal actions."""
         mask_map = self._environment.action_mask_for_dog(
             self._current_dog_index,
             reserved_positions={

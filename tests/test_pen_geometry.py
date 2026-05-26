@@ -7,6 +7,7 @@ Verifies that:
 - average_distance_to_pen approaches 0.0 when all sheep are inside the pen
 """
 
+# pylint: disable=protected-access
 from __future__ import annotations
 
 import pytest

@@ -1,5 +1,6 @@
 """Tests for ShepherdCommand enum and ScriptedShepherd command policy."""
 
+# pylint: disable=missing-function-docstring,import-outside-toplevel,reimported,protected-access
 from __future__ import annotations
 
 from sheepdog.config import LabConfig

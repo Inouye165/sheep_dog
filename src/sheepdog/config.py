@@ -156,10 +156,12 @@ class LabConfig:
     policy: PolicyConfig = field(default_factory=PolicyConfig)
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize this config to a plain dict."""
         return asdict(self)
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> LabConfig:
+        """Construct a LabConfig from a raw dict (e.g., loaded from JSON)."""
         rewards_payload = dict(payload["rewards"])
         instincts_payload = rewards_payload.pop("instincts", None)
         policy_payload = payload.get("policy")

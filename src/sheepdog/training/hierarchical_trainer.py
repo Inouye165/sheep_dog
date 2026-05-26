@@ -168,7 +168,7 @@ class HierarchicalMaskablePPOTrainer(Trainer):
             "training_signature": payload.get("training_signature"),
         }
 
-    def _save_state(
+    def _save_state(  # pylint: disable=arguments-differ
         self,
         total_episodes: int,
         total_timesteps: int,
@@ -243,7 +243,7 @@ class HierarchicalMaskablePPOTrainer(Trainer):
                 policy_config_dict=self._loaded_state.get("policy_config"),
                 shepherd=self._shepherd,
             )
-            policy._model.set_env(training_env)
+            policy._model.set_env(training_env)  # pylint: disable=protected-access
         else:
             policy = ShepherdNeuralDogPolicy.initialize(self.config, shepherd=self._shepherd)
 
@@ -272,7 +272,7 @@ class HierarchicalMaskablePPOTrainer(Trainer):
                 batch_total=n_checkpoints,
                 starting_total=starting_total,
             )
-            policy._model.learn(
+            policy._model.learn(  # pylint: disable=protected-access
                 total_timesteps=steps_per_segment,
                 callback=callback,
                 reset_num_timesteps=False,
@@ -284,6 +284,7 @@ class HierarchicalMaskablePPOTrainer(Trainer):
             policy.save(saved_model_path)
 
             # Evaluate
+            # pylint: disable-next=import-outside-toplevel
             from sheepdog.evaluation.evaluator import Evaluator
 
             evaluator = Evaluator(self.config, self.output_root)
@@ -294,6 +295,7 @@ class HierarchicalMaskablePPOTrainer(Trainer):
             )
 
             # Save checkpoint metadata
+            # pylint: disable-next=import-outside-toplevel
             from dataclasses import asdict as _asdict  # noqa: PLC0415
 
             checkpoint_meta = CheckpointMetadata(

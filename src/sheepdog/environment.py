@@ -1,7 +1,9 @@
 """Deterministic 2D sheep herding environment."""
 
+# pylint: disable=too-many-lines
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from math import inf
@@ -87,6 +89,7 @@ class EnvironmentSnapshot:
     debug: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain dict."""
         return asdict(self)
 
 
@@ -100,6 +103,7 @@ class StepRecord:
     reward: RewardBreakdown
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain dict."""
         return asdict(self)
 
 
@@ -114,6 +118,7 @@ class EpisodeResult:
     replay: tuple[StepRecord, ...] = field(default_factory=tuple)
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain dict."""
         return asdict(self)
 
 
@@ -168,32 +173,40 @@ class SheepdogEnvironment:
 
     @property
     def dog_count(self) -> int:
+        """Return the number of dogs in this episode."""
         return self.env_config.dogs
 
     @property
     def sheep_count(self) -> int:
+        """Return the number of sheep in this episode."""
         return self.env_config.sheep
 
     @property
     def pen(self) -> Pen:
+        """Return the pen object."""
         return self._pen
 
     @property
     def dogs(self) -> tuple[DogState, ...]:
+        """Return an immutable snapshot of all dog states."""
         return tuple(self._dogs)
 
     @property
     def sheep(self) -> tuple[SheepState, ...]:
+        """Return an immutable snapshot of all sheep states."""
         return tuple(self._sheep)
 
     @property
     def history(self) -> tuple[StepRecord, ...]:
+        """Return the completed step records in order."""
         return tuple(self._history)
 
     def invalidate_role_assignments(self) -> None:
+        """Force role reassignment on the next call to prepare_policy_step."""
         self._roles_prepared_step = None
 
     def reset(self, seed: int | None = None) -> EnvironmentSnapshot:
+        """Reset to a new episode and return the initial snapshot."""
         self._seed = 0 if seed is None else seed
         self._rng = Random(self._seed + self.env_config.seed_offset)
         self._step_count = 0
@@ -287,6 +300,7 @@ class SheepdogEnvironment:
         return self.env_config.dog_speed
 
     def get_state_snapshot(self) -> EnvironmentSnapshot:
+        """Return a frozen snapshot of the current environment state."""
         debug_payload = self._snapshot_debug_payload()
         return EnvironmentSnapshot(
             step=self._step_count,
@@ -337,6 +351,7 @@ class SheepdogEnvironment:
         weights: Any | None = None,
         reserved_positions: set[Point] | None = None,
     ) -> dict[Action, bool]:
+        """Return a legal-action mask for the specified dog."""
         self.prepare_policy_step(weights=weights)
         dog = self._dogs[dog_index]
         current_score = self._action_score(
@@ -385,6 +400,7 @@ class SheepdogEnvironment:
         weights: Any | None = None,
         reserved_positions: set[Point] | None = None,
     ) -> list[Action]:
+        """Return all legal actions sorted best-first for the specified dog."""
         mask = self.action_mask_for_dog(
             dog_index,
             policy_mode=policy_mode,
@@ -405,6 +421,7 @@ class SheepdogEnvironment:
         )
 
     def project_dog_action(self, dog_index: int, action: Action) -> Point:
+        """Return the destination point a dog would reach by taking the given action."""
         dog = self._dogs[dog_index]
         blocked_positions = {sheep.position for sheep in self._sheep if not sheep.penned}
         blocked_positions.update(other.position for other in self._dogs if other.index != dog_index)
@@ -421,6 +438,7 @@ class SheepdogEnvironment:
         )
 
     def prepare_policy_step(self, weights: Any | None = None) -> None:
+        """Compute role assignments for this step if they are not yet cached."""
         del weights
         if self._roles_prepared_step == self._step_count:
             return
@@ -458,6 +476,7 @@ class SheepdogEnvironment:
         self._roles_prepared_step = self._step_count
 
     def current_role_assignments(self) -> dict[int, str]:
+        """Return the role string keyed by dog index for the current step."""
         self.prepare_policy_step()
         return {
             dog_index: assignment.role.value
@@ -476,6 +495,7 @@ class SheepdogEnvironment:
         policy_mode: PolicyMode | None = None,
         weights: Any | None = None,
     ) -> float:
+        """Return the heuristic score for a single dog-action combination."""
         return self._action_score(
             dog_index,
             action,
@@ -484,6 +504,7 @@ class SheepdogEnvironment:
         )
 
     def run_policy(self, policy: object, seed: int, capture_replay: bool = False) -> EpisodeResult:
+        """Run *policy* from *seed* until termination and return the episode result."""
         self.reset(seed)
         while not self._terminated:
             actions = policy.select_actions(self)
@@ -500,6 +521,7 @@ class SheepdogEnvironment:
     def step(
         self, actions: Sequence[str], capture_replay: bool = False
     ) -> tuple[EnvironmentSnapshot, RewardBreakdown]:
+        """Advance the simulation one team step and return the new snapshot and reward."""
         if self._terminated:
             raise RuntimeError("Cannot step a terminated episode.")
         if len(actions) != len(self._dogs):
@@ -689,11 +711,10 @@ class SheepdogEnvironment:
         return final_snapshot, breakdown
 
     def export_replay(self, path: str | Path) -> Path:
+        """Write the episode replay to *path* as a JSON file and return it."""
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("w", encoding="utf-8") as handle:
-            import json
-
             json.dump([record.to_dict() for record in self._history], handle, indent=2)
         return target
 

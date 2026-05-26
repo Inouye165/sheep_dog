@@ -1,5 +1,6 @@
 """Tests for JointActionRLEnv (joint dog action stepping)."""
 
+# pylint: disable=missing-function-docstring,import-outside-toplevel,protected-access
 from __future__ import annotations
 
 import numpy as np
@@ -20,7 +21,7 @@ def _make_env(seed: int = 0) -> JointActionRLEnv:
 
 def test_observation_shape_matches_space():
     env = _make_env()
-    obs, info = env.reset()
+    obs, _ = env.reset()
     assert obs.shape == env.observation_space.shape
 
 
@@ -54,7 +55,7 @@ def test_action_masks_dtype_is_bool():
 
 def test_reset_returns_valid_obs():
     env = _make_env()
-    obs, info = env.reset()
+    obs, _ = env.reset()
     assert np.all(np.isfinite(obs))
     assert obs.shape == env.observation_space.shape
 
@@ -80,7 +81,7 @@ def test_step_returns_five_tuple():
 def test_step_obs_shape_matches_space():
     env = _make_env()
     env.reset()
-    obs, reward, terminated, truncated, info = env.step(8)
+    obs, _, _, _, _ = env.step(8)
     assert obs.shape == env.observation_space.shape
 
 
@@ -137,7 +138,7 @@ def test_multiple_steps_before_team_step():
     # fires the team step and yields a nonzero reward.  At minimum, the
     # observation returned should always be finite and correct shape.
     for _step_idx in range(n_dogs):
-        obs, reward, terminated, truncated, info = env.step(8)
+        obs, _, terminated, truncated, _ = env.step(8)
         assert obs.shape == env.observation_space.shape
         if terminated or truncated:
             break  # short episodes are OK

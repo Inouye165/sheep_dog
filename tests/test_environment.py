@@ -1,6 +1,6 @@
 """Regression tests for the herding environment."""
 
-# pylint: disable=protected-access
+# pylint: disable=protected-access,missing-function-docstring
 
 from __future__ import annotations
 

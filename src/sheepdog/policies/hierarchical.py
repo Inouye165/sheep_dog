@@ -50,6 +50,7 @@ class HierarchicalNeuralPolicyConfig:
     action_size: int = len(ACTION_ORDER)
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain dict."""
         return {
             "hidden_sizes": list(self.hidden_sizes),
             "observation_size": self.observation_size,
@@ -62,6 +63,7 @@ class HierarchicalNeuralPolicyConfig:
         payload: dict[str, Any] | None,
         observation_size: int,
     ) -> HierarchicalNeuralPolicyConfig:
+        """Reconstruct a HierarchicalNeuralPolicyConfig from persisted state."""
         if not payload:
             return cls(hidden_sizes=(64, 64), observation_size=observation_size)
         return cls(
@@ -110,6 +112,7 @@ class ShepherdNeuralDogPolicy:
         shepherd: ScriptedShepherd | None = None,
     ) -> ShepherdNeuralDogPolicy:
         """Create a fresh, untrained hierarchical model."""
+        # pylint: disable-next=import-outside-toplevel
         from sb3_contrib import MaskablePPO
 
         adapter = JointActionRLEnv(config, shepherd=shepherd)
@@ -149,6 +152,7 @@ class ShepherdNeuralDogPolicy:
         shepherd: ScriptedShepherd | None = None,
     ) -> ShepherdNeuralDogPolicy:
         """Load a trained hierarchical checkpoint."""
+        # pylint: disable-next=import-outside-toplevel
         from sb3_contrib import MaskablePPO
 
         adapter = JointActionRLEnv(config, shepherd=shepherd)
@@ -177,6 +181,7 @@ class ShepherdNeuralDogPolicy:
 
     def select_actions(self, environment: object) -> list[Action]:
         """Return one action per dog, conditioned on the shepherd's command."""
+        # pylint: disable-next=import-outside-toplevel
         from sheepdog.environment import SheepdogEnvironment
 
         env = environment  # type: ignore[assignment]

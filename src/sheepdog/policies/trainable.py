@@ -118,6 +118,7 @@ class PolicyWeights:
         )
 
     def mutated(self, rng: random.Random, scale: float) -> PolicyWeights:
+        """Return a copy of these weights with each field perturbed by a small random delta."""
         return replace(
             self,
             nearest_sheep=self.nearest_sheep + rng.uniform(-scale, scale),
@@ -164,6 +165,7 @@ class TrainableLinearPolicy:
         self.weights = weights or PolicyWeights()
 
     def select_actions(self, environment: object) -> list[Action]:
+        """Return the best-ranked action for every dog in the environment."""
         actions: list[Action] = []
         reserved_positions: set[object] = set()
         if hasattr(environment, "prepare_policy_step"):

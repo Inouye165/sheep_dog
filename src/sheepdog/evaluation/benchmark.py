@@ -42,6 +42,7 @@ class BenchmarkResult:
     average_gate_corridor_failure_steps: float
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain dict."""
         return asdict(self)
 
 
@@ -60,6 +61,7 @@ class BenchmarkHarness:
         policy: Policy,
         seeds: tuple[int, ...],
     ) -> BenchmarkResult:
+        """Run the policy on all seeds and return a BenchmarkResult."""
         results = [
             SheepdogEnvironment(self.config).run_policy(policy, seed=seed, capture_replay=False)
             for seed in seeds
@@ -112,6 +114,7 @@ class BenchmarkHarness:
         seeds: tuple[int, ...],
         output_stem: str = "benchmark-comparison",
     ) -> tuple[list[BenchmarkResult], Path, Path, Path]:
+        """Run evaluate_policy for all entries and write JSON, CSV, and Markdown reports."""
         results = [self.evaluate_policy(label, policy, seeds) for label, policy in entries]
         json_path = self.output_root / f"{output_stem}.json"
         csv_path = self.output_root / f"{output_stem}.csv"
@@ -200,11 +203,13 @@ def run_herding_eval_report(
     (json_path, markdown_path)
         Paths to the generated report files.
     """
+    # pylint: disable=import-outside-toplevel
     import datetime
 
     from sheepdog.policies.factory import load_playable_policy
     from sheepdog.policies.heuristic import HeuristicExpertPolicy, InstinctOnlyPolicy
     from sheepdog.policies.random_policy import RandomPolicy
+    # pylint: enable=import-outside-toplevel
 
     eval_seeds = seeds or config.training.evaluation_seeds
     out = Path(output_dir)
@@ -231,10 +236,12 @@ def run_herding_eval_report(
     # Hierarchical neural dogs entry.
     hier_label = f"hierarchical_checkpoint_{hierarchical_checkpoint_episode or 0}"
     if hierarchical_model_path is not None:
+        # pylint: disable-next=import-outside-toplevel
         from sheepdog.policies.hierarchical import ShepherdNeuralDogPolicy
 
         hier_policy = ShepherdNeuralDogPolicy.load(hierarchical_model_path, config)
     else:
+        # pylint: disable-next=import-outside-toplevel
         from sheepdog.policies.hierarchical import ShepherdNeuralDogPolicy
 
         hier_policy = ShepherdNeuralDogPolicy.initialize(config)

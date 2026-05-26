@@ -63,6 +63,7 @@ def _apply_runtime_profile(args: argparse.Namespace, config: LabConfig) -> LabCo
 
 
 def train_command() -> None:
+    """Run the CLI train command: parse args and start training."""
     parser = argparse.ArgumentParser(description="Train sheepdog checkpoint policy.")
     parser.add_argument("--config", default=None, help="Optional JSON config file.")
     parser.add_argument("--output-dir", default=None, help="Override the artifact root.")
@@ -83,6 +84,7 @@ def train_command() -> None:
 
 
 def evaluate_command() -> None:
+    """Run the CLI evaluate command: run evaluation on a checkpoint policy."""
     parser = argparse.ArgumentParser(description="Evaluate a checkpoint policy.")
     parser.add_argument("--config", default=None, help="Optional JSON config file.")
     parser.add_argument("--policy", choices=POLICY_CHOICES, default="instinct_only")
@@ -97,6 +99,7 @@ def evaluate_command() -> None:
 
 
 def export_demo_command() -> None:
+    """Run the CLI export-demo command: write a replay JSON for the web UI."""
     parser = argparse.ArgumentParser(description="Export a playable demo replay for the UI.")
     parser.add_argument("--config", default=None, help="Optional JSON config file.")
     parser.add_argument("--seed", type=int, default=11, help="Replay seed.")
@@ -124,6 +127,7 @@ def export_demo_command() -> None:
 
 
 def benchmark_command() -> None:
+    """Run the CLI benchmark command: compare policy variants on fixed seeds."""
     parser = argparse.ArgumentParser(description="Benchmark baseline and PPO policy variants.")
     parser.add_argument("--config", default=None, help="Optional JSON config file.")
     parser.add_argument("--seeds", nargs="*", type=int, default=None)
@@ -195,6 +199,7 @@ def benchmark_command() -> None:
 
 
 def _apply_training_overrides(args: argparse.Namespace, config: LabConfig) -> LabConfig:
+    """Apply any trainer/policy/timestep overrides from CLI args to config."""
     training = config.training
     if getattr(args, "trainer_type", None):
         training = replace(training, trainer_type=args.trainer_type)
@@ -208,6 +213,7 @@ def _apply_training_overrides(args: argparse.Namespace, config: LabConfig) -> La
 
 
 def replace_training_output(config: LabConfig, output_dir: str):
+    """Return a copy of config with the training output_dir replaced."""
     return replace(
         config.training,
         output_dir=output_dir,
@@ -241,6 +247,7 @@ def train_hierarchical_command() -> None:
             config,
             training=replace(config.training, output_dir=output_dir),
         )
+    # pylint: disable-next=import-outside-toplevel
     from sheepdog.training.hierarchical_trainer import HierarchicalMaskablePPOTrainer
 
     trainer = HierarchicalMaskablePPOTrainer(config, output_dir)
@@ -286,6 +293,7 @@ def herding_eval_command() -> None:
     args = parser.parse_args()
     config = _apply_runtime_profile(args, _load_config(args.config))
     seeds = tuple(args.seeds or config.training.evaluation_seeds)
+    # pylint: disable-next=import-outside-toplevel
     from sheepdog.evaluation.benchmark import run_herding_eval_report
 
     json_path, md_path = run_herding_eval_report(
@@ -300,6 +308,7 @@ def herding_eval_command() -> None:
 
 
 def main() -> None:
+    """Entry point: dispatch to the appropriate sub-command based on argv."""
     if len(sys.argv) <= 1:
         train_command()
         return

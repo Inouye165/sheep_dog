@@ -1,5 +1,6 @@
 """Role-aware observation building for shared sheepdog policies."""
 
+# pylint: disable=protected-access
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -190,7 +191,7 @@ class RoleAwareObservationBuilder:
         self,
         environment: SheepdogEnvironment,
         dog_index: int,
-        flock_center: Point,
+        _flock_center: Point,
     ) -> Any | None:
         assignment = environment._role_assignments.get(dog_index)
         if assignment is not None and assignment.target_sheep_index is not None:

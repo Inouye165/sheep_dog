@@ -8,6 +8,7 @@ timeout_rate, and average_final_distance_to_pen.
 Run with: python -m pytest tests/test_stage1_benchmark.py -v -s
 """
 
+# pylint: disable=missing-function-docstring,import-outside-toplevel
 from __future__ import annotations
 
 import json

@@ -4,6 +4,7 @@ SB3 / sb3_contrib are optional.  All tests in this module are skipped when
 those packages are not installed.
 """
 
+# pylint: disable=missing-function-docstring,import-outside-toplevel,wrong-import-position
 from __future__ import annotations
 
 import pytest

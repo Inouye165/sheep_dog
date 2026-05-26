@@ -55,6 +55,7 @@ class TeamStrategy:
         sheep: list[SheepState],
         pen: Pen,
     ) -> tuple[dict[int, RoleAssignment], StrategySnapshot]:
+        """Assign each dog a role and return the assignment map and strategy snapshot."""
         unpenned = [animal for animal in sheep if not animal.penned]
         if not dogs:
             return {}, StrategySnapshot(None, 0.0, 0.0, None, False, False)

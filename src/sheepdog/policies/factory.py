@@ -40,6 +40,7 @@ def create_policy_from_name(
     if policy_name == "instinct_only":
         return InstinctOnlyPolicy()
     if policy_name == "neural_policy":
+        # pylint: disable-next=import-outside-toplevel
         from sheepdog.policies.neural import NeuralPolicy
 
         if config is None:
@@ -48,6 +49,7 @@ def create_policy_from_name(
             return NeuralPolicy.load(policy_state_path, config, policy_config)
         return NeuralPolicy.initialize(config)
     if policy_name == "shepherd_neural_dogs":
+        # pylint: disable-next=import-outside-toplevel
         from sheepdog.policies.hierarchical import ShepherdNeuralDogPolicy
 
         if config is None:

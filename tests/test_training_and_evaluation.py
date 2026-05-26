@@ -1,5 +1,6 @@
 """Regression tests for checkpoint and evaluation export."""
 
+# pylint: disable=missing-function-docstring,missing-class-docstring,import-outside-toplevel
 from __future__ import annotations
 
 import json

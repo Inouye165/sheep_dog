@@ -99,6 +99,7 @@ The web app is a viewer, not a second simulation engine. It loads exported check
 - `neural_policy` uses a learned small neural-network policy from MaskablePPO checkpoints.
 
 By default the no-training playback path uses `instinct_only`, not the expert heuristic. Pen-directed behavior now requires training, `heuristic_expert`, or an explicit handler target command.
+us
 
 Action masking keeps illegal movement out of policy choices. For heuristic-style modes, `wait` is also gated by the same tactical scoring threshold used for movement decisions. For neural/RL modes such as `neural_policy`, `shepherd_neural_dogs`, and unspecified policy mode inside RL wrappers, `wait` remains legal even when a movement action scores better, so MaskablePPO can learn hold-position behavior instead of having it masked away.
 

@@ -1,5 +1,6 @@
 """Local HTTP API for interactive training control."""
 
+# pylint: disable=too-many-lines
 from __future__ import annotations
 
 import datetime
@@ -385,6 +386,7 @@ class _BaselineExportTrainer(Trainer):
         checkpoint_path: Path,
         summary: Any,
     ) -> None:
+        """Export web assets for the current checkpoint to the web export directory."""
         self._export_web_assets(
             Path(config.training.web_export_dir),
             [checkpoint_payload],
@@ -451,6 +453,7 @@ class TrainingManager:
         }
 
     def snapshot(self) -> dict[str, Any]:
+        """Return a thread-safe copy of the current training status."""
         with self._lock:
             return dict(self._status)
 
@@ -464,6 +467,7 @@ class TrainingManager:
         debug_reward_breakdown: bool | None = None,
         promote_from_checkpoint_episode: int | None = None,
     ) -> dict[str, Any]:
+        """Start a background training job and return the initial status."""
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return dict(self._status)
@@ -507,6 +511,7 @@ class TrainingManager:
             return dict(self._status)
 
     def clear(self) -> tuple[dict[str, Any], int]:
+        """Stop any running job, clear outputs, and restore the baseline replay."""
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 payload = dict(self._status)
@@ -682,6 +687,7 @@ class TrainingManager:
         policy_mode: PolicyMode | None = None,
         effective_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """Run one episode with the selected policy and return the replay dict."""
         config = LabConfig()
         selection = _resolve_replay_selection(
             config,
@@ -945,7 +951,8 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         raw_body = self.rfile.read(content_length)
         return json.loads(raw_body.decode("utf-8"))
 
-    def do_GET(self) -> None:  # noqa: N802
+    def do_GET(self) -> None:  # noqa: N802  # pylint: disable=invalid-name
+        """Handle HTTP GET requests."""
         if self.path.startswith("/generated/"):
             rel = self.path[len("/generated/") :].split("?")[0]
             if ".." in rel:
@@ -972,7 +979,8 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             return
         self._json_response({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
 
-    def do_POST(self) -> None:  # noqa: N802
+    def do_POST(self) -> None:  # noqa: N802  # pylint: disable=invalid-name
+        """Handle HTTP POST requests."""
         if self.path in {"/api/training/clear", "/api/training/reset"}:
             payload, status = self.manager.clear()
             self._json_response(payload, status=status)
@@ -1036,7 +1044,8 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             )
         )
 
-    def do_OPTIONS(self) -> None:  # noqa: N802
+    def do_OPTIONS(self) -> None:  # noqa: N802  # pylint: disable=invalid-name
+        """Handle HTTP OPTIONS (CORS preflight) requests."""
         self.send_response(HTTPStatus.NO_CONTENT)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")

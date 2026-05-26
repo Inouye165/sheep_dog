@@ -1,5 +1,6 @@
 """Regression tests for the MaskablePPO neural policy experiment."""
 
+# pylint: disable=missing-function-docstring
 from __future__ import annotations
 
 from pathlib import Path

@@ -1,5 +1,6 @@
 """Tests for the interactive training server."""
 
+# pylint: disable=missing-function-docstring,missing-class-docstring
 from __future__ import annotations
 
 import json

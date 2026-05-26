@@ -199,7 +199,7 @@ class ScriptedShepherd:
     def _decide(
         self,
         ctx: ShepherdContext,
-        environment: SheepdogEnvironment,
+        _environment: SheepdogEnvironment,
     ) -> ShepherdCommand:
         """Map context to the highest-priority command."""
         # All sheep in pen → stop.

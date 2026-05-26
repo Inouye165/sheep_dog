@@ -1,5 +1,6 @@
 """Tests for HierarchicalObservationBuilder (dog identity + shepherd command features)."""
 
+# pylint: disable=missing-function-docstring,import-outside-toplevel
 from __future__ import annotations
 
 import numpy as np

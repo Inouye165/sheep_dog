@@ -24,6 +24,7 @@ class NeuralPolicyConfig:
     action_size: int = len(ACTION_ORDER)
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain dict."""
         return {
             "hidden_sizes": list(self.hidden_sizes),
             "observation_size": self.observation_size,
@@ -32,6 +33,7 @@ class NeuralPolicyConfig:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any] | None, observation_size: int) -> NeuralPolicyConfig:
+        """Reconstruct a NeuralPolicyConfig from persisted state."""
         if not payload:
             return cls(hidden_sizes=(64, 64), observation_size=observation_size)
         hidden_sizes = payload.get("hidden_sizes", (64, 64))
@@ -56,6 +58,7 @@ class NeuralPolicy:
 
     @classmethod
     def initialize(cls, config: LabConfig) -> NeuralPolicy:
+        """Create a fresh, untrained neural policy."""
         adapter = SheepdogRLAdapter(config)
         observation_size = int(adapter.observation_space.shape[0])
         policy_config = NeuralPolicyConfig(
@@ -86,6 +89,7 @@ class NeuralPolicy:
         config: LabConfig,
         policy_config: dict[str, Any] | None = None,
     ) -> NeuralPolicy:
+        """Load a trained neural policy from a checkpoint file."""
         adapter = SheepdogRLAdapter(config)
         observation_size = int(adapter.observation_space.shape[0])
         resolved_path = Path(path)
@@ -97,6 +101,7 @@ class NeuralPolicy:
         )
 
     def save(self, path: str | Path) -> Path:
+        """Save the model to *path* and return the resolved path."""
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         self.model.save(str(target))
@@ -105,6 +110,7 @@ class NeuralPolicy:
         return resolved_target
 
     def select_actions(self, environment: object) -> list[Action]:
+        """Return one action per dog based on the neural model's predictions."""
         actions: list[Action] = []
         reserved_positions: set[object] = set()
         if hasattr(environment, "prepare_policy_step"):

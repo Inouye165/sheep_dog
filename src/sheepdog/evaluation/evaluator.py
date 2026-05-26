@@ -72,6 +72,7 @@ class EvaluationRecord:
     replay_path: str
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain dict."""
         return asdict(self)
 
 
@@ -104,6 +105,7 @@ class EvaluationSummary:
     average_gate_corridor_failure_steps: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain dict."""
         return asdict(self)
 
 
@@ -122,6 +124,7 @@ class Evaluator:
         seeds: tuple[int, ...],
         checkpoint_episode: int,
     ) -> tuple[EvaluationSummary, Path, Path]:
+        """Run the policy on each seed and collect evaluation records and replays."""
         results: list[EpisodeResult] = []
         records: list[EvaluationRecord] = []
 

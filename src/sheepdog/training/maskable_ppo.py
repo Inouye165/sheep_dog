@@ -27,6 +27,7 @@ class NeuralTrainingRunSummary:
     policy_config: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain dict."""
         return {
             "checkpoints": self.checkpoints,
             "final_model_path": self.final_model_path,

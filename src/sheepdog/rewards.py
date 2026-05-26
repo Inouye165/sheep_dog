@@ -41,6 +41,7 @@ class RewardBreakdown:
     total: float = 0.0
 
     def to_dict(self) -> dict[str, float]:
+        """Serialize to a plain dict."""
         return asdict(self)
 
 
@@ -162,6 +163,7 @@ class RewardComputer:
         self._config = config
 
     def compute(self, inputs: RewardInputs) -> RewardBreakdown:
+        """Compute a full reward breakdown for one team step."""
         progress_delta = inputs.previous_average_distance - inputs.current_average_distance
         progress_to_pen = progress_delta * self._config.progress_scale
         sheep_penned = inputs.newly_penned * self._config.sheep_penned_reward
@@ -460,6 +462,7 @@ class HierarchicalRewardBreakdown:
     total: float = 0.0
 
     def to_dict(self) -> dict[str, float]:
+        """Serialize to a plain dict."""
         return asdict(self)
 
 
@@ -520,6 +523,7 @@ class HierarchicalRewardComputer:
         self._cfg = config
 
     def compute(self, inputs: HierarchicalRewardInputs) -> HierarchicalRewardBreakdown:
+        """Compute the hierarchical reward breakdown for one team step."""
         cfg = self._cfg
 
         # --- Progress: flock moving toward pen ---
