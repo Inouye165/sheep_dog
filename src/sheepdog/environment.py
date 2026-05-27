@@ -70,6 +70,7 @@ class AgentSnapshot:
     penned: bool = False
     last_action: str = "wait"
     personality: str | None = None
+    color: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,6 +309,14 @@ class SheepdogEnvironment:
             return self.env_config.dog_speed * self.env_config.dog_sprint_multiplier
         return self.env_config.dog_speed
 
+    def _sheep_display_color(self, personality: str | None) -> str:
+        palette = self.env_config.sheep_personality_colors
+        if not palette:
+            return "#f8fafc"
+        if personality and personality in palette:
+            return palette[personality]
+        return palette.get("obedient", next(iter(palette.values())))
+
     def get_state_snapshot(self) -> EnvironmentSnapshot:
         """Return a frozen snapshot of the current environment state."""
         debug_payload = self._snapshot_debug_payload()
@@ -335,6 +344,7 @@ class SheepdogEnvironment:
                     y=sheep.position.y,
                     penned=sheep.penned,
                     personality=sheep.personality,
+                    color=self._sheep_display_color(sheep.personality),
                 )
                 for sheep in self._sheep
             ),
@@ -754,10 +764,16 @@ class SheepdogEnvironment:
         base_x = self.env_config.width // 3
         base_y = self.env_config.height // 2
         occupied = {dog.position for dog in self._dogs}
-        # Only consume RNG for personality assignment when the feature is
-        # enabled, so existing seeded behavior is preserved bit-for-bit when
-        # ``sheep_personality_strength`` is 0.
         assign_personalities = self.env_config.sheep_personality_strength > 0.0
+        # Dedicated personality RNG, independent of the env RNG that drives
+        # positions/jitter. This lets ``sheep_personality_seed_offset`` reshuffle
+        # the lineup for the same eval seed without disturbing physics.
+        personality_rng = Random(
+            self._seed
+            + self.env_config.seed_offset
+            + self.env_config.sheep_personality_seed_offset
+            + 9973
+        )
         for index in range(self.env_config.sheep):
             position = self._sample_unique_position(
                 preferred_x=base_x,
@@ -768,7 +784,9 @@ class SheepdogEnvironment:
             )
             occupied.add(position)
             personality = (
-                self._rng.choice(SHEEP_PERSONALITIES) if assign_personalities else "obedient"
+                personality_rng.choice(SHEEP_PERSONALITIES)
+                if assign_personalities
+                else "obedient"
             )
             sheep.append(
                 SheepState(
@@ -984,15 +1002,24 @@ class SheepdogEnvironment:
             vector_y *= 1.5
         vector_x += self._wall_avoidance(position, axis="x")
         vector_y += self._wall_avoidance(position, axis="y")
-        if strength > 0.0 and personality in ("pen_curious", "pen_shy"):
+        if strength > 0.0 and personality == "pen_shy":
             pen_center = self._pen.center
             dx = pen_center.x - position.x
             dy = pen_center.y - position.y
             norm = max(1.0, (dx * dx + dy * dy) ** 0.5)
-            sign = 1.0 if personality == "pen_curious" else -1.0
-            magnitude = 1.0 * strength
-            vector_x += sign * (dx / norm) * magnitude
-            vector_y += sign * (dy / norm) * magnitude
+            vector_x -= (dx / norm) * strength
+            vector_y -= (dy / norm) * strength
+        if strength > 0.0 and personality == "pen_fearful":
+            pen_center = self._pen.center
+            dx = pen_center.x - position.x
+            dy = pen_center.y - position.y
+            dist = max(1.0, (dx * dx + dy * dy) ** 0.5)
+            # Scale repulsion up to 4× at the pen entrance (dist ≈ 1) and fade
+            # smoothly to 1× at pen_width distance away.
+            proximity_scale = max(1.0, self.env_config.pen_width / dist * 4.0)
+            magnitude = strength * proximity_scale
+            vector_x -= (dx / dist) * magnitude
+            vector_y -= (dy / dist) * magnitude
         blocked = blocked_positions or set()
         candidate_actions = ("up", "down", "left", "right")
         primary_action: Action | None = None

@@ -90,9 +90,9 @@ def _step_one_sheep(
     )
 
 
-def test_pen_curious_biases_toward_pen() -> None:
-    # Place a sheep far from any dog so the only nontrivial vector is the
-    # personality bias toward the pen center.
+def test_pen_fearful_biases_away_from_pen() -> None:
+    # Place a sheep near the pen so the proximity-scaled repulsion is active,
+    # with a far dog so the only nontrivial vector is the personality bias.
     env_config = EnvironmentConfig(sheep=1, sheep_personality_strength=1.0)
     pen_center = Point(
         env_config.width - env_config.pen_width + env_config.pen_width // 2,
@@ -100,8 +100,8 @@ def test_pen_curious_biases_toward_pen() -> None:
     )
     sheep_position = Point(pen_center.x - 10, pen_center.y + 12)
     far_dog = [Point(0, env_config.height - 1)]
-    move_curious = _step_one_sheep(
-        personality="pen_curious",
+    move_fearful = _step_one_sheep(
+        personality="pen_fearful",
         strength=1.0,
         sheep_position=sheep_position,
         dog_positions=far_dog,
@@ -112,8 +112,8 @@ def test_pen_curious_biases_toward_pen() -> None:
         sheep_position=sheep_position,
         dog_positions=far_dog,
     )
-    # Curious sheep should end up closer to the pen than the obedient baseline.
-    assert move_curious.distance_to(pen_center) < move_obedient.distance_to(pen_center)
+    # Fearful sheep should end up farther from the pen than the obedient baseline.
+    assert move_fearful.distance_to(pen_center) > move_obedient.distance_to(pen_center)
 
 
 def test_pen_shy_biases_away_from_pen() -> None:

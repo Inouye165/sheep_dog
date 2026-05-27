@@ -254,6 +254,10 @@ Training config (`TrainingConfig` in `src/sheepdog/config.py`):
 - `candidate_pool_size` – number of mutated candidate policies considered each training episode.
 - `mutation_scale` – per-weight mutation magnitude for the hill climber.
 
+Environment display config (`EnvironmentConfig` in `src/sheepdog/config.py`):
+
+- `sheep_personality_colors` – mapping of personality name → hex color used to color-code sheep in the replay viewer. Keys must match entries in `entities.SHEEP_PERSONALITIES` (`obedient`, `pen_fearful`, `pen_shy`, `escapist`, `bold`). When `sheep_personality_strength` is `0.0` every sheep is `obedient` and therefore shares the `obedient` color – raise the strength (e.g. `0.2`) to see distinct colors and behaviors.
+
 Curriculum stages (`CURRICULUM_STAGES` in `src/sheepdog/curriculum.py`):
 
 1. One dog, one sheep, dense open field, one-cell motion, nearby pen.
@@ -310,6 +314,7 @@ npm run dev
 The UI shows:
 
 - the field, dogs, sheep, and pen
+- color-coded sheep markers with a sheep legend
 - compact dog role labels during replay
 - the selected checkpoint and seed
 - policy mode

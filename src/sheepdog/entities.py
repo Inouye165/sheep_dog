@@ -57,16 +57,17 @@ class DogState:
 
 SHEEP_PERSONALITIES: tuple[str, ...] = (
     "obedient",
-    "pen_curious",
+    "pen_fearful",
     "pen_shy",
     "escapist",
     "bold",
 )
 """Available sheep personality archetypes.
 
-* ``obedient``   - neutral baseline; no extra bias.
-* ``pen_curious`` - mild pull toward the pen center.
-* ``pen_shy``    - mild push away from the pen center.
+* ``obedient``    - neutral baseline; no extra bias.
+* ``pen_fearful`` - proximity-scaled push away from the pen; strongest near the
+  pen opening, fading with distance. Makes the dog work harder to drive sheep in.
+* ``pen_shy``     - constant mild push away from the pen center.
 * ``escapist``   - when panicked, breaks away from the flock instead of cohering.
 * ``bold``       - reduced flee response to dogs beyond close range; the dog
   must get closer (or bark) to drive this sheep effectively.

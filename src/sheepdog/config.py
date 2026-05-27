@@ -28,6 +28,20 @@ class EnvironmentConfig:
     dog_speed: float = 1.0
     dog_sprint_multiplier: float = 2.0
     sheep_speed: float = 0.75
+    # Per-personality display colors used by the web replay viewer. The keys
+    # must match entries in ``entities.SHEEP_PERSONALITIES``; any sheep with
+    # an unknown personality falls back to the ``obedient`` entry. When
+    # ``sheep_personality_strength`` is 0.0 all sheep are ``obedient`` and
+    # therefore share the same color in the viewer.
+    sheep_personality_colors: dict[str, str] = field(
+        default_factory=lambda: {
+            "obedient": "#f8fafc",
+            "pen_fearful": "#f87171",
+            "pen_shy": "#93c5fd",
+            "escapist": "#f9a8d4",
+            "bold": "#fdba74",
+        }
+    )
     no_progress_window: int = 80
     no_progress_distance_delta: float = 0.15
     no_progress_penned_delta: int = 0
@@ -48,6 +62,10 @@ class EnvironmentConfig:
     # >1.0 becomes pronounced). Personalities are assigned at episode reset and
     # held fixed for the entire episode. See ``entities.SHEEP_PERSONALITIES``.
     sheep_personality_strength: float = 0.0
+    # Offset added to a dedicated personality RNG (separate from the env RNG
+    # that drives positions/jitter). Bump this to reshuffle the personality
+    # lineup for the same eval seed without changing positions or dynamics.
+    sheep_personality_seed_offset: int = 0
     # Minimum number of dogs that must remain after assigning a blocker.
     # Set to 1 to require at least one herder still pushing the flock;
     # set to 0 to allow blocker even when it would be the only dog (legacy).
@@ -190,8 +208,17 @@ class LabConfig:
         policy = (
             PolicyConfig(**policy_payload) if isinstance(policy_payload, dict) else PolicyConfig()
         )
+        environment_payload = dict(payload["environment"])
+        personality_colors = environment_payload.get("sheep_personality_colors")
+        if isinstance(personality_colors, dict):
+            environment_payload["sheep_personality_colors"] = {
+                str(name): str(color) for name, color in personality_colors.items()
+            }
+        # Backward-compatible: drop any legacy ``sheep_palette`` field so
+        # checkpoints written before per-personality colors can still load.
+        environment_payload.pop("sheep_palette", None)
         return cls(
-            environment=EnvironmentConfig(**payload["environment"]),
+            environment=EnvironmentConfig(**environment_payload),
             rewards=RewardConfig(instincts=instincts, **rewards_payload),
             training=TrainingConfig(**training_payload),
             policy=policy,
