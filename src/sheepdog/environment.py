@@ -784,9 +784,7 @@ class SheepdogEnvironment:
             )
             occupied.add(position)
             personality = (
-                personality_rng.choice(SHEEP_PERSONALITIES)
-                if assign_personalities
-                else "obedient"
+                personality_rng.choice(SHEEP_PERSONALITIES) if assign_personalities else "obedient"
             )
             sheep.append(
                 SheepState(
@@ -988,11 +986,7 @@ class SheepdogEnvironment:
         if panic_steps <= 0 and flock_center is not None:
             vector_x += (flock_center.x - position.x) * 0.35
             vector_y += (flock_center.y - position.y) * 0.35
-        elif (
-            personality == "escapist"
-            and strength > 0.0
-            and flock_center is not None
-        ):
+        elif personality == "escapist" and strength > 0.0 and flock_center is not None:
             # When scared, an escapist sheep bolts away from the flock instead
             # of cohering with it.
             vector_x += (position.x - flock_center.x) * 0.35 * strength

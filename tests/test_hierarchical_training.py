@@ -22,7 +22,6 @@ from sheepdog.training.joint_rl_env import JointActionRLEnv  # noqa: E402
 
 
 def test_joint_env_reset_returns_array():
-
     env = JointActionRLEnv(LabConfig())
     obs, _info = env.reset(seed=0)
     assert hasattr(obs, "shape")

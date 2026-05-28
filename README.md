@@ -349,8 +349,8 @@ Python:
 ```powershell
 python -m pip install -e .[dev]
 python -m pytest
-ruff check src tests
-ruff format --check src tests
+python -m ruff check src tests
+python -m ruff format --check src tests
 ```
 
 Web:
@@ -366,8 +366,8 @@ Full validation pass from PowerShell:
 
 ```powershell
 python -m pytest
-ruff check src tests
-ruff format --check src tests
+python -m ruff check src tests
+python -m ruff format --check src tests
 cd web
 npm run lint
 npm run test

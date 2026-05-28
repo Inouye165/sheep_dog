@@ -257,6 +257,114 @@ def _read_persisted_total() -> int:
 
 STAGE_HISTORY_FILENAME = "stage-history.json"
 TRAINING_SETTINGS_FILENAME = "training-settings.json"
+HYPERPARAMS_FILENAME = "user-hyperparams.json"
+
+
+def _default_user_hyperparams() -> dict[str, Any]:
+    """Return the canonical default user-adjustable hyperparameter values."""
+    config = LabConfig()
+    return {
+        "environment": {
+            "sheep_personality_strength": config.environment.sheep_personality_strength,
+            "sheep_speed": config.environment.sheep_speed,
+            "sheep_vision": config.environment.sheep_vision,
+            "flock_radius": config.environment.flock_radius,
+            "dog_speed": config.environment.dog_speed,
+            "dog_sprint_multiplier": config.environment.dog_sprint_multiplier,
+            "dog_vision": config.environment.dog_vision,
+        },
+        "training": {
+            "learning_rate": config.training.learning_rate,
+            "learning_rate_final": config.training.learning_rate_final,
+            "entropy_coef": config.training.entropy_coef,
+            "gamma": config.training.gamma,
+            "gae_lambda": config.training.gae_lambda,
+            "clip_range": config.training.clip_range,
+            "rollout_steps": config.training.rollout_steps,
+            "batch_size": config.training.batch_size,
+            "value_coef": config.training.value_coef,
+        },
+        "rewards": {
+            "time_penalty": config.rewards.time_penalty,
+            "progress_scale": config.rewards.progress_scale,
+            "sheep_penned_reward": config.rewards.sheep_penned_reward,
+            "wait_penalty": config.rewards.wait_penalty,
+            "no_progress_penalty": config.rewards.no_progress_penalty,
+            "terminal_success_reward": config.rewards.terminal_success_reward,
+            "terminal_failure_penalty": config.rewards.terminal_failure_penalty,
+            "flock_cohesion_scale": config.rewards.flock_cohesion_scale,
+            "scatter_penalty_scale": config.rewards.scatter_penalty_scale,
+            "sprint_cost_scale": config.rewards.sprint_cost_scale,
+        },
+    }
+
+
+def _read_user_hyperparams(output_root: Path) -> dict[str, Any]:
+    """Load persisted user hyperparameters, filling missing keys from defaults."""
+    defaults = _default_user_hyperparams()
+    path = output_root / HYPERPARAMS_FILENAME
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return defaults
+    # Merge: saved values override defaults, but missing keys fall back.
+    merged: dict[str, Any] = {}
+    for section, section_defaults in defaults.items():
+        saved_section = saved.get(section, {})
+        merged[section] = {k: saved_section.get(k, v) for k, v in section_defaults.items()}
+    return merged
+
+
+def _write_user_hyperparams(output_root: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    """Persist user hyperparameters and return the merged result."""
+    defaults = _default_user_hyperparams()
+    merged: dict[str, Any] = {}
+    for section, section_defaults in defaults.items():
+        incoming = payload.get(section, {})
+        merged[section] = {}
+        for key, default_val in section_defaults.items():
+            raw = incoming.get(key, default_val)
+            # Coerce to the same type as the default.
+            try:
+                merged[section][key] = type(default_val)(raw)
+            except (TypeError, ValueError):
+                merged[section][key] = default_val
+    output_root.mkdir(parents=True, exist_ok=True)
+    (output_root / HYPERPARAMS_FILENAME).write_text(json.dumps(merged, indent=2), encoding="utf-8")
+    return merged
+
+
+def _apply_user_hyperparams(base_config: LabConfig, user_params: dict[str, Any]) -> LabConfig:
+    """Return a LabConfig with user-adjustable fields overridden from *user_params*."""
+    env_overrides = {
+        k: v
+        for k, v in user_params.get("environment", {}).items()
+        if hasattr(base_config.environment, k)
+    }
+    training_overrides = {
+        k: v for k, v in user_params.get("training", {}).items() if hasattr(base_config.training, k)
+    }
+    reward_overrides = {
+        k: v
+        for k, v in user_params.get("rewards", {}).items()
+        if hasattr(base_config.rewards, k) and k != "instincts"
+    }
+    env = (
+        replace(base_config.environment, **env_overrides)
+        if env_overrides
+        else base_config.environment
+    )
+    training = (
+        replace(base_config.training, **training_overrides)
+        if training_overrides
+        else base_config.training
+    )
+    rewards = (
+        replace(base_config.rewards, **reward_overrides)
+        if reward_overrides
+        else base_config.rewards
+    )
+    return replace(base_config, environment=env, training=training, rewards=rewards)
 
 
 def _read_persisted_settings(output_root: Path) -> dict[str, Any]:
@@ -310,7 +418,9 @@ def _build_training_job_config(
 ) -> LabConfig:
     """Build the effective training configuration for one requested job."""
 
-    config = LabConfig()
+    output_root = Path(LabConfig().training.output_dir)
+    user_params = _read_user_hyperparams(output_root)
+    config = _apply_user_hyperparams(LabConfig(), user_params)
     total_episodes = max(1, requested_episodes)
     training_episodes = max(0, total_episodes - 1)
     checkpoint_episodes = tuple(range(total_episodes))
@@ -338,6 +448,15 @@ def _build_training_job_config(
         total_timesteps=total_timesteps,
         output_dir=config.training.output_dir,
         web_export_dir=config.training.web_export_dir,
+        learning_rate=config.training.learning_rate,
+        learning_rate_final=config.training.learning_rate_final,
+        entropy_coef=config.training.entropy_coef,
+        gamma=config.training.gamma,
+        gae_lambda=config.training.gae_lambda,
+        clip_range=config.training.clip_range,
+        rollout_steps=config.training.rollout_steps,
+        batch_size=config.training.batch_size,
+        value_coef=config.training.value_coef,
     )
     job_config = replace(config, training=training_config)
     return apply_training_profile(
@@ -550,6 +669,16 @@ class TrainingManager:
         output_root = Path(LabConfig().training.output_dir)
         return _load_json(output_root / "config-history.json") or {"revisions": []}
 
+    def get_hyperparams(self) -> dict[str, Any]:
+        """Return persisted user hyperparameters (with defaults for any missing keys)."""
+        output_root = Path(LabConfig().training.output_dir)
+        return _read_user_hyperparams(output_root)
+
+    def save_hyperparams(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Persist user hyperparameter overrides and return the merged result."""
+        output_root = Path(LabConfig().training.output_dir)
+        return _write_user_hyperparams(output_root, payload)
+
     def save_config_revision(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Append *payload* as a new revision in config-history.json."""
         output_root = Path(LabConfig().training.output_dir)
@@ -688,7 +817,9 @@ class TrainingManager:
         effective_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run one episode with the selected policy and return the replay dict."""
-        config = LabConfig()
+        output_root = Path(LabConfig().training.output_dir)
+        user_params = _read_user_hyperparams(output_root)
+        config = _apply_user_hyperparams(LabConfig(), user_params)
         selection = _resolve_replay_selection(
             config,
             checkpoint_episode=checkpoint_episode,
@@ -977,6 +1108,9 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         if self.path == "/api/config/history":
             self._json_response(self.manager.get_config_history())
             return
+        if self.path == "/api/config/hyperparams":
+            self._json_response(self.manager.get_hyperparams())
+            return
         self._json_response({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:  # noqa: N802  # pylint: disable=invalid-name
@@ -990,6 +1124,12 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             body = self._read_json()
             history = self.manager.save_config_revision(body)
             self._json_response(history)
+            return
+
+        if self.path == "/api/config/hyperparams":
+            body = self._read_json()
+            merged = self.manager.save_hyperparams(body)
+            self._json_response(merged)
             return
 
         payload = self._read_json()

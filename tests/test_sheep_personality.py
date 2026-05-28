@@ -182,6 +182,7 @@ def test_escapist_breaks_from_flock_when_panicked() -> None:
         panic_steps=3,
         flock_center=flock_center,
     )
+
     # The escapist should be at least as far from the flock as the obedient
     # sheep after one step, and ideally strictly farther.
     def flock_dist(p: Point) -> float:
