@@ -186,6 +186,10 @@ export interface ReplayRunRequest {
     curriculum_stage: number;
     debug_reward_breakdown: boolean;
   };
+  /** Per-run environment tweaks (not persisted to Config hyperparams). */
+  environment_overrides?: {
+    sheep_personality_strength?: number;
+  };
 }
 
 export interface EvaluationRecord {

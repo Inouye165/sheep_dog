@@ -3,18 +3,20 @@ import { ControlBar } from "./components/ControlBar";
 import { ConfigPanel } from "./components/ConfigPanel";
 import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
 import { FieldView } from "./components/FieldView";
+import { ScenarioPanel } from "./components/ScenarioPanel";
 import { TrainingPanel } from "./components/TrainingPanel";
 import { StatusPanel } from "./components/StatusPanel";
 import { ResultsPanel } from "./components/ResultsPanel";
-import { clearTraining, loadCheckpointIndex, loadReplay, loadTrainingStatus, runReplay, startTraining } from "./lib/api";
+import { clearTraining, loadCheckpointIndex, loadHyperparams, loadReplay, loadTrainingStatus, runReplay, startTraining } from "./lib/api";
 import type { CheckpointEntry, CheckpointIndex, ReplayBundle, ReplaySnapshot, TrainingStatus } from "./state/types";
 
 type RunState = "idle" | "running" | "paused" | "success" | "timeout" | "stopped";
-type ActiveTab = "train" | "watch" | "insights" | "results" | "config";
+type ActiveTab = "train" | "watch" | "test" | "insights" | "results" | "config";
 
 const APP_TABS: { id: ActiveTab; label: string }[] = [
   { id: "train", label: "Train" },
   { id: "watch", label: "Watch" },
+  { id: "test", label: "Test" },
   { id: "insights", label: "Insights" },
   { id: "results", label: "Results" },
   { id: "config", label: "Config" },
@@ -95,6 +97,13 @@ export function App() {
   const [runningCurrentReplay, setRunningCurrentReplay] = useState(false);
   const [loadingSelectedReplay, setLoadingSelectedReplay] = useState(false);
   const [activeTab, setActiveTab] = useState<ActiveTab>("train");
+  const [scenarioReplay, setScenarioReplay] = useState<ReplayBundle | null>(null);
+  const [scenarioFrameIndex, setScenarioFrameIndex] = useState(0);
+  const [scenarioRunState, setScenarioRunState] = useState<RunState>("idle");
+  const [scenarioPersonalityStrength, setScenarioPersonalityStrength] = useState(0);
+  const [scenarioSeed, setScenarioSeed] = useState(11);
+  const [scenarioFastMode, setScenarioFastMode] = useState(false);
+  const [runningScenario, setRunningScenario] = useState(false);
   // Episode of the best-formal checkpoint for the current stage captured at
   // promote time, so the next training start can seed from the correct policy.
   const [promoteFromEpisode, setPromoteFromEpisode] = useState<number | null>(null);
@@ -121,6 +130,7 @@ export function App() {
   );
 
   const playbackDelay = playbackFastMode ? 24 : 220;
+  const scenarioPlaybackDelay = scenarioFastMode ? 24 : 220;
   const trainingRunning = trainingStatus?.running ?? false;
 
   // When training completes, lock the stage chip to the stage that was actually
@@ -275,6 +285,14 @@ export function App() {
 
   const snapshot = currentFrame?.snapshot ?? replay?.final_snapshot ?? null;
 
+  const scenarioCurrentFrame =
+    scenarioReplay?.frames?.[
+      Math.min(scenarioFrameIndex, Math.max((scenarioReplay?.frames.length ?? 0) - 1, 0))
+    ] ?? null;
+  const scenarioSnapshot =
+    scenarioCurrentFrame?.snapshot ?? scenarioReplay?.final_snapshot ?? null;
+  const fieldSnapshot = activeTab === "test" ? scenarioSnapshot : snapshot;
+
   function applyCheckpointIndex(index: CheckpointIndex | null) {
     setCheckpointIndex(index);
     if (!index) {
@@ -307,6 +325,23 @@ export function App() {
         if (active) {
           setLoading(false);
         }
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      try {
+        const hyperparams = await loadHyperparams();
+        if (active) {
+          setScenarioPersonalityStrength(hyperparams.environment.sheep_personality_strength);
+        }
+      } catch {
+        // Keep default when hyperparams are unavailable.
       }
     })();
     return () => {
@@ -488,6 +523,23 @@ export function App() {
     return () => window.clearInterval(timer);
   }, [playbackDelay, replay, runState]);
 
+  useEffect(() => {
+    if (scenarioRunState !== "running" || !scenarioReplay) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      setScenarioFrameIndex((currentIndex) => {
+        if (currentIndex >= scenarioReplay.frames.length - 1) {
+          window.clearInterval(timer);
+          setScenarioRunState(resolveRunState(scenarioReplay.final_snapshot, "idle"));
+          return currentIndex;
+        }
+        return currentIndex + 1;
+      });
+    }, scenarioPlaybackDelay);
+    return () => window.clearInterval(timer);
+  }, [scenarioPlaybackDelay, scenarioReplay, scenarioRunState]);
+
   function handleCheckpointChange(episode: number) {
     setSelectedCheckpointEpisode(episode);
     const checkpoint = checkpointIndex?.checkpoints.find((entry) => entry.checkpoint_episode === episode);
@@ -567,6 +619,53 @@ export function App() {
     }
   }
 
+  async function handleRunScenario() {
+    setRunningScenario(true);
+    setError(null);
+    setTrainingError(null);
+    try {
+      const bundle = await runReplay({
+        seed: scenarioSeed,
+        checkpoint_episode: currentReplaySelection.checkpointEpisode,
+        trainer_type: currentReplaySelection.trainerType,
+        policy_type: currentReplaySelection.policyType,
+        policy_mode: currentReplaySelection.policyMode,
+        effective_config: {
+          enable_instinct_rewards: effectiveEnableInstincts,
+          curriculum_stage: effectiveCurriculumStage,
+          debug_reward_breakdown: effectiveDebugRewardBreakdown,
+        },
+        environment_overrides: {
+          sheep_personality_strength: scenarioPersonalityStrength,
+        },
+      });
+      setScenarioReplay(bundle);
+      setScenarioSeed(bundle.seed);
+      setScenarioFrameIndex(0);
+      setScenarioRunState("running");
+    } catch (runError) {
+      setError(runError instanceof Error ? runError.message : "Unable to run the scenario.");
+    } finally {
+      setRunningScenario(false);
+    }
+  }
+
+  function handleRestartScenarioPlayback() {
+    if (!scenarioReplay) {
+      return;
+    }
+    setScenarioFrameIndex(0);
+    setScenarioRunState("running");
+  }
+
+  function handleEndScenarioEpisode() {
+    if (!scenarioReplay) {
+      return;
+    }
+    setScenarioFrameIndex(Math.max(scenarioReplay.frames.length - 1, 0));
+    setScenarioRunState(resolveRunState(scenarioReplay.final_snapshot, "idle"));
+  }
+
   async function handleRunCurrentReplay() {
     setRunningCurrentReplay(true);
     setError(null);
@@ -635,6 +734,23 @@ export function App() {
   const statusLabel = resolveRunState(snapshot, runState);
   const statusMessage = trainingStatus?.message ?? "Idle";
   const canEndEpisode = Boolean(replay) && (runState === "running" || frameIndex < (replay?.frames.length ?? 0) - 1);
+  const scenarioStatusLabel = resolveRunState(
+    scenarioCurrentFrame?.snapshot ?? scenarioReplay?.final_snapshot ?? null,
+    scenarioRunState,
+  );
+  const canEndScenarioEpisode =
+    Boolean(scenarioReplay) &&
+    (scenarioRunState === "running" || scenarioFrameIndex < (scenarioReplay?.frames.length ?? 0) - 1);
+  const scenarioPolicyLabel =
+    scenarioReplay?.policy_name === "neural_policy"
+      ? "Neural PPO"
+      : scenarioReplay?.policy_name === "trained_policy"
+        ? "Trained linear"
+        : currentReplaySelection.policyMode === "neural_policy"
+          ? "Neural PPO (best)"
+          : currentReplaySelection.policyMode === "trained_policy"
+            ? "Trained linear (best)"
+            : "Instinct only";
   const tabButtons = APP_TABS.map(({ id, label }) => (
     <button
       key={id}
@@ -674,7 +790,7 @@ export function App() {
         </div>
       ) : (
         <div className="layout-grid">
-          <FieldView snapshot={snapshot} />
+          <FieldView snapshot={fieldSnapshot} />
           <aside className="side-column">
             {activeTab === "train" ? (
               <TrainingPanel
@@ -718,6 +834,34 @@ export function App() {
                 previousBestEntry={previousBestEntry}
                 seedEpisode={trainingStatus?.seed_episode ?? null}
               />
+            ) : activeTab === "test" ? (
+              <>
+                <StatusPanel
+                  snapshot={scenarioSnapshot}
+                  replay={scenarioReplay}
+                  selectedCheckpoint={null}
+                  selectedCheckpointEpisode={null}
+                  bestCheckpointEpisode={bestCheckpointEpisode}
+                  selectedSeed={scenarioSeed}
+                  runState={scenarioStatusLabel}
+                />
+                <ScenarioPanel
+                  personalityStrength={scenarioPersonalityStrength}
+                  seed={scenarioSeed}
+                  fastMode={scenarioFastMode}
+                  running={runningScenario}
+                  canEndEpisode={canEndScenarioEpisode}
+                  hasReplay={Boolean(scenarioReplay)}
+                  policyLabel={scenarioPolicyLabel}
+                  onPersonalityStrengthChange={setScenarioPersonalityStrength}
+                  onSeedChange={setScenarioSeed}
+                  onFastModeChange={setScenarioFastMode}
+                  onRun={handleRunScenario}
+                  onRestart={handleRestartScenarioPlayback}
+                  onEndEpisode={handleEndScenarioEpisode}
+                  disabled={loading}
+                />
+              </>
             ) : (
               <>
                 <StatusPanel

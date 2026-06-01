@@ -367,6 +367,26 @@ def _apply_user_hyperparams(base_config: LabConfig, user_params: dict[str, Any])
     return replace(base_config, environment=env, training=training, rewards=rewards)
 
 
+def _apply_environment_overrides(
+    config: LabConfig, environment_overrides: dict[str, Any] | None
+) -> LabConfig:
+    """Merge per-run environment overrides without persisting to user hyperparams."""
+    if not isinstance(environment_overrides, dict):
+        return config
+    env_overrides: dict[str, Any] = {}
+    for key, value in environment_overrides.items():
+        if not hasattr(config.environment, key):
+            continue
+        default_val = getattr(config.environment, key)
+        try:
+            env_overrides[key] = type(default_val)(value)
+        except (TypeError, ValueError):
+            continue
+    if not env_overrides:
+        return config
+    return replace(config, environment=replace(config.environment, **env_overrides))
+
+
 def _read_persisted_settings(output_root: Path) -> dict[str, Any]:
     """Best-effort read of persisted curriculum settings for initial status.
 
@@ -815,6 +835,7 @@ class TrainingManager:
         checkpoint_episode: int | None = None,
         policy_mode: PolicyMode | None = None,
         effective_config: dict[str, Any] | None = None,
+        environment_overrides: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run one episode with the selected policy and return the replay dict."""
         output_root = Path(LabConfig().training.output_dir)
@@ -826,12 +847,13 @@ class TrainingManager:
             policy_mode=policy_mode,
             effective_config=effective_config,
         )
+        run_config = _apply_environment_overrides(selection.config, environment_overrides)
         policy = _load_playable_policy(
-            selection.config,
+            run_config,
             checkpoint_episode=selection.checkpoint_episode,
             policy_mode=selection.policy_mode,
         )
-        result = SheepdogEnvironment(selection.config).run_policy(
+        result = SheepdogEnvironment(run_config).run_policy(
             policy,
             seed=seed,
             capture_replay=True,
@@ -846,13 +868,14 @@ class TrainingManager:
                 "checkpoint_episode": selection.checkpoint_episode,
                 "total_training_episodes": selection.total_training_episodes,
                 "environment": {
-                    "dogs": selection.config.environment.dogs,
-                    "sheep": selection.config.environment.sheep,
-                    "width": selection.config.environment.width,
-                    "height": selection.config.environment.height,
-                    "curriculum_stage": selection.config.rewards.instincts.curriculum_stage,
+                    "dogs": run_config.environment.dogs,
+                    "sheep": run_config.environment.sheep,
+                    "width": run_config.environment.width,
+                    "height": run_config.environment.height,
+                    "sheep_personality_strength": run_config.environment.sheep_personality_strength,
+                    "curriculum_stage": run_config.rewards.instincts.curriculum_stage,
                     "enable_instinct_rewards": (
-                        selection.config.rewards.instincts.enable_instinct_rewards
+                        run_config.rewards.instincts.enable_instinct_rewards
                     ),
                 },
             }
@@ -1138,6 +1161,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             checkpoint_episode = payload.get("checkpoint_episode")
             policy_mode = payload.get("policy_mode")
             effective_config = payload.get("effective_config")
+            environment_overrides = payload.get("environment_overrides")
             try:
                 replay = self.manager.run_live_replay(
                     seed,
@@ -1147,6 +1171,11 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                     policy_mode=policy_mode,
                     effective_config=(
                         effective_config if isinstance(effective_config, dict) else None
+                    ),
+                    environment_overrides=(
+                        environment_overrides
+                        if isinstance(environment_overrides, dict)
+                        else None
                     ),
                 )
             except FileNotFoundError as exc:

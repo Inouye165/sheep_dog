@@ -330,6 +330,68 @@ def test_run_live_replay_honors_effective_stage_for_baseline(tmp_path: Path) -> 
     assert payload["environment"]["sheep"] == 1
 
 
+def test_run_live_replay_applies_environment_overrides(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    generated = tmp_path / "web" / "public" / "generated"
+    generated.mkdir(parents=True)
+
+    manager = TrainingManager()
+
+    config = LabConfig(
+        training=TrainingConfig(
+            output_dir=str(artifacts),
+            web_export_dir=str(generated),
+        )
+    )
+    captured: dict[str, object] = {}
+
+    class TestConfig:
+        def __new__(cls):
+            return config
+
+    def fake_load_playable_policy(
+        effective_config: LabConfig,
+        *,
+        checkpoint_episode: int | None = None,
+        policy_mode: str | None = None,
+    ) -> object:
+        del checkpoint_episode
+        captured["config"] = effective_config
+        return SimpleNamespace(name=policy_mode or "instinct_only")
+
+    class FakeEnvironment:
+        def __init__(self, effective_config: LabConfig) -> None:
+            captured["environment_config"] = effective_config
+
+        def run_policy(self, policy: object, seed: int, capture_replay: bool = False) -> object:
+            del capture_replay
+            active_config = captured["environment_config"]
+            assert isinstance(active_config, LabConfig)
+            return SimpleNamespace(
+                seed=seed,
+                policy_name=getattr(policy, "name", "instinct_only"),
+                final_snapshot=_FakeSnapshot(active_config),
+                stats=_FakeStats(),
+                replay=[],
+            )
+
+    with (
+        patch("sheepdog.server.LabConfig", TestConfig),
+        patch("sheepdog.server._load_playable_policy", fake_load_playable_policy),
+        patch("sheepdog.server.SheepdogEnvironment", FakeEnvironment),
+    ):
+        payload = manager.run_live_replay(
+            42,
+            policy_mode="instinct_only",
+            environment_overrides={"sheep_personality_strength": 0.75},
+        )
+
+    effective_config = captured["environment_config"]
+    assert isinstance(effective_config, LabConfig)
+    assert effective_config.environment.sheep_personality_strength == 0.75
+    assert payload["environment"]["sheep_personality_strength"] == 0.75
+
+
 def test_initial_status_prefers_saved_stage_over_history_max(tmp_path: Path) -> None:
     artifacts = tmp_path / "artifacts"
     generated = tmp_path / "web" / "public" / "generated"
