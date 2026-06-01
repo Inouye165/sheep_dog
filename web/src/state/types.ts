@@ -129,6 +129,8 @@ export interface ReplayBundle {
     final_reward_breakdown: RewardBreakdown;
   };
   frames: ReplayFrame[];
+  scenario_id?: string;
+  scenario_name?: string;
 }
 
 export interface TrainingStatus {
@@ -257,6 +259,43 @@ export interface EvaluationSummary {
 export interface CheckpointIndex {
   checkpoints: CheckpointEntry[];
   latest: EvaluationSummary | null;
+}
+
+export interface SavedScenario {
+  id: string;
+  name: string;
+  created_at: string;
+  seed: number;
+  width: number;
+  height: number;
+  dogs: AgentSnapshot[];
+  sheep: AgentSnapshot[];
+  pen: Pen;
+  sheep_personality_strength?: number;
+  sheep_personality_seed_offset?: number;
+  seed_offset?: number;
+  description?: string;
+  notes?: string;
+}
+
+export interface ScenarioRunResult {
+  scenario_id: string;
+  checkpoint_episode: number;
+  success: boolean;
+  sheep_penned: number;
+  steps: number;
+  timeout: boolean;
+  stopped: boolean;
+  reward_total: number;
+  replay_path: string;
+}
+
+export interface ScenarioIndex {
+  scenarios: SavedScenario[];
+  best_by_scenario: Record<string, ScenarioRunResult & { checkpoint_episode: number }>;
+  runs: ScenarioRunResult[];
+  latest_checkpoint_episode: number | null;
+  latest_runs: ScenarioRunResult[];
 }
 
 export interface ConfigTrainingSettings {

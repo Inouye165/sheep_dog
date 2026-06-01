@@ -1,4 +1,16 @@
-import type { CheckpointIndex, ConfigHistory, ConfigRevision, ReplayBundle, ReplayRunRequest, TrainingStartRequest, TrainingStatus, UserHyperparams } from "../state/types";
+import type {
+  CheckpointIndex,
+  ConfigHistory,
+  ConfigRevision,
+  ReplayBundle,
+  ReplayRunRequest,
+  SavedScenario,
+  ScenarioIndex,
+  ScenarioRunResult,
+  TrainingStartRequest,
+  TrainingStatus,
+  UserHyperparams,
+} from "../state/types";
 
 const API_BASE_URL = "http://127.0.0.1:8000";
 
@@ -106,5 +118,58 @@ export async function saveHyperparams(payload: UserHyperparams): Promise<UserHyp
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
+  }, API_BASE_URL);
+}
+
+/** Load scenarios and evaluation results from the training API (source of truth). */
+export async function loadScenarioIndex(): Promise<ScenarioIndex> {
+  return fetchJson<ScenarioIndex>("/api/scenarios", undefined, API_BASE_URL);
+}
+
+export async function saveScenario(payload: {
+  name: string;
+  seed: number;
+  snapshot: ReplayBundle["final_snapshot"];
+  sheep_personality_strength?: number;
+  description?: string;
+  snapshot_source?: "initial" | "final";
+}): Promise<SavedScenario> {
+  return fetchJson<SavedScenario>("/api/scenarios", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  }, API_BASE_URL);
+}
+
+export type CheckpointMode = "latest" | "global_best" | "scenario_best" | "specific";
+
+export interface ScenarioCheckpointRequest {
+  checkpoint_mode: CheckpointMode;
+  checkpoint_episode?: number;
+  policy_mode?: string;
+  trainer_type?: string;
+  policy_type?: string;
+  effective_config?: Record<string, unknown>;
+}
+
+export async function evaluateScenario(
+  scenarioId: string,
+  request: ScenarioCheckpointRequest,
+): Promise<{ checkpoint_episode: number; result: ScenarioRunResult; index: ScenarioIndex }> {
+  return fetchJson(`/api/scenarios/${scenarioId}/evaluate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  }, API_BASE_URL);
+}
+
+export async function replayScenario(
+  scenarioId: string,
+  request: ScenarioCheckpointRequest,
+): Promise<ReplayBundle> {
+  return fetchJson<ReplayBundle>(`/api/scenarios/${scenarioId}/replay`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
   }, API_BASE_URL);
 }

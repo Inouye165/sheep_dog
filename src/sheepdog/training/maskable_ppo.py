@@ -444,6 +444,7 @@ class MaskablePPOTrainer(Trainer):
                 representative_replay_path,
                 checkpoint_path,
             )
+            self._evaluate_saved_scenarios(policy, total_eps_this_checkpoint)
             emit(
                 {
                     "phase": "checkpoint",
