@@ -1,4 +1,4 @@
-import type { CheckpointIndex, ConfigHistory, ConfigRevision, ReplayBundle, ReplayRunRequest, TrainingStartRequest, TrainingStatus } from "../state/types";
+import type { CheckpointIndex, ConfigHistory, ConfigRevision, ReplayBundle, ReplayRunRequest, TrainingStartRequest, TrainingStatus, UserHyperparams } from "../state/types";
 
 const API_BASE_URL = "http://127.0.0.1:8000";
 
@@ -91,6 +91,18 @@ export async function saveConfigRevision(
   payload: Omit<ConfigRevision, "id" | "timestamp">,
 ): Promise<ConfigHistory> {
   return fetchJson<ConfigHistory>("/api/config/history", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  }, API_BASE_URL);
+}
+
+export async function loadHyperparams(): Promise<UserHyperparams> {
+  return fetchJson<UserHyperparams>("/api/config/hyperparams", undefined, API_BASE_URL);
+}
+
+export async function saveHyperparams(payload: UserHyperparams): Promise<UserHyperparams> {
+  return fetchJson<UserHyperparams>("/api/config/hyperparams", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),

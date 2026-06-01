@@ -15,6 +15,10 @@ const ROLE_LABELS: Record<string, string> = {
   blocker: "Blocker",
 };
 
+const DEFAULT_SHEEP_COLOR = "#f8fafc";
+const PENNED_SHEEP_STROKE = "#86efac";
+const ACTIVE_SHEEP_STROKE = "#cbd5e1";
+
 function fenceSegments(snapshot: ReplaySnapshot): Array<{ side: Side; x1: number; y1: number; x2: number; y2: number }> {
   const { pen } = snapshot;
   const opening = pen.opening ?? "left";
@@ -90,6 +94,43 @@ export function FieldView({ snapshot }: FieldViewProps) {
           ))}
         </div>
       ) : null}
+      {snapshot?.sheep.length ? (
+        <div className="field-card__meta" aria-label="Sheep legend">
+          {(() => {
+            // Group sheep by personality so the legend shows one swatch per
+            // archetype (with a count), not one swatch per individual sheep.
+            const groups = new Map<string, { color: string; count: number }>();
+            for (const sheep of snapshot.sheep) {
+              const key = sheep.personality ?? "obedient";
+              const color = sheep.color ?? DEFAULT_SHEEP_COLOR;
+              const existing = groups.get(key);
+              if (existing) {
+                existing.count += 1;
+              } else {
+                groups.set(key, { color, count: 1 });
+              }
+            }
+            return Array.from(groups.entries()).map(([personality, info]) => (
+              <span key={`sheep-legend-${personality}`}>
+                <span
+                  aria-hidden="true"
+                  style={{
+                    display: "inline-block",
+                    width: "0.85rem",
+                    height: "0.85rem",
+                    borderRadius: "999px",
+                    marginRight: "0.4rem",
+                    verticalAlign: "middle",
+                    backgroundColor: info.color,
+                    border: `1px solid ${ACTIVE_SHEEP_STROKE}`,
+                  }}
+                />
+                {`${personality} (${info.count})`}
+              </span>
+            ));
+          })()}
+        </div>
+      ) : null}
       <div className="field-stage">
         {snapshot ? (
           <svg className="field-stage__svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Sheepdog simulation map">
@@ -136,10 +177,18 @@ export function FieldView({ snapshot }: FieldViewProps) {
             ) : null}
             {snapshot.sheep.map((sheep) => (
               <g key={`sheep-${sheep.index}`} transform={`translate(${sheep.x + 0.5}, ${sheep.y + 0.5})`}>
-                <circle r={sheepRadius} fill={sheep.penned ? "#bbf7d0" : "#f8fafc"} stroke="#cbd5e1" strokeWidth={penStroke} style={transitionStyle} />
+                <circle
+                  r={sheepRadius}
+                  fill={sheep.color ?? DEFAULT_SHEEP_COLOR}
+                  fillOpacity={sheep.penned ? 0.85 : 1}
+                  stroke={sheep.penned ? PENNED_SHEEP_STROKE : ACTIVE_SHEEP_STROKE}
+                  strokeWidth={penStroke}
+                  style={transitionStyle}
+                />
                 <text textAnchor="middle" dominantBaseline="central" fill="#0f172a" fontSize={fontSize} fontWeight={700} style={transitionStyle}>
                   S
                 </text>
+                <title>{`Sheep ${sheep.index + 1}${sheep.personality ? ` - ${sheep.personality}` : ""}${sheep.penned ? " (penned)" : ""}`}</title>
               </g>
             ))}
             {snapshot.dogs.map((dog) => {

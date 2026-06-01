@@ -18,6 +18,7 @@ export interface AgentSnapshot {
   last_action?: string;
   role?: string;
   personality?: string | null;
+  color?: string | null;
 }
 
 export interface RewardBreakdown {
@@ -273,4 +274,45 @@ export interface ConfigRevision {
 
 export interface ConfigHistory {
   revisions: ConfigRevision[];
+}
+
+export interface UserHyperparamsEnvironment {
+  sheep_personality_strength: number;
+  sheep_speed: number;
+  sheep_vision: number;
+  flock_radius: number;
+  dog_speed: number;
+  dog_sprint_multiplier: number;
+  dog_vision: number;
+}
+
+export interface UserHyperparamsTraining {
+  learning_rate: number;
+  learning_rate_final: number;
+  entropy_coef: number;
+  gamma: number;
+  gae_lambda: number;
+  clip_range: number;
+  rollout_steps: number;
+  batch_size: number;
+  value_coef: number;
+}
+
+export interface UserHyperparamsRewards {
+  time_penalty: number;
+  progress_scale: number;
+  sheep_penned_reward: number;
+  wait_penalty: number;
+  no_progress_penalty: number;
+  terminal_success_reward: number;
+  terminal_failure_penalty: number;
+  flock_cohesion_scale: number;
+  scatter_penalty_scale: number;
+  sprint_cost_scale: number;
+}
+
+export interface UserHyperparams {
+  environment: UserHyperparamsEnvironment;
+  training: UserHyperparamsTraining;
+  rewards: UserHyperparamsRewards;
 }

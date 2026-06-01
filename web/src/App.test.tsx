@@ -288,8 +288,8 @@ describe("App", () => {
     expect(screen.getByRole("option", { name: /Seed 11/ })).toBeInTheDocument();
   });
 
-  it("syncs the curriculum stage from the server even when local storage is stale", async () => {
-    window.localStorage.setItem("sheepdog_curriculum_stage", "5");
+  it("adopts a higher server curriculum stage on initial load", async () => {
+    window.localStorage.setItem("sheepdog_curriculum_stage", "1");
 
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
@@ -314,6 +314,37 @@ describe("App", () => {
     await waitFor(() => expect(screen.getByLabelText("Training controls")).toBeInTheDocument());
     expect(screen.getByText("Stage 2", { selector: ".stage-chip__label" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Promote → Stage 3" })).toBeInTheDocument();
+    expect(window.localStorage.getItem("sheepdog_curriculum_stage")).toBe("2");
+  });
+
+  it("preserves a locally-promoted curriculum stage above the server's reported stage", async () => {
+    // User clicked Promote so localStorage is ahead of the server's
+    // last-trained stage.  Polling must NOT revert the UI back to the server
+    // value while training is idle.
+    window.localStorage.setItem("sheepdog_curriculum_stage", "2");
+
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.includes("/api/training/status")) {
+        return jsonResponse({
+          ...idleTrainingStatus,
+          curriculum_stage: 1,
+        });
+      }
+      if (path.includes("checkpoint-index.json")) {
+        return jsonResponse(checkpointIndex);
+      }
+      if (path.includes("checkpoint-000000-seed-000011.json")) {
+        return jsonResponse(replay);
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByLabelText("Training controls")).toBeInTheDocument());
+    expect(screen.getByText("Stage 2", { selector: ".stage-chip__label" })).toBeInTheDocument();
     expect(window.localStorage.getItem("sheepdog_curriculum_stage")).toBe("2");
   });
 

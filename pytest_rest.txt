@@ -1,0 +1,18 @@
+........................................................................ [ 48%]
+........................................................................ [ 96%]
+.....                                                                    [100%]
+============================== warnings summary ===============================
+tests\test_stage1_benchmark.py:147
+  C:\Users\inouy\source\sheep_dog\tests\test_stage1_benchmark.py:147: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_stage1_benchmark.py:202
+  C:\Users\inouy\source\sheep_dog\tests\test_stage1_benchmark.py:202: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_stage1_benchmark.py:243
+  C:\Users\inouy\source\sheep_dog\tests\test_stage1_benchmark.py:243: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+149 passed, 3 warnings in 249.33s (0:04:09)

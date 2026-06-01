@@ -5,16 +5,18 @@ import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
 import { FieldView } from "./components/FieldView";
 import { TrainingPanel } from "./components/TrainingPanel";
 import { StatusPanel } from "./components/StatusPanel";
+import { ResultsPanel } from "./components/ResultsPanel";
 import { clearTraining, loadCheckpointIndex, loadReplay, loadTrainingStatus, runReplay, startTraining } from "./lib/api";
 import type { CheckpointEntry, CheckpointIndex, ReplayBundle, ReplaySnapshot, TrainingStatus } from "./state/types";
 
 type RunState = "idle" | "running" | "paused" | "success" | "timeout" | "stopped";
-type ActiveTab = "train" | "watch" | "insights" | "config";
+type ActiveTab = "train" | "watch" | "insights" | "results" | "config";
 
 const APP_TABS: { id: ActiveTab; label: string }[] = [
   { id: "train", label: "Train" },
   { id: "watch", label: "Watch" },
   { id: "insights", label: "Insights" },
+  { id: "results", label: "Results" },
   { id: "config", label: "Config" },
 ];
 
@@ -122,9 +124,11 @@ export function App() {
   const trainingRunning = trainingStatus?.running ?? false;
 
   // When training completes, lock the stage chip to the stage that was actually
-  // trained and preset episodes to the recommended count for that stage.
+  // trained and preset episodes to the recommended count for that stage.  Only
+  // fire on the running→idle transition so polling doesn't clobber a user's
+  // pending promote selection while training is idle.
   useEffect(() => {
-    if (!trainingRunning && trainingStatus?.curriculum_stage != null) {
+    if (prevTrainingRunning.current && !trainingRunning && trainingStatus?.curriculum_stage != null) {
       syncTrainingStageFromStatus(trainingStatus);
     }
     prevTrainingRunning.current = trainingRunning;
@@ -318,7 +322,21 @@ export function App() {
         const status = await loadTrainingStatus();
         if (active) {
           setTrainingStatus((previous) => mergeTrainingStatus(previous, status));
-          syncTrainingStageFromStatus(status);
+          // Adopt the server's stage on initial load when training is running,
+          // or when the server reports a HIGHER stage than localStorage (the
+          // user trained further on another session).  Never overwrite a local
+          // stage that is >= the server's, so a pending Promote click is not
+          // immediately reverted by polling.
+          const localStage = parseInt(
+            localStorage.getItem("sheepdog_curriculum_stage") ?? "0",
+            10,
+          );
+          if (
+            status.running ||
+            (status.curriculum_stage != null && status.curriculum_stage > localStage)
+          ) {
+            syncTrainingStageFromStatus(status);
+          }
         }
       } catch {
         if (active) {
@@ -634,11 +652,13 @@ export function App() {
       {error ? <div className="warning-box warning-box--error">{error}</div> : null}
       {trainingError ? <div className="warning-box warning-box--error">{trainingError}</div> : null}
 
-      {activeTab === "insights" || activeTab === "config" ? (
+      {/* Unified tab bar - always in same position */}
+      <div className="app-tab-bar" role="tablist">
+        {tabButtons}
+      </div>
+
+      {activeTab === "insights" || activeTab === "results" || activeTab === "config" ? (
         <div className="insights-fullscreen">
-          <div className="tab-bar insights-fullscreen__tabs" role="tablist">
-            {tabButtons}
-          </div>
           {activeTab === "insights" ? (
             <DiagnosticsPanel
               checkpointIndex={checkpointIndex}
@@ -646,6 +666,8 @@ export function App() {
               trainingStatus={trainingStatus}
               effectiveCurriculumStage={effectiveCurriculumStage}
             />
+          ) : activeTab === "results" ? (
+            <ResultsPanel checkpointIndex={checkpointIndex} />
           ) : (
             <ConfigPanel />
           )}
@@ -654,9 +676,6 @@ export function App() {
         <div className="layout-grid">
           <FieldView snapshot={snapshot} />
           <aside className="side-column">
-            <div className="tab-bar" role="tablist">
-              {tabButtons}
-            </div>
             {activeTab === "train" ? (
               <TrainingPanel
                 episodes={trainingEpisodes}
