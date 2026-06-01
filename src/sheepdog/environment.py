@@ -23,7 +23,8 @@ from sheepdog.entities import (
     SheepState,
 )
 from sheepdog.observations import DogObservation, RoleAwareObservationBuilder
-from sheepdog.policies.base import Action, PolicyMode
+from sheepdog.evaluation.scenarios import SavedScenario
+from sheepdog.policies.base import Action, Policy, PolicyMode
 from sheepdog.rewards import RewardBreakdown, RewardComputer, RewardInputs
 from sheepdog.team_strategy import RoleAssignment, StrategySnapshot, TeamStrategy
 
@@ -266,6 +267,75 @@ class SheepdogEnvironment:
         self._previous_flock_spread = self._flock_spread()
         return self.get_state_snapshot()
 
+    def reset_from_scenario(self, scenario: object) -> EnvironmentSnapshot:
+        """Reset using a fixed layout from a :class:`SavedScenario`."""
+        if not isinstance(scenario, SavedScenario):
+            raise TypeError("scenario must be a SavedScenario")
+        self._seed = scenario.seed
+        self._rng = Random(self._seed + scenario.seed_offset)
+        self._step_count = 0
+        self._simulated_seconds = 0.0
+        self._no_progress_steps = 0
+        self._reward_total = 0.0
+        self._terminated = False
+        self._timeout = False
+        self._stopped = False
+        self._success = False
+        self._stop_reason = ""
+        self._history = []
+        self._stats = EpisodeStats()
+        self._role_assignments = {}
+        self._strategy_snapshot = StrategySnapshot(None, 0.0, 0.0, None, False, False)
+        self._roles_prepared_step = None
+        self._role_distribution = {role.value: 0 for role in DogRole}
+        self._dog_role_occupancy = {
+            str(index): {role.value: 0 for role in DogRole}
+            for index in range(len(scenario.dogs))
+        }
+        self._role_switches = 0
+        self._collector_activations = 0
+        self._blocker_activations = 0
+        self._sheep_split_events = 0
+        self._cumulative_gate_progress = 0.0
+        self._controlled_stall_steps = 0
+        self._controlled_stall_streak = 0
+        self._left_flank_occupancy_steps = 0
+        self._right_flank_occupancy_steps = 0
+        self._gate_corridor_occupancy_peak = 0.0
+        self._gate_corridor_failure_steps = 0
+        self._pen = Pen(
+            Point(scenario.pen.origin_x, scenario.pen.origin_y),
+            scenario.pen.width,
+            scenario.pen.height,
+            opening=scenario.pen.opening,
+        )
+        self._fence_cells = self._pen.fence_cells()
+        self._dogs = [
+            DogState(index=layout.index, position=Point(layout.x, layout.y).clamp(
+                scenario.width, scenario.height
+            ))
+            for layout in sorted(scenario.dogs, key=lambda item: item.index)
+        ]
+        self._sheep = []
+        for layout in sorted(scenario.sheep, key=lambda item: item.index):
+            personality = layout.personality or "obedient"
+            if personality not in SHEEP_PERSONALITIES:
+                personality = "obedient"
+            self._sheep.append(
+                SheepState(
+                    index=layout.index,
+                    position=Point(layout.x, layout.y).clamp(scenario.width, scenario.height),
+                    personality=personality,
+                )
+            )
+        for dog in self._dogs:
+            self._record_position_history(dog.recent_positions, dog.position)
+        for sheep in self._sheep:
+            self._record_position_history(sheep.recent_positions, sheep.position)
+        self._previous_average_distance = self._average_distance_to_pen()
+        self._previous_flock_spread = self._flock_spread()
+        return self.get_state_snapshot()
+
     def _advance_position(
         self,
         position: Point,
@@ -398,7 +468,7 @@ class SheepdogEnvironment:
             weights=weights,
             reserved_positions=reserved_positions,
         )
-        mask = {
+        mask: dict[Action, bool] = {
             action: self.project_dog_action(dog_index, action) != dog.position
             for action in ACTION_ORDER
             if action != "wait"
@@ -427,12 +497,12 @@ class SheepdogEnvironment:
             weights=weights,
             reserved_positions=reserved_positions,
         )
-        candidates = [action for action, allowed in mask.items() if allowed]
+        candidates: list[Action] = [action for action, allowed in mask.items() if allowed]
         return sorted(
             candidates,
             key=lambda action: self._action_score(
                 dog_index,
-                action,
+                cast(Action, action),
                 policy_mode=policy_mode,
                 weights=weights,
                 reserved_positions=reserved_positions,
@@ -523,9 +593,22 @@ class SheepdogEnvironment:
             weights=weights,
         )
 
-    def run_policy(self, policy: object, seed: int, capture_replay: bool = False) -> EpisodeResult:
+    def run_policy(self, policy: Policy, seed: int, capture_replay: bool = False) -> EpisodeResult:
         """Run *policy* from *seed* until termination and return the episode result."""
         self.reset(seed)
+        return self._run_policy_loop(policy, seed=seed, capture_replay=capture_replay)
+
+    def run_policy_on_scenario(
+        self, policy: Policy, scenario: object, capture_replay: bool = False
+    ) -> EpisodeResult:
+        """Run *policy* on a fixed :class:`SavedScenario` layout."""
+        self.reset_from_scenario(scenario)
+        assert isinstance(scenario, SavedScenario)
+        return self._run_policy_loop(policy, seed=scenario.seed, capture_replay=capture_replay)
+
+    def _run_policy_loop(
+        self, policy: Policy, *, seed: int, capture_replay: bool
+    ) -> EpisodeResult:
         while not self._terminated:
             actions = policy.select_actions(self)
             self.step(actions, capture_replay=capture_replay)
@@ -546,7 +629,7 @@ class SheepdogEnvironment:
             raise RuntimeError("Cannot step a terminated episode.")
         if len(actions) != len(self._dogs):
             raise ValueError("Action count does not match dog count.")
-        validated_actions = [self._validate_action(action) for action in actions]
+        validated_actions: list[Action] = [self._validate_action(action) for action in actions]
         self.prepare_policy_step()
 
         previous_snapshot = self.get_state_snapshot()
@@ -1159,6 +1242,7 @@ class SheepdogEnvironment:
         wall_margin = self._wall_margin(candidate)
         if weights is None:
             weights = self._default_action_weights(active_policy_mode)
+        assert weights is not None
         wait_bias = 0.0
         if action == "wait":
             if candidate_debug["holding_pressure_position"]:
