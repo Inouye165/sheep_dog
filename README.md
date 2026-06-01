@@ -405,7 +405,7 @@ You can provide a JSON config file to the CLI. Example:
 - The UI is a replay viewer for exported runs, not a live training dashboard.
 - There is no backend API server yet; the browser reads generated files directly.
 
-## Next Steps
+## The Next Steps
 
 1. Compare this role-aware hill-climbing baseline against PPO or MaskablePPO rather than replacing it blindly.
 2. Add richer role analytics and per-dog trajectory overlays in the replay viewer.
