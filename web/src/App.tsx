@@ -4,11 +4,32 @@ import { ConfigPanel } from "./components/ConfigPanel";
 import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
 import { FieldView } from "./components/FieldView";
 import { ScenarioPanel } from "./components/ScenarioPanel";
+import { SavedScenariosPanel } from "./components/SavedScenariosPanel";
 import { TrainingPanel } from "./components/TrainingPanel";
 import { StatusPanel } from "./components/StatusPanel";
 import { ResultsPanel } from "./components/ResultsPanel";
-import { clearTraining, loadCheckpointIndex, loadHyperparams, loadReplay, loadTrainingStatus, runReplay, startTraining } from "./lib/api";
-import type { CheckpointEntry, CheckpointIndex, ReplayBundle, ReplaySnapshot, TrainingStatus } from "./state/types";
+import {
+  clearTraining,
+  evaluateScenario,
+  loadCheckpointIndex,
+  loadHyperparams,
+  loadReplay,
+  loadScenarioIndex,
+  loadTrainingStatus,
+  replayScenario,
+  runReplay,
+  saveScenario,
+  startTraining,
+} from "./lib/api";
+import type { CheckpointMode } from "./lib/api";
+import type {
+  CheckpointEntry,
+  CheckpointIndex,
+  ReplayBundle,
+  ReplaySnapshot,
+  ScenarioIndex,
+  TrainingStatus,
+} from "./state/types";
 
 type RunState = "idle" | "running" | "paused" | "success" | "timeout" | "stopped";
 type ActiveTab = "train" | "watch" | "test" | "insights" | "results" | "config";
@@ -16,7 +37,7 @@ type ActiveTab = "train" | "watch" | "test" | "insights" | "results" | "config";
 const APP_TABS: { id: ActiveTab; label: string }[] = [
   { id: "train", label: "Train" },
   { id: "watch", label: "Watch" },
-  { id: "test", label: "Test" },
+  { id: "test", label: "Scenarios" },
   { id: "insights", label: "Insights" },
   { id: "results", label: "Results" },
   { id: "config", label: "Config" },
@@ -104,6 +125,12 @@ export function App() {
   const [scenarioSeed, setScenarioSeed] = useState(11);
   const [scenarioFastMode, setScenarioFastMode] = useState(false);
   const [runningScenario, setRunningScenario] = useState(false);
+  const [scenarioIndex, setScenarioIndex] = useState<ScenarioIndex | null>(null);
+  const [scenarioCheckpointMode, setScenarioCheckpointMode] = useState<CheckpointMode>("latest");
+  const [specificScenarioCheckpointEpisode, setSpecificScenarioCheckpointEpisode] = useState<number | null>(null);
+  const [selectedScenarioId, setSelectedScenarioId] = useState<string | null>(null);
+  const [saveSnapshotSource, setSaveSnapshotSource] = useState<"initial" | "final">("final");
+  const [evaluatingScenarios, setEvaluatingScenarios] = useState(false);
   // Episode of the best-formal checkpoint for the current stage captured at
   // promote time, so the next training start can seed from the correct policy.
   const [promoteFromEpisode, setPromoteFromEpisode] = useState<number | null>(null);
@@ -235,6 +262,14 @@ export function App() {
     return (candidate.average_completion_steps ?? Infinity) < (current.average_completion_steps ?? Infinity);
   }
 
+  const latestCheckpointEpisode = useMemo(() => {
+    const checkpoints = checkpointIndex?.checkpoints;
+    if (!checkpoints?.length) {
+      return trainingStatus?.latest_checkpoint_episode ?? null;
+    }
+    return checkpoints[checkpoints.length - 1]?.checkpoint_episode ?? null;
+  }, [checkpointIndex, trainingStatus?.latest_checkpoint_episode]);
+
   const bestCheckpointEpisode = useMemo(() => {
     if (!checkpointIndex?.checkpoints.length) return null;
     const best = checkpointIndex.checkpoints.reduce((acc, entry) => {
@@ -293,6 +328,43 @@ export function App() {
     scenarioCurrentFrame?.snapshot ?? scenarioReplay?.final_snapshot ?? null;
   const fieldSnapshot = activeTab === "test" ? scenarioSnapshot : snapshot;
 
+  async function refreshScenarioIndex() {
+    try {
+      const index = await loadScenarioIndex();
+      setScenarioIndex(index);
+    } catch {
+      setScenarioIndex({
+        scenarios: [],
+        runs: [],
+        best_by_scenario: {},
+        latest_checkpoint_episode: latestCheckpointEpisode,
+        latest_runs: [],
+      });
+    }
+  }
+
+  function buildScenarioCheckpointRequest() {
+    return {
+      checkpoint_mode: scenarioCheckpointMode,
+      checkpoint_episode:
+        scenarioCheckpointMode === "specific" ? specificScenarioCheckpointEpisode ?? undefined : undefined,
+      policy_mode: policySelectionForCheckpoint(
+        scenarioCheckpointMode === "specific" ? specificScenarioCheckpointEpisode : latestCheckpointEpisode,
+      ).policyMode,
+      trainer_type: policySelectionForCheckpoint(
+        scenarioCheckpointMode === "specific" ? specificScenarioCheckpointEpisode : latestCheckpointEpisode,
+      ).trainerType,
+      policy_type: policySelectionForCheckpoint(
+        scenarioCheckpointMode === "specific" ? specificScenarioCheckpointEpisode : latestCheckpointEpisode,
+      ).policyType,
+      effective_config: {
+        enable_instinct_rewards: effectiveEnableInstincts,
+        curriculum_stage: effectiveCurriculumStage,
+        debug_reward_breakdown: effectiveDebugRewardBreakdown,
+      },
+    };
+  }
+
   function applyCheckpointIndex(index: CheckpointIndex | null) {
     setCheckpointIndex(index);
     if (!index) {
@@ -319,6 +391,7 @@ export function App() {
           return;
         }
         applyCheckpointIndex(index);
+        await refreshScenarioIndex();
       } catch (loadError) {
         setError(loadError instanceof Error ? loadError.message : "Unable to load exported checkpoint data.");
       } finally {
@@ -444,6 +517,7 @@ export function App() {
           return;
         }
         setCheckpointIndex(index);
+        void refreshScenarioIndex();
         const checkpoint =
           index.checkpoints.find((entry) => entry.checkpoint_episode === trainingStatus.latest_checkpoint_episode) ??
           index.checkpoints[index.checkpoints.length - 1] ??
@@ -616,6 +690,98 @@ export function App() {
       setTrainingError(clearError instanceof Error ? clearError.message : "Unable to clear training.");
     } finally {
       setClearingTraining(false);
+    }
+  }
+
+  function policySelectionForCheckpoint(episode: number | null) {
+    const entry =
+      checkpointIndex?.checkpoints.find((checkpoint) => checkpoint.checkpoint_episode === episode) ?? null;
+    if (!entry) {
+      return currentReplaySelection;
+    }
+    const policyMode =
+      entry.policy_mode === "neural_policy" || entry.policy_name === "neural_policy"
+        ? "neural_policy"
+        : entry.policy_mode === "trained_policy" || entry.policy_name === "trained_policy"
+          ? "trained_policy"
+          : currentReplaySelection.policyMode;
+    return {
+      checkpointEpisode: entry.checkpoint_episode,
+      trainerType: entry.trainer_type ?? currentReplaySelection.trainerType,
+      policyType: entry.policy_type ?? currentReplaySelection.policyType,
+      policyMode,
+    };
+  }
+
+  async function handleSaveScenario() {
+    const layoutSnapshot =
+      saveSnapshotSource === "initial"
+        ? scenarioReplay?.frames?.[0]?.snapshot ?? scenarioSnapshot
+        : scenarioCurrentFrame?.snapshot ?? scenarioReplay?.final_snapshot ?? scenarioSnapshot;
+    if (!layoutSnapshot) {
+      setError("Run a live or saved scenario first, then save its layout.");
+      return;
+    }
+    const name = window.prompt("Scenario name", `Hard case seed ${scenarioSeed}`);
+    if (!name?.trim()) {
+      return;
+    }
+    const description = window.prompt("Description (optional)", "") ?? "";
+    setError(null);
+    try {
+      await saveScenario({
+        name: name.trim(),
+        seed: scenarioSeed,
+        snapshot: layoutSnapshot,
+        sheep_personality_strength: scenarioPersonalityStrength,
+        description: description.trim(),
+        snapshot_source: saveSnapshotSource,
+      });
+      await refreshScenarioIndex();
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Unable to save scenario.");
+    }
+  }
+
+  async function handleEvaluateScenarios() {
+    if (!selectedScenarioId) {
+      setError("Select a saved scenario to evaluate.");
+      return;
+    }
+    setEvaluatingScenarios(true);
+    setError(null);
+    try {
+      const response = await evaluateScenario(selectedScenarioId, buildScenarioCheckpointRequest());
+      setScenarioIndex(response.index);
+      if (response.result.replay_path) {
+        const bundle = await loadReplay(response.result.replay_path);
+        setScenarioReplay(bundle);
+        setScenarioFrameIndex(0);
+        setScenarioRunState("running");
+      }
+    } catch (evalError) {
+      setError(evalError instanceof Error ? evalError.message : "Unable to evaluate scenario.");
+    } finally {
+      setEvaluatingScenarios(false);
+    }
+  }
+
+  async function handleRunSavedScenario() {
+    if (!selectedScenarioId) {
+      setError("Select a saved scenario.");
+      return;
+    }
+    setRunningScenario(true);
+    setError(null);
+    try {
+      const bundle = await replayScenario(selectedScenarioId, buildScenarioCheckpointRequest());
+      setScenarioReplay(bundle);
+      setScenarioFrameIndex(0);
+      setScenarioRunState("running");
+    } catch (runError) {
+      setError(runError instanceof Error ? runError.message : "Unable to replay the saved scenario.");
+    } finally {
+      setRunningScenario(false);
     }
   }
 
@@ -860,6 +1026,27 @@ export function App() {
                   onRestart={handleRestartScenarioPlayback}
                   onEndEpisode={handleEndScenarioEpisode}
                   disabled={loading}
+                />
+                <SavedScenariosPanel
+                  scenarioIndex={scenarioIndex}
+                  checkpoints={checkpointIndex?.checkpoints ?? []}
+                  latestCheckpointEpisode={latestCheckpointEpisode}
+                  bestCheckpointEpisode={bestCheckpointEpisode}
+                  checkpointMode={scenarioCheckpointMode}
+                  specificCheckpointEpisode={specificScenarioCheckpointEpisode}
+                  selectedScenarioId={selectedScenarioId}
+                  scenarioReplay={scenarioReplay}
+                  saveSnapshotSource={saveSnapshotSource}
+                  running={runningScenario || evaluatingScenarios}
+                  disabled={loading}
+                  onCheckpointModeChange={setScenarioCheckpointMode}
+                  onSpecificCheckpointChange={setSpecificScenarioCheckpointEpisode}
+                  onSelectScenario={setSelectedScenarioId}
+                  onSaveSnapshotSourceChange={setSaveSnapshotSource}
+                  onSaveFromReplay={handleSaveScenario}
+                  onEvaluate={handleEvaluateScenarios}
+                  onRunScenario={handleRunSavedScenario}
+                  canSaveFromReplay={Boolean(scenarioSnapshot)}
                 />
               </>
             ) : (

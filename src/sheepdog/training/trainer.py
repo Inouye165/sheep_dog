@@ -18,6 +18,7 @@ from sheepdog.checkpoints.store import CheckpointMetadata, CheckpointStore
 from sheepdog.config import LabConfig, TrainingConfig
 from sheepdog.environment import SheepdogEnvironment
 from sheepdog.evaluation.evaluator import EvaluationSummary, Evaluator
+from sheepdog.evaluation.scenario_evaluator import evaluate_checkpoint_on_scenarios
 from sheepdog.policies.trainable import PolicyWeights, TrainableLinearPolicy
 
 
@@ -473,6 +474,7 @@ class Trainer:
                     representative_replay_path,
                     checkpoint_path,
                 )
+                self._evaluate_saved_scenarios(best_policy, cumulative_episode)
 
                 emit(
                     {
@@ -676,3 +678,15 @@ class Trainer:
         )
         replay_target = web_export_dir / "latest-replay.json"
         _atomic_write_text(replay_target, replay_path.read_text(encoding="utf-8"))
+
+    def _evaluate_saved_scenarios(self, policy: TrainableLinearPolicy, checkpoint_episode: int) -> None:
+        """Run saved hard-case scenarios when any exist (does not affect global best)."""
+
+        try:
+            evaluate_checkpoint_on_scenarios(
+                self.config,
+                policy,
+                checkpoint_episode,
+            )
+        except (OSError, ValueError, RuntimeError):
+            pass  # Scenario eval is optional; formal eval remains authoritative

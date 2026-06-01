@@ -14,6 +14,12 @@ from pathlib import Path
 from typing import Any
 
 from sheepdog.checkpoints.store import CheckpointMetadata
+from sheepdog.evaluation.scenario_evaluator import (
+    evaluate_scenario,
+    refresh_scenario_exports,
+    resolve_checkpoint_episode,
+)
+from sheepdog.evaluation.scenarios import ScenarioStore, scenario_from_snapshot
 from sheepdog.config import (
     EnvironmentConfig,
     InstinctRewardConfig,
@@ -502,6 +508,22 @@ def _load_playable_policy(
     )
 
 
+def _parse_scenario_action_path(path: str) -> tuple[str, str] | None:
+    """Return ``(scenario_id, action)`` for ``/api/scenarios/{id}/evaluate|replay``."""
+
+    prefix = "/api/scenarios/"
+    if not path.startswith(prefix):
+        return None
+    rest = path[len(prefix) :].split("?")[0].strip("/")
+    parts = rest.split("/")
+    if len(parts) != 2:
+        return None
+    scenario_id, action = parts
+    if action not in {"evaluate", "replay"}:
+        return None
+    return scenario_id, action
+
+
 def _replay_payload(result: Any) -> dict[str, Any]:
     """Convert an environment run result to the web replay schema."""
 
@@ -885,6 +907,176 @@ class TrainingManager:
         replay_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return payload
 
+    def _lab_config(self) -> LabConfig:
+        output_root = Path(LabConfig().training.output_dir)
+        user_params = _read_user_hyperparams(output_root)
+        return _apply_user_hyperparams(LabConfig(), user_params)
+
+    def _resolve_scenario_checkpoint(
+        self,
+        config: LabConfig,
+        payload: dict[str, Any],
+        *,
+        scenario_id: str | None = None,
+    ) -> int:
+        mode = str(payload.get("checkpoint_mode", "latest"))
+        explicit = payload.get("checkpoint_episode")
+        explicit_episode = None if explicit is None else int(explicit)
+        if mode not in {"latest", "global_best", "scenario_best", "specific"}:
+            mode = "latest"
+        return resolve_checkpoint_episode(
+            mode,  # type: ignore[arg-type]
+            output_root=Path(config.training.output_dir),
+            scenario_id=scenario_id,
+            explicit_episode=explicit_episode,
+            web_export_dir=Path(config.training.web_export_dir),
+        )
+
+    def list_scenarios(self) -> dict[str, Any]:
+        config = self._lab_config()
+        return refresh_scenario_exports(config)
+
+    def save_scenario(self, payload: dict[str, Any]) -> dict[str, Any]:
+        config = self._lab_config()
+        store = ScenarioStore(Path(config.training.output_dir) / "scenarios")
+        name = str(payload.get("name", "Unnamed scenario")).strip() or "Unnamed scenario"
+        seed = int(payload.get("seed", 11))
+        snapshot = payload.get("snapshot")
+        if not isinstance(snapshot, dict):
+            raise ValueError("snapshot is required")
+        description = str(payload.get("description", payload.get("notes", "")))
+        scenario = scenario_from_snapshot(
+            name=name,
+            seed=seed,
+            snapshot=snapshot,
+            sheep_personality_strength=float(
+                payload.get(
+                    "sheep_personality_strength",
+                    config.environment.sheep_personality_strength,
+                )
+            ),
+            sheep_personality_seed_offset=int(
+                payload.get(
+                    "sheep_personality_seed_offset",
+                    config.environment.sheep_personality_seed_offset,
+                )
+            ),
+            seed_offset=int(payload.get("seed_offset", config.environment.seed_offset)),
+            description=description,
+        )
+        store.save(scenario)
+        refresh_scenario_exports(config)
+        return scenario.to_dict()
+
+    def evaluate_scenario_by_id(
+        self,
+        scenario_id: str,
+        payload: dict[str, Any],
+        *,
+        policy_mode: PolicyMode | None = None,
+        effective_config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Evaluate one checkpoint on one saved scenario and record metrics."""
+
+        config = self._lab_config()
+        store = ScenarioStore(Path(config.training.output_dir) / "scenarios")
+        scenario = store.get(scenario_id)
+        if scenario is None:
+            raise FileNotFoundError(f"Scenario {scenario_id} not found")
+        checkpoint_episode = self._resolve_scenario_checkpoint(
+            config,
+            payload,
+            scenario_id=scenario_id,
+        )
+        selection = _resolve_replay_selection(
+            config,
+            checkpoint_episode=checkpoint_episode,
+            policy_mode=policy_mode or payload.get("policy_mode"),
+            effective_config=effective_config or payload.get("effective_config"),
+        )
+        policy = _load_playable_policy(
+            selection.config,
+            checkpoint_episode=checkpoint_episode,
+            policy_mode=selection.policy_mode,
+        )
+        result = evaluate_scenario(
+            selection.config,
+            policy,
+            scenario,
+            checkpoint_episode,
+            record_result=True,
+        )
+        bundle = refresh_scenario_exports(config)
+        return {
+            "checkpoint_episode": checkpoint_episode,
+            "result": result.to_dict(),
+            "index": bundle,
+        }
+
+    def replay_scenario_by_id(
+        self,
+        scenario_id: str,
+        payload: dict[str, Any],
+        *,
+        policy_mode: PolicyMode | None = None,
+        effective_config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Run one checkpoint on a saved scenario and return replay JSON (no metric recording)."""
+
+        config = self._lab_config()
+        store = ScenarioStore(Path(config.training.output_dir) / "scenarios")
+        scenario = store.get(scenario_id)
+        if scenario is None:
+            raise FileNotFoundError(f"Scenario {scenario_id} not found")
+        checkpoint_episode = self._resolve_scenario_checkpoint(
+            config,
+            payload,
+            scenario_id=scenario_id,
+        )
+        selection = _resolve_replay_selection(
+            config,
+            checkpoint_episode=checkpoint_episode,
+            policy_mode=policy_mode or payload.get("policy_mode"),
+            effective_config=effective_config or payload.get("effective_config"),
+        )
+        policy = _load_playable_policy(
+            selection.config,
+            checkpoint_episode=checkpoint_episode,
+            policy_mode=selection.policy_mode,
+        )
+        from sheepdog.evaluation.scenario_evaluator import config_for_scenario
+
+        run_config = config_for_scenario(selection.config, scenario)
+        initial = run_config.environment
+        result = SheepdogEnvironment(run_config).run_policy_on_scenario(
+            policy,
+            scenario,
+            capture_replay=True,
+        )
+        replay_payload = _replay_payload(result)
+        replay_payload.update(
+            {
+                "scenario_id": scenario.id,
+                "scenario_name": scenario.name,
+                "trainer_type": selection.trainer_type,
+                "policy_type": selection.policy_type,
+                "policy_mode": selection.policy_mode,
+                "replay_mode": selection.replay_mode,
+                "checkpoint_episode": checkpoint_episode,
+                "total_training_episodes": selection.total_training_episodes,
+                "environment": {
+                    "dogs": initial.dogs,
+                    "sheep": initial.sheep,
+                    "width": initial.width,
+                    "height": initial.height,
+                    "sheep_personality_strength": initial.sheep_personality_strength,
+                    "curriculum_stage": run_config.rewards.instincts.curriculum_stage,
+                    "enable_instinct_rewards": run_config.rewards.instincts.enable_instinct_rewards,
+                },
+            }
+        )
+        return replay_payload
+
     def _run_training(
         self,
         requested_episodes: int,
@@ -1134,6 +1326,9 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         if self.path == "/api/config/hyperparams":
             self._json_response(self.manager.get_hyperparams())
             return
+        if self.path == "/api/scenarios" or self.path.startswith("/api/scenarios?"):
+            self._json_response(self.manager.list_scenarios())
+            return
         self._json_response({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:  # noqa: N802  # pylint: disable=invalid-name
@@ -1156,6 +1351,48 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             return
 
         payload = self._read_json()
+        scenario_action = _parse_scenario_action_path(self.path)
+        if scenario_action is not None:
+            scenario_id, action = scenario_action
+            policy_mode = payload.get("policy_mode")
+            effective_config = payload.get("effective_config")
+            try:
+                if action == "evaluate":
+                    result = self.manager.evaluate_scenario_by_id(
+                        scenario_id,
+                        payload,
+                        policy_mode=policy_mode,
+                        effective_config=(
+                            effective_config if isinstance(effective_config, dict) else None
+                        ),
+                    )
+                else:
+                    result = self.manager.replay_scenario_by_id(
+                        scenario_id,
+                        payload,
+                        policy_mode=policy_mode,
+                        effective_config=(
+                            effective_config if isinstance(effective_config, dict) else None
+                        ),
+                    )
+            except FileNotFoundError as exc:
+                self._json_response({"error": str(exc)}, status=HTTPStatus.NOT_FOUND)
+                return
+            except ValueError as exc:
+                self._json_response({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            self._json_response(result)
+            return
+
+        if self.path == "/api/scenarios":
+            try:
+                scenario = self.manager.save_scenario(payload)
+            except (ValueError, TypeError) as exc:
+                self._json_response({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            self._json_response(scenario)
+            return
+
         if self.path == "/api/replay/run":
             seed = int(payload.get("seed", 11))
             checkpoint_episode = payload.get("checkpoint_episode")

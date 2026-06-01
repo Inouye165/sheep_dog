@@ -680,6 +680,64 @@ select {
   line-height: 1.4;
 }
 
+.saved-scenarios-panel__title {
+  margin: 0 0 0.35rem;
+  font-size: 1rem;
+}
+
+.saved-scenarios-panel__table-wrap {
+  overflow-x: auto;
+  margin-top: 0.75rem;
+}
+
+.saved-scenarios-panel__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+.saved-scenarios-panel__table th,
+.saved-scenarios-panel__table td {
+  padding: 0.35rem 0.5rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.08));
+  vertical-align: top;
+}
+
+.saved-scenarios-panel__name {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+  text-decoration: underline;
+  font: inherit;
+}
+
+.saved-scenarios-panel__row--selected td {
+  background: rgba(96, 165, 250, 0.08);
+}
+
+.saved-scenarios-panel__fieldset {
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.08));
+  border-radius: 6px;
+  margin: 0.5rem 0;
+  padding: 0.5rem 0.75rem;
+}
+
+.saved-scenarios-panel__fieldset legend {
+  font-size: 0.82rem;
+  padding: 0 0.25rem;
+}
+
+.saved-scenarios-panel__desc {
+  display: block;
+  font-size: 0.75rem;
+  opacity: 0.75;
+  margin-top: 0.15rem;
+}
+
 .scenario-panel__policy strong {
   color: var(--text);
   font-weight: 600;
