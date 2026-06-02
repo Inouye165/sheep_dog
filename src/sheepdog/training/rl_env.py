@@ -11,6 +11,7 @@ from gymnasium import spaces
 
 from sheepdog.config import LabConfig
 from sheepdog.environment import ACTION_ORDER, SheepdogEnvironment
+from sheepdog.training.scenario_sampler import ScenarioSampler
 
 
 class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
@@ -46,6 +47,11 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
         self._pending_actions: list[str] = []
         self._current_dog_index = 0
         self._latest_seed = config.training.train_seed
+        # Scenario sampler for mixing difficult training scenarios
+        self._scenario_sampler = ScenarioSampler(
+            config.training,
+            config.environment,
+        )
 
     def reset(
         self,
@@ -59,7 +65,20 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
         self._latest_seed = int(seed)
         self._pending_actions = []
         self._current_dog_index = 0
-        self._environment.reset(seed=self._latest_seed)
+
+        # Use scenario sampler if scenario training is enabled
+        if self.config.training.scenario_training_enabled:
+            selection = self._scenario_sampler.sample(self._episode_counter)
+            if selection.scenario is not None:
+                # Use predefined scenario
+                self._environment.reset_from_scenario(selection.scenario)
+            else:
+                # Use normal random reset
+                self._environment.reset(seed=self._latest_seed)
+        else:
+            # Scenario training disabled: use normal random reset
+            self._environment.reset(seed=self._latest_seed)
+
         observation = self._current_observation()
         return observation, self._info()
 
@@ -129,3 +148,9 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
         seed = self.config.training.train_seed + self._episode_counter
         self._episode_counter += 1
         return int(seed)
+
+    def get_scenario_usage_summary(self) -> dict[str, Any]:
+        """Return scenario usage statistics for observability."""
+        if not self.config.training.scenario_training_enabled:
+            return {"scenario_training_enabled": False}
+        return self._scenario_sampler.get_usage_summary()

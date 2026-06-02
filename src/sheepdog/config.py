@@ -157,6 +157,17 @@ class TrainingConfig:
     invalid_action_masking: bool = True
     output_dir: str = "artifacts"
     web_export_dir: str = "web/public/generated"
+    # Scenario-based training: enable to mix difficult starting scenarios
+    # with normal random starts for robustness training.
+    scenario_training_enabled: bool = False
+    scenario_mix: dict[str, float] = field(
+        default_factory=lambda: {
+            "random": 0.50,
+            "scattered_sheep": 0.20,
+            "split_flock": 0.15,
+            "corner_huddle": 0.15,
+        }
+    )
 
 
 @dataclass(frozen=True, slots=True)

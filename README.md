@@ -300,6 +300,76 @@ Recommended progression:
 
 Realism note: the denser logical grid is doing the main visual work here. Instead of letting dogs jump 2-3 cells in one update, the simulation now advances with smaller logical steps and more total steps. That improves wall interactions, makes flanking space available, and gives the UI enough intermediate positions for smoother playback.
 
+## Scenario-Based Training
+
+Scenario-based training mixes difficult starting situations with normal random starts to make the trained policy more robust by regularly exposing it to edge-case recovery situations during training.
+
+### Why It Helps
+
+Normal random starts can leave the policy undertrained on difficult recovery scenarios like:
+- **Scattered sheep**: Sheep spread widely across the field, requiring dispersed flock recovery
+- **Split flock**: Sheep separated into two groups, requiring regrouping behavior
+- **Corner huddle**: Sheep clustered in a corner away from the pen, requiring extraction and movement
+
+By regularly training on these edge cases, the policy learns robust recovery strategies that generalize better to unseen situations.
+
+### How to Enable
+
+Add scenario training configuration to your training config:
+
+```json
+{
+  "training": {
+    "scenario_training_enabled": true,
+    "scenario_mix": {
+      "random": 0.50,
+      "scattered_sheep": 0.20,
+      "split_flock": 0.15,
+      "corner_huddle": 0.15
+    }
+  }
+}
+```
+
+The `scenario_mix` weights determine the probability of each scenario type at episode reset. Weights must sum to 1.0.
+
+### Important Warning
+
+**Always mix scenario training with random starts.** Do not set the random weight to 0.0. Training exclusively on difficult scenarios can cause overfitting to those specific patterns and degrade performance on normal situations. A mix of 50% random with 50% difficult scenarios is a good starting point.
+
+### Reproducibility
+
+Scenario selection uses the existing RNG/seed system. Two training runs with the same seed produce the same sequence of scenario choices, ensuring reproducible training.
+
+### Observability
+
+The scenario sampler tracks usage statistics. After training, you can query the scenario usage summary to see how many episodes started from each scenario type. This helps verify that the configured mix is being applied correctly.
+
+### Evaluation
+
+You can evaluate a trained policy against each scenario type separately to identify performance differences:
+
+```python
+from sheepdog.training.scenario_evaluator import evaluate_policy_on_scenario_types
+
+results = evaluate_policy_on_scenario_types(
+    policy,
+    config,
+    evaluation_seeds=(11, 23, 37, 41, 53),
+    scenario_types=("random", "scattered_sheep", "split_flock", "corner_huddle"),
+)
+```
+
+This returns per-scenario-type metrics (success rate, average reward, steps, etc.) so you can see if the policy performs differently on edge cases compared with normal random starts.
+
+### Available Scenario Types
+
+- **random**: Normal randomized starting positions (default behavior)
+- **scattered_sheep**: Sheep spread widely across the field
+- **split_flock**: Sheep separated into two groups
+- **corner_huddle**: Sheep clustered in a corner away from the pen
+
+All scenarios use relative placement where possible to work with different grid sizes.
 
 ## UI
 
