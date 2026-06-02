@@ -679,14 +679,15 @@ class Trainer:
         replay_target = web_export_dir / "latest-replay.json"
         _atomic_write_text(replay_target, replay_path.read_text(encoding="utf-8"))
 
-    def _evaluate_saved_scenarios(self, policy: TrainableLinearPolicy, checkpoint_episode: int) -> None:
+    def _evaluate_saved_scenarios(
+        self, policy: TrainableLinearPolicy, checkpoint_episode: int
+    ) -> None:
         """Run saved hard-case scenarios when any exist (does not affect global best)."""
 
-        try:
+        import contextlib
+        with contextlib.suppress(OSError, ValueError, RuntimeError):
             evaluate_checkpoint_on_scenarios(
                 self.config,
                 policy,
                 checkpoint_episode,
             )
-        except (OSError, ValueError, RuntimeError):
-            pass  # Scenario eval is optional; formal eval remains authoritative

@@ -354,7 +354,10 @@ class RewardComputer:
             return 0.0, 0.0
 
         farthest_progress = 0.0
-        if fp_scale != 0.0 and inputs.previous_farthest_distance != inputs.current_farthest_distance:
+        if (
+            fp_scale != 0.0
+            and inputs.previous_farthest_distance != inputs.current_farthest_distance
+        ):
             delta = inputs.previous_farthest_distance - inputs.current_farthest_distance
             farthest_progress = delta * fp_scale
 

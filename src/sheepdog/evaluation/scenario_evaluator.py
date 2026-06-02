@@ -127,7 +127,8 @@ class ScenarioResultsStore:
         return [
             run
             for run in runs
-            if isinstance(run, dict) and int(run.get("checkpoint_episode", -1)) == checkpoint_episode
+            if isinstance(run, dict)
+            and int(run.get("checkpoint_episode", -1)) == checkpoint_episode
         ]
 
     def export_index(
@@ -404,7 +405,10 @@ def resolve_global_best_checkpoint_episode(
     return resolve_latest_checkpoint_episode(output_root)
 
 
-def _is_strictly_better_checkpoint_entry(candidate: dict[str, Any], current: dict[str, Any]) -> bool:
+def _is_strictly_better_checkpoint_entry(
+    candidate: dict[str, Any],
+    current: dict[str, Any],
+) -> bool:
     c_stage = (candidate.get("reward_config") or {}).get("instincts", {}).get("curriculum_stage", 0)
     cur_stage = (current.get("reward_config") or {}).get("instincts", {}).get("curriculum_stage", 0)
     if c_stage > cur_stage:
@@ -478,7 +482,10 @@ def refresh_scenario_exports(base_config: LabConfig) -> dict[str, Any]:
     return bundle
 
 
-def export_scenario_index(base_config: LabConfig, latest_checkpoint_episode: int | None) -> dict[str, Any]:
+def export_scenario_index(
+    base_config: LabConfig,
+    latest_checkpoint_episode: int | None,
+) -> dict[str, Any]:
     """Refresh persisted scenario index files and return the bundle."""
 
     if latest_checkpoint_episode is None:

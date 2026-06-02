@@ -96,7 +96,9 @@ def evaluate_policy_on_scenario_types(
             average_distance_to_pen=fmean(
                 result.final_snapshot.average_distance_to_pen for result in episode_results
             ),
-            average_flock_spread=fmean(result.final_snapshot.flock_spread for result in episode_results),
+            average_flock_spread=fmean(
+                result.final_snapshot.flock_spread for result in episode_results
+            ),
             average_steps=fmean(result.stats.steps for result in episode_results),
         )
 

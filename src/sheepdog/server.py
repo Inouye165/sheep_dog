@@ -14,12 +14,6 @@ from pathlib import Path
 from typing import Any
 
 from sheepdog.checkpoints.store import CheckpointMetadata
-from sheepdog.evaluation.scenario_evaluator import (
-    evaluate_scenario,
-    refresh_scenario_exports,
-    resolve_checkpoint_episode,
-)
-from sheepdog.evaluation.scenarios import ScenarioStore, scenario_from_snapshot
 from sheepdog.config import (
     EnvironmentConfig,
     InstinctRewardConfig,
@@ -29,6 +23,12 @@ from sheepdog.config import (
 )
 from sheepdog.curriculum import apply_training_profile
 from sheepdog.environment import SheepdogEnvironment
+from sheepdog.evaluation.scenario_evaluator import (
+    evaluate_scenario,
+    refresh_scenario_exports,
+    resolve_checkpoint_episode,
+)
+from sheepdog.evaluation.scenarios import ScenarioStore, scenario_from_snapshot
 from sheepdog.policies.base import PolicyMode
 from sheepdog.policies.factory import load_playable_policy
 from sheepdog.policies.heuristic import InstinctOnlyPolicy

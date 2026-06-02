@@ -52,7 +52,9 @@ def test_get_scenario_builder():
 
 
 def test_create_scattered_sheep_scenario(tmp_path: Path):
+    import dataclasses
     config = make_config(tmp_path).environment
+    config = dataclasses.replace(config, sheep=4)
     scenario = create_scattered_sheep_scenario(seed=42, config=config)
 
     assert scenario.name == "scattered_sheep"
@@ -83,7 +85,7 @@ def test_create_split_flock_scenario(tmp_path: Path):
     sheep_positions = [(s.x, s.y) for s in scenario.sheep]
     # Calculate centroid
     centroid_x = sum(p[0] for p in sheep_positions) / len(sheep_positions)
-    centroid_y = sum(p[1] for p in sheep_positions) / len(sheep_positions)
+    sum(p[1] for p in sheep_positions) / len(sheep_positions)
 
     # Count sheep on each side of centroid
     left_count = sum(1 for x, _ in sheep_positions if x < centroid_x)
@@ -202,7 +204,9 @@ def test_scenario_sampler_enabled(tmp_path: Path):
     # All selections should have valid scenario types
     for selection in selections:
         assert selection.scenario_type in ["random", "scattered_sheep"]
-        assert selection.seed == config.training.train_seed + selection.seed - config.training.train_seed
+        assert selection.seed == (
+            config.training.train_seed + selection.seed - config.training.train_seed
+        )
 
     # Verify usage tracking
     counts = sampler.get_usage_counts()
