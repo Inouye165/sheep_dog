@@ -254,12 +254,100 @@ def create_normal_random_scenario(
     )
 
 
+def create_partial_pen_with_stray_scenario(
+    *,
+    seed: int,
+    config: EnvironmentConfig,
+) -> Scenario:
+    """Create a scenario with most sheep near the pen and 1–2 stray outliers.
+
+    Dogs are placed near the pen entrance, tempting them to guard already-close
+    sheep instead of fetching the distant stray.  This forces the policy to
+    learn to prioritise the worst-case sheep.
+    """
+    width = config.width
+    height = config.height
+    sheep_count = config.sheep
+    dog_count = config.dogs
+
+    rng = Random(seed + config.seed_offset)
+
+    pen_right = width - 1
+    pen_top = 1
+    margin = max(2, min(width, height) // 10)
+
+    # Number of strays: 1 if fewer than 4 sheep, else 2
+    stray_count = 1 if sheep_count < 4 else 2
+    near_count = sheep_count - stray_count
+
+    sheep: list[AgentLayout] = []
+
+    # Near-pen sheep: scatter them within ~20% of field width from the right edge
+    near_zone_x_min = max(margin, pen_right - max(3, width // 5))
+    near_zone_x_max = pen_right - margin
+    near_zone_y_min = max(margin, pen_top)
+    near_zone_y_max = min(height - margin - 1, pen_top + config.pen_height + margin * 2)
+
+    for i in range(near_count):
+        x = rng.randint(near_zone_x_min, near_zone_x_max)
+        y = rng.randint(near_zone_y_min, near_zone_y_max)
+        sheep.append(AgentLayout(index=i, x=x, y=y))
+
+    # Stray sheep: place in the far corner (bottom-left) from the pen
+    stray_zone_x_max = max(margin + 1, width // 5)
+    stray_zone_y_min = max(margin, height // 2)
+    stray_zone_y_max = height - margin - 1
+
+    for i in range(stray_count):
+        x = rng.randint(margin, stray_zone_x_max)
+        y = rng.randint(stray_zone_y_min, stray_zone_y_max)
+        sheep.append(AgentLayout(index=near_count + i, x=x, y=y))
+
+    # Dogs: place near pen entrance (just left of the opening)
+    dogs: list[AgentLayout] = []
+    pen_entrance_x = pen_right - config.pen_width - margin
+    pen_entrance_y = pen_top + config.pen_height // 2
+    for i in range(dog_count):
+        x = max(margin, pen_entrance_x - i * 2)
+        y = pen_entrance_y + rng.randint(-margin, margin)
+        y = max(margin, min(height - margin - 1, y))
+        dogs.append(AgentLayout(index=i, x=x, y=y))
+
+    pen = PenLayout(
+        origin_x=pen_right - config.pen_width,
+        origin_y=pen_top,
+        width=config.pen_width,
+        height=config.pen_height,
+        opening=config.pen_opening,
+    )
+
+    return Scenario(
+        id=f"partial_pen_with_stray_{seed}",
+        name="partial_pen_with_stray",
+        created_at="",
+        seed=seed,
+        width=width,
+        height=height,
+        dogs=tuple(dogs),
+        sheep=tuple(sheep),
+        pen=pen,
+        sheep_personality_strength=config.sheep_personality_strength,
+        sheep_personality_seed_offset=config.sheep_personality_seed_offset,
+        seed_offset=config.seed_offset,
+        description=(
+            f"Most sheep near pen, {stray_count} stray in far corner — "
+            "trains dogs to fetch outliers not guard the already-close flock"
+        ),
+    )
+
+
 # Scenario type registry
 SCENARIO_BUILDERS: dict[str, callable] = {
     "scattered_sheep": create_scattered_sheep_scenario,
     "split_flock": create_split_flock_scenario,
     "corner_huddle": create_corner_huddle_scenario,
     "normal_random": create_normal_random_scenario,
+    "partial_pen_with_stray": create_partial_pen_with_stray_scenario,
 }
 
 

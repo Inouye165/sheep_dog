@@ -22,7 +22,12 @@ from sheepdog.entities import (
     Point,
     SheepState,
 )
-from sheepdog.observations import DogObservation, RoleAwareObservationBuilder
+# from sheepdog.observations import DogObservation, RoleAwareObservationBuilder
+from sheepdog.observations import (
+    DogObservation,
+    EmergentObservationBuilder,
+    RoleAwareObservationBuilder,
+)
 from sheepdog.evaluation.scenarios import SavedScenario
 from sheepdog.policies.base import Action, Policy, PolicyMode
 from sheepdog.rewards import RewardBreakdown, RewardComputer, RewardInputs
@@ -150,6 +155,7 @@ class SheepdogEnvironment:
         self._fence_cells: frozenset[Point] = frozenset()
         self._previous_average_distance = 0.0
         self._previous_flock_spread = 0.0
+        self._previous_farthest_distance = 0.0
         self._no_progress_steps = 0
         self._reward_total = 0.0
         self._terminated = False
@@ -164,7 +170,17 @@ class SheepdogEnvironment:
             self.env_config.height,
             self.env_config,
         )
-        self._observation_builder = RoleAwareObservationBuilder()
+        if config is None:
+            obs_mode = "guided"
+        else:
+            training_config = getattr(config, "training", None)
+            obs_mode = getattr(training_config, "observation_mode", "guided")
+        self._observation_builder: RoleAwareObservationBuilder | EmergentObservationBuilder
+
+        if obs_mode == "emergent":
+            self._observation_builder = EmergentObservationBuilder()
+        else:
+            self._observation_builder = RoleAwareObservationBuilder()
         self._role_assignments: dict[int, RoleAssignment] = {}
         self._strategy_snapshot = StrategySnapshot(None, 0.0, 0.0, None, False, False)
         self._roles_prepared_step: int | None = None
@@ -265,6 +281,7 @@ class SheepdogEnvironment:
             self._record_position_history(sheep.recent_positions, sheep.position)
         self._previous_average_distance = self._average_distance_to_pen()
         self._previous_flock_spread = self._flock_spread()
+        self._previous_farthest_distance = self._farthest_distance_to_pen()
         return self.get_state_snapshot()
 
     def reset_from_scenario(self, scenario: object) -> EnvironmentSnapshot:
@@ -334,6 +351,7 @@ class SheepdogEnvironment:
             self._record_position_history(sheep.recent_positions, sheep.position)
         self._previous_average_distance = self._average_distance_to_pen()
         self._previous_flock_spread = self._flock_spread()
+        self._previous_farthest_distance = self._farthest_distance_to_pen()
         return self.get_state_snapshot()
 
     def _advance_position(
@@ -762,11 +780,14 @@ class SheepdogEnvironment:
                     else None
                 ),
                 target_position=(float(self._pen.center.x), float(self._pen.center.y)),
+                previous_farthest_distance=self._previous_farthest_distance,
+                current_farthest_distance=self._farthest_distance_to_pen(),
             )
         )
         self._reward_total += breakdown.total
         self._previous_average_distance = current_snapshot.average_distance_to_pen
         self._previous_flock_spread = current_snapshot.flock_spread
+        self._previous_farthest_distance = self._farthest_distance_to_pen()
 
         final_snapshot = self.get_state_snapshot()
 
@@ -792,7 +813,6 @@ class SheepdogEnvironment:
             collector_activations=self._collector_activations,
             blocker_activations=self._blocker_activations,
             sheep_split_events=self._sheep_split_events,
-            cumulative_gate_progress=self._cumulative_gate_progress,
             controlled_stall_steps=self._controlled_stall_steps,
             left_flank_occupancy_steps=self._left_flank_occupancy_steps,
             right_flank_occupancy_steps=self._right_flank_occupancy_steps,
@@ -1537,6 +1557,14 @@ class SheepdogEnvironment:
             return 0.0
         pen_center = self._pen.center
         return fmean(position.distance_to(pen_center) for position in unpenned)
+
+    def _farthest_distance_to_pen(self) -> float:
+        """Return the max distance any unpenned sheep is from the pen centre."""
+        unpenned = [sheep.position for sheep in self._sheep if not sheep.penned]
+        if not unpenned:
+            return 0.0
+        pen_center = self._pen.center
+        return max(position.distance_to(pen_center) for position in unpenned)
 
     def _nearest_unpenned_sheep(self, position: Point) -> SheepState | None:
         unpenned = [sheep for sheep in self._sheep if not sheep.penned]

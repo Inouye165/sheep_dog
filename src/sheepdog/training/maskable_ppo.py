@@ -99,6 +99,7 @@ class MaskablePPOTrainer(Trainer):
         # sprint multiplier are kept because they change training dynamics.
         return {
             "action_size": len(ACTION_ORDER),
+            "observation_mode": self.config.training.observation_mode,
             "rewards": asdict(self.config.rewards),
             "environment": {
                 "dog_speed": self.config.environment.dog_speed,

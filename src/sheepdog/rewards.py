@@ -39,6 +39,8 @@ class RewardBreakdown:
     overpressure_penalty: float = 0.0
     split_flock_penalty: float = 0.0
     total: float = 0.0
+    farthest_sheep_progress: float = 0.0
+    stray_ignore_penalty: float = 0.0
 
     def to_dict(self) -> dict[str, float]:
         """Serialize to a plain dict."""
@@ -81,6 +83,8 @@ class RewardInputs:
     flock_centroid: Position | None = None
     previous_flock_centroid: Position | None = None
     target_position: Position | None = None
+    previous_farthest_distance: float = 0.0
+    current_farthest_distance: float = 0.0
 
 
 def _distance(a: Position, b: Position) -> float:
@@ -199,6 +203,7 @@ class RewardComputer:
         terminal_success = self._config.terminal_success_reward if inputs.success else 0.0
         terminal_failure = -self._config.terminal_failure_penalty if inputs.timeout else 0.0
         instincts = self._compute_instincts(inputs)
+        farthest_sheep_progress, stray_ignore_penalty = self._compute_stray_terms(inputs)
         total = (
             progress_to_pen
             + sheep_penned
@@ -225,6 +230,7 @@ class RewardComputer:
             + instincts["overpressure_penalty"]
             + instincts["split_flock_penalty"]
         )
+        total += farthest_sheep_progress + stray_ignore_penalty
         return RewardBreakdown(
             progress_to_pen=progress_to_pen,
             sheep_penned=sheep_penned,
@@ -251,6 +257,8 @@ class RewardComputer:
             overpressure_penalty=instincts["overpressure_penalty"],
             split_flock_penalty=instincts["split_flock_penalty"],
             total=total,
+            farthest_sheep_progress=farthest_sheep_progress,
+            stray_ignore_penalty=stray_ignore_penalty,
         )
 
     def _compute_instincts(self, inputs: RewardInputs) -> dict[str, float]:
@@ -332,6 +340,31 @@ class RewardComputer:
             "overpressure_penalty": overpressure_penalty,
             "split_flock_penalty": split_flock_penalty,
         }
+
+    def _compute_stray_terms(self, inputs: RewardInputs) -> tuple[float, float]:
+        """Compute farthest-sheep progress and stray-ignore penalty.
+
+        Returns ``(farthest_sheep_progress, stray_ignore_penalty)``.  Both are
+        0.0 when the corresponding scale config is 0.0 (default), so existing
+        guided training is completely unaffected.
+        """
+        fp_scale = self._config.farthest_sheep_progress_scale
+        si_scale = self._config.stray_ignore_penalty_scale
+        if fp_scale == 0.0 and si_scale == 0.0:
+            return 0.0, 0.0
+
+        farthest_progress = 0.0
+        if fp_scale != 0.0 and inputs.previous_farthest_distance != inputs.current_farthest_distance:
+            delta = inputs.previous_farthest_distance - inputs.current_farthest_distance
+            farthest_progress = delta * fp_scale
+
+        stray_penalty = 0.0
+        if si_scale != 0.0 and inputs.current_farthest_distance > 0.0:
+            # Penalise each step that the farthest unpenned sheep remains far.
+            # Scale by the normalised distance so nearer strays cost less.
+            stray_penalty = -inputs.current_farthest_distance * si_scale
+
+        return farthest_progress, stray_penalty
 
     def _lane_crowding_penalty(self, inputs: RewardInputs) -> float:
         target = inputs.target_position
