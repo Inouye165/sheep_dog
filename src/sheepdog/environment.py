@@ -22,13 +22,14 @@ from sheepdog.entities import (
     Point,
     SheepState,
 )
+from sheepdog.evaluation.scenarios import SavedScenario
+
 # from sheepdog.observations import DogObservation, RoleAwareObservationBuilder
 from sheepdog.observations import (
     DogObservation,
     EmergentObservationBuilder,
     RoleAwareObservationBuilder,
 )
-from sheepdog.evaluation.scenarios import SavedScenario
 from sheepdog.policies.base import Action, Policy, PolicyMode
 from sheepdog.rewards import RewardBreakdown, RewardComputer, RewardInputs
 from sheepdog.team_strategy import RoleAssignment, StrategySnapshot, TeamStrategy
@@ -1037,7 +1038,7 @@ class SheepdogEnvironment:
                 if next_move == move:
                     break
                 move = next_move
-            if self._nearest_dog_distance(move, dog_positions) <= self.env_config.dog_vision:
+            if self._nearest_dog_distance(move, dog_positions) <= self.env_config.sheep_vision:
                 sheep.panic_steps = max(sheep.panic_steps, 2)
             next_positions.append(move)
             next_budgets.append(remaining_budget)
@@ -1072,14 +1073,27 @@ class SheepdogEnvironment:
     ) -> Point:
         personality = sheep.personality if sheep is not None else "obedient"
         strength = max(0.0, float(self.env_config.sheep_personality_strength))
+        
+        # Check if sheep should idle (no dog pressure, not panicked, near flock, away from wall)
+        nearest_dog_distance = self._nearest_dog_distance(position, dog_positions)
+        should_idle = (
+            panic_steps <= 0
+            and nearest_dog_distance > self.env_config.sheep_vision
+            and flock_center is not None
+            and position.distance_to(flock_center) <= self.env_config.flock_radius
+            and self._wall_margin(position) > 1.0
+        )
+        if should_idle and self._rng.random() < 0.7:
+            # 70% chance to idle when conditions are met
+            return position
+        
         vector_x = 0.0
         vector_y = 0.0
-        nearest_dog_distance = inf
         for dog_position in dog_positions:
             distance = max(1.0, position.distance_to(dog_position))
             nearest_dog_distance = min(nearest_dog_distance, distance)
-            if distance <= self.env_config.dog_vision:
-                weight = (self.env_config.dog_vision - distance + 1.0) / distance
+            if distance <= self.env_config.sheep_vision:
+                weight = (self.env_config.sheep_vision - distance + 1.0) / distance
                 # Bold sheep ignore distant dogs more readily, so the dog must
                 # close the gap (or bark) to apply meaningful pressure.
                 if personality == "bold" and strength > 0.0 and distance > 3.0:
@@ -1087,14 +1101,19 @@ class SheepdogEnvironment:
                 vector_x += (position.x - dog_position.x) * weight
                 vector_y += (position.y - dog_position.y) * weight
         if panic_steps <= 0 and flock_center is not None:
-            vector_x += (flock_center.x - position.x) * 0.35
-            vector_y += (flock_center.y - position.y) * 0.35
+            # Flock cohesion: only apply when dogs are nearby OR sheep is far from flock
+            # This prevents constant self-driving when no dogs are present
+            dogs_nearby = nearest_dog_distance <= self.env_config.sheep_vision
+            far_from_flock = position.distance_to(flock_center) > self.env_config.flock_radius
+            if dogs_nearby or far_from_flock:
+                vector_x += (flock_center.x - position.x) * 0.35
+                vector_y += (flock_center.y - position.y) * 0.35
         elif personality == "escapist" and strength > 0.0 and flock_center is not None:
             # When scared, an escapist sheep bolts away from the flock instead
             # of cohering with it.
             vector_x += (position.x - flock_center.x) * 0.35 * strength
             vector_y += (position.y - flock_center.y) * 0.35 * strength
-        if nearest_dog_distance <= self.env_config.dog_vision:
+        if nearest_dog_distance <= self.env_config.sheep_vision:
             vector_x *= 1.5
             vector_y *= 1.5
         vector_x += self._wall_avoidance(position, axis="x")
@@ -1200,7 +1219,7 @@ class SheepdogEnvironment:
         return (
             step_x * vector_x
             + step_y * vector_y
-            + min(dog_clearance, self.env_config.dog_vision * 2) * 0.35
+            + min(dog_clearance, self.env_config.sheep_vision * 2) * 0.35
             + self._wall_margin(candidate) * 0.1
             + self._rng.random() * 1e-6
         )

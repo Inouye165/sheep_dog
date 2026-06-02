@@ -23,6 +23,19 @@ Episodes end when all sheep are penned, the step limit is reached, or the no-pro
 - Sheep randomness is intentionally small and only used to break otherwise equivalent local options.
 - Deadlock handling watches for wall-pinned sheep, repeated two-position dog loops, and stalled progress, then increases the value of lateral/flank positioning relative to straight-line pressure.
 
+## Sheep Vision and Idle Behavior
+
+Sheep and dogs have separate vision ranges to prevent training pollution:
+
+- `dog_vision`: What dogs can observe (used for dog observations and scoring). Can be large during early PPO training to give dogs full-field awareness.
+- `sheep_vision`: How far sheep detect/react to dogs. This is the actual panic/flee trigger range for sheep. Dogs outside this range do not cause sheep to flee.
+
+Sheep idle/grazing behavior prevents self-penning:
+
+- When no dog is within `sheep_vision`, not panicked, near flock center, and not against a wall, sheep have a 70% chance to idle (wait) instead of moving.
+- Flock cohesion only applies when dogs are nearby OR when a sheep is far from the flock. This prevents sheep from continuously marching toward the flock center (and potentially into the pen) when no dogs are present.
+- This separation ensures dogs receive reward only for penning behavior they actually caused, not for accidental self-penning by sheep.
+
 ## Reward Design
 
 Reward is split into named components so it can be audited and tested:

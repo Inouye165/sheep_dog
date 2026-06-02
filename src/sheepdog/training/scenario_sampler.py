@@ -127,7 +127,7 @@ def validate_scenario_mix(scenario_mix: dict[str, float]) -> None:
         raise ValueError("scenario_mix must be a dictionary")
 
     valid_types = set(list_scenario_types()) | {"random"}
-    for key in scenario_mix.keys():
+    for key in scenario_mix:
         if key not in valid_types:
             raise ValueError(
                 f"Invalid scenario type in mix: {key}. "

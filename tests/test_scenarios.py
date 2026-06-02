@@ -14,7 +14,6 @@ from sheepdog.evaluation.scenario_evaluator import (
     evaluate_scenario,
     is_strictly_better_scenario_result,
     resolve_checkpoint_episode,
-    run_scenario,
 )
 from sheepdog.evaluation.scenarios import (
     AgentLayout,
@@ -165,17 +164,6 @@ def test_best_per_scenario_updates_only_when_improved(tmp_path: Path) -> None:
     assert best_after_first is not None
     assert best_after_first["checkpoint_episode"] == 1
 
-    worse = {
-        "scenario_id": scenario.id,
-        "checkpoint_episode": 2,
-        "success": False,
-        "sheep_penned": 0,
-        "steps": 999,
-        "timeout": True,
-        "stopped": False,
-        "reward_total": -50.0,
-        "replay_path": "/generated/replays/worse.json",
-    }
     results_store.record_run(
         type(first)(
             scenario_id=scenario.id,
@@ -196,7 +184,7 @@ def test_best_per_scenario_updates_only_when_improved(tmp_path: Path) -> None:
 
 
 def test_resolve_checkpoint_episode_latest_and_specific(tmp_path: Path) -> None:
-    config = make_config(tmp_path)
+    make_config(tmp_path)
     output_root = tmp_path
     summary = {
         "checkpoints": [
