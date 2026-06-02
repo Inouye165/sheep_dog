@@ -127,6 +127,8 @@ class RewardConfig:
     stalled_control_penalty: float = 0.45
     wrong_hold_penalty: float = 0.8
     instincts: InstinctRewardConfig = field(default_factory=InstinctRewardConfig)
+    farthest_sheep_progress_scale: float = 0.0
+    stray_ignore_penalty_scale: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +170,10 @@ class TrainingConfig:
             "corner_huddle": 0.15,
         }
     )
+    # Observation mode: "guided" (default) includes scripted role labels and
+    # strategy targets; "emergent" strips roles/targets so the model must learn
+    # herding purely from raw observations and reward signal.
+    observation_mode: str = "guided"
 
 
 @dataclass(frozen=True, slots=True)
