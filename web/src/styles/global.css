@@ -1,5 +1,7 @@
 :root {
   color-scheme: dark;
+  --sticky-top-offset: 0.6rem;
+  --tab-bar-sticky-height: 3.25rem;
   --bg: #08111b;
   --bg-elevated: rgba(10, 19, 31, 0.86);
   --panel: rgba(12, 24, 38, 0.9);
@@ -640,6 +642,10 @@ select {
   box-shadow: var(--shadow);
   margin-bottom: 0.75rem;
   max-width: 640px;
+  position: sticky;
+  top: var(--sticky-top-offset);
+  z-index: 30;
+  backdrop-filter: blur(8px);
 }
 
 .scenario-panel__intro {
@@ -1555,41 +1561,72 @@ select {
 /* ── Results panel (learning progression) ── */
 
 .results-panel {
+  --results-row-gap: 4px;
+  --results-rows-visible: 4;
+  --results-viewport-height: calc(100vh - 86px);
+  --results-row-height: calc((var(--results-viewport-height) - (var(--results-row-gap) * 3)) / var(--results-rows-visible));
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
+  gap: 4px;
 }
 
 .results-panel__header {
+  position: sticky;
+  top: calc(var(--sticky-top-offset) + var(--tab-bar-sticky-height) + 0.35rem);
+  z-index: 20;
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
-  gap: 1.5rem;
-  padding: 1.5rem 1.75rem;
-  background: var(--panel);
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px 6px;
+  background: rgba(9, 18, 30, 0.88);
   border: 1px solid var(--panel-border);
-  border-radius: 1rem;
-  box-shadow: var(--shadow);
+  border-radius: 0.75rem;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(8px);
+}
+
+.results-panel__meta {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.results-panel__meta .eyebrow {
+  font-size: 0.64rem;
+  letter-spacing: 0.12em;
 }
 
 .results-panel__description {
   color: var(--muted);
-  margin: 0.5rem 0 0;
-  font-size: 0.95rem;
+  margin: 0;
+  font-size: 8px;
 }
 
 .results-panel__controls {
   display: flex;
-  gap: 0.6rem;
+  gap: 4px;
   align-items: center;
+  margin-left: auto;
 }
 
 .results-panel__controls button {
   white-space: nowrap;
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 9px;
+  line-height: 1;
+  border-color: rgba(148, 163, 184, 0.24);
+  background: rgba(17, 31, 47, 0.92);
+  box-shadow: none;
 }
 
 .results-panel__controls select {
-  min-width: 100px;
+  min-width: 72px;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 9px;
+  background: rgba(17, 31, 47, 0.92);
 }
 
 .results-empty {
@@ -1614,76 +1651,181 @@ select {
 
 .results-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 0.75rem;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 4px;
+  height: 100%;
 }
 
-@media (min-width: 1200px) {
+.results-stage-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--results-row-gap);
+  height: var(--results-viewport-height);
+  max-height: var(--results-viewport-height);
+  overflow-y: auto;
+  overflow-x: hidden;
+  scroll-snap-type: y mandatory;
+  scroll-padding-top: 0.15rem;
+  scrollbar-gutter: stable;
+}
+
+.results-stage {
+  display: flex;
+  flex-direction: column;
+  min-height: var(--results-row-height);
+  max-height: var(--results-row-height);
+  flex: 0 0 var(--results-row-height);
+  scroll-snap-align: start;
+  scroll-snap-stop: always;
+}
+
+@media (max-width: 1400px) {
   .results-grid {
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1160px) {
+  .results-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 920px) {
+  .results-panel {
+    --results-viewport-height: auto;
+  }
+
+  .results-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .results-stage-list {
+    height: auto;
+    max-height: none;
+    overflow: visible;
+    scroll-snap-type: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .results-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 620px) {
+  .results-grid {
+    grid-template-columns: 1fr;
   }
 }
 
 .milestone-card {
   background: var(--panel);
   border: 1px solid var(--panel-border);
-  border-radius: 1rem;
-  box-shadow: var(--shadow);
+  border-radius: 6px;
+  box-shadow: 0 12px 26px rgba(0, 0, 0, 0.28);
   overflow: hidden;
   display: flex;
   flex-direction: column;
   animation: rise-in 320ms ease;
+  padding: 5px 7px 4px;
+  height: 100%;
+}
+
+.milestone-card--placeholder {
+  opacity: 0.78;
+  border-style: dashed;
 }
 
 .milestone-card__header {
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
-  gap: 1rem;
-  padding: 0.75rem 1rem;
-  border-bottom: 1px solid var(--panel-border);
-  background: rgba(8, 15, 25, 0.5);
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  margin-bottom: 4px;
 }
 
-.milestone-card__stage {
-  font-size: 0.8rem;
+.milestone-card__header-left {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.milestone-card__badge {
+  font-size: 9px;
+  line-height: 1;
+  padding: 1px 5px;
+  border-radius: 999px;
+  border: 1px solid transparent;
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.03em;
+}
+
+.milestone-card__badge--s1 {
+  color: #93c5fd;
+  background: rgba(59, 130, 246, 0.18);
+  border-color: rgba(59, 130, 246, 0.38);
+}
+
+.milestone-card__badge--s2 {
+  color: #86efac;
+  background: rgba(34, 197, 94, 0.18);
+  border-color: rgba(34, 197, 94, 0.38);
+}
+
+.milestone-card__badge--s3 {
+  color: #d8b4fe;
+  background: rgba(147, 51, 234, 0.18);
+  border-color: rgba(147, 51, 234, 0.38);
+}
+
+.milestone-card__badge--s4 {
+  color: #f9a8d4;
+  background: rgba(236, 72, 153, 0.18);
+  border-color: rgba(236, 72, 153, 0.38);
+}
+
+.milestone-card__badge--s5 {
+  color: #e9d5ff;
+  background: rgba(168, 85, 247, 0.18);
+  border-color: rgba(168, 85, 247, 0.38);
 }
 
 .milestone-card__title {
-  margin: 0.15rem 0 0;
-  font-size: 1.1rem;
-  font-weight: 600;
-  color: var(--text);
-}
-
-.milestone-card__stats {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-  align-items: flex-end;
-  text-align: right;
-}
-
-.milestone-stat {
-  font-size: 0.82rem;
-  color: var(--muted);
-  padding: 0.25rem 0.5rem;
-  border-radius: 0.4rem;
-  background: rgba(148, 163, 184, 0.08);
-}
-
-.milestone-stat--success {
-  color: var(--good);
-  background: rgba(74, 222, 128, 0.12);
+  margin: 0;
+  font-size: 11px;
   font-weight: 500;
+  color: var(--text);
+  line-height: 1.1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.milestone-card__success {
+  margin-left: auto;
+  font-size: 9px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.milestone-card__success--good {
+  color: #3fb950;
+}
+
+.milestone-card__success--bad {
+  color: #f85149;
 }
 
 .milestone-card__field {
   position: relative;
-  aspect-ratio: 4 / 3;
+  width: calc(100% - 2px);
+  min-width: 0;
+  margin: 0 1px;
+  border-radius: 4px;
   background: rgba(4, 8, 14, 0.7);
   overflow: hidden;
 }
@@ -1701,7 +1843,7 @@ select {
   place-content: center;
   height: 100%;
   color: var(--muted);
-  font-size: 0.9rem;
+  font-size: 8px;
 }
 
 .milestone-card__error {
@@ -1712,16 +1854,16 @@ select {
 
 .milestone-card__progress {
   display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  padding: 0.6rem 1rem;
-  background: rgba(8, 15, 25, 0.5);
-  border-top: 1px solid var(--panel-border);
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  padding: 2px 0 0;
+  margin-top: auto;
 }
 
 .milestone-card__progress-bar {
-  flex: 1;
-  height: 0.4rem;
+  width: 100%;
+  height: 3px;
   background: rgba(148, 163, 184, 0.15);
   border-radius: 999px;
   overflow: hidden;
@@ -1729,14 +1871,36 @@ select {
 
 .milestone-card__progress-fill {
   height: 100%;
-  background: linear-gradient(90deg, var(--accent), rgba(244, 197, 66, 0.7));
+  background: #ef4444;
   border-radius: 999px;
   transition: width 120ms linear;
 }
 
+.milestone-card__progress-fill--good {
+  background: #3fb950;
+}
+
+.milestone-card__progress-fill--warn {
+  background: #d29922;
+}
+
+.milestone-card__progress-fill--bad {
+  background: #f85149;
+}
+
+.milestone-card__progress-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
 .milestone-card__step {
-  font-size: 0.8rem;
+  font-size: 8px;
   color: var(--muted);
   white-space: nowrap;
+}
+
+.milestone-card__progress--placeholder {
+  justify-content: center;
 }
 
