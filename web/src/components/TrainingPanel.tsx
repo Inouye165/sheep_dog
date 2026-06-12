@@ -1,7 +1,5 @@
 import type { CheckpointEntry } from "../state/types";
 
-const MAX_STAGE = 5;
-
 const STAGE_DESCRIPTIONS: Record<number, string> = {
   0: "Full problem — 3 dogs, 6 sheep, 80×60 grid",
   1: "1 dog · 1 sheep · 60×45 grid",
@@ -9,6 +7,9 @@ const STAGE_DESCRIPTIONS: Record<number, string> = {
   3: "1 dog · 3 sheep · 120×84 grid",
   4: "2 dogs · 5 sheep · 132×90 grid",
   5: "3 dogs · 6 sheep · 144×96 grid",
+  6: "3 dogs · 6 sheep · group of 5 + 1 stray",
+  7: "3 dogs · 6 sheep · group of 3 + 3 strays",
+  8: "3 dogs · 6 sheep · all sheep scattered",
 };
 
 /** Ideal episode count to run per curriculum stage before evaluating. */
@@ -19,6 +20,9 @@ const RECOMMENDED_EPISODES: Record<number, number> = {
   3: 150,
   4: 200,
   5: 300,
+  6: 400,
+  7: 500,
+  8: 600,
 };
 
 /** Success rate threshold above which promoting to the next stage is recommended. */
@@ -29,6 +33,7 @@ interface TrainingPanelProps {
   fastMode: boolean;
   enableInstincts: boolean;
   curriculumStage: number;
+  maxCurriculumStage: number;
   debugRewardBreakdown: boolean;
   running: boolean;
   clearing: boolean;
@@ -71,6 +76,7 @@ export function TrainingPanel({
   fastMode,
   enableInstincts,
   curriculumStage,
+  maxCurriculumStage,
   debugRewardBreakdown,
   running,
   clearing,
@@ -117,7 +123,7 @@ export function TrainingPanel({
     .filter(([, v]) => v > 0)
     .sort(([a], [b]) => Number(a) - Number(b));
   const busy = running || clearing;
-  const canPromote = curriculumStage < MAX_STAGE && !busy;
+  const canPromote = curriculumStage < maxCurriculumStage && !busy;
   const stageDesc = STAGE_DESCRIPTIONS[curriculumStage] ?? `Stage ${curriculumStage}`;
   const successPct = successRate !== null ? `${Math.round(successRate * 100)}%` : "—";
   const successGood = successRate !== null && successRate >= 0.5;
@@ -187,7 +193,7 @@ export function TrainingPanel({
           <button type="button" className="button-row__promote" onClick={onPromote}>
             Promote → Stage {curriculumStage + 1}
           </button>
-        ) : curriculumStage >= MAX_STAGE ? (
+        ) : curriculumStage >= maxCurriculumStage ? (
           <span className="pill pill--live">Max stage</span>
         ) : null}
       </div>
@@ -196,7 +202,7 @@ export function TrainingPanel({
         <div className="warning-box warning-box--success" role="status">
           ✓ {Math.round(successRate! * 100)}% success — ready to promote to Stage {curriculumStage + 1}
         </div>
-      ) : successRate !== null && successRate < PROMOTE_THRESHOLD && !running && curriculumStage < MAX_STAGE ? (
+      ) : successRate !== null && successRate < PROMOTE_THRESHOLD && !running && curriculumStage < maxCurriculumStage ? (
         <div className="warning-box" role="status">
           {Math.round(successRate * 100)}% success — train more before promoting
           (target ≥ {Math.round(PROMOTE_THRESHOLD * 100)}%)
@@ -438,7 +444,7 @@ export function TrainingPanel({
             <input
               type="number"
               min={0}
-              max={5}
+              max={8}
               value={curriculumStage}
               onChange={(event) => onCurriculumStageChange(Number(event.target.value) || 0)}
               disabled={busy}

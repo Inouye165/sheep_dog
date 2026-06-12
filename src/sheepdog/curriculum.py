@@ -42,6 +42,7 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         # that are completely stalled across almost the whole episode.
         "no_progress_window": 300,
         "no_progress_distance_delta": 0.15,
+        "curriculum_stage": 1,
     },
     2: {
         "dogs": 1,
@@ -56,6 +57,7 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "max_steps": 720,
         "no_progress_window": 110,
         "no_progress_distance_delta": 0.30,
+        "curriculum_stage": 2,
     },
     3: {
         "dogs": 1,
@@ -70,6 +72,7 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "no_progress_window": 120,
         # Slightly relaxed for the larger field — drives take longer.
         "no_progress_distance_delta": 0.25,
+        "curriculum_stage": 3,
     },
     4: {
         "dogs": 2,
@@ -83,6 +86,7 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "max_steps": 960,
         "no_progress_window": 135,
         "no_progress_distance_delta": 0.20,
+        "curriculum_stage": 4,
     },
     5: {
         "dogs": 3,
@@ -96,6 +100,49 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "max_steps": 1020,
         "no_progress_window": 150,
         "no_progress_distance_delta": 0.20,
+        "curriculum_stage": 5,
+    },
+    6: {
+        "dogs": 3,
+        "sheep": 6,
+        "width": 144,
+        "height": 96,
+        "pen_width": 15,
+        "pen_height": 15,
+        "dog_speed": 2,
+        "sheep_speed": 1,
+        "max_steps": 1020,
+        "no_progress_window": 150,
+        "no_progress_distance_delta": 0.20,
+        "curriculum_stage": 6,
+    },
+    7: {
+        "dogs": 3,
+        "sheep": 6,
+        "width": 144,
+        "height": 96,
+        "pen_width": 15,
+        "pen_height": 15,
+        "dog_speed": 2,
+        "sheep_speed": 1,
+        "max_steps": 1020,
+        "no_progress_window": 150,
+        "no_progress_distance_delta": 0.20,
+        "curriculum_stage": 7,
+    },
+    8: {
+        "dogs": 3,
+        "sheep": 6,
+        "width": 144,
+        "height": 96,
+        "pen_width": 15,
+        "pen_height": 15,
+        "dog_speed": 2,
+        "sheep_speed": 1,
+        "max_steps": 1020,
+        "no_progress_window": 150,
+        "no_progress_distance_delta": 0.20,
+        "curriculum_stage": 8,
     },
 }
 
@@ -175,5 +222,8 @@ def stage_summary(stage: int) -> str:
         3: "One dog, three sheep, larger dense field for longer drive/fetch paths.",
         4: "Two dogs, medium flock, dense-grid pressure control and role spacing.",
         5: "Three dogs, larger flock, dense-grid multi-dog cooperation.",
+        6: "Three dogs, six sheep: group of 5 and 1 alone randomly placed.",
+        7: "Three dogs, six sheep: group of 3 and 3 randomly placed alone.",
+        8: "Three dogs, six sheep: all sheep randomly placed.",
     }
     return descriptions.get(stage, "Custom stage.")

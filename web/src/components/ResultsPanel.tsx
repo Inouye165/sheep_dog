@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { CheckpointEntry, CheckpointIndex, ReplayBundle, ReplaySnapshot } from "../state/types";
 import { loadReplay } from "../lib/api";
+import { exportResultsVideo, makeResultsVideoFileName } from "../lib/resultsVideo";
 
-const STAGE_ORDER = [1, 2, 3, 4, 5] as const;
+
+const DEFAULT_STAGE_COUNT = 8;
 const REPLAYS_PER_STAGE = 5;
 const TARGET_WEIGHTS_BY_SLOT_COUNT: Record<number, number[]> = {
   5: [0.34, 0.17, 0.07],
@@ -26,7 +28,7 @@ interface StageMilestones {
   checkpoints: Array<CheckpointEntry | null>;
 }
 
-interface GridMilestone {
+export interface GridMilestone {
   stage: number;
   slot: number;
   checkpoint: CheckpointEntry | null;
@@ -189,11 +191,24 @@ function selectEvenMilestones(stageCheckpoints: CheckpointEntry[]): CheckpointEn
   return selected.slice(0, REPLAYS_PER_STAGE);
 }
 
-function buildStageMilestones(checkpoints: CheckpointEntry[]): StageMilestones[] {
+function resolveStageOrder(checkpoints: CheckpointEntry[]): number[] {
+  const maxStageInData = checkpoints.reduce((highest, checkpoint) => {
+    const stage = checkpoint.reward_config?.instincts?.curriculum_stage ?? 0;
+    return Math.max(highest, stage);
+  }, 0);
+  const stageCount = Math.max(DEFAULT_STAGE_COUNT, maxStageInData);
+  return Array.from({ length: stageCount }, (_, index) => index + 1);
+}
+
+function buildStageMilestones(
+  checkpoints: CheckpointEntry[],
+  stageOrder: number[],
+): StageMilestones[] {
   const byStage: Record<number, CheckpointEntry[]> = {};
+  const stageSet = new Set(stageOrder);
   for (const checkpoint of checkpoints) {
     const stage = checkpoint.reward_config?.instincts?.curriculum_stage ?? 0;
-    if (!STAGE_ORDER.includes(stage as (typeof STAGE_ORDER)[number])) {
+    if (!stageSet.has(stage)) {
       continue;
     }
     if (!byStage[stage]) {
@@ -202,7 +217,7 @@ function buildStageMilestones(checkpoints: CheckpointEntry[]): StageMilestones[]
     byStage[stage].push(checkpoint);
   }
 
-  return STAGE_ORDER.map((stage) => {
+  return stageOrder.map((stage) => {
     const stageCheckpoints = byStage[stage] ?? [];
     const selected = stageCheckpoints.some((checkpoint) => completionSteps(checkpoint) !== null)
       ? selectEvenMilestones(stageCheckpoints)
@@ -219,19 +234,19 @@ function buildStageMilestones(checkpoints: CheckpointEntry[]): StageMilestones[]
 }
 
 export function ResultsPanel({ checkpointIndex }: ResultsPanelProps) {
-  const stageMilestones = useMemo(
-    () => buildStageMilestones(checkpointIndex?.checkpoints ?? []),
+  const stageOrder = useMemo(
+    () => resolveStageOrder(checkpointIndex?.checkpoints ?? []),
     [checkpointIndex],
+  );
+  const stageMilestones = useMemo(
+    () => buildStageMilestones(checkpointIndex?.checkpoints ?? [], stageOrder),
+    [checkpointIndex, stageOrder],
   );
 
   const milestoneCheckpoints = useMemo(
     () => stageMilestones.flatMap((entry) => entry.checkpoints.filter((checkpoint): checkpoint is CheckpointEntry => checkpoint !== null)),
     [stageMilestones],
   );
-
-  const [replays, setReplays] = useState<Map<number, MilestoneReplay>>(new Map());
-  const [playing, setPlaying] = useState(false);
-  const [playbackSpeed, setPlaybackSpeed] = useState<"slow" | "normal" | "fast">("normal");
 
   const gridMilestones = useMemo(
     () =>
@@ -244,6 +259,47 @@ export function ResultsPanel({ checkpointIndex }: ResultsPanelProps) {
       ),
     [stageMilestones],
   );
+
+  const [replays, setReplays] = useState<Map<number, MilestoneReplay>>(new Map());
+  const [playing, setPlaying] = useState(false);
+  const [playbackSpeed, setPlaybackSpeed] = useState<"slow" | "normal" | "fast">("normal");
+  const [exportStatus, setExportStatus] = useState<"idle" | "exporting" | "success" | "error">("idle");
+  const [exportProgress, setExportProgress] = useState<number>(0);
+  const [exportError, setExportError] = useState<string | null>(null);
+
+  const isLoadingReplays = useMemo(() => {
+    if (milestoneCheckpoints.length === 0) return false;
+    if (replays.size === 0) return true;
+    return Array.from(replays.values()).some((replay) => replay.loading);
+  }, [milestoneCheckpoints, replays]);
+
+  const handleExportVideo = useCallback(async () => {
+    setExportStatus("exporting");
+    setExportProgress(0);
+    setExportError(null);
+    try {
+      const blob = await exportResultsVideo(gridMilestones, replays, playbackSpeed, (progress) => {
+        setExportProgress(progress);
+      });
+
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = makeResultsVideoFileName();
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      setExportStatus("success");
+      setTimeout(() => {
+        setExportStatus("idle");
+      }, 5000);
+    } catch (err) {
+      setExportStatus("error");
+      setExportError(err instanceof Error ? err.message : "Failed to export video");
+    }
+  }, [gridMilestones, replays, playbackSpeed, setExportProgress]);
 
   useEffect(() => {
     if (!milestoneCheckpoints.length) {
@@ -407,6 +463,16 @@ export function ResultsPanel({ checkpointIndex }: ResultsPanelProps) {
             {filledSlots}/{totalSlots} replay slots
             {placeholders > 0 ? ` • ${placeholders} placeholder${placeholders === 1 ? "" : "s"}` : ""}
           </p>
+          {exportStatus === "success" && (
+            <span style={{ fontSize: "9px", color: "#3fb950", marginLeft: "8px", fontWeight: "bold" }}>
+              Video export started
+            </span>
+          )}
+          {exportStatus === "error" && (
+            <span style={{ fontSize: "9px", color: "#f85149", marginLeft: "8px", fontWeight: "bold" }}>
+              {exportError}
+            </span>
+          )}
         </div>
         <div className="results-panel__controls">
           <button
@@ -427,8 +493,15 @@ export function ResultsPanel({ checkpointIndex }: ResultsPanelProps) {
             <option value="normal">Normal</option>
             <option value="fast">Fast</option>
           </select>
+          <button
+            onClick={handleExportVideo}
+            disabled={isLoadingReplays || exportStatus === "exporting"}
+          >
+            {exportStatus === "exporting" ? `Exporting (${Math.round(exportProgress * 100)}%)...` : "Export Video"}
+          </button>
         </div>
       </div>
+
 
       <div className="results-stage-list">
         <div className="results-grid">
@@ -476,15 +549,22 @@ export function ResultsPanel({ checkpointIndex }: ResultsPanelProps) {
 }
 
 function stageColor(stage: number): string {
-  const colors: Record<number, string> = {
+  const palette: Record<number, string> = {
     0: "#9ca3af",
     1: "#60a5fa",
     2: "#34d399",
     3: "#f59e0b",
     4: "#f472b6",
     5: "#c084fc",
+    6: "#fb7185",
+    7: "#22d3ee",
+    8: "#a3e635",
   };
-  return colors[stage] ?? "#9ca3af";
+  if (palette[stage]) {
+    return palette[stage];
+  }
+  const hue = ((stage - 1) * 47) % 360;
+  return `hsl(${hue} 74% 64%)`;
 }
 
 interface MilestoneCardProps {
@@ -516,6 +596,11 @@ function MilestoneCard({ checkpoint, snapshot, stage, loading, error, frameIndex
   const successPercent = Math.round(successRatio * 100);
   const successClassName = successPercent === 100 ? "milestone-card__success milestone-card__success--good" : successPercent === 0 ? "milestone-card__success milestone-card__success--bad" : "milestone-card__success";
   const progressTone = successPercent === 100 ? "milestone-card__progress-fill--good" : progressRatio > 0.6 ? "milestone-card__progress-fill--warn" : "milestone-card__progress-fill--bad";
+  const badgeStyle = {
+    color: stageAccent,
+    background: `color-mix(in srgb, ${stageAccent} 22%, transparent)`,
+    borderColor: `color-mix(in srgb, ${stageAccent} 40%, transparent)`,
+  };
 
   function fenceSegments(snap: ReplaySnapshot) {
     const { pen } = snap;
@@ -539,7 +624,7 @@ function MilestoneCard({ checkpoint, snapshot, stage, loading, error, frameIndex
     <div className="milestone-card" style={{ borderColor: stageAccent, boxShadow: `0 16px 34px color-mix(in srgb, ${stageAccent} 20%, transparent)` }}>
       <div className="milestone-card__header">
         <div className="milestone-card__header-left">
-          <span className={`milestone-card__badge milestone-card__badge--s${Math.min(Math.max(stage, 1), 5)}`}>
+          <span className="milestone-card__badge" style={badgeStyle}>
             S{stage}
           </span>
           <h3 className="milestone-card__title">Episode {checkpoint.checkpoint_episode}</h3>
@@ -626,6 +711,11 @@ interface PlaceholderCardProps {
 
 function PlaceholderCard({ stage, slot }: PlaceholderCardProps) {
   const stageAccent = stageColor(stage);
+  const badgeStyle = {
+    color: stageAccent,
+    background: `color-mix(in srgb, ${stageAccent} 22%, transparent)`,
+    borderColor: `color-mix(in srgb, ${stageAccent} 40%, transparent)`,
+  };
 
   return (
     <div
@@ -635,7 +725,7 @@ function PlaceholderCard({ stage, slot }: PlaceholderCardProps) {
     >
       <div className="milestone-card__header">
         <div className="milestone-card__header-left">
-          <span className={`milestone-card__badge milestone-card__badge--s${Math.min(Math.max(stage, 1), 5)}`}>S{stage}</span>
+          <span className="milestone-card__badge" style={badgeStyle}>S{stage}</span>
           <h3 className="milestone-card__title">Replay slot {slot}</h3>
         </div>
         <span className="milestone-card__success">--</span>

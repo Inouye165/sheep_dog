@@ -44,6 +44,7 @@ const APP_TABS: { id: ActiveTab; label: string }[] = [
 ];
 
 const CLEAR_TRAINING_MESSAGE = "Training cleared. Baseline replay restored";
+const DEFAULT_MAX_CURRICULUM_STAGE = 8;
 
 /** Mirrors RECOMMENDED_EPISODES in TrainingPanel — update both together. */
 const RECOMMENDED_EPISODES_BY_STAGE: Record<number, number> = {
@@ -53,7 +54,14 @@ const RECOMMENDED_EPISODES_BY_STAGE: Record<number, number> = {
   3: 150,
   4: 200,
   5: 300,
+  6: 400,
+  7: 500,
+  8: 600,
 };
+
+function recommendedEpisodesForStage(stage: number): number {
+  return RECOMMENDED_EPISODES_BY_STAGE[stage] ?? 100;
+}
 function resolveRunState(snapshot: ReplaySnapshot | null, currentState: RunState): RunState {
   if (!snapshot) {
     return currentState;
@@ -144,7 +152,7 @@ export function App() {
     }
     setTrainingCurriculumStage(reportedStage);
     localStorage.setItem("sheepdog_curriculum_stage", String(reportedStage));
-    setTrainingEpisodes(RECOMMENDED_EPISODES_BY_STAGE[reportedStage] ?? 50);
+    setTrainingEpisodes(recommendedEpisodesForStage(reportedStage));
   }, []);
 
   const selectedCheckpoint = useMemo(() => {
@@ -159,6 +167,11 @@ export function App() {
   const playbackDelay = playbackFastMode ? 24 : 220;
   const scenarioPlaybackDelay = scenarioFastMode ? 24 : 220;
   const trainingRunning = trainingStatus?.running ?? false;
+  const maxCurriculumStage = Math.max(
+    trainingStatus?.max_curriculum_stage ?? 0,
+    trainingCurriculumStage,
+    DEFAULT_MAX_CURRICULUM_STAGE,
+  );
 
   // When training completes, lock the stage chip to the stage that was actually
   // trained and preset episodes to the recommended count for that stage.  Only
@@ -631,9 +644,12 @@ export function App() {
     // tail which may have lower formal success rate.
     setPromoteFromEpisode(bestStageFormalEntry?.checkpoint_episode ?? null);
     setTrainingCurriculumStage((prev) => {
-      const next = prev >= 5 ? 1 : prev + 1;
+      const next = Math.min(prev + 1, maxCurriculumStage);
+      if (next === prev) {
+        return prev;
+      }
       localStorage.setItem("sheepdog_curriculum_stage", String(next));
-      setTrainingEpisodes(RECOMMENDED_EPISODES_BY_STAGE[next] ?? 100);
+      setTrainingEpisodes(recommendedEpisodesForStage(next));
       return next;
     });
   }
@@ -672,7 +688,9 @@ export function App() {
       setTrainingStatus(status);
       setTrainingCurriculumStage(1);
       localStorage.setItem("sheepdog_curriculum_stage", "1");
-      setTrainingEpisodes(RECOMMENDED_EPISODES_BY_STAGE[1] ?? 50);      setPromoteFromEpisode(null);      applyCheckpointIndex(index);
+      setTrainingEpisodes(recommendedEpisodesForStage(1));
+      setPromoteFromEpisode(null);
+      applyCheckpointIndex(index);
       const latestCheckpoint = index?.checkpoints[index.checkpoints.length - 1] ?? null;
       const seed = latestCheckpoint?.records[0]?.seed ?? null;
       if (latestCheckpoint && seed !== null) {
@@ -964,6 +982,7 @@ export function App() {
                 fastMode={trainingFastMode}
                 enableInstincts={effectiveEnableInstincts}
                 curriculumStage={effectiveCurriculumStage}
+                maxCurriculumStage={maxCurriculumStage}
                 debugRewardBreakdown={effectiveDebugRewardBreakdown}
                 running={trainingStatus?.running ?? false}
                 clearing={clearingTraining}

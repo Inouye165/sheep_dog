@@ -863,28 +863,85 @@ class SheepdogEnvironment:
             )
         return dogs
 
+    def _random_sheep_spawn_center(
+        self,
+        occupied: set[Point],
+        avoid_points: list[Point] | None = None,
+        min_distance: float = 15.0,
+    ) -> Point:
+        current_min_distance = min_distance
+        for _ in range(3):
+            for _ in range(50):
+                x = self._rng.randint(4, self.env_config.width - 5)
+                y = self._rng.randint(4, self.env_config.height - 5)
+                pt = Point(x, y)
+                if self._pen.contains(pt) or pt in self._fence_cells:
+                    continue
+                if (
+                    x >= self.env_config.width - self.env_config.pen_width - 2
+                    and y <= self.env_config.pen_height + 2
+                ):
+                    continue
+                if y >= self.env_config.height - 4:
+                    continue
+                if avoid_points:
+                    if any(pt.distance_to(ap) < current_min_distance for ap in avoid_points):
+                        continue
+                return pt
+            current_min_distance *= 0.5
+
+        for _ in range(100):
+            x = self._rng.randint(4, self.env_config.width - 5)
+            y = self._rng.randint(4, self.env_config.height - 5)
+            pt = Point(x, y)
+            if not self._pen.contains(pt) and pt not in self._fence_cells:
+                return pt
+        return Point(self.env_config.width // 2, self.env_config.height // 2)
+
     def _initial_sheep(self) -> list[SheepState]:
         sheep: list[SheepState] = []
-        base_x = self.env_config.width // 3
-        base_y = self.env_config.height // 2
         occupied = {dog.position for dog in self._dogs}
         assign_personalities = self.env_config.sheep_personality_strength > 0.0
-        # Dedicated personality RNG, independent of the env RNG that drives
-        # positions/jitter. This lets ``sheep_personality_seed_offset`` reshuffle
-        # the lineup for the same eval seed without disturbing physics.
         personality_rng = Random(
             self._seed
             + self.env_config.seed_offset
             + self.env_config.sheep_personality_seed_offset
             + 9973
         )
-        for index in range(self.env_config.sheep):
+
+        stage = self.env_config.curriculum_stage
+
+        if stage == 6:
+            # One group of 5 and 1 alone randomly placed
+            center_5 = self._random_sheep_spawn_center(occupied)
+            center_1 = self._random_sheep_spawn_center(occupied, avoid_points=[center_5], min_distance=15.0)
+
+            for index in range(5):
+                position = self._sample_unique_position(
+                    preferred_x=center_5.x,
+                    preferred_y=center_5.y,
+                    occupied=occupied,
+                    jitter_x=2,
+                    jitter_y=2,
+                )
+                occupied.add(position)
+                personality = (
+                    personality_rng.choice(SHEEP_PERSONALITIES) if assign_personalities else "obedient"
+                )
+                sheep.append(
+                    SheepState(
+                        index=index,
+                        position=position,
+                        personality=personality,
+                    )
+                )
+
             position = self._sample_unique_position(
-                preferred_x=base_x,
-                preferred_y=base_y,
+                preferred_x=center_1.x,
+                preferred_y=center_1.y,
                 occupied=occupied,
-                jitter_x=2,
-                jitter_y=2,
+                jitter_x=0,
+                jitter_y=0,
             )
             occupied.add(position)
             personality = (
@@ -892,11 +949,110 @@ class SheepdogEnvironment:
             )
             sheep.append(
                 SheepState(
-                    index=index,
+                    index=5,
                     position=position,
                     personality=personality,
                 )
             )
+
+        elif stage == 7:
+            # One group of 3 and 3 randomly placed alone
+            center_3 = self._random_sheep_spawn_center(occupied)
+            avoid_list = [center_3]
+            other_centers = []
+            for _ in range(3):
+                c = self._random_sheep_spawn_center(occupied, avoid_points=avoid_list, min_distance=15.0)
+                other_centers.append(c)
+                avoid_list.append(c)
+
+            for index in range(3):
+                position = self._sample_unique_position(
+                    preferred_x=center_3.x,
+                    preferred_y=center_3.y,
+                    occupied=occupied,
+                    jitter_x=2,
+                    jitter_y=2,
+                )
+                occupied.add(position)
+                personality = (
+                    personality_rng.choice(SHEEP_PERSONALITIES) if assign_personalities else "obedient"
+                )
+                sheep.append(
+                    SheepState(
+                        index=index,
+                        position=position,
+                        personality=personality,
+                    )
+                )
+
+            for i, center in enumerate(other_centers):
+                position = self._sample_unique_position(
+                    preferred_x=center.x,
+                    preferred_y=center.y,
+                    occupied=occupied,
+                    jitter_x=0,
+                    jitter_y=0,
+                )
+                occupied.add(position)
+                personality = (
+                    personality_rng.choice(SHEEP_PERSONALITIES) if assign_personalities else "obedient"
+                )
+                sheep.append(
+                    SheepState(
+                        index=3 + i,
+                        position=position,
+                        personality=personality,
+                    )
+                )
+
+        elif stage == 8:
+            # All sheep randomly placed
+            centers = []
+            for index in range(self.env_config.sheep):
+                c = self._random_sheep_spawn_center(occupied, avoid_points=centers, min_distance=10.0)
+                centers.append(c)
+                position = self._sample_unique_position(
+                    preferred_x=c.x,
+                    preferred_y=c.y,
+                    occupied=occupied,
+                    jitter_x=0,
+                    jitter_y=0,
+                )
+                occupied.add(position)
+                personality = (
+                    personality_rng.choice(SHEEP_PERSONALITIES) if assign_personalities else "obedient"
+                )
+                sheep.append(
+                    SheepState(
+                        index=index,
+                        position=position,
+                        personality=personality,
+                    )
+                )
+
+        else:
+            # Stage 0 to 5 default herding layout
+            base_x = self.env_config.width // 3
+            base_y = self.env_config.height // 2
+            for index in range(self.env_config.sheep):
+                position = self._sample_unique_position(
+                    preferred_x=base_x,
+                    preferred_y=base_y,
+                    occupied=occupied,
+                    jitter_x=2,
+                    jitter_y=2,
+                )
+                occupied.add(position)
+                personality = (
+                    personality_rng.choice(SHEEP_PERSONALITIES) if assign_personalities else "obedient"
+                )
+                sheep.append(
+                    SheepState(
+                        index=index,
+                        position=position,
+                        personality=personality,
+                    )
+                )
         return sheep
 
     def _sample_unique_position(

@@ -63,7 +63,7 @@ class TestPenFenceCells:
         for cell in interior:
             assert pen.contains(cell), f"Pen should contain {cell}"
 
-    @pytest.mark.parametrize("stage", [1, 2, 3, 4, 5])
+    @pytest.mark.parametrize("stage", [1, 2, 3, 4, 5, 6, 7, 8])
     def test_stage_pen_gate_is_clear(self, stage: int) -> None:
         """All curriculum stages should have a clear pen opening."""
         config = _stage_config(stage)
@@ -89,7 +89,7 @@ class TestPenFenceCells:
             f"{[(c.x, c.y) for c in gate_cells_in_fence[:5]]}"
         )
 
-    @pytest.mark.parametrize("stage", [1, 2, 3, 4, 5])
+    @pytest.mark.parametrize("stage", [1, 2, 3, 4, 5, 6, 7, 8])
     def test_stage_pen_interior_not_fenced(self, stage: int) -> None:
         """Pen interior must be free of fence cells for every curriculum stage."""
         config = _stage_config(stage)
@@ -214,7 +214,7 @@ class TestSuccessCondition:
             f"Interior cell {first_interior} should NOT be a fence cell"
         )
 
-    @pytest.mark.parametrize("stage", [1, 2, 3, 4, 5])
+    @pytest.mark.parametrize("stage", [1, 2, 3, 4, 5, 6, 7, 8])
     def test_pen_origin_is_at_right_edge(self, stage: int) -> None:
         """Pen origin x should equal width - pen_width for every curriculum stage."""
         config = _stage_config(stage)
