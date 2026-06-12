@@ -70,6 +70,8 @@ class EnvironmentConfig:
     # Set to 1 to require at least one herder still pushing the flock;
     # set to 0 to allow blocker even when it would be the only dog (legacy).
     blocker_min_remaining_dogs: int = 1
+    # Current active herding curriculum stage (0 disables overrides)
+    curriculum_stage: int = 0
 
 
 @dataclass(frozen=True, slots=True)

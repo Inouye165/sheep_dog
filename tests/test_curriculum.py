@@ -61,3 +61,48 @@ def test_unknown_stage_returns_original_config() -> None:
 def test_each_stage_has_a_summary() -> None:
     for stage in CURRICULUM_STAGES:
         assert stage_summary(stage)
+
+
+def test_stages_6_7_8_sheep_placements() -> None:
+    from sheepdog.environment import SheepdogEnvironment
+
+    # --- Stage 6 ---
+    config = apply_curriculum_stage(LabConfig(), 6)
+    env = SheepdogEnvironment(config)
+    env.reset(seed=42)
+    sheep_positions = [s.position for s in env.sheep]
+    assert len(sheep_positions) == 6
+    stray_found = False
+    for i, p1 in enumerate(sheep_positions):
+        others = [p2 for j, p2 in enumerate(sheep_positions) if j != i]
+        closest_dist = min(p1.distance_to(p2) for p2 in others)
+        max_group_dist = max(o1.distance_to(o2) for o1 in others for o2 in others)
+        if closest_dist >= 12.0 and max_group_dist <= 8.5:
+            stray_found = True
+            break
+    assert stray_found, "Stage 6 should have 1 group of 5 sheep and 1 stray far away"
+
+    # --- Stage 7 ---
+    config = apply_curriculum_stage(LabConfig(), 7)
+    env = SheepdogEnvironment(config)
+    env.reset(seed=42)
+    sheep_positions = [s.position for s in env.sheep]
+    assert len(sheep_positions) == 6
+    strays_count = 0
+    for i, p1 in enumerate(sheep_positions):
+        others = [p2 for j, p2 in enumerate(sheep_positions) if j != i]
+        closest_dist = min(p1.distance_to(p2) for p2 in others)
+        if closest_dist >= 8.0:
+            strays_count += 1
+    assert strays_count >= 3, f"Stage 7 should have 3 isolated strays, got {strays_count}"
+
+    # --- Stage 8 ---
+    config = apply_curriculum_stage(LabConfig(), 8)
+    env = SheepdogEnvironment(config)
+    env.reset(seed=42)
+    sheep_positions = [s.position for s in env.sheep]
+    assert len(sheep_positions) == 6
+    for i, p1 in enumerate(sheep_positions):
+        others = [p2 for j, p2 in enumerate(sheep_positions) if j != i]
+        closest_dist = min(p1.distance_to(p2) for p2 in others)
+        assert closest_dist >= 8.0, f"Stage 8 sheep should be spaced out, but closest is {closest_dist}"

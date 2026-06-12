@@ -144,6 +144,8 @@ export interface TrainingStatus {
   allow_instinct_target_awareness?: boolean;
   handler_target_enabled?: boolean;
   debug_reward_breakdown: boolean;
+  available_curriculum_stages?: number[];
+  max_curriculum_stage?: number;
   curriculum_stage: number;
   requested_episodes: number;
   completed_episodes: number;

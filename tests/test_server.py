@@ -426,3 +426,41 @@ def test_initial_status_prefers_saved_stage_over_history_max(tmp_path: Path) -> 
 
     assert status["curriculum_stage"] == 2
     assert status["stage_history"] == {"2": 50, "5": 300}
+
+
+def test_training_manager_error_handling_on_setup_failure(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    generated = tmp_path / "web" / "public" / "generated"
+    artifacts.mkdir(parents=True)
+    generated.mkdir(parents=True)
+
+    manager = TrainingManager()
+
+    config = LabConfig(
+        training=TrainingConfig(
+            output_dir=str(artifacts),
+            web_export_dir=str(generated),
+        )
+    )
+
+    class TestConfig:
+        def __new__(cls):
+            return config
+
+    with (
+        patch("sheepdog.server.LabConfig", TestConfig),
+        patch("sheepdog.server._build_training_job_config", side_effect=ValueError("Simulated setup error")),
+    ):
+        manager.start(requested_episodes=10, fast_mode=True)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            snap = manager.snapshot()
+            if not snap["running"]:
+                break
+            time.sleep(0.05)
+        
+        snap = manager.snapshot()
+        assert not snap["running"]
+        assert snap["phase"] == "error"
+        assert "Simulated setup error" in str(snap["error"])
+
