@@ -7,9 +7,9 @@ const STAGE_DESCRIPTIONS: Record<number, string> = {
   3: "1 dog · 3 sheep · 120×84 grid",
   4: "2 dogs · 5 sheep · 132×90 grid",
   5: "3 dogs · 6 sheep · 144×96 grid",
-  6: "3 dogs · 6 sheep · group of 5 + 1 stray",
-  7: "3 dogs · 6 sheep · group of 3 + 3 strays",
-  8: "3 dogs · 6 sheep · all sheep scattered",
+  6: "3 dogs · 6 sheep · nearby stray recovery",
+  7: "3 dogs · 6 sheep · farther stray recovery",
+  8: "3 dogs · 6 sheep · split/scattered recovery",
 };
 
 /** Ideal episode count to run per curriculum stage before evaluating. */
@@ -444,7 +444,7 @@ export function TrainingPanel({
             <input
               type="number"
               min={0}
-              max={8}
+              max={maxCurriculumStage}
               value={curriculumStage}
               onChange={(event) => onCurriculumStageChange(Number(event.target.value) || 0)}
               disabled={busy}

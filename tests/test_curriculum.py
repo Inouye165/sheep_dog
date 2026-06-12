@@ -10,6 +10,7 @@ from sheepdog.curriculum import (
     available_stages,
     stage_summary,
 )
+from sheepdog.environment import SheepdogEnvironment
 
 
 def test_available_stages_are_sorted_and_non_empty() -> None:
@@ -63,9 +64,40 @@ def test_each_stage_has_a_summary() -> None:
         assert stage_summary(stage)
 
 
-def test_stages_6_7_8_sheep_placements() -> None:
-    from sheepdog.environment import SheepdogEnvironment
+def test_curriculum_includes_stages_6_7_8() -> None:
+    assert 6 in CURRICULUM_STAGES
+    assert 7 in CURRICULUM_STAGES
+    assert 8 in CURRICULUM_STAGES
 
+
+def test_stage_6_is_easier_no_progress_gate_than_stage_5() -> None:
+    stage_five = apply_curriculum_stage(LabConfig(), 5)
+    stage_six = apply_curriculum_stage(LabConfig(), 6)
+
+    assert stage_six.environment.no_progress_window > stage_five.environment.no_progress_window
+    assert (
+        stage_six.environment.no_progress_distance_delta
+        < stage_five.environment.no_progress_distance_delta
+    )
+
+
+def test_stage_6_enables_collection_reward_shaping() -> None:
+    stage_five = apply_curriculum_stage(LabConfig(), 5)
+    stage_six = apply_curriculum_stage(LabConfig(), 6)
+
+    assert (
+        stage_six.rewards.farthest_sheep_progress_scale
+        > stage_five.rewards.farthest_sheep_progress_scale
+    )
+    assert (
+        stage_six.rewards.stray_ignore_penalty_scale
+        > stage_five.rewards.stray_ignore_penalty_scale
+    )
+    assert stage_six.rewards.flock_cohesion_scale > stage_five.rewards.flock_cohesion_scale
+    assert stage_six.rewards.scatter_penalty_scale > stage_five.rewards.scatter_penalty_scale
+
+
+def test_stages_6_7_8_sheep_placements() -> None:
     # --- Stage 6 ---
     config = apply_curriculum_stage(LabConfig(), 6)
     env = SheepdogEnvironment(config)
@@ -77,10 +109,13 @@ def test_stages_6_7_8_sheep_placements() -> None:
         others = [p2 for j, p2 in enumerate(sheep_positions) if j != i]
         closest_dist = min(p1.distance_to(p2) for p2 in others)
         max_group_dist = max(o1.distance_to(o2) for o1 in others for o2 in others)
-        if closest_dist >= 12.0 and max_group_dist <= 8.5:
+        group_center_x = sum(p.x for p in others) / len(others)
+        group_center_y = sum(p.y for p in others) / len(others)
+        center_dist = ((p1.x - group_center_x) ** 2 + (p1.y - group_center_y) ** 2) ** 0.5
+        if closest_dist >= 12.0 and max_group_dist <= 8.5 and 12.0 <= center_dist <= 24.0:
             stray_found = True
             break
-    assert stray_found, "Stage 6 should have 1 group of 5 sheep and 1 stray far away"
+    assert stray_found, "Stage 6 should have one nearby stray separated from a compact group"
 
     # --- Stage 7 ---
     config = apply_curriculum_stage(LabConfig(), 7)
@@ -92,9 +127,9 @@ def test_stages_6_7_8_sheep_placements() -> None:
     for i, p1 in enumerate(sheep_positions):
         others = [p2 for j, p2 in enumerate(sheep_positions) if j != i]
         closest_dist = min(p1.distance_to(p2) for p2 in others)
-        if closest_dist >= 8.0:
+        if closest_dist >= 18.0:
             strays_count += 1
-    assert strays_count >= 3, f"Stage 7 should have 3 isolated strays, got {strays_count}"
+    assert strays_count >= 2, f"Stage 7 should have farther stray sheep, got {strays_count}"
 
     # --- Stage 8 ---
     config = apply_curriculum_stage(LabConfig(), 8)
@@ -102,7 +137,10 @@ def test_stages_6_7_8_sheep_placements() -> None:
     env.reset(seed=42)
     sheep_positions = [s.position for s in env.sheep]
     assert len(sheep_positions) == 6
+    close_neighbors = 0
     for i, p1 in enumerate(sheep_positions):
         others = [p2 for j, p2 in enumerate(sheep_positions) if j != i]
         closest_dist = min(p1.distance_to(p2) for p2 in others)
-        assert closest_dist >= 8.0, f"Stage 8 sheep should be spaced out, but closest is {closest_dist}"
+        if closest_dist <= 6.0:
+            close_neighbors += 1
+    assert close_neighbors >= 2, "Stage 8 should include a compact subgroup for split recovery"

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 Action = Literal[
     "up",
@@ -15,6 +15,7 @@ Action = Literal[
     "sprint_right",
     "wait",
 ]
+
 PolicyMode = Literal[
     "random_untrained",
     "random_policy",
@@ -25,14 +26,24 @@ PolicyMode = Literal[
     # Hierarchical: scripted shepherd + neural dogs (Phase A+)
     "shepherd_neural_dogs",
 ]
+
 PolicyType = Literal["linear", "neural"]
-TrainerType = Literal["hill_climb", "maskable_ppo", "hierarchical_maskable_ppo"]
+
+TrainerType = Literal[
+    "hill_climb",
+    "maskable_ppo",
+    "hierarchical_maskable_ppo",
+]
 
 
 class Policy(Protocol):
     """Shared policy contract for all dog controllers."""
 
-    name: str
+    @property
+    def name(self) -> str:
+        """Human-readable policy name."""
+        raise NotImplementedError
 
-    def select_actions(self, environment: object) -> list[Action]:
+    def select_actions(self, environment: Any) -> list[Action]:
         """Return one action per dog."""
+        raise NotImplementedError

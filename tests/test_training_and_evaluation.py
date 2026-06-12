@@ -164,6 +164,7 @@ def test_build_training_job_config_applies_fast_mode_and_curriculum() -> None:
     assert config.training.episodes == 3
     assert config.training.trainer_type == "maskable_ppo"
     assert config.training.policy_type == "neural"
+    assert config.policy.policy_mode == "neural_policy"
     assert config.training.evaluation_seeds == (11,)
     assert config.training.candidate_evaluation_seeds == TrainingConfig().candidate_evaluation_seeds
     assert config.training.candidate_pool_size == TrainingConfig().candidate_pool_size

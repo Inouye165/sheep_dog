@@ -1,9 +1,9 @@
 """Curriculum stages for incremental herding training.
 
 Stages start simple (one dog, one sheep, nearby pen) and become harder so
-training does not need to discover everything from scratch. Stages tweak
-``EnvironmentConfig`` only; they do not change the reward formula. Combine
-with ``InstinctRewardConfig.enable_instinct_rewards`` for shaped training.
+training does not need to discover everything from scratch. Stages primarily
+adjust ``EnvironmentConfig`` and may apply targeted reward overrides for
+advanced split-flock recovery stages.
 
 Extension point: this module deliberately exposes ``CURRICULUM_STAGES`` and
 ``apply_curriculum_stage`` so a future handler/command system can add stages
@@ -111,9 +111,9 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "pen_height": 15,
         "dog_speed": 2,
         "sheep_speed": 1,
-        "max_steps": 1020,
-        "no_progress_window": 150,
-        "no_progress_distance_delta": 0.20,
+        "max_steps": 1200,
+        "no_progress_window": 300,
+        "no_progress_distance_delta": 0.10,
         "curriculum_stage": 6,
     },
     7: {
@@ -125,9 +125,9 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "pen_height": 15,
         "dog_speed": 2,
         "sheep_speed": 1,
-        "max_steps": 1020,
-        "no_progress_window": 150,
-        "no_progress_distance_delta": 0.20,
+        "max_steps": 1400,
+        "no_progress_window": 420,
+        "no_progress_distance_delta": 0.12,
         "curriculum_stage": 7,
     },
     8: {
@@ -139,10 +139,45 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "pen_height": 15,
         "dog_speed": 2,
         "sheep_speed": 1,
-        "max_steps": 1020,
-        "no_progress_window": 150,
-        "no_progress_distance_delta": 0.20,
+        "max_steps": 1500,
+        "no_progress_window": 500,
+        "no_progress_distance_delta": 0.15,
         "curriculum_stage": 8,
+    },
+}
+
+# Stage-specific reward shaping for separated-sheep recovery.  Stages 1-5
+# intentionally keep default rewards for backward compatibility.
+CURRICULUM_REWARD_OVERRIDES: dict[int, dict[str, object]] = {
+    6: {
+        "time_penalty": 0.025,
+        "no_progress_penalty": 0.04,
+        "flock_cohesion_scale": 0.60,
+        "scatter_penalty_scale": 0.35,
+        "farthest_sheep_progress_scale": 0.75,
+        "stray_ignore_penalty_scale": 0.0075,
+        "sheep_penned_reward": 10.0,
+        "terminal_success_reward": 80.0,
+    },
+    7: {
+        "time_penalty": 0.03,
+        "no_progress_penalty": 0.045,
+        "flock_cohesion_scale": 0.55,
+        "scatter_penalty_scale": 0.40,
+        "farthest_sheep_progress_scale": 0.65,
+        "stray_ignore_penalty_scale": 0.008,
+        "sheep_penned_reward": 10.0,
+        "terminal_success_reward": 75.0,
+    },
+    8: {
+        "time_penalty": 0.03,
+        "no_progress_penalty": 0.05,
+        "flock_cohesion_scale": 0.50,
+        "scatter_penalty_scale": 0.45,
+        "farthest_sheep_progress_scale": 0.60,
+        "stray_ignore_penalty_scale": 0.009,
+        "sheep_penned_reward": 10.0,
+        "terminal_success_reward": 70.0,
     },
 }
 
@@ -210,6 +245,10 @@ def apply_curriculum_stage(config: LabConfig, stage: int) -> LabConfig:
     if not overrides:
         return config
     new_environment = replace(config.environment, **overrides)
+    reward_overrides = CURRICULUM_REWARD_OVERRIDES.get(stage)
+    if reward_overrides:
+        new_rewards = replace(config.rewards, **reward_overrides)
+        return replace(config, environment=new_environment, rewards=new_rewards)
     return replace(config, environment=new_environment)
 
 
@@ -222,8 +261,8 @@ def stage_summary(stage: int) -> str:
         3: "One dog, three sheep, larger dense field for longer drive/fetch paths.",
         4: "Two dogs, medium flock, dense-grid pressure control and role spacing.",
         5: "Three dogs, larger flock, dense-grid multi-dog cooperation.",
-        6: "Three dogs, six sheep: group of 5 and 1 alone randomly placed.",
-        7: "Three dogs, six sheep: group of 3 and 3 randomly placed alone.",
-        8: "Three dogs, six sheep: all sheep randomly placed.",
+        6: "Three dogs, six sheep: nearby stray recovery (group of 5 + 1 stray).",
+        7: "Three dogs, six sheep: farther stray recovery (group of 4 + 2 strays).",
+        8: "Three dogs, six sheep: split/scattered recovery.",
     }
     return descriptions.get(stage, "Custom stage.")

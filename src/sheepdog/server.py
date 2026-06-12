@@ -494,7 +494,11 @@ def _build_training_job_config(
         batch_size=config.training.batch_size,
         value_coef=config.training.value_coef,
     )
-    job_config = replace(config, training=training_config)
+    job_config = replace(
+        config,
+        training=training_config,
+        policy=replace(config.policy, policy_mode="neural_policy"),
+    )
     return apply_training_profile(
         job_config,
         enable_instinct_rewards=enable_instinct_rewards,
@@ -541,8 +545,8 @@ def _replay_payload(result: Any) -> dict[str, Any]:
         "seed": result.seed,
         "policy_name": result.policy_name,
         "final_snapshot": result.final_snapshot.to_dict(),
-        "stats": asdict(result.stats),
-        "frames": [frame.to_dict() for frame in result.replay],
+"stats": asdict(result.stats, dict_factory=dict),
+"frames": [frame.to_dict() for frame in result.replay],
     }
 
 

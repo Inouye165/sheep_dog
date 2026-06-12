@@ -114,6 +114,51 @@ def test_episode_stops_when_no_progress_occurs() -> None:
     assert snapshot.timeout is False
 
 
+def test_stage_6_counts_flock_spread_reduction_as_progress() -> None:
+    config = make_config(curriculum_stage=6, no_progress_distance_delta=0.2)
+    environment = SheepdogEnvironment(config)
+
+    progress = environment._progress_made_for_no_progress(
+        newly_penned=0,
+        average_distance_delta=0.0,
+        flock_spread_delta=0.10,
+        farthest_to_flock_center_delta=0.0,
+        farthest_to_pen_delta=0.0,
+    )
+
+    assert progress is True
+
+
+def test_stage_6_counts_farthest_sheep_progress_as_progress() -> None:
+    config = make_config(curriculum_stage=6, no_progress_distance_delta=0.2)
+    environment = SheepdogEnvironment(config)
+
+    progress = environment._progress_made_for_no_progress(
+        newly_penned=0,
+        average_distance_delta=0.0,
+        flock_spread_delta=0.0,
+        farthest_to_flock_center_delta=0.11,
+        farthest_to_pen_delta=0.0,
+    )
+
+    assert progress is True
+
+
+def test_pre_stage_6_ignores_spread_only_progress_signal() -> None:
+    config = make_config(curriculum_stage=5, no_progress_distance_delta=0.2)
+    environment = SheepdogEnvironment(config)
+
+    progress = environment._progress_made_for_no_progress(
+        newly_penned=0,
+        average_distance_delta=0.0,
+        flock_spread_delta=0.08,
+        farthest_to_flock_center_delta=0.11,
+        farthest_to_pen_delta=0.11,
+    )
+
+    assert progress is False
+
+
 def test_action_mask_disallows_useless_wait_when_movement_exists() -> None:
     # Heuristic modes must preserve the wait-scoring threshold gate.
     config = make_config()
@@ -804,18 +849,18 @@ def test_sheep_use_sheep_vision_not_dog_vision_for_detection() -> None:
     config = make_config(dog_vision=50, sheep_vision=8, dogs=1, sheep=1)
     environment = SheepdogEnvironment(config)
     environment.reset(seed=42)
-    
+
     sheep = environment.sheep[0]
     dog = environment.dogs[0]
-    
+
     # Place dog outside sheep_vision but inside dog_vision
     sheep.position = sheep.position.__class__(20, 20)
     # 10 units away, > sheep_vision(8), < dog_vision(50)
     dog.position = dog.position.__class__(30, 20)
-    
+
     # Sheep should not panic/flee since dog is outside sheep_vision
     environment.step(["wait"])
-    
+
     # Sheep should not have moved significantly
     # (may have small random movement due to flock cohesion).
     # With the fix, sheep should mostly stay still when dog is outside sheep_vision.
@@ -827,18 +872,18 @@ def test_sheep_stay_mostly_still_when_dogs_far_away() -> None:
     config = make_config(dog_vision=50, sheep_vision=12, dogs=1, sheep=3)
     environment = SheepdogEnvironment(config)
     environment.reset(seed=43)
-    
+
     # Place dogs far away from all sheep
     environment.dogs[0].position = environment.dogs[0].position.__class__(5, 5)
     for sheep in environment.sheep:
         sheep.position = sheep.position.__class__(50, 30)
-    
+
     initial_positions = [(s.position.x, s.position.y) for s in environment.sheep]
-    
+
     # Run several steps with dogs waiting
     for _ in range(10):
         environment.step(["wait"])
-    
+
     # Sheep should not have moved significantly across the field
     final_positions = [(s.position.x, s.position.y) for s in environment.sheep]
     total_movement = sum(
@@ -856,22 +901,22 @@ def test_sheep_do_not_self_pen_with_frozen_dogs() -> None:
     environment = SheepdogEnvironment(config)
     snapshot = environment.reset(seed=44)
     pen = snapshot.pen
-    
+
     # Place dogs far from pen
     environment.dogs[0].position = environment.dogs[0].position.__class__(10, 10)
-    
+
     # Place sheep near but not in pen
     for i, sheep in enumerate(environment.sheep):
         sheep.position = sheep.position.__class__(pen.origin.x - 15, pen.origin.y + i)
-    
+
     initial_penned = sum(1 for s in environment.sheep if s.penned)
-    
+
     # Run simulation with frozen dogs
     for _ in range(30):
         environment.step(["wait"])
-    
+
     final_penned = sum(1 for s in environment.sheep if s.penned)
-    
+
     # Sheep should not have entered the pen without dog pressure
     assert final_penned == initial_penned, "Sheep should not self-pen without dog pressure"
 
@@ -881,19 +926,19 @@ def test_sheep_move_when_dogs_within_sheep_vision() -> None:
     config = make_config(dog_vision=50, sheep_vision=12, dogs=1, sheep=1, sheep_speed=1.0)
     environment = SheepdogEnvironment(config)
     environment.reset(seed=45)
-    
+
     sheep = environment.sheep[0]
     dog = environment.dogs[0]
-    
+
     # Place dog within sheep_vision
     sheep.position = sheep.position.__class__(20, 20)
     dog.position = dog.position.__class__(15, 20)  # 5 units away, < sheep_vision(12)
-    
+
     before = sheep.position
     environment.step(["wait"])
-    
+
     after = environment.sheep[0].position
-    
+
     # Sheep should have moved away from the dog (or at least not toward it)
     # With the flee vector, sheep should move right (increase x) to escape
     assert after.x >= before.x, "Sheep should not move toward dog within sheep_vision"

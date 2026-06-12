@@ -458,7 +458,18 @@ export function DiagnosticsPanel({
     [checkpointIndex?.checkpoints],
   );
 
-  const plateauInfo = useMemo(() => detectPlateau(checkpoints), [checkpoints]);
+  const stageScopedCheckpoints = useMemo(
+    () =>
+      checkpoints.filter(
+        (c) => (c.reward_config?.instincts?.curriculum_stage ?? 0) === effectiveCurriculumStage,
+      ),
+    [checkpoints, effectiveCurriculumStage],
+  );
+
+  const plateauInfo = useMemo(
+    () => detectPlateau(stageScopedCheckpoints),
+    [stageScopedCheckpoints],
+  );
 
   const [viewWindow, setViewWindow] = useState<ViewWindow>("stage");
 
