@@ -8,7 +8,7 @@ from sheepdog.policies.base import Action, PolicyMode
 class _ScoredPolicy:
     """Select the highest-scoring legal action for each dog."""
 
-    name: PolicyMode
+    name: str
 
     def __init__(self, policy_mode: PolicyMode) -> None:
         self.name = policy_mode

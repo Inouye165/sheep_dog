@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass, replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from sheepdog.checkpoints.store import CheckpointMetadata
 from sheepdog.config import (
@@ -22,14 +22,16 @@ from sheepdog.config import (
     TrainingConfig,
 )
 from sheepdog.curriculum import apply_training_profile
+from sheepdog.curriculum import available_stages
 from sheepdog.environment import SheepdogEnvironment
 from sheepdog.evaluation.scenario_evaluator import (
+    config_for_scenario,
     evaluate_scenario,
     refresh_scenario_exports,
     resolve_checkpoint_episode,
 )
 from sheepdog.evaluation.scenarios import ScenarioStore, scenario_from_snapshot
-from sheepdog.policies.base import PolicyMode
+from sheepdog.policies.base import Policy, PolicyMode
 from sheepdog.policies.factory import load_playable_policy
 from sheepdog.policies.heuristic import InstinctOnlyPolicy
 from sheepdog.training.factory import create_trainer
@@ -266,6 +268,14 @@ TRAINING_SETTINGS_FILENAME = "training-settings.json"
 HYPERPARAMS_FILENAME = "user-hyperparams.json"
 
 
+def _curriculum_stage_metadata() -> tuple[list[int], int]:
+    """Return available curriculum stages and the highest stage number."""
+
+    stages = [int(stage) for stage in available_stages()]
+    max_stage = max(stages) if stages else 0
+    return stages, max_stage
+
+
 def _default_user_hyperparams() -> dict[str, Any]:
     """Return the canonical default user-adjustable hyperparameter values."""
     config = LabConfig()
@@ -498,7 +508,7 @@ def _load_playable_policy(
     *,
     checkpoint_episode: int | None = None,
     policy_mode: PolicyMode | None = None,
-) -> object:
+) -> Policy:
     """Return a runnable policy for replay requests."""
 
     return load_playable_policy(
@@ -568,6 +578,7 @@ class TrainingManager:
     def _initial_status(self) -> dict[str, Any]:
         config = LabConfig()
         instincts = config.rewards.instincts
+        available_curriculum_stages, max_curriculum_stage = _curriculum_stage_metadata()
         trainer_type, policy_type, replay_mode = _policy_metadata(config.policy.policy_mode)
         output_root = Path(config.training.output_dir)
         stage_history = _read_stage_history(output_root)
@@ -587,6 +598,8 @@ class TrainingManager:
             "debug_reward_breakdown": persisted.get(
                 "debug_reward_breakdown", instincts.debug_reward_breakdown
             ),
+            "available_curriculum_stages": available_curriculum_stages,
+            "max_curriculum_stage": max_curriculum_stage,
             "curriculum_stage": persisted.get("curriculum_stage", instincts.curriculum_stage),
             "requested_episodes": 0,
             "completed_episodes": 0,
@@ -873,7 +886,7 @@ class TrainingManager:
         policy = _load_playable_policy(
             run_config,
             checkpoint_episode=selection.checkpoint_episode,
-            policy_mode=selection.policy_mode,
+            policy_mode=cast(PolicyMode, selection.policy_mode),
         )
         result = SheepdogEnvironment(run_config).run_policy(
             policy,
@@ -933,10 +946,12 @@ class TrainingManager:
         )
 
     def list_scenarios(self) -> dict[str, Any]:
+        """Return the current scenario index."""
         config = self._lab_config()
         return refresh_scenario_exports(config)
 
     def save_scenario(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Persist a new scenario from the web payload and return updated index."""
         config = self._lab_config()
         store = ScenarioStore(Path(config.training.output_dir) / "scenarios")
         name = str(payload.get("name", "Unnamed scenario")).strip() or "Unnamed scenario"
@@ -997,7 +1012,7 @@ class TrainingManager:
         policy = _load_playable_policy(
             selection.config,
             checkpoint_episode=checkpoint_episode,
-            policy_mode=selection.policy_mode,
+            policy_mode=cast(PolicyMode, selection.policy_mode),
         )
         result = evaluate_scenario(
             selection.config,
@@ -1042,10 +1057,8 @@ class TrainingManager:
         policy = _load_playable_policy(
             selection.config,
             checkpoint_episode=checkpoint_episode,
-            policy_mode=selection.policy_mode,
+            policy_mode=cast(PolicyMode, selection.policy_mode),
         )
-        from sheepdog.evaluation.scenario_evaluator import config_for_scenario
-
         run_config = config_for_scenario(selection.config, scenario)
         initial = run_config.environment
         result = SheepdogEnvironment(run_config).run_policy_on_scenario(
@@ -1087,75 +1100,75 @@ class TrainingManager:
         debug_reward_breakdown: bool | None = None,
         promote_from_checkpoint_episode: int | None = None,
     ) -> None:
-        job_config = _build_training_job_config(
-            requested_episodes,
-            fast_mode,
-            enable_instinct_rewards=enable_instinct_rewards,
-            curriculum_stage=curriculum_stage,
-            debug_reward_breakdown=debug_reward_breakdown,
-        )
-        total_episodes = max(1, requested_episodes)
-        trainer = create_trainer(job_config, job_config.training.output_dir)
-
-        # If the caller provided a specific best-formal checkpoint episode (set
-        # during stage promotion), override the trainer's loaded weights so it
-        # starts from that policy rather than whatever the hill-climber last wrote.
-        if promote_from_checkpoint_episode is not None:
-            output_root = Path(job_config.training.output_dir)
-            try:
-                checkpoint_payload = _load_checkpoint_payload(
-                    output_root, promote_from_checkpoint_episode
-                )
-                policy_weights = checkpoint_payload.get("policy_weights")
-                if policy_weights is not None:
-                    trainer.override_start_weights(policy_weights)
-            except (FileNotFoundError, KeyError, TypeError):
-                pass  # Fall back to automatic stage-change detection in trainer
-
-        def progress_callback(payload: dict[str, Any]) -> None:
-            checkpoint_episode = payload.get("checkpoint_episode")
-            summary = payload.get("summary")
-            replay_path = payload.get("replay_path")
-            latest_seed = None
-            if summary and summary.get("records"):
-                latest_seed = summary["records"][0].get("seed")
-                if replay_path is None:
-                    replay_path = summary["records"][0].get("replay_path")
-            batch_completed = payload.get("batch_completed_episodes", 0)
-            batch_total = payload.get("batch_total_episodes", total_episodes)
-            total_trained = payload.get("total_episodes_trained")
-            update: dict[str, Any] = {
-                "running": payload.get("phase") != "complete",
-                "phase": payload.get("phase", "running"),
-                "requested_episodes": batch_total,
-                "completed_episodes": batch_completed,
-                "batch_total_episodes": batch_total,
-                "batch_completed_episodes": batch_completed,
-                "current_episode": payload.get("current_episode"),
-                "checkpoint_episode": checkpoint_episode,
-                "best_score": payload.get("best_score"),
-                "message": payload.get("message", "Training"),
-                "error": None,
-            }
-            if total_trained is not None:
-                update["total_episodes_trained"] = total_trained
-            if checkpoint_episode is not None:
-                update["latest_checkpoint_episode"] = checkpoint_episode
-                update["latest_seed"] = latest_seed
-                update["latest_replay_path"] = replay_path
-            if isinstance(summary, dict) and payload.get("phase") == "checkpoint":
-                update["latest_success_rate"] = summary.get("success_rate")
-                update["latest_avg_sheep_penned"] = summary.get("average_sheep_penned")
-                update["latest_avg_reward"] = summary.get("average_reward")
-                update["latest_timeout_rate"] = summary.get("timeout_rate")
-                update["latest_avg_distance_to_pen"] = summary.get("average_distance_to_pen")
-            if payload.get("phase") == "starting" and payload.get("seed_episode") is not None:
-                update["seed_episode"] = payload.get("seed_episode")
-            if payload.get("phase") == "starting" and total_trained is not None:
-                update["starting_episode"] = total_trained
-            self._update_status(update)
-
         try:
+            job_config = _build_training_job_config(
+                requested_episodes,
+                fast_mode,
+                enable_instinct_rewards=enable_instinct_rewards,
+                curriculum_stage=curriculum_stage,
+                debug_reward_breakdown=debug_reward_breakdown,
+            )
+            total_episodes = max(1, requested_episodes)
+            trainer = create_trainer(job_config, job_config.training.output_dir)
+
+            # If the caller provided a specific best-formal checkpoint episode (set
+            # during stage promotion), override the trainer's loaded weights so it
+            # starts from that policy rather than whatever the hill-climber last wrote.
+            if promote_from_checkpoint_episode is not None:
+                output_root = Path(job_config.training.output_dir)
+                try:
+                    checkpoint_payload = _load_checkpoint_payload(
+                        output_root, promote_from_checkpoint_episode
+                    )
+                    policy_weights = checkpoint_payload.get("policy_weights")
+                    if policy_weights is not None:
+                        trainer.override_start_weights(policy_weights)
+                except (FileNotFoundError, KeyError, TypeError):
+                    pass  # Fall back to automatic stage-change detection in trainer
+
+            def progress_callback(payload: dict[str, Any]) -> None:
+                checkpoint_episode = payload.get("checkpoint_episode")
+                summary = payload.get("summary")
+                replay_path = payload.get("replay_path")
+                latest_seed = None
+                if summary and summary.get("records"):
+                    latest_seed = summary["records"][0].get("seed")
+                    if replay_path is None:
+                        replay_path = summary["records"][0].get("replay_path")
+                batch_completed = payload.get("batch_completed_episodes", 0)
+                batch_total = payload.get("batch_total_episodes", total_episodes)
+                total_trained = payload.get("total_episodes_trained")
+                update: dict[str, Any] = {
+                    "running": payload.get("phase") != "complete",
+                    "phase": payload.get("phase", "running"),
+                    "requested_episodes": batch_total,
+                    "completed_episodes": batch_completed,
+                    "batch_total_episodes": batch_total,
+                    "batch_completed_episodes": batch_completed,
+                    "current_episode": payload.get("current_episode"),
+                    "checkpoint_episode": checkpoint_episode,
+                    "best_score": payload.get("best_score"),
+                    "message": payload.get("message", "Training"),
+                    "error": None,
+                }
+                if total_trained is not None:
+                    update["total_episodes_trained"] = total_trained
+                if checkpoint_episode is not None:
+                    update["latest_checkpoint_episode"] = checkpoint_episode
+                    update["latest_seed"] = latest_seed
+                    update["latest_replay_path"] = replay_path
+                if isinstance(summary, dict) and payload.get("phase") == "checkpoint":
+                    update["latest_success_rate"] = summary.get("success_rate")
+                    update["latest_avg_sheep_penned"] = summary.get("average_sheep_penned")
+                    update["latest_avg_reward"] = summary.get("average_reward")
+                    update["latest_timeout_rate"] = summary.get("timeout_rate")
+                    update["latest_avg_distance_to_pen"] = summary.get("average_distance_to_pen")
+                if payload.get("phase") == "starting" and payload.get("seed_episode") is not None:
+                    update["seed_episode"] = payload.get("seed_episode")
+                if payload.get("phase") == "starting" and total_trained is not None:
+                    update["starting_episode"] = total_trained
+                self._update_status(update)
+
             effective_config_path = (
                 Path(job_config.training.output_dir) / "effective-training-config.json"
             )
@@ -1243,7 +1256,7 @@ class TrainingManager:
                 self._status["message"] = "Training complete"
                 self._status["stage_history"] = history
                 self._status["grand_total_episodes"] = sum(history.values())
-        except (OSError, RuntimeError, ValueError) as exc:  # pragma: no cover
+        except Exception as exc:  # pragma: no cover  # pylint: disable=broad-exception-caught
             with self._lock:
                 self._status["running"] = False
                 self._status["phase"] = "error"
