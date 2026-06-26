@@ -144,6 +144,10 @@ export interface TrainingStatus {
   allow_instinct_target_awareness?: boolean;
   handler_target_enabled?: boolean;
   debug_reward_breakdown: boolean;
+  auto_promote?: boolean;
+  auto_promote_threshold?: number;
+  auto_promote_stages_completed?: number;
+  auto_promote_gate?: AutoPromoteGateDiagnostics;
   available_curriculum_stages?: number[];
   max_curriculum_stage?: number;
   curriculum_stage: number;
@@ -164,11 +168,44 @@ export interface TrainingStatus {
   latest_avg_sheep_penned: number | null;
   latest_avg_reward: number | null;
   latest_timeout_rate: number | null;
+  latest_stopped_rate: number | null;
+  latest_avg_no_progress_steps: number | null;
   latest_avg_distance_to_pen: number | null;
+  latest_avg_flock_spread: number | null;
+  latest_avg_farthest_distance_to_pen: number | null;
+  latest_avg_farthest_distance_to_flock_center: number | null;
   phase: string;
   message: string;
   error: string | null;
-  seed_episode?: number | null;  starting_episode: number | null;}
+  error_type?: string | null;
+  traceback?: string | null;
+  seed_episode?: number | null;
+  starting_episode: number | null;
+}
+
+export interface AutoPromoteGateDiagnostics {
+  decision: "pending" | "hold" | "promote";
+  reason: string;
+  seed_count: number;
+  success_count: number;
+  best_success: number;
+  best_reward: number | null;
+  seed_gate_ok: boolean;
+  success_rate_ok: boolean;
+  timeout_ok: boolean;
+  reward_close_ok: boolean;
+  qualified_streak: number;
+  min_qualified_streak: number;
+  seed_gate_hits: number;
+  min_seed_gate_hits: number;
+  seed_gate_target_met: boolean;
+  full_success_hits: number;
+  min_full_success_hits: number;
+  full_success_target_met: boolean;
+  success_threshold: number;
+  max_timeout_rate: number;
+  reward_tolerance_ratio: number;
+}
 
 export interface TrainingStartRequest {
   episodes: number;
@@ -176,6 +213,7 @@ export interface TrainingStartRequest {
   enable_instinct_rewards: boolean;
   curriculum_stage: number;
   debug_reward_breakdown: boolean;
+  auto_promote?: boolean;
   promote_from_checkpoint_episode?: number | null;
 }
 
@@ -201,10 +239,15 @@ export interface EvaluationRecord {
   success: boolean;
   timeout: boolean;
   stopped: boolean;
+  stop_reason?: string;
+  spawn_mode?: string;
   steps: number;
   simulated_seconds: number;
   sheep_penned: number;
   final_sheep_distance_to_pen: number;
+  final_flock_spread?: number;
+  final_farthest_distance_to_pen?: number;
+  final_farthest_distance_to_flock_center?: number;
   no_progress_steps: number;
   reward_total: number;
   reward_breakdown: RewardBreakdown;
@@ -253,6 +296,12 @@ export interface EvaluationSummary {
   success_rate: number;
   timeout_rate: number;
   average_completion_steps: number;
+  average_distance_to_pen?: number;
+  average_flock_spread?: number;
+  stopped_rate?: number;
+  average_no_progress_steps?: number;
+  average_farthest_distance_to_pen?: number;
+  average_farthest_distance_to_flock_center?: number;
   average_completion_seconds: number;
   average_sheep_penned: number;
   average_reward: number;
@@ -360,4 +409,23 @@ export interface UserHyperparams {
   environment: UserHyperparamsEnvironment;
   training: UserHyperparamsTraining;
   rewards: UserHyperparamsRewards;
+}
+
+export interface NetworkTopologyInfo {
+  observation_mode: string;
+  hidden_layer_sizes: number[];
+  observation_size: number;
+  action_size: number;
+  actor_head: {
+    type: string;
+    node_count: number;
+    output: string;
+  };
+  critic_head: {
+    type: string;
+    node_count: number;
+    output: string;
+  };
+  action_masking_enabled: boolean;
+  connectivity: string;
 }

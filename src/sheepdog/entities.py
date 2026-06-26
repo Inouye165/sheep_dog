@@ -170,6 +170,9 @@ class EpisodeStats:
     no_progress_steps: int = 0
     final_avg_distance_to_pen: float = 0.0
     final_flock_spread: float = 0.0
+    final_farthest_distance_to_pen: float = 0.0
+    final_farthest_distance_to_flock_center: float = 0.0
+    spawn_mode: str = ""
     role_distribution: dict[str, int] = field(default_factory=dict)
     dog_role_occupancy: dict[str, dict[str, int]] = field(default_factory=dict)
     role_switches: int = 0

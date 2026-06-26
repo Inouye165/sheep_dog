@@ -361,6 +361,22 @@ describe("App", () => {
     expect(screen.getByText(/rear_pressure, left_flanker/i)).toBeInTheDocument();
   });
 
+  it("shows the read-only health dashboard in Insights", async () => {
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    await user.click(screen.getByRole("tab", { name: "Insights" }));
+    await user.click(screen.getByRole("tab", { name: "Health" }));
+
+    await waitFor(() => expect(screen.getByLabelText("Training health overview")).toBeInTheDocument());
+
+    expect(screen.getByText(/Live training diagnostics/)).toBeInTheDocument();
+    expect(screen.getByText(/Latest success/)).toBeInTheDocument();
+    expect(screen.getByText(/Latest timeout rate/)).toBeInTheDocument();
+    expect(screen.getByText(/No-progress guard/)).toBeInTheDocument();
+  });
+
   it("clears training artifacts from the UI", async () => {
     const user = userEvent.setup();
     const fetchMock = vi.mocked(fetch);
@@ -649,6 +665,7 @@ describe("App", () => {
           enable_instinct_rewards: false,
           curriculum_stage: 1,
           debug_reward_breakdown: false,
+          auto_promote: true,
         }),
       }),
     );

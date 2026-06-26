@@ -12,6 +12,9 @@ describe("TrainingPanel", () => {
         curriculumStage={6}
         maxCurriculumStage={8}
         debugRewardBreakdown={false}
+        autoPromote
+        autoPromoteThreshold={0.5}
+        autoPromoteStagesCompleted={0}
         running={false}
         clearing={false}
         batchCompletedEpisodes={0}
@@ -29,13 +32,15 @@ describe("TrainingPanel", () => {
         onEnableInstinctsChange={vi.fn()}
         onCurriculumStageChange={vi.fn()}
         onDebugRewardBreakdownChange={vi.fn()}
+        onAutoPromoteChange={vi.fn()}
         onStartTraining={vi.fn()}
         onClearTraining={vi.fn()}
+        onResetJourney={vi.fn()}
         onPromote={vi.fn()}
       />,
     );
 
-    expect(screen.getByText("3 dogs · 6 sheep · nearby stray recovery")).toBeInTheDocument();
+    expect(screen.getByText("2 dogs · 3 sheep · tiny nearby stray starts")).toBeInTheDocument();
 
     rerender(
       <TrainingPanel
@@ -45,6 +50,9 @@ describe("TrainingPanel", () => {
         curriculumStage={7}
         maxCurriculumStage={8}
         debugRewardBreakdown={false}
+        autoPromote
+        autoPromoteThreshold={0.5}
+        autoPromoteStagesCompleted={0}
         running={false}
         clearing={false}
         batchCompletedEpisodes={0}
@@ -62,13 +70,15 @@ describe("TrainingPanel", () => {
         onEnableInstinctsChange={vi.fn()}
         onCurriculumStageChange={vi.fn()}
         onDebugRewardBreakdownChange={vi.fn()}
+        onAutoPromoteChange={vi.fn()}
         onStartTraining={vi.fn()}
         onClearTraining={vi.fn()}
+        onResetJourney={vi.fn()}
         onPromote={vi.fn()}
       />,
     );
 
-    expect(screen.getByText("3 dogs · 6 sheep · farther stray recovery")).toBeInTheDocument();
+    expect(screen.getByText("2 dogs · 4 sheep · early nearby stray collection")).toBeInTheDocument();
 
     rerender(
       <TrainingPanel
@@ -78,6 +88,9 @@ describe("TrainingPanel", () => {
         curriculumStage={8}
         maxCurriculumStage={9}
         debugRewardBreakdown={false}
+        autoPromote
+        autoPromoteThreshold={0.5}
+        autoPromoteStagesCompleted={0}
         running={false}
         clearing={false}
         batchCompletedEpisodes={0}
@@ -95,13 +108,15 @@ describe("TrainingPanel", () => {
         onEnableInstinctsChange={vi.fn()}
         onCurriculumStageChange={vi.fn()}
         onDebugRewardBreakdownChange={vi.fn()}
+        onAutoPromoteChange={vi.fn()}
         onStartTraining={vi.fn()}
         onClearTraining={vi.fn()}
+        onResetJourney={vi.fn()}
         onPromote={vi.fn()}
       />,
     );
 
-    expect(screen.getByText("3 dogs · 6 sheep · split/scattered recovery")).toBeInTheDocument();
+    expect(screen.getByText("3 dogs · 4 sheep · nearby stray emphasis")).toBeInTheDocument();
     const stageInput = screen.getByLabelText("Stage (manual)");
     expect(stageInput).toHaveAttribute("max", "9");
   });

@@ -28,6 +28,12 @@ class EnvironmentConfig:
     dog_speed: float = 1.0
     dog_sprint_multiplier: float = 2.0
     sheep_speed: float = 0.75
+    # Sheep-to-flock attraction used by sheep movement. Lower values reduce
+    # autonomous self-grouping, letting dog pressure matter more.
+    sheep_flock_cohesion_weight: float = 0.2
+    # When False, flock cohesion is only applied if at least one dog is within
+    # sheep vision range, preventing autonomous regrouping across the field.
+    sheep_cohere_without_dog_pressure: bool = True
     # Per-personality display colors used by the web replay viewer. The keys
     # must match entries in ``entities.SHEEP_PERSONALITIES``; any sheep with
     # an unknown personality falls back to the ``obedient`` entry. When
@@ -62,6 +68,9 @@ class EnvironmentConfig:
     # >1.0 becomes pronounced). Personalities are assigned at episode reset and
     # held fixed for the entire episode. See ``entities.SHEEP_PERSONALITIES``.
     sheep_personality_strength: float = 0.0
+    # Optional fixed sheep personality override for all spawned sheep.
+    # Empty string keeps mixed personalities based on RNG.
+    sheep_personality_override: str = ""
     # Offset added to a dedicated personality RNG (separate from the env RNG
     # that drives positions/jitter). Bump this to reshuffle the personality
     # lineup for the same eval seed without changing positions or dynamics.
@@ -72,6 +81,48 @@ class EnvironmentConfig:
     blocker_min_remaining_dogs: int = 1
     # Current active herding curriculum stage (0 disables overrides)
     curriculum_stage: int = 0
+    # Weighted sheep-spawn scenario mix, e.g. {"fixed_easy": 0.7,
+    # "randomized_flock": 0.3}. Keys must be entries from ``SPAWN_MODES``.
+    # An empty dict keeps the legacy stage-keyed spawn behaviour so older
+    # checkpoints and replays remain reproducible.
+    spawn_mix: dict[str, float] = field(default_factory=dict)
+    # Distance bands (in cells from the flock centre) used by the
+    # nearby_stray / two_strays and farther_stray spawn modes.
+    stray_near_min: float = 8.0
+    stray_near_max: float = 12.0
+    stray_far_min: float = 18.0
+    stray_far_max: float = 28.0
+    # Pen placement mode; one of ``PEN_PLACEMENTS``. "corner" keeps the
+    # legacy fixed top-right pen so old checkpoints replay unchanged.
+    pen_placement: str = "corner"
+    # When True, collection signals (flock spread shrinking, the farthest
+    # sheep approaching the flock or the pen) count as progress for the
+    # no-progress termination check.
+    count_collection_progress: bool = False
+
+
+# Sheep spawn layout modes understood by the environment.
+SPAWN_MODES: tuple[str, ...] = (
+    "fixed_easy",
+    "randomized_flock",
+    "nearby_stray",
+    "farther_stray",
+    "two_strays",
+    "split_flock",
+    "partial_scattered",
+    "scattered_sheep",
+    "all_corners",
+)
+
+# Pen placement modes understood by the environment.
+PEN_PLACEMENTS: tuple[str, ...] = (
+    "corner",
+    "same_wall",
+    "any_wall",
+    "away_from_corner",
+    "interior",
+    "random",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +209,9 @@ class TrainingConfig:
     clip_range: float = 0.2
     entropy_coef: float = 0.01
     value_coef: float = 0.5
+    # Number of vectorized RL environments used by neural PPO training.
+    # >1 enables process-based parallel stepping (SubprocVecEnv).
+    ppo_env_workers: int = 8
     invalid_action_masking: bool = True
     output_dir: str = "artifacts"
     web_export_dir: str = "web/public/generated"
@@ -219,6 +273,8 @@ class LabConfig:
         hidden_sizes = training_payload.get("neural_hidden_sizes")
         if hidden_sizes is not None:
             training_payload["neural_hidden_sizes"] = tuple(hidden_sizes)
+        if "ppo_env_workers" in training_payload:
+            training_payload["ppo_env_workers"] = int(training_payload["ppo_env_workers"])
         instincts = (
             InstinctRewardConfig(**instincts_payload)
             if isinstance(instincts_payload, dict)
@@ -236,6 +292,11 @@ class LabConfig:
         # Backward-compatible: drop any legacy ``sheep_palette`` field so
         # checkpoints written before per-personality colors can still load.
         environment_payload.pop("sheep_palette", None)
+        spawn_mix = environment_payload.get("spawn_mix")
+        if isinstance(spawn_mix, dict):
+            environment_payload["spawn_mix"] = {
+                str(name): float(weight) for name, weight in spawn_mix.items()
+            }
         return cls(
             environment=EnvironmentConfig(**environment_payload),
             rewards=RewardConfig(instincts=instincts, **rewards_payload),

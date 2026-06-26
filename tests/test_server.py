@@ -77,6 +77,57 @@ def test_clear_training_restores_untrained_baseline(tmp_path: Path) -> None:
     assert final_snapshot["grid_height"] == config.environment.height
 
 
+def test_reset_journey_archives_and_resets_to_stage_one(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    generated = tmp_path / "web" / "public" / "generated"
+    (artifacts / "checkpoints").mkdir(parents=True)
+    (artifacts / "evaluations").mkdir(parents=True)
+    (generated / "replays").mkdir(parents=True)
+
+    (artifacts / "checkpoints" / "checkpoint-000123.json").write_text("{}", encoding="utf-8")
+    (artifacts / "training-summary.json").write_text("{}", encoding="utf-8")
+    (generated / "latest-replay.json").write_text("{}", encoding="utf-8")
+
+    manager = TrainingManager()
+    config = LabConfig(
+        training=TrainingConfig(
+            episodes=1,
+            checkpoint_episodes=(0,),
+            evaluation_seeds=(11,),
+            output_dir=str(artifacts),
+            web_export_dir=str(generated),
+        )
+    )
+
+    class TestConfig:
+        def __new__(cls):
+            return config
+
+    with patch("sheepdog.server.LabConfig", TestConfig):
+        payload, status = manager.reset_journey()
+
+    assert status == 200
+    assert payload["phase"] in {"clearing", "idle"}
+    assert payload["curriculum_stage"] == 1
+
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        snap = manager.snapshot()
+        if snap.get("phase") == "idle":
+            break
+        time.sleep(0.1)
+
+    archive_root = artifacts / "archive"
+    archived_runs = sorted(path for path in archive_root.glob("journey-*") if path.is_dir())
+    assert archived_runs
+    latest_archive = archived_runs[-1]
+    assert (latest_archive / "checkpoints" / "checkpoint-000123.json").exists()
+    assert (latest_archive / "training-summary.json").exists()
+
+    settings_payload = json.loads((artifacts / "training-settings.json").read_text(encoding="utf-8"))
+    assert settings_payload["curriculum_stage"] == 1
+
+
 @dataclass(frozen=True, slots=True)
 class _FakeStats:
     steps: int = 1
@@ -462,5 +513,7 @@ def test_training_manager_error_handling_on_setup_failure(tmp_path: Path) -> Non
         snap = manager.snapshot()
         assert not snap["running"]
         assert snap["phase"] == "error"
+        assert snap["error_type"] == "ValueError"
         assert "Simulated setup error" in str(snap["error"])
+        assert "ValueError: Simulated setup error" in str(snap["traceback"])
 

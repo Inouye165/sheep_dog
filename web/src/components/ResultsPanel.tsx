@@ -4,7 +4,7 @@ import { loadReplay } from "../lib/api";
 import { exportResultsVideo, makeResultsVideoFileName } from "../lib/resultsVideo";
 
 
-const DEFAULT_STAGE_COUNT = 8;
+const DEFAULT_STAGE_COUNT = 21;
 const REPLAYS_PER_STAGE = 5;
 const TARGET_WEIGHTS_BY_SLOT_COUNT: Record<number, number[]> = {
   5: [0.34, 0.17, 0.07],

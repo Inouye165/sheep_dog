@@ -2,6 +2,7 @@ import type {
   CheckpointIndex,
   ConfigHistory,
   ConfigRevision,
+  NetworkTopologyInfo,
   ReplayBundle,
   ReplayRunRequest,
   SavedScenario,
@@ -81,6 +82,12 @@ export async function resetTraining(): Promise<TrainingStatus> {
   return clearTraining();
 }
 
+export async function resetJourneyTraining(): Promise<TrainingStatus> {
+  return fetchJson<TrainingStatus>("/api/training/reset-journey", {
+    method: "POST",
+  }, API_BASE_URL);
+}
+
 export async function runReplay(request: ReplayRunRequest): Promise<ReplayBundle> {
   return fetchJson<ReplayBundle>("/api/replay/run", {
     method: "POST",
@@ -111,6 +118,10 @@ export async function saveConfigRevision(
 
 export async function loadHyperparams(): Promise<UserHyperparams> {
   return fetchJson<UserHyperparams>("/api/config/hyperparams", undefined, API_BASE_URL);
+}
+
+export async function loadNetworkTopology(): Promise<NetworkTopologyInfo> {
+  return fetchJson<NetworkTopologyInfo>("/api/network/topology", undefined, API_BASE_URL);
 }
 
 export async function saveHyperparams(payload: UserHyperparams): Promise<UserHyperparams> {

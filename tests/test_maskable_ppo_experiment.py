@@ -33,6 +33,7 @@ def make_experiment_config(tmp_path: Path, **environment_overrides: int) -> LabC
         rollout_steps=8,
         batch_size=4,
         total_timesteps=16,
+        ppo_env_workers=1,
         output_dir=str(tmp_path / "artifacts"),
         web_export_dir=str(tmp_path / "web" / "generated"),
     )
@@ -230,3 +231,57 @@ def test_evaluator_is_deterministic_for_fixed_seed_neural_policy(tmp_path: Path)
 
     assert first.average_reward == second.average_reward
     assert first.success_rate == second.success_rate
+
+
+def test_maskable_ppo_trainer_compatible_across_curriculum_stages(tmp_path: Path) -> None:
+    from sheepdog.curriculum import apply_training_profile
+    from dataclasses import asdict
+    import json
+
+    config_stage_1 = make_experiment_config(tmp_path)
+    config_stage_1 = apply_training_profile(
+        config_stage_1,
+        curriculum_stage=1,
+        enable_instinct_rewards=True,
+    )
+
+    training_signature = {
+        "action_size": 9,
+        "observation_mode": "guided",
+        "rewards": asdict(config_stage_1.rewards),
+        "environment": {
+            "dog_speed": config_stage_1.environment.dog_speed,
+            "dog_sprint_multiplier": config_stage_1.environment.dog_sprint_multiplier,
+            "sheep_speed": config_stage_1.environment.sheep_speed,
+        }
+    }
+
+    state_payload = {
+        "total_episodes_trained": 10,
+        "total_timesteps": 300,
+        "policy_state_path": "stage-1-model.zip",
+        "policy_config": {
+            "hidden_sizes": [128, 128],
+            "observation_size": 54,
+            "action_size": 9
+        },
+        "training_signature": training_signature
+    }
+
+    artifacts_dir = Path(config_stage_1.training.output_dir)
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    (artifacts_dir / "training-state.json").write_text(
+        json.dumps(state_payload, indent=2),
+        encoding="utf-8",
+    )
+
+    config_stage_3 = apply_training_profile(
+        make_experiment_config(tmp_path),
+        curriculum_stage=3,
+        enable_instinct_rewards=True,
+    )
+
+    trainer = create_trainer(config_stage_3, config_stage_3.training.output_dir)
+    assert trainer._has_compatible_policy_state() is True
+
+

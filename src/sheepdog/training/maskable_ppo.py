@@ -14,7 +14,6 @@ from stable_baselines3.common.callbacks import BaseCallback
 from sheepdog.checkpoints.store import CheckpointMetadata
 from sheepdog.environment import ACTION_ORDER
 from sheepdog.policies.neural import NeuralPolicy
-from sheepdog.training.rl_env import SheepdogRLAdapter
 from sheepdog.training.trainer import Trainer
 
 
@@ -78,7 +77,8 @@ class _TrainingProgressCallback(BaseCallback):
                 "checkpoint_episode": None,
                 "best_score": None,
                 "message": (
-                    f"Learning neural policy: {num_timesteps}/{self._total_timesteps} "
+                    f"Learning neural policy: "
+                    f"{min(num_timesteps, self._total_timesteps)}/{self._total_timesteps} "
                     f"timesteps ({completion:.0%})"
                 ),
                 "batch_total_episodes": self._batch_total_episodes,
@@ -110,21 +110,47 @@ class MaskablePPOTrainer(Trainer):
 
     @staticmethod
     def _strip_non_architectural_fields(sig: dict[str, Any]) -> dict[str, Any]:
-        """Return a copy with stage/toggle metadata removed before comparison.
+        """Return a copy with stage/toggle metadata and curriculum overrides removed before comparison.
 
         ``curriculum_stage``, ``debug_reward_breakdown``, and
         ``enable_instinct_rewards`` are runtime toggles that do not affect the
-        neural-network architecture; stripping them lets stage promotions reuse
-        the trained model and accumulate ``total_episodes_trained`` correctly.
+        neural-network architecture; stripping them and curriculum-dependent
+        speed/reward overrides lets stage promotions reuse the trained model
+        and accumulate ``total_episodes_trained`` correctly.
         """
-        sig = dict(sig)
-        if "rewards" in sig:
-            rewards = dict(sig["rewards"])
-            instincts = dict(rewards.get("instincts", {}))
-            for key in ("curriculum_stage", "debug_reward_breakdown", "enable_instinct_rewards"):
-                instincts.pop(key, None)
-            rewards["instincts"] = instincts
-            sig["rewards"] = rewards
+        import copy
+        sig = copy.deepcopy(sig)
+
+        # 1. Identify curriculum stage
+        stage = 0
+        if "rewards" in sig and isinstance(sig["rewards"], dict):
+            instincts = sig["rewards"].get("instincts")
+            if isinstance(instincts, dict):
+                stage = int(instincts.get("curriculum_stage", 0))
+
+        # 2. Strip instinct toggles
+        if "rewards" in sig and isinstance(sig["rewards"], dict):
+            instincts = sig["rewards"].get("instincts")
+            if isinstance(instincts, dict):
+                for key in ("curriculum_stage", "debug_reward_breakdown", "enable_instinct_rewards"):
+                    instincts.pop(key, None)
+
+        # 3. Strip environment overrides if curriculum stage is active
+        from sheepdog.curriculum import CURRICULUM_STAGES, CURRICULUM_REWARD_OVERRIDES
+        if stage in CURRICULUM_STAGES:
+            env_overrides = CURRICULUM_STAGES[stage]
+            if "environment" in sig and isinstance(sig["environment"], dict):
+                for key in ("dog_speed", "sheep_speed"):
+                    if key in env_overrides:
+                        sig["environment"].pop(key, None)
+
+        # 4. Strip reward overrides if curriculum reward overrides are active
+        if stage in CURRICULUM_REWARD_OVERRIDES:
+            reward_overrides = CURRICULUM_REWARD_OVERRIDES[stage]
+            if "rewards" in sig and isinstance(sig["rewards"], dict):
+                for key in reward_overrides:
+                    sig["rewards"].pop(key, None)
+
         return sig
 
     def _has_compatible_policy_state(self) -> bool:
@@ -260,8 +286,6 @@ class MaskablePPOTrainer(Trainer):
             )
         else:
             policy = NeuralPolicy.initialize(self.config)
-        training_env = SheepdogRLAdapter(self.config)
-        policy.model.set_env(training_env)
 
         checkpoint_payloads: list[dict[str, Any]] = (
             list(self._load_summary_checkpoints()) if resuming_policy else []
@@ -303,7 +327,9 @@ class MaskablePPOTrainer(Trainer):
             )
             progress_reporter = _TrainingProgressCallback(
                 emit,
-                report_interval=max(1, steps_per_segment // 4),
+                # Emit progress frequently enough that long PPO segments do not
+                # look stalled in the UI. Cap the update rate to avoid chatty logs.
+                report_interval=max(250, min(5_000, steps_per_segment // 100)),
                 total_timesteps=steps_per_segment,
                 starting_total_episodes=starting_total + new_segments - 1,
                 batch_total_episodes=batch_total,

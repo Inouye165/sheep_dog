@@ -19,8 +19,124 @@ const STAGE_COLORS: Record<number, string> = {
   5: "#c084fc",
 };
 
+const PROMOTE_THRESHOLD = 0.5;
+const RECENT_WINDOW = 5;
+
 function stageColor(stage: number | undefined): string {
   return STAGE_COLORS[stage ?? 0] ?? "#9ca3af";
+}
+
+function formatPercent(value: number | null | undefined): string {
+  return value != null ? `${Math.round(value * 100)}%` : "—";
+}
+
+function formatNumber(value: number | null | undefined, decimals = 1): string {
+  return value != null ? value.toFixed(decimals) : "—";
+}
+
+function average(values: number[]): number | null {
+  if (values.length === 0) return null;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+type DecisionTone = "good" | "warn" | "danger" | "muted";
+
+interface DecisionSignal {
+  title: string;
+  body: string;
+  tone: DecisionTone;
+  badge: string;
+}
+
+function buildDecisionSignal(params: {
+  checkpointCount: number;
+  latestSuccessRate: number | null;
+  latestReward: number | null;
+  latestTimeoutRate: number | null;
+  plateauKind: "plateau" | "cliff" | "spike" | null;
+  stage: number;
+  abovePromotionThreshold: boolean;
+  improving: boolean;
+}): DecisionSignal {
+  const {
+    checkpointCount,
+    latestSuccessRate,
+    latestReward,
+    latestTimeoutRate,
+    plateauKind,
+    stage,
+    abovePromotionThreshold,
+    improving,
+  } = params;
+
+  if (checkpointCount === 0) {
+    return {
+      title: "Collect baseline data",
+      body: "Run a few checkpoints before judging readiness. Professional workflows wait for a trend, not a single score.",
+      tone: "muted",
+      badge: "No history",
+    };
+  }
+
+  if (plateauKind === "cliff" || (latestSuccessRate != null && latestSuccessRate < 0.05 && checkpointCount >= 8)) {
+    return {
+      title: "Investigate the training setup",
+      body:
+        "The model is still failing consistently. At this point engineers would inspect reward shaping, curriculum difficulty, and whether the run is actually learnable from scratch.",
+      tone: "danger",
+      badge: "Cliff",
+    };
+  }
+
+  if (latestTimeoutRate != null && latestTimeoutRate >= 0.6) {
+    return {
+      title: "Too many timeouts",
+      body:
+        "Episodes are ending by timeout more often than success. That usually means the policy is finding partial motion but not a stable penning strategy yet.",
+      tone: "warn",
+      badge: "Failure mode",
+    };
+  }
+
+  if (latestSuccessRate != null && abovePromotionThreshold && improving && plateauKind !== "spike") {
+    return {
+      title: "Promote to the next stage",
+      body:
+        "Success is at or above the promotion bar and the recent window is still moving in the right direction. This is the safest handoff point for curriculum learning.",
+      tone: "good",
+      badge: `Stage ${stage} ready`,
+    };
+  }
+
+  if (plateauKind === "plateau") {
+    return {
+      title: "Continue training, but watch for saturation",
+      body:
+        "The curve is flattening. Engineers would usually keep the run going for a small additional window, then compare the best checkpoint against the current one.",
+      tone: "warn",
+      badge: "Plateau",
+    };
+  }
+
+  if (plateauKind === "spike") {
+    return {
+      title: "Model found something promising, then regressed",
+      body:
+        "This is the classic PPO oscillation pattern. Keep the best checkpoint, but expect stability checks before advancing.",
+      tone: "warn",
+      badge: "Volatile",
+    };
+  }
+
+  return {
+    title: "Continue training",
+    body:
+      latestReward != null
+        ? "The model is still improving, but not strongly enough to call the stage complete. Let the batch run and compare the next checkpoint against this one."
+        : "There is some signal, but not enough to make a confident promotion call yet.",
+    tone: "muted",
+    badge: latestSuccessRate != null ? `${Math.round(latestSuccessRate * 100)}% success` : "In progress",
+  };
 }
 
 // ── Inline SVG line-chart ───────────────────────────────────────────────────
@@ -313,7 +429,7 @@ function LineChart({
 
 // ── Chart sub-tab types & legend ───────────────────────────────────────────
 
-type ChartTab = "success" | "reward" | "sheep" | "history";
+type ChartTab = "health" | "success" | "reward" | "sheep" | "history" | "learningSignal";
 type ViewWindow = "stage" | "all" | 25 | 50 | 100;
 
 const VIEW_WINDOW_OPTIONS: Array<{ value: ViewWindow; label: string }> = [
@@ -323,6 +439,163 @@ const VIEW_WINDOW_OPTIONS: Array<{ value: ViewWindow; label: string }> = [
   { value: 100, label: "Last 100" },
   { value: "all", label: "All" },
 ];
+
+const LEARNING_SIGNAL_WINDOW_OPTIONS: Array<{ value: ViewWindow; label: string }> = [
+  { value: "stage", label: "This stage" },
+  { value: 25, label: "Last 25" },
+  { value: 50, label: "Last 50" },
+  { value: "all", label: "All" },
+];
+
+const SMOOTHING_WINDOWS = [25, 50, 100] as const;
+type SmoothingWindow = (typeof SMOOTHING_WINDOWS)[number];
+
+interface SignalSummary {
+  label: string;
+  tone: DecisionTone;
+}
+
+interface AdvisorSignal {
+  state: "A" | "B" | "C" | "D" | "E";
+  title: string;
+  body: string;
+  tone: DecisionTone;
+  actions: string[];
+  reason: string;
+}
+
+function formatSignalDelta(current: number | null, previous: number | null, percent = false): string {
+  if (current == null || previous == null) return "No baseline yet";
+  const delta = current - previous;
+  if (Math.abs(delta) < 0.0001) return "No meaningful change";
+  const prefix = delta > 0 ? "+" : "-";
+  if (percent) {
+    return `${prefix}${Math.round(Math.abs(delta) * 100)}%`;
+  }
+  return `${prefix}${Math.abs(delta).toFixed(2)}`;
+}
+
+function buildAdvisor(params: {
+  currentFlatStreak: number;
+  longestHistoricalPlateau: number;
+  rewardSignal: SignalSummary;
+  timeoutSignal: SignalSummary;
+  speedSignal: SignalSummary;
+  recentSuccess: number | null;
+  recentRewardDelta: number | null;
+  recentSpeedDelta: number | null;
+  recentTimeout: number | null;
+  recentNoProgress: number | null;
+  highSuccessStable: boolean;
+}): AdvisorSignal {
+  const {
+    currentFlatStreak,
+    longestHistoricalPlateau,
+    rewardSignal,
+    timeoutSignal,
+    speedSignal,
+    recentSuccess,
+    recentRewardDelta,
+    recentSpeedDelta,
+    recentTimeout,
+    recentNoProgress,
+    highSuccessStable,
+  } = params;
+
+  const degradingSignals = [rewardSignal.label === "Declining", timeoutSignal.label === "Getting Worse", speedSignal.label === "Slowing"].filter(Boolean).length;
+
+  if (highSuccessStable) {
+    return {
+      state: "E",
+      title: "Ready to Advance — Consider Next Phase",
+      body: "Agent has held high success for a sustained window. Plateau at high performance suggests diminishing returns on this stage.",
+      tone: "good",
+      actions: ["Advance to the next curriculum stage", "Keep this checkpoint as your stage-complete baseline"],
+      reason: "Success has been above 80% for a sustained period and has not regressed, which indicates stage mastery.",
+    };
+  }
+
+  if (degradingSignals >= 2) {
+    return {
+      state: "D",
+      title: "Investigate Training Setup",
+      body: "Multiple signals are degrading together, which points to a setup issue rather than a normal plateau.",
+      tone: "danger",
+      actions: [
+        "Review reward shaping balance (penalties vs progress reward)",
+        "Re-check curriculum stage difficulty",
+        "Run a short scratch restart to test reproducibility",
+      ],
+      reason: "When reward, timeout, and speed degrade together, training usually needs setup intervention instead of more episodes.",
+    };
+  }
+
+  const hasMicroProgress =
+    (recentRewardDelta != null && recentRewardDelta > 0) ||
+    (recentSpeedDelta != null && recentSpeedDelta < 0);
+  if (hasMicroProgress && (recentSuccess ?? 0) < 0.8) {
+    return {
+      state: "B",
+      title: "Keep Training — Micro-Progress Detected",
+      body: `Success is flat but reward/speed signals are improving (${formatSignalDelta(recentRewardDelta, 0)} reward trend, ${formatSignalDelta(recentSpeedDelta, 0)} steps trend).`,
+      tone: "good",
+      actions: ["Continue current run", "Re-evaluate after the next 50 checkpoints"],
+      reason: "Reward and efficiency often improve before success rate jumps in sparse-reward RL tasks.",
+    };
+  }
+
+  if (currentFlatStreak > longestHistoricalPlateau && longestHistoricalPlateau > 0) {
+    const suggestions: string[] = [];
+    if ((recentTimeout ?? 0) > 0.6) {
+      suggestions.push("Reduce episode length or simplify curriculum stage");
+    }
+    if (rewardSignal.label === "Volatile") {
+      suggestions.push("Reduce entropy_coef for more stable convergence");
+    }
+    if (rewardSignal.label === "Declining") {
+      suggestions.push("Review reward shaping — penalties may be dominating");
+    }
+    if ((recentNoProgress ?? 0) > 0) {
+      suggestions.push("Review action space/reward conversion — policy is moving but not converting");
+    }
+    return {
+      state: "C",
+      title: "Consider Parameter Adjustment",
+      body: `Flat streak (${currentFlatStreak} episodes) exceeds your longest known pre-breakthrough plateau (${longestHistoricalPlateau}).`,
+      tone: "warn",
+      actions: suggestions.length > 0 ? suggestions : ["Adjust exploration/stability hyperparameters", "Try a smaller curriculum step"],
+      reason: "Past runs suggest this plateau is longer than your typical pre-breakthrough window.",
+    };
+  }
+
+  if (currentFlatStreak <= longestHistoricalPlateau || longestHistoricalPlateau === 0) {
+    return {
+      state: "A",
+      title: "Keep Training — Within Breakthrough Window",
+      body: `You've been flat for ${currentFlatStreak} episodes. Previous breakthroughs took up to ${longestHistoricalPlateau || currentFlatStreak} episodes of plateau.`,
+      tone: "muted",
+      actions: ["Continue training", "Watch reward and speed for micro-progress"],
+      reason: "Plateaus are normal in PPO; prior runs indicate breakthroughs can arrive after long flat stretches.",
+    };
+  }
+
+  return {
+    state: "C",
+    title: "Consider Parameter Adjustment",
+    body: "Signals are not improving enough to justify continuing unchanged.",
+    tone: "warn",
+    actions: ["Adjust entropy/stability settings", "Review curriculum stage"] ,
+    reason: "No strong improvement signal detected.",
+  };
+}
+
+function InfoTip({ text }: { text: string }) {
+  return (
+    <span className="info-tip" title={text} aria-label={text}>
+      i
+    </span>
+  );
+}
 
 type SymbolSpec =
   | { kind: "line"; color: string }
@@ -335,6 +608,23 @@ interface LegendEntry {
   symbol: SymbolSpec;
   label: string;
   detail: string;
+}
+
+interface StatCardProps {
+  label: string;
+  value: string;
+  detail: string;
+  tone?: DecisionTone;
+}
+
+function StatCard({ label, value, detail, tone = "muted" }: StatCardProps) {
+  return (
+    <article className={`stat-card stat-card--${tone}`}>
+      <span className="stat-card__label">{label}</span>
+      <strong className="stat-card__value">{value}</strong>
+      <span className="stat-card__detail">{detail}</span>
+    </article>
+  );
 }
 
 function SymIcon({ sym }: { sym: SymbolSpec }) {
@@ -395,6 +685,342 @@ function ChartLegend({ entries }: { entries: LegendEntry[] }) {
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+function trendSummary(current: number | null, previous: number | null, format: (value: number) => string): string {
+  if (current == null) return "No data";
+  if (previous == null) return format(current);
+  const delta = current - previous;
+  if (Math.abs(delta) < 0.0001) {
+    return `${format(current)} · flat`;
+  }
+  const sign = delta > 0 ? "+" : "-";
+  return `${format(current)} · ${sign}${format(Math.abs(delta))}`;
+}
+
+interface LearningPoint {
+  checkpoint: number;
+  successRate: number;
+  reward: number;
+  timeoutRate: number;
+  completionSteps: number;
+  sheepPenned: number;
+  noProgressGuard: number;
+  stage: number;
+}
+
+interface FlatZone {
+  startCheckpoint: number;
+  endCheckpoint: number;
+  length: number;
+}
+
+interface BreakthroughEvent {
+  index: number;
+  checkpoint: number;
+  flatEpisodesBefore: number;
+  fromSuccessRate: number;
+  toSuccessRate: number;
+}
+
+interface LearningSignalAnalysis {
+  flatZones: FlatZone[];
+  breakthroughs: BreakthroughEvent[];
+  currentFlatStreak: number;
+  stageBestSuccessRate: number;
+  smoothedSuccessRate: number[];
+  longestHistoricalPlateau: number;
+}
+
+function rollingAverage(values: number[], windowSize: number): number[] {
+  if (values.length === 0) return [];
+  const safeWindow = Math.max(1, windowSize);
+  const output: number[] = [];
+  for (let i = 0; i < values.length; i += 1) {
+    const start = Math.max(0, i - safeWindow + 1);
+    const sample = values.slice(start, i + 1);
+    output.push(sample.reduce((sum, value) => sum + value, 0) / sample.length);
+  }
+  return output;
+}
+
+function averageNoProgress(entry: CheckpointEntry): number {
+  if (!entry.records?.length) return 0;
+  const values = entry.records.map((record) => record.no_progress_steps ?? 0);
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function analyzeLearningSignal(points: LearningPoint[], smoothingWindow: number): LearningSignalAnalysis {
+  if (points.length === 0) {
+    return {
+      flatZones: [],
+      breakthroughs: [],
+      currentFlatStreak: 0,
+      stageBestSuccessRate: 0,
+      smoothedSuccessRate: [],
+      longestHistoricalPlateau: 0,
+    };
+  }
+
+  let personalBest = points[0].successRate;
+  let meaningfulAnchor = points[0].successRate;
+  let lastMeaningfulIndex = 0;
+  const flatZones: FlatZone[] = [];
+  const breakthroughs: BreakthroughEvent[] = [];
+
+  for (let i = 1; i < points.length; i += 1) {
+    const point = points[i];
+    const flatBefore = i - lastMeaningfulIndex - 1;
+    const isBreakthrough = point.successRate > personalBest + 0.10 && flatBefore > 20;
+    if (isBreakthrough) {
+      breakthroughs.push({
+        index: breakthroughs.length + 1,
+        checkpoint: point.checkpoint,
+        flatEpisodesBefore: flatBefore,
+        fromSuccessRate: personalBest,
+        toSuccessRate: point.successRate,
+      });
+    }
+
+    const isMeaningful = point.successRate > meaningfulAnchor + 0.05;
+    if (isMeaningful) {
+      if (flatBefore > 20) {
+        flatZones.push({
+          startCheckpoint: points[lastMeaningfulIndex + 1]?.checkpoint ?? point.checkpoint,
+          endCheckpoint: points[i - 1]?.checkpoint ?? point.checkpoint,
+          length: flatBefore,
+        });
+      }
+      meaningfulAnchor = point.successRate;
+      lastMeaningfulIndex = i;
+    }
+
+    personalBest = Math.max(personalBest, point.successRate);
+  }
+
+  const currentFlatStreak = points.length - 1 - lastMeaningfulIndex;
+  if (currentFlatStreak > 20 && points.length > 1) {
+    flatZones.push({
+      startCheckpoint: points[lastMeaningfulIndex + 1]?.checkpoint ?? points[points.length - 1].checkpoint,
+      endCheckpoint: points[points.length - 1].checkpoint,
+      length: currentFlatStreak,
+    });
+  }
+
+  const longestHistoricalPlateau = breakthroughs.length
+    ? Math.max(...breakthroughs.map((event) => event.flatEpisodesBefore))
+    : 0;
+
+  return {
+    flatZones,
+    breakthroughs,
+    currentFlatStreak,
+    stageBestSuccessRate: Math.max(...points.map((point) => point.successRate)),
+    smoothedSuccessRate: rollingAverage(
+      points.map((point) => point.successRate),
+      smoothingWindow,
+    ),
+    longestHistoricalPlateau,
+  };
+}
+
+function slope(values: number[]): number {
+  if (values.length < 2) return 0;
+  const first = values[0];
+  const last = values[values.length - 1];
+  return (last - first) / (values.length - 1);
+}
+
+function standardDeviation(values: number[]): number {
+  if (values.length < 2) return 0;
+  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
+  return Math.sqrt(variance);
+}
+
+type SparkTrendLabel = "Climbing" | "Flat" | "Declining" | "Volatile" | "Improving" | "Stuck" | "Getting Worse" | "Getting Faster" | "Slowing";
+
+function rewardTrendLabel(values: number[]): SparkTrendLabel {
+  const s = slope(values);
+  const volatility = standardDeviation(values);
+  if (volatility > Math.max(2.5, Math.abs((values[values.length - 1] ?? 0) * 0.25))) return "Volatile";
+  if (s > 0.02) return "Climbing";
+  if (s < -0.02) return "Declining";
+  return "Flat";
+}
+
+function timeoutTrendLabel(values: number[]): SparkTrendLabel {
+  const s = slope(values);
+  if (s < -0.002) return "Improving";
+  if (s > 0.002) return "Getting Worse";
+  return "Stuck";
+}
+
+function speedTrendLabel(values: number[]): SparkTrendLabel {
+  const s = slope(values);
+  if (s < -0.4) return "Getting Faster";
+  if (s > 0.4) return "Slowing";
+  return "Flat";
+}
+
+function trendArrow(label: SparkTrendLabel): string {
+  if (label === "Climbing" || label === "Improving" || label === "Getting Faster") return "↗";
+  if (label === "Declining" || label === "Getting Worse" || label === "Slowing") return "↘";
+  if (label === "Volatile") return "≈";
+  return "→";
+}
+
+interface SparklineProps {
+  values: number[];
+  color: string;
+  lowerIsBetter?: boolean;
+}
+
+function Sparkline({ values, color }: SparklineProps) {
+  const W = 260;
+  const H = 64;
+  if (values.length < 2) {
+    return <div className="signal-sparkline signal-sparkline--empty">Not enough data</div>;
+  }
+  const minV = Math.min(...values);
+  const maxV = Math.max(...values);
+  const range = maxV - minV || 1;
+  const points = values
+    .map((value, index) => {
+      const x = (index / (values.length - 1)) * (W - 8) + 4;
+      const y = H - 6 - ((value - minV) / range) * (H - 14);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="signal-sparkline" aria-hidden="true">
+      <polyline points={points} fill="none" stroke={color} strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+interface LearningSignalChartProps {
+  points: LearningPoint[];
+  smoothedSuccessRate: number[];
+  flatZones: FlatZone[];
+  breakthroughs: BreakthroughEvent[];
+  currentCheckpoint: number | null;
+  stageBestSuccessRate: number;
+  onBreakthroughClick: (checkpoint: number) => void;
+  focusedCheckpoint: number | null;
+}
+
+function LearningSignalChart({
+  points,
+  smoothedSuccessRate,
+  flatZones,
+  breakthroughs,
+  currentCheckpoint,
+  stageBestSuccessRate,
+  onBreakthroughClick,
+  focusedCheckpoint,
+}: LearningSignalChartProps) {
+  const W = 1100;
+  const H = 340;
+  const PAD = { top: 22, right: 34, bottom: 38, left: 56 };
+  const plotW = W - PAD.left - PAD.right;
+  const plotH = H - PAD.top - PAD.bottom;
+  const xMin = points[0]?.checkpoint ?? 0;
+  const xMax = points[points.length - 1]?.checkpoint ?? 1;
+  const xRange = xMax - xMin || 1;
+
+  function toX(checkpoint: number): number {
+    return PAD.left + ((checkpoint - xMin) / xRange) * plotW;
+  }
+
+  function toY(value: number): number {
+    return PAD.top + plotH - value * plotH;
+  }
+
+  const baseLine = points.map((point) => `${toX(point.checkpoint).toFixed(1)},${toY(point.successRate).toFixed(1)}`).join(" ");
+  const smoothLine = points
+    .map((point, index) => `${toX(point.checkpoint).toFixed(1)},${toY(smoothedSuccessRate[index] ?? point.successRate).toFixed(1)}`)
+    .join(" ");
+
+  const yTicks = [0, 0.25, 0.5, 0.75, 1];
+
+  return (
+    <div className="signal-main-chart">
+      <svg viewBox={`0 0 ${W} ${H}`} className="signal-main-chart__svg" role="img" aria-label="Learning signal success history chart">
+        {yTicks.map((tick) => (
+          <g key={tick}>
+            <line x1={PAD.left} y1={toY(tick)} x2={PAD.left + plotW} y2={toY(tick)} stroke="rgba(148,163,184,0.14)" strokeWidth={1} />
+            <text x={PAD.left - 6} y={toY(tick) + 4} textAnchor="end" fontSize={11} fill="rgba(148,163,184,0.75)">{Math.round(tick * 100)}%</text>
+          </g>
+        ))}
+
+        {flatZones.map((zone) => {
+          const x1 = toX(zone.startCheckpoint);
+          const x2 = toX(zone.endCheckpoint);
+          return (
+            <rect
+              key={`${zone.startCheckpoint}-${zone.endCheckpoint}`}
+              x={Math.min(x1, x2)}
+              y={PAD.top}
+              width={Math.max(2, Math.abs(x2 - x1))}
+              height={plotH}
+              fill="rgba(96,165,250,0.07)"
+            />
+          );
+        })}
+
+        <line
+          x1={PAD.left}
+          y1={toY(stageBestSuccessRate)}
+          x2={PAD.left + plotW}
+          y2={toY(stageBestSuccessRate)}
+          stroke="rgba(74,222,128,0.42)"
+          strokeWidth={1.2}
+          strokeDasharray="5 4"
+        />
+
+        {currentCheckpoint != null ? (
+          <line
+            x1={toX(currentCheckpoint)}
+            y1={PAD.top}
+            x2={toX(currentCheckpoint)}
+            y2={PAD.top + plotH}
+            stroke="rgba(244,197,66,0.8)"
+            strokeWidth={1.4}
+            strokeDasharray="4 3"
+          />
+        ) : null}
+
+        <polyline points={baseLine} fill="none" stroke="rgba(96,165,250,0.9)" strokeWidth={2.2} strokeLinejoin="round" strokeLinecap="round" />
+        <polyline points={smoothLine} fill="none" stroke="rgba(244,197,66,0.95)" strokeWidth={2.4} strokeLinejoin="round" strokeLinecap="round" />
+
+        {breakthroughs.map((event) => {
+          const x = toX(event.checkpoint);
+          const y = toY(event.toSuccessRate);
+          const focused = focusedCheckpoint === event.checkpoint;
+          return (
+            <g key={event.checkpoint}>
+              {focused ? <circle cx={x} cy={y} r={10} fill="none" stroke="rgba(244,197,66,0.6)" strokeWidth={2} /> : null}
+              <circle
+                cx={x}
+                cy={y}
+                r={6}
+                fill="rgba(244,197,66,0.95)"
+                stroke="rgba(8,17,27,0.85)"
+                strokeWidth={1.4}
+                style={{ cursor: "pointer" }}
+                onClick={() => onBreakthroughClick(event.checkpoint)}
+              />
+              <title>{`Breakthrough #${event.index} at checkpoint ${event.checkpoint}`}</title>
+            </g>
+          );
+        })}
+
+        <text x={PAD.left + 4} y={PAD.top + 14} fontSize={11} fill="rgba(148,163,184,0.75)">success rate</text>
+        <text x={PAD.left + plotW - 4} y={PAD.top + plotH + 28} textAnchor="end" fontSize={11} fill="rgba(148,163,184,0.75)">checkpoint</text>
+      </svg>
     </div>
   );
 }
@@ -575,6 +1201,191 @@ export function DiagnosticsPanel({
   const isLiveTraining = trainingStatus?.running ?? false;
   const uniqueStages = useMemo(() => [...new Set(stages)].sort((a, b) => a - b), [stages]);
   const [activeChart, setActiveChart] = useState<ChartTab>("success");
+  const [learningSignalWindow, setLearningSignalWindow] = useState<ViewWindow>("all");
+  const [learningSignalSmoothWindow, setLearningSignalSmoothWindow] = useState<SmoothingWindow>(50);
+  const [focusedBreakthroughCheckpoint, setFocusedBreakthroughCheckpoint] = useState<number | null>(null);
+  const [advisorExplainOpen, setAdvisorExplainOpen] = useState(false);
+  const [breakthroughNotes, setBreakthroughNotes] = useState<Record<number, string>>({});
+
+  const latestCheckpoint = checkpoints[checkpoints.length - 1] ?? null;
+  const recentCheckpoints = useMemo(() => checkpoints.slice(-RECENT_WINDOW), [checkpoints]);
+  const previousWindow = useMemo(() => checkpoints.slice(-(RECENT_WINDOW * 2), -RECENT_WINDOW), [checkpoints]);
+
+  const latestSuccessRate = latestCheckpoint?.success_rate ?? null;
+  const latestReward = latestCheckpoint?.average_reward ?? null;
+  const latestSheepPenned = latestCheckpoint?.average_sheep_penned ?? null;
+  const latestTimeoutRate = latestCheckpoint?.timeout_rate ?? null;
+  const latestSteps = latestCheckpoint?.average_completion_steps ?? null;
+  const latestNoProgress = trainingStatus?.latest_avg_no_progress_steps ?? null;
+
+  const recentSuccessRate = average(recentCheckpoints.map((entry) => entry.success_rate));
+  const recentReward = average(recentCheckpoints.map((entry) => entry.average_reward));
+  const recentTimeoutRate = average(recentCheckpoints.map((entry) => entry.timeout_rate));
+  const recentSheepPenned = average(recentCheckpoints.map((entry) => entry.average_sheep_penned));
+  const recentSteps = average(recentCheckpoints.map((entry) => entry.average_completion_steps));
+
+  const priorSuccessRate = average(previousWindow.map((entry) => entry.success_rate));
+  const priorReward = average(previousWindow.map((entry) => entry.average_reward));
+  const priorTimeoutRate = average(previousWindow.map((entry) => entry.timeout_rate));
+  const priorSheepPenned = average(previousWindow.map((entry) => entry.average_sheep_penned));
+  const priorSteps = average(previousWindow.map((entry) => entry.average_completion_steps));
+
+  const recentSuccessDelta = recentSuccessRate != null && priorSuccessRate != null ? recentSuccessRate - priorSuccessRate : null;
+  const recentRewardDelta = recentReward != null && priorReward != null ? recentReward - priorReward : null;
+  const recentTimeoutDelta = recentTimeoutRate != null && priorTimeoutRate != null ? recentTimeoutRate - priorTimeoutRate : null;
+  const recentSheepDelta = recentSheepPenned != null && priorSheepPenned != null ? recentSheepPenned - priorSheepPenned : null;
+  const recentStepsDelta = recentSteps != null && priorSteps != null ? recentSteps - priorSteps : null;
+
+  const improvementScore =
+    (recentSuccessDelta ?? 0) +
+    ((recentRewardDelta ?? 0) / 100) +
+    ((recentSheepDelta ?? 0) / 10) -
+    ((recentTimeoutDelta ?? 0) / 2) -
+    ((recentStepsDelta ?? 0) / 500);
+
+  const stageCheckpoints = checkpoints.filter(
+    (entry) => (entry.reward_config?.instincts?.curriculum_stage ?? 0) === effectiveCurriculumStage,
+  );
+  const stageBestSuccessRate = stageCheckpoints.length ? Math.max(...stageCheckpoints.map((entry) => entry.success_rate)) : null;
+  const stageBestReward = stageCheckpoints.length ? Math.max(...stageCheckpoints.map((entry) => entry.average_reward)) : null;
+  const stageMedianSteps = stageCheckpoints.length
+    ? [...stageCheckpoints.map((entry) => entry.average_completion_steps)].sort((a, b) => a - b)[Math.floor(stageCheckpoints.length / 2)]
+    : null;
+  const currentStageBestSuccessRate =
+    stageCheckpoints.length > 0 ? Math.max(...stageCheckpoints.map((entry) => entry.success_rate)) : 0;
+  const plateauKind = plateauInfo?.kind ?? null;
+  const abovePromotionThreshold = latestSuccessRate != null && latestSuccessRate >= PROMOTE_THRESHOLD;
+  const recentImproving = improvementScore > 0.01;
+  const decisionSignal = buildDecisionSignal({
+    checkpointCount: checkpoints.length,
+    latestSuccessRate,
+    latestReward,
+    latestTimeoutRate,
+    plateauKind,
+    stage: effectiveCurriculumStage,
+    abovePromotionThreshold,
+    improving: recentImproving,
+  });
+
+  const readinessTone: DecisionTone =
+    decisionSignal.tone === "danger"
+      ? "danger"
+      : decisionSignal.tone === "good"
+        ? "good"
+        : decisionSignal.tone === "warn"
+          ? "warn"
+          : "muted";
+
+  const learningSignalSource = useMemo(() => {
+    if (learningSignalWindow === "all") return checkpoints;
+    if (learningSignalWindow === "stage") {
+      return checkpoints.filter(
+        (entry) => (entry.reward_config?.instincts?.curriculum_stage ?? 0) === effectiveCurriculumStage,
+      );
+    }
+    return checkpoints.slice(-learningSignalWindow);
+  }, [checkpoints, learningSignalWindow, effectiveCurriculumStage]);
+
+  const learningSignalPoints = useMemo<LearningPoint[]>(
+    () =>
+      learningSignalSource.map((entry) => ({
+        checkpoint: entry.checkpoint_episode,
+        successRate: entry.success_rate,
+        reward: entry.average_reward,
+        timeoutRate: entry.timeout_rate,
+        completionSteps: entry.average_completion_steps,
+        sheepPenned: entry.average_sheep_penned,
+        noProgressGuard: averageNoProgress(entry),
+        stage: entry.reward_config?.instincts?.curriculum_stage ?? 0,
+      })),
+    [learningSignalSource],
+  );
+
+  const learningSignalAnalysis = useMemo(
+    () => analyzeLearningSignal(learningSignalPoints, learningSignalSmoothWindow),
+    [learningSignalPoints, learningSignalSmoothWindow],
+  );
+
+  const rewardValues = learningSignalPoints.map((point) => point.reward);
+  const timeoutValues = learningSignalPoints.map((point) => point.timeoutRate);
+  const speedValues = learningSignalPoints.map((point) => point.completionSteps);
+  const noProgressValues = learningSignalPoints.map((point) => point.noProgressGuard);
+
+  const rewardTrend = useMemo(() => rewardTrendLabel(rewardValues), [rewardValues]);
+  const timeoutTrend = useMemo(() => timeoutTrendLabel(timeoutValues), [timeoutValues]);
+  const speedTrend = useMemo(() => speedTrendLabel(speedValues), [speedValues]);
+
+  const recentWindow = 50;
+  const currentRewardWindow = rewardValues.slice(-recentWindow);
+  const priorRewardWindow = rewardValues.slice(-recentWindow * 2, -recentWindow);
+  const currentSpeedWindow = speedValues.slice(-recentWindow);
+  const priorSpeedWindow = speedValues.slice(-recentWindow * 2, -recentWindow);
+  const rewardDelta =
+    currentRewardWindow.length && priorRewardWindow.length
+      ? average(currentRewardWindow)! - average(priorRewardWindow)!
+      : null;
+  const speedDelta =
+    currentSpeedWindow.length && priorSpeedWindow.length
+      ? average(currentSpeedWindow)! - average(priorSpeedWindow)!
+      : null;
+
+  const recentSuccess = average(learningSignalPoints.slice(-recentWindow).map((point) => point.successRate));
+  const recentTimeout = average(learningSignalPoints.slice(-recentWindow).map((point) => point.timeoutRate));
+  const recentNoProgress = average(noProgressValues.slice(-recentWindow));
+  const highSuccessStable =
+    learningSignalPoints.length >= 50 &&
+    learningSignalPoints.slice(-50).every((point) => point.successRate >= 0.8) &&
+    learningSignalPoints[learningSignalPoints.length - 1].successRate >=
+      learningSignalPoints[Math.max(0, learningSignalPoints.length - 50)].successRate - 0.02;
+
+  const rewardSignalSummary: SignalSummary = {
+    label: rewardTrend,
+    tone: rewardTrend === "Climbing" ? "good" : rewardTrend === "Declining" ? "danger" : rewardTrend === "Volatile" ? "warn" : "muted",
+  };
+  const timeoutSignalSummary: SignalSummary = {
+    label: timeoutTrend,
+    tone: timeoutTrend === "Improving" ? "good" : timeoutTrend === "Getting Worse" ? "danger" : "warn",
+  };
+  const speedSignalSummary: SignalSummary = {
+    label: speedTrend,
+    tone: speedTrend === "Getting Faster" ? "good" : speedTrend === "Slowing" ? "warn" : "muted",
+  };
+
+  const learningAdvisor = useMemo(
+    () =>
+      buildAdvisor({
+        currentFlatStreak: learningSignalAnalysis.currentFlatStreak,
+        longestHistoricalPlateau: learningSignalAnalysis.longestHistoricalPlateau,
+        rewardSignal: rewardSignalSummary,
+        timeoutSignal: timeoutSignalSummary,
+        speedSignal: speedSignalSummary,
+        recentSuccess,
+        recentRewardDelta: rewardDelta,
+        recentSpeedDelta: speedDelta,
+        recentTimeout,
+        recentNoProgress,
+        highSuccessStable,
+      }),
+    [
+      learningSignalAnalysis.currentFlatStreak,
+      learningSignalAnalysis.longestHistoricalPlateau,
+      rewardSignalSummary,
+      timeoutSignalSummary,
+      speedSignalSummary,
+      recentSuccess,
+      rewardDelta,
+      speedDelta,
+      recentTimeout,
+      recentNoProgress,
+      highSuccessStable,
+    ],
+  );
+
+  const flatContextStatus =
+    learningSignalAnalysis.currentFlatStreak <= learningSignalAnalysis.longestHistoricalPlateau ||
+    learningSignalAnalysis.longestHistoricalPlateau === 0
+      ? `Within normal plateau range — previous breakthroughs took up to ${learningSignalAnalysis.longestHistoricalPlateau || learningSignalAnalysis.currentFlatStreak} episodes`
+      : "Exceeding longest known plateau — consider intervention";
 
   // ── Empty state ───────────────────────────────────────────────────────────
   if (checkpoints.length === 0) {
@@ -688,12 +1499,14 @@ export function DiagnosticsPanel({
 
       {/* Chart sub-tabs */}
       <div className="chart-tabs" role="tablist">
-        {(["success", "reward", "sheep", "history"] as ChartTab[]).map((id) => {
+        {(["success", "reward", "sheep", "history", "health", "learningSignal"] as ChartTab[]).map((id) => {
           const labels: Record<ChartTab, string> = {
             success: "Success Rate",
             reward: "Avg Reward",
             sheep: "Sheep Penned",
             history: "History",
+            health: "Health",
+            learningSignal: "Learning Signal",
           };
           return (
             <button
@@ -708,6 +1521,304 @@ export function DiagnosticsPanel({
           );
         })}
       </div>
+
+      {activeChart === "learningSignal" && (
+        <div className="chart-view">
+          <section className="learning-signal" aria-label="Learning Signal">
+            <header className="learning-signal__header">
+              <div>
+                <h3>
+                  Learning Signal
+                  <InfoTip text="A learning-focused view to decide whether to keep training, tune parameters, or advance stage." />
+                </h3>
+                <p>Is the model still learning, or do I need to intervene?</p>
+              </div>
+              <div className="learning-signal__controls">
+                <div className="learning-signal__pill-group" role="group" aria-label="Learning signal data window">
+                  {LEARNING_SIGNAL_WINDOW_OPTIONS.map(({ value, label }) => (
+                    <button
+                      key={`learning-window-${String(value)}`}
+                      className={`chart-tab${learningSignalWindow === value ? " chart-tab--active" : ""}`}
+                      onClick={() => setLearningSignalWindow(value)}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <div className="learning-signal__pill-group" role="group" aria-label="Smoothing window">
+                  {SMOOTHING_WINDOWS.map((windowSize) => (
+                    <button
+                      key={`smooth-${windowSize}`}
+                      className={`chart-tab${learningSignalSmoothWindow === windowSize ? " chart-tab--active" : ""}`}
+                      onClick={() => setLearningSignalSmoothWindow(windowSize)}
+                    >
+                      Smooth {windowSize}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </header>
+
+            <section className="learning-signal__section">
+              <div className="learning-signal__section-title">
+                <h4>
+                  The Learning Curve
+                  <InfoTip text="Flat stretches can be normal in PPO. Breakthrough markers indicate first strong jumps after prolonged plateaus." />
+                </h4>
+              </div>
+              <LearningSignalChart
+                points={learningSignalPoints}
+                smoothedSuccessRate={learningSignalAnalysis.smoothedSuccessRate}
+                flatZones={learningSignalAnalysis.flatZones}
+                breakthroughs={learningSignalAnalysis.breakthroughs}
+                currentCheckpoint={learningSignalPoints[learningSignalPoints.length - 1]?.checkpoint ?? null}
+                stageBestSuccessRate={currentStageBestSuccessRate}
+                focusedCheckpoint={focusedBreakthroughCheckpoint}
+                onBreakthroughClick={(checkpoint) => setFocusedBreakthroughCheckpoint(checkpoint)}
+              />
+            </section>
+
+            <section className="learning-signal__section">
+              <div className="learning-signal__section-title">
+                <h4>
+                  Flat Streak Context
+                  <InfoTip text="Compares your current flat streak against pre-breakthrough plateaus from your own training history." />
+                </h4>
+              </div>
+              <div className="flat-context">
+                <div className="flat-context__main">
+                  <span className="flat-context__label">Current flat streak</span>
+                  <strong>{learningSignalAnalysis.currentFlatStreak} episodes</strong>
+                </div>
+                <div className="flat-context__bars">
+                  {learningSignalAnalysis.breakthroughs.length === 0 ? (
+                    <div className="flat-context__empty">No historical breakthroughs yet</div>
+                  ) : (
+                    learningSignalAnalysis.breakthroughs.map((event) => {
+                      const denom = Math.max(
+                        learningSignalAnalysis.longestHistoricalPlateau,
+                        learningSignalAnalysis.currentFlatStreak,
+                        1,
+                      );
+                      const width = `${Math.max(8, (event.flatEpisodesBefore / denom) * 100)}%`;
+                      return (
+                        <div key={`bar-${event.checkpoint}`} className="flat-context__bar-row">
+                          <span className="flat-context__bar-label">Before B{event.index}</span>
+                          <div className="flat-context__bar-track">
+                            <span className="flat-context__bar-fill" style={{ width }} />
+                          </div>
+                          <span className="flat-context__bar-value">{event.flatEpisodesBefore}</span>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+                <div
+                  className={`warning-box${
+                    flatContextStatus.startsWith("Exceeding") ? " warning-box--warning" : " warning-box--success"
+                  }`}
+                >
+                  {flatContextStatus}
+                </div>
+              </div>
+            </section>
+
+            <section className="learning-signal__section">
+              <div className="learning-signal__section-title">
+                <h4>
+                  Multi-Signal Trend Panel
+                  <InfoTip text="Cross-check reward, timeout, and speed to detect hidden progress even when success is flat." />
+                </h4>
+              </div>
+              <div className="signal-grid">
+                <article className="signal-card">
+                  <header>
+                    <h5>Reward Trend</h5>
+                    <span className={`signal-arrow signal-arrow--${rewardSignalSummary.tone}`}>{trendArrow(rewardTrend)}</span>
+                  </header>
+                  <Sparkline values={rewardValues} color="rgba(244,197,66,0.9)" />
+                  <p>{rewardTrend}</p>
+                </article>
+                <article className="signal-card">
+                  <header>
+                    <h5>Timeout Trend</h5>
+                    <span className={`signal-arrow signal-arrow--${timeoutSignalSummary.tone}`}>{trendArrow(timeoutTrend)}</span>
+                  </header>
+                  <Sparkline values={timeoutValues} color="rgba(251,113,133,0.9)" />
+                  <p>{timeoutTrend} (lower is better)</p>
+                </article>
+                <article className="signal-card">
+                  <header>
+                    <h5>Completion Speed</h5>
+                    <span className={`signal-arrow signal-arrow--${speedSignalSummary.tone}`}>{trendArrow(speedTrend)}</span>
+                  </header>
+                  <Sparkline values={speedValues} color="rgba(125,211,252,0.9)" />
+                  <p>{speedTrend} (fewer steps is better)</p>
+                </article>
+              </div>
+            </section>
+
+            <section className="learning-signal__section">
+              <div className="learning-signal__section-title">
+                <h4>
+                  Intervention Advisor
+                  <InfoTip text="Actionable guidance generated from plateau duration, trend direction, and convergence stability." />
+                </h4>
+              </div>
+              <div className={`advisor advisor--${learningAdvisor.tone}`}>
+                <header className="advisor__header">
+                  <span className={`pill pill--${learningAdvisor.tone}`}>State {learningAdvisor.state}</span>
+                  <h5>{learningAdvisor.title}</h5>
+                </header>
+                <p>{learningAdvisor.body}</p>
+                <ul className="advisor__actions">
+                  {learningAdvisor.actions.map((action, index) => (
+                    <li key={`action-${index}`}>{action}</li>
+                  ))}
+                </ul>
+                <button className="advisor__why" onClick={() => setAdvisorExplainOpen((open) => !open)}>
+                  {advisorExplainOpen ? "Hide" : "Show"} Why this recommendation?
+                </button>
+                {advisorExplainOpen ? <div className="advisor__reason">{learningAdvisor.reason}</div> : null}
+              </div>
+            </section>
+
+            <section className="learning-signal__section">
+              <div className="learning-signal__section-title">
+                <h4>
+                  Breakthrough History
+                  <InfoTip text="Track where breakthroughs happened and annotate what changed so you can learn from past interventions." />
+                </h4>
+              </div>
+              <div className="diag-table-wrap">
+                <table className="diag-table learning-signal__table">
+                  <thead>
+                    <tr>
+                      <th>Breakthrough #</th>
+                      <th>At Checkpoint</th>
+                      <th>After Flat Episodes</th>
+                      <th>Success Jump</th>
+                      <th>What changed</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {learningSignalAnalysis.breakthroughs.length === 0 ? (
+                      <tr>
+                        <td colSpan={5} className="learning-signal__table-empty">No breakthroughs detected yet.</td>
+                      </tr>
+                    ) : (
+                      learningSignalAnalysis.breakthroughs.map((event) => (
+                        <tr key={`breakthrough-row-${event.checkpoint}`}>
+                          <td>#{event.index}</td>
+                          <td>
+                            <button
+                              className="learning-signal__jump-btn"
+                              onClick={() => setFocusedBreakthroughCheckpoint(event.checkpoint)}
+                            >
+                              {event.checkpoint}
+                            </button>
+                          </td>
+                          <td>{event.flatEpisodesBefore}</td>
+                          <td>
+                            {Math.round(event.fromSuccessRate * 100)}% → {Math.round(event.toSuccessRate * 100)}%
+                          </td>
+                          <td>
+                            <input
+                              className="learning-signal__note-input"
+                              value={breakthroughNotes[event.checkpoint] ?? ""}
+                              placeholder="manual note"
+                              onChange={(e) =>
+                                setBreakthroughNotes((prev) => ({
+                                  ...prev,
+                                  [event.checkpoint]: e.target.value,
+                                }))
+                              }
+                            />
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </section>
+        </div>
+      )}
+
+      {activeChart === "health" && (
+        <div className="chart-view">
+          <section className="health-dashboard" aria-label="Training health overview">
+            <div className="health-dashboard__hero">
+              <div>
+                <p className="eyebrow">Training health</p>
+                <h3>{decisionSignal.title}</h3>
+                <p className="health-dashboard__copy">{decisionSignal.body}</p>
+              </div>
+              <div className="health-dashboard__badge-wrap">
+                <span className={`pill pill--${readinessTone}`}>{decisionSignal.badge}</span>
+                <span className="pill pill--muted">{checkpoints.length} checkpoints</span>
+              </div>
+            </div>
+
+            <div className="health-dashboard__grid">
+              <StatCard
+                label="Latest success"
+                value={formatPercent(latestSuccessRate)}
+                detail={trendSummary(latestSuccessRate, priorSuccessRate, (value) => `${Math.round(value * 100)}%`) + ` · promo bar ${Math.round(PROMOTE_THRESHOLD * 100)}%`}
+                tone={latestSuccessRate != null && latestSuccessRate >= PROMOTE_THRESHOLD ? "good" : "warn"}
+              />
+              <StatCard
+                label="Latest reward"
+                value={formatNumber(latestReward, 1)}
+                detail={trendSummary(latestReward, priorReward, (value) => value.toFixed(1))}
+                tone={latestReward != null && recentRewardDelta != null && recentRewardDelta > 0 ? "good" : "muted"}
+              />
+              <StatCard
+                label="Latest sheep penned"
+                value={formatNumber(latestSheepPenned, 1)}
+                detail={trendSummary(latestSheepPenned, priorSheepPenned, (value) => value.toFixed(1))}
+                tone={latestSheepPenned != null && recentSheepDelta != null && recentSheepDelta > 0 ? "good" : "muted"}
+              />
+              <StatCard
+                label="Latest timeout rate"
+                value={formatPercent(latestTimeoutRate)}
+                detail={trendSummary(latestTimeoutRate, priorTimeoutRate, (value) => `${Math.round(value * 100)}%`) + " · lower is better"}
+                tone={latestTimeoutRate != null && latestTimeoutRate >= 0.6 ? "danger" : "muted"}
+              />
+              <StatCard
+                label="Latest completion steps"
+                value={formatNumber(latestSteps, 0)}
+                detail={trendSummary(latestSteps, priorSteps, (value) => `${Math.round(value)}`) + " · fewer is better"}
+                tone={latestSteps != null && recentStepsDelta != null && recentStepsDelta < 0 ? "good" : "muted"}
+              />
+              <StatCard
+                label="No-progress guard"
+                value={formatNumber(latestNoProgress, 0)}
+                detail="High values usually mean the policy is moving but not converting motion into penning"
+                tone={latestNoProgress != null && latestNoProgress > 0 ? "warn" : "muted"}
+              />
+            </div>
+
+            <div className="health-dashboard__callout health-dashboard__callout--neutral">
+              <div>
+                <strong>Live training diagnostics</strong>
+                <p>
+                  Monitor rolling success, timeout rate, reward trend, completion steps, and stage-over-stage deltas to assess stability, convergence quality, and curriculum generalization in the current run.
+                </p>
+              </div>
+              <div className="health-dashboard__callout-metrics">
+                <span><strong>{formatPercent(recentSuccessRate)}</strong> recent success</span>
+                <span><strong>{formatNumber(recentReward, 1)}</strong> recent reward</span>
+                <span><strong>{formatPercent(recentTimeoutRate)}</strong> recent timeout</span>
+                <span><strong>{formatNumber(stageBestSuccessRate, 2)}</strong> stage best success</span>
+                <span><strong>{formatNumber(stageBestReward, 1)}</strong> stage best reward</span>
+                <span><strong>{formatNumber(stageMedianSteps, 0)}</strong> stage median steps</span>
+              </div>
+            </div>
+          </section>
+        </div>
+      )}
 
       {activeChart === "success" && (
         <div className="chart-view">

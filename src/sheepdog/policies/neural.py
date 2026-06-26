@@ -2,17 +2,47 @@
 
 from __future__ import annotations
 
+import os
+from functools import partial
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 from sb3_contrib import MaskablePPO
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnv
 
 from sheepdog.config import LabConfig
 from sheepdog.environment import ACTION_ORDER
 from sheepdog.policies.base import Action
 from sheepdog.training.rl_env import SheepdogRLAdapter
+
+
+def _make_rl_adapter(config_payload: dict[str, Any]) -> SheepdogRLAdapter:
+    """Build one RL adapter from a serializable config payload."""
+    return SheepdogRLAdapter(LabConfig.from_dict(config_payload))
+
+
+def _resolve_env_workers(config: LabConfig) -> int:
+    """Resolve PPO worker count from config and optional env override."""
+    raw_override = os.getenv("SHEEPDOG_PPO_NUM_ENVS")
+    if raw_override is not None:
+        try:
+            return max(1, int(raw_override))
+        except ValueError:
+            pass
+    return max(1, int(config.training.ppo_env_workers))
+
+
+def _build_vec_env(config: LabConfig) -> tuple[VecEnv, int, str]:
+    """Create a vectorized env with the selected backend and worker count."""
+    workers = _resolve_env_workers(config)
+    config_payload = config.to_dict()
+    env_fns = [partial(_make_rl_adapter, config_payload) for _ in range(workers)]
+    if workers == 1:
+        return DummyVecEnv(env_fns), workers, "dummy"
+    # Use spawn to stay Windows-safe when called from threaded server code.
+    return SubprocVecEnv(env_fns, start_method="spawn"), workers, "subproc"
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +52,7 @@ class NeuralPolicyConfig:
     hidden_sizes: tuple[int, ...]
     observation_size: int
     action_size: int = len(ACTION_ORDER)
+    env_workers: int = 1
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict."""
@@ -29,6 +60,7 @@ class NeuralPolicyConfig:
             "hidden_sizes": list(self.hidden_sizes),
             "observation_size": self.observation_size,
             "action_size": self.action_size,
+            "env_workers": self.env_workers,
         }
 
     @classmethod
@@ -41,6 +73,7 @@ class NeuralPolicyConfig:
             hidden_sizes=tuple(int(value) for value in hidden_sizes),
             observation_size=int(payload.get("observation_size", observation_size)),
             action_size=int(payload.get("action_size", len(ACTION_ORDER))),
+            env_workers=max(1, int(payload.get("env_workers", 1))),
         )
 
 
@@ -58,16 +91,17 @@ class NeuralPolicy:
 
     @classmethod
     def initialize(cls, config: LabConfig) -> NeuralPolicy:
-        """Create a fresh, untrained neural policy."""
-        adapter = SheepdogRLAdapter(config)
-        observation_size = int(adapter.observation_space.shape[0])
+        """Create a fresh, untrained neural policy with vectorized environments."""
+        vec_env, env_workers, _backend = _build_vec_env(config)
+        observation_size = int(vec_env.observation_space.shape[0])
         policy_config = NeuralPolicyConfig(
             hidden_sizes=tuple(config.training.neural_hidden_sizes),
             observation_size=observation_size,
+            env_workers=env_workers,
         )
         model = MaskablePPO(
             "MlpPolicy",
-            adapter,
+            vec_env,
             learning_rate=config.training.learning_rate,
             n_steps=config.training.rollout_steps,
             batch_size=config.training.batch_size,
@@ -90,10 +124,10 @@ class NeuralPolicy:
         policy_config: dict[str, Any] | None = None,
     ) -> NeuralPolicy:
         """Load a trained neural policy from a checkpoint file."""
-        adapter = SheepdogRLAdapter(config)
-        observation_size = int(adapter.observation_space.shape[0])
+        vec_env, _env_workers, _backend = _build_vec_env(config)
+        observation_size = int(vec_env.observation_space.shape[0])
         resolved_path = Path(path)
-        model = MaskablePPO.load(str(resolved_path), env=adapter)
+        model = MaskablePPO.load(str(resolved_path), env=vec_env)
         return cls(
             model=model,
             model_path=resolved_path,

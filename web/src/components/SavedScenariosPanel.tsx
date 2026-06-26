@@ -205,48 +205,51 @@ export function SavedScenariosPanel({
       ) : null}
 
       {scenarios.length ? (
-        <div className="saved-scenarios-panel__table-wrap">
-          <table className="saved-scenarios-panel__table">
-            <thead>
-              <tr>
-                <th>Scenario</th>
-                <th>Last run</th>
-                <th>Best for scenario</th>
-              </tr>
-            </thead>
-            <tbody>
-              {scenarios.map((scenario) => {
-                const latest = runByScenario.get(scenario.id);
-                const best = bestByScenario[scenario.id];
-                return (
-                  <tr
-                    key={scenario.id}
-                    className={selectedScenarioId === scenario.id ? "saved-scenarios-panel__row--selected" : ""}
-                  >
-                    <td>
-                      <button
-                        type="button"
-                        className="saved-scenarios-panel__name"
-                        onClick={() => onSelectScenario(scenario.id)}
-                      >
-                        {scenario.name}
-                      </button>
-                      {scenario.description ? (
-                        <span className="saved-scenarios-panel__desc">{scenario.description}</span>
-                      ) : null}
-                    </td>
-                    <td>{latest ? formatResult(latest) : "—"}</td>
-                    <td>
-                      {best
-                        ? `ep ${best.checkpoint_episode} · ${formatResult(best)}`
-                        : "—"}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+        <details className="training-advanced">
+          <summary>Scenario performance table</summary>
+          <div className="saved-scenarios-panel__table-wrap">
+            <table className="saved-scenarios-panel__table">
+              <thead>
+                <tr>
+                  <th>Scenario</th>
+                  <th>Last run</th>
+                  <th>Best for scenario</th>
+                </tr>
+              </thead>
+              <tbody>
+                {scenarios.map((scenario) => {
+                  const latest = runByScenario.get(scenario.id);
+                  const best = bestByScenario[scenario.id];
+                  return (
+                    <tr
+                      key={scenario.id}
+                      className={selectedScenarioId === scenario.id ? "saved-scenarios-panel__row--selected" : ""}
+                    >
+                      <td>
+                        <button
+                          type="button"
+                          className="saved-scenarios-panel__name"
+                          onClick={() => onSelectScenario(scenario.id)}
+                        >
+                          {scenario.name}
+                        </button>
+                        {scenario.description ? (
+                          <span className="saved-scenarios-panel__desc">{scenario.description}</span>
+                        ) : null}
+                      </td>
+                      <td>{latest ? formatResult(latest) : "—"}</td>
+                      <td>
+                        {best
+                          ? `ep ${best.checkpoint_episode} · ${formatResult(best)}`
+                          : "—"}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </details>
       ) : (
         <p className="scenario-panel__hint">No saved scenarios yet. Run a live episode, then save its layout.</p>
       )}
