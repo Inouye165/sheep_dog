@@ -88,7 +88,8 @@ class _HierarchicalProgressCallback(BaseCallback):
                 "checkpoint_episode": None,
                 "best_score": None,
                 "message": (
-                    f"[Hierarchical] PPO timesteps: {n}/{self._total_timesteps} ({completion:.0%})"
+                    f"[Hierarchical] PPO timesteps: "
+                    f"{min(n, self._total_timesteps)}/{self._total_timesteps} ({completion:.0%})"
                 ),
                 "batch_total_episodes": self._batch_total,
             }

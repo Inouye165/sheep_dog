@@ -57,7 +57,11 @@ class EvaluationRecord:
     final_sheep_distance_to_pen: float
     final_flock_spread: float
     no_progress_steps: int
+    stop_reason: str
+    spawn_mode: str
     reward_total: float
+    final_farthest_distance_to_pen: float
+    final_farthest_distance_to_flock_center: float
     role_switches: int
     collector_activations: int
     blocker_activations: int
@@ -94,6 +98,9 @@ class EvaluationSummary:
     average_distance_to_pen: float = 0.0
     average_flock_spread: float = 0.0
     stopped_rate: float = 0.0
+    average_no_progress_steps: float = 0.0
+    average_farthest_distance_to_pen: float = 0.0
+    average_farthest_distance_to_flock_center: float = 0.0
     average_role_switches: float = 0.0
     average_collector_activations: float = 0.0
     average_blocker_activations: float = 0.0
@@ -191,6 +198,13 @@ class Evaluator:
             average_distance_to_pen=fmean(record.final_sheep_distance_to_pen for record in records),
             average_flock_spread=fmean(record.final_flock_spread for record in records),
             stopped_rate=fmean(1.0 if record.stopped else 0.0 for record in records),
+            average_no_progress_steps=fmean(record.no_progress_steps for record in records),
+            average_farthest_distance_to_pen=fmean(
+                record.final_farthest_distance_to_pen for record in records
+            ),
+            average_farthest_distance_to_flock_center=fmean(
+                record.final_farthest_distance_to_flock_center for record in records
+            ),
             average_role_switches=fmean(result.stats.role_switches for result in results),
             average_collector_activations=fmean(
                 result.stats.collector_activations for result in results
@@ -243,7 +257,11 @@ class Evaluator:
             final_sheep_distance_to_pen=snapshot.average_distance_to_pen,
             final_flock_spread=snapshot.flock_spread,
             no_progress_steps=result.stats.no_progress_steps,
+            stop_reason=result.stats.stop_reason,
+            spawn_mode=result.stats.spawn_mode,
             reward_total=result.stats.reward_total,
+            final_farthest_distance_to_pen=result.stats.final_farthest_distance_to_pen,
+            final_farthest_distance_to_flock_center=result.stats.final_farthest_distance_to_flock_center,
             role_switches=result.stats.role_switches,
             collector_activations=result.stats.collector_activations,
             blocker_activations=result.stats.blocker_activations,

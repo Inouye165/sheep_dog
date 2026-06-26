@@ -7,11 +7,13 @@ import datetime
 import json
 import shutil
 import threading
+import traceback
 from dataclasses import asdict, dataclass, replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 from sheepdog.checkpoints.store import CheckpointMetadata
 from sheepdog.config import (
@@ -23,7 +25,7 @@ from sheepdog.config import (
 )
 from sheepdog.curriculum import apply_training_profile
 from sheepdog.curriculum import available_stages
-from sheepdog.environment import SheepdogEnvironment
+from sheepdog.environment import ACTION_ORDER, SheepdogEnvironment
 from sheepdog.evaluation.scenario_evaluator import (
     config_for_scenario,
     evaluate_scenario,
@@ -266,6 +268,65 @@ def _read_persisted_total() -> int:
 STAGE_HISTORY_FILENAME = "stage-history.json"
 TRAINING_SETTINGS_FILENAME = "training-settings.json"
 HYPERPARAMS_FILENAME = "user-hyperparams.json"
+AUTO_PROMOTE_SUCCESS_THRESHOLD = 0.5
+AUTO_PROMOTE_MAX_TIMEOUT_RATE = 0.5
+AUTO_PROMOTE_REWARD_TOLERANCE_RATIO = 0.10
+AUTO_PROMOTE_MIN_QUALIFIED_STREAK = 2
+AUTO_PROMOTE_MIN_SEED_GATE_HITS = 2
+AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS = 1
+MAX_STAGE_MASTERY_QUALIFIED_STREAK = 5
+MAX_STAGE_MASTERY_FULL_SUCCESS_HITS = 3
+PLATEAU_STOP_MIN_CHECKPOINTS = 20
+PLATEAU_STOP_NO_IMPROVEMENT_STREAK = 20
+
+
+def _auto_promote_gate_defaults() -> dict[str, Any]:
+    """Return the default auto-promotion diagnostics payload."""
+
+    return {
+        "decision": "pending",
+        "reason": "Awaiting checkpoint evaluation",
+        "seed_count": 0,
+        "success_count": 0,
+        "best_success": 0.0,
+        "best_reward": None,
+        "seed_gate_ok": False,
+        "success_rate_ok": False,
+        "timeout_ok": False,
+        "reward_close_ok": False,
+        "qualified_streak": 0,
+        "min_qualified_streak": AUTO_PROMOTE_MIN_QUALIFIED_STREAK,
+        "seed_gate_hits": 0,
+        "min_seed_gate_hits": AUTO_PROMOTE_MIN_SEED_GATE_HITS,
+        "seed_gate_target_met": False,
+        "full_success_hits": 0,
+        "min_full_success_hits": AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS,
+        "full_success_target_met": False,
+        "success_threshold": AUTO_PROMOTE_SUCCESS_THRESHOLD,
+        "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
+        "reward_tolerance_ratio": AUTO_PROMOTE_REWARD_TOLERANCE_RATIO,
+    }
+
+
+def _seed_success_gate(success_count: int, seed_count: int) -> bool:
+    """Return whether a checkpoint satisfies the per-seed promotion gate."""
+
+    if seed_count <= 0:
+        return False
+    if seed_count >= 5:
+        return success_count >= 3
+    if seed_count >= 3:
+        return success_count == seed_count
+    return success_count >= seed_count
+
+
+def _reward_within_tolerance(reward: float, best_reward: float) -> bool:
+    """Return whether *reward* is within the accepted gap from *best_reward*."""
+
+    if best_reward == float("-inf"):
+        return True
+    tolerance = max(15.0, abs(best_reward) * AUTO_PROMOTE_REWARD_TOLERANCE_RATIO)
+    return reward >= (best_reward - tolerance)
 
 
 def _curriculum_stage_metadata() -> tuple[list[int], int]:
@@ -419,6 +480,8 @@ def _read_persisted_settings(output_root: Path) -> dict[str, Any]:
             result["enable_instinct_rewards"] = bool(payload["enable_instinct_rewards"])
         if "debug_reward_breakdown" in payload:
             result["debug_reward_breakdown"] = bool(payload["debug_reward_breakdown"])
+        if "auto_promote" in payload:
+            result["auto_promote"] = bool(payload["auto_promote"])
     except (OSError, json.JSONDecodeError, ValueError, TypeError):
         pass
     return result
@@ -467,8 +530,9 @@ def _build_training_job_config(
     # Fast-mode uses 4 000 steps/ep (≥2 full rollouts per checkpoint).
     # Full-mode keeps 25 000 for thorough exploration.
     steps_per_episode = 4_000 if fast_mode else 25_000
-    # Fast mode uses a single evaluation seed to keep checkpoint latency low.
-    evaluation_seeds = (11,) if fast_mode else config.training.evaluation_seeds
+    # Fast mode keeps latency low while using a small fixed seed set to reduce
+    # overfitting to a single deterministic scenario.
+    evaluation_seeds = (11, 23, 37) if fast_mode else config.training.evaluation_seeds
     total_timesteps = max(config.training.total_timesteps, total_episodes * steps_per_episode)
     training_config = TrainingConfig(
         trainer_type="maskable_ppo",
@@ -602,6 +666,10 @@ class TrainingManager:
             "debug_reward_breakdown": persisted.get(
                 "debug_reward_breakdown", instincts.debug_reward_breakdown
             ),
+            "auto_promote": persisted.get("auto_promote", True),
+            "auto_promote_threshold": AUTO_PROMOTE_SUCCESS_THRESHOLD,
+            "auto_promote_stages_completed": 0,
+            "auto_promote_gate": _auto_promote_gate_defaults(),
             "available_curriculum_stages": available_curriculum_stages,
             "max_curriculum_stage": max_curriculum_stage,
             "curriculum_stage": persisted.get("curriculum_stage", instincts.curriculum_stage),
@@ -622,10 +690,17 @@ class TrainingManager:
             "latest_avg_sheep_penned": None,
             "latest_avg_reward": None,
             "latest_timeout_rate": None,
+            "latest_stopped_rate": None,
+            "latest_avg_no_progress_steps": None,
             "latest_avg_distance_to_pen": None,
+            "latest_avg_flock_spread": None,
+            "latest_avg_farthest_distance_to_pen": None,
+            "latest_avg_farthest_distance_to_flock_center": None,
             "phase": "idle",
             "message": "Idle",
             "error": None,
+            "error_type": None,
+            "traceback": None,
             "seed_episode": None,
             "starting_episode": None,
         }
@@ -643,6 +718,7 @@ class TrainingManager:
         enable_instinct_rewards: bool | None = None,
         curriculum_stage: int | None = None,
         debug_reward_breakdown: bool | None = None,
+        auto_promote: bool | None = None,
         promote_from_checkpoint_episode: int | None = None,
     ) -> dict[str, Any]:
         """Start a background training job and return the initial status."""
@@ -670,6 +746,14 @@ class TrainingManager:
                         if curriculum_stage is None
                         else max(0, int(curriculum_stage))
                     ),
+                    "auto_promote": (
+                        self._status["auto_promote"]
+                        if auto_promote is None
+                        else bool(auto_promote)
+                    ),
+                    "auto_promote_threshold": AUTO_PROMOTE_SUCCESS_THRESHOLD,
+                    "auto_promote_stages_completed": 0,
+                    "auto_promote_gate": _auto_promote_gate_defaults(),
                     "requested_episodes": requested_episodes,
                     "message": "Queued training job",
                 }
@@ -681,6 +765,7 @@ class TrainingManager:
                     "enable_instinct_rewards": enable_instinct_rewards,
                     "curriculum_stage": curriculum_stage,
                     "debug_reward_breakdown": debug_reward_breakdown,
+                    "auto_promote": auto_promote,
                     "promote_from_checkpoint_episode": promote_from_checkpoint_episode,
                 },
                 daemon=True,
@@ -716,6 +801,53 @@ class TrainingManager:
         with self._lock:
             return dict(self._status), HTTPStatus.OK
 
+    def reset_journey(self) -> tuple[dict[str, Any], int]:
+        """Archive current artifacts, reset status to stage 1, and restore baseline."""
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                payload = dict(self._status)
+                payload["message"] = "Cannot reset journey while a job is running"
+                return payload, HTTPStatus.CONFLICT
+
+        config = LabConfig()
+        archive_dir = self._archive_training_outputs(config)
+        self._clear_training_outputs(config)
+
+        output_root = Path(config.training.output_dir)
+        settings_path = output_root / TRAINING_SETTINGS_FILENAME
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        settings_payload = {
+            "curriculum_stage": 1,
+            "enable_instinct_rewards": True,
+            "debug_reward_breakdown": False,
+            "auto_promote": True,
+            "updated_at": datetime.datetime.now(datetime.UTC).isoformat(),
+        }
+        settings_path.write_text(json.dumps(settings_payload, indent=2), encoding="utf-8")
+
+        with self._lock:
+            self._thread = None
+            self._status = self._initial_status()
+            self._status["curriculum_stage"] = 1
+            self._status["phase"] = "clearing"
+            self._status["message"] = "Resetting journey... restoring baseline replay"
+
+        def _restore_baseline() -> None:
+            self._export_untrained_baseline(config)
+            with self._lock:
+                self._status["phase"] = "idle"
+                if archive_dir is not None:
+                    self._status["message"] = (
+                        f"Journey reset to Stage 1. Archived previous run to {archive_dir}"
+                    )
+                else:
+                    self._status["message"] = "Journey reset to Stage 1. No prior artifacts found"
+
+        threading.Thread(target=_restore_baseline, daemon=True).start()
+
+        with self._lock:
+            return dict(self._status), HTTPStatus.OK
+
     # ── Config / history helpers ─────────────────────────────────────────────
 
     def get_config(self) -> dict[str, Any]:
@@ -732,6 +864,75 @@ class TrainingManager:
         """Return persisted user hyperparameters (with defaults for any missing keys)."""
         output_root = Path(LabConfig().training.output_dir)
         return _read_user_hyperparams(output_root)
+
+    def get_network_topology(self) -> dict[str, Any]:
+        """Return read-only neural topology metadata for visualization."""
+        config = LabConfig()
+        output_root = Path(config.training.output_dir)
+        effective_config = _load_json(output_root / "effective-training-config.json") or {}
+        training_payload = (
+            effective_config.get("training", {}) if isinstance(effective_config, dict) else {}
+        )
+        training_payload = training_payload if isinstance(training_payload, dict) else {}
+
+        training_state = _load_json(output_root / Trainer.STATE_FILENAME) or {}
+        policy_config = (
+            training_state.get("policy_config", {}) if isinstance(training_state, dict) else {}
+        )
+        policy_config = policy_config if isinstance(policy_config, dict) else {}
+        training_signature = (
+            training_state.get("training_signature", {})
+            if isinstance(training_state, dict)
+            else {}
+        )
+        training_signature = training_signature if isinstance(training_signature, dict) else {}
+
+        hidden_sizes = policy_config.get("hidden_sizes")
+        if not isinstance(hidden_sizes, list):
+            hidden_sizes = training_payload.get("neural_hidden_sizes")
+        if not isinstance(hidden_sizes, list):
+            hidden_sizes = list(config.training.neural_hidden_sizes)
+
+        observation_size = policy_config.get("observation_size")
+        if not isinstance(observation_size, int) or observation_size <= 0:
+            observation_size = training_signature.get("observation_size")
+        if not isinstance(observation_size, int) or observation_size <= 0:
+            observation_size = 54
+
+        action_size = policy_config.get("action_size")
+        if not isinstance(action_size, int) or action_size <= 0:
+            action_size = training_signature.get("action_size")
+        if not isinstance(action_size, int) or action_size <= 0:
+            action_size = len(ACTION_ORDER)
+
+        observation_mode = training_payload.get("observation_mode")
+        if not isinstance(observation_mode, str):
+            observation_mode = training_signature.get("observation_mode")
+        if not isinstance(observation_mode, str):
+            observation_mode = config.training.observation_mode
+
+        invalid_action_masking = training_payload.get("invalid_action_masking")
+        if not isinstance(invalid_action_masking, bool):
+            invalid_action_masking = config.training.invalid_action_masking
+
+        return {
+            "observation_mode": observation_mode,
+            "hidden_layer_sizes": [int(v) for v in hidden_sizes if isinstance(v, int) and v > 0],
+            "observation_size": int(observation_size),
+            "action_size": int(action_size),
+            "actor_head": {
+                "type": "dense",
+                "node_count": int(action_size),
+                "output": "action_logits",
+            },
+            "critic_head": {
+                "type": "dense",
+                "node_count": 1,
+                "output": "state_value",
+            },
+            "action_masking_enabled": bool(invalid_action_masking),
+            "connectivity": "dense_fully_connected",
+        }
 
     def save_hyperparams(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Persist user hyperparameter overrides and return the merged result."""
@@ -769,6 +970,38 @@ class TrainingManager:
         self._remove_path(generated_root / "latest-evaluation.json")
         self._remove_path(generated_root / "latest-replay.json")
         self._remove_path(generated_root / "checkpoint-index.json")
+
+    def _archive_training_outputs(self, config: LabConfig) -> str | None:
+        output_root = Path(config.training.output_dir)
+        generated_root = Path(config.training.web_export_dir)
+        timestamp = datetime.datetime.now(datetime.UTC).strftime("%Y%m%d-%H%M%S")
+        archive_root = output_root / "archive" / f"journey-{timestamp}"
+        mappings: list[tuple[Path, Path]] = [
+            (output_root / "checkpoints", archive_root / "checkpoints"),
+            (output_root / "evaluations", archive_root / "evaluations"),
+            (output_root / Trainer.STATE_FILENAME, archive_root / Trainer.STATE_FILENAME),
+            (output_root / "training-summary.json", archive_root / "training-summary.json"),
+            (output_root / STAGE_HISTORY_FILENAME, archive_root / STAGE_HISTORY_FILENAME),
+            (output_root / TRAINING_SETTINGS_FILENAME, archive_root / TRAINING_SETTINGS_FILENAME),
+            (
+                output_root / "effective-training-config.json",
+                archive_root / "effective-training-config.json",
+            ),
+            (generated_root / "replays", archive_root / "web-replays"),
+            (generated_root / "latest-checkpoint.json", archive_root / "latest-checkpoint.json"),
+            (generated_root / "latest-evaluation.json", archive_root / "latest-evaluation.json"),
+            (generated_root / "latest-replay.json", archive_root / "latest-replay.json"),
+            (generated_root / "checkpoint-index.json", archive_root / "checkpoint-index.json"),
+        ]
+
+        moved_any = False
+        for src, dst in mappings:
+            if not src.exists():
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(dst))
+            moved_any = True
+        return str(archive_root) if moved_any else None
 
     def _export_untrained_baseline(self, config: LabConfig) -> None:
         trainer = _BaselineExportTrainer(config, config.training.output_dir)
@@ -1102,170 +1335,520 @@ class TrainingManager:
         enable_instinct_rewards: bool | None = None,
         curriculum_stage: int | None = None,
         debug_reward_breakdown: bool | None = None,
+        auto_promote: bool | None = None,
         promote_from_checkpoint_episode: int | None = None,
     ) -> None:
         try:
-            job_config = _build_training_job_config(
-                requested_episodes,
-                fast_mode,
-                enable_instinct_rewards=enable_instinct_rewards,
-                curriculum_stage=curriculum_stage,
-                debug_reward_breakdown=debug_reward_breakdown,
-            )
             total_episodes = max(1, requested_episodes)
-            trainer = create_trainer(job_config, job_config.training.output_dir)
+            # Respect the user-requested batch size so progress reflects the
+            # configured run length (for example 75 episodes shows as 75).
+            batch_episodes = total_episodes
+            available_stage_numbers, max_stage = _curriculum_stage_metadata()
+            auto_promote_enabled = True if auto_promote is None else bool(auto_promote)
+            current_stage = max(1, int(curriculum_stage) if curriculum_stage is not None else 1)
+            if available_stage_numbers and current_stage not in available_stage_numbers:
+                current_stage = max(1, min(current_stage, max_stage))
+            resume_checkpoint_episode = promote_from_checkpoint_episode
+            promoted_stages = 0
+            output_root = Path(LabConfig().training.output_dir)
 
-            # If the caller provided a specific best-formal checkpoint episode (set
-            # during stage promotion), override the trainer's loaded weights so it
-            # starts from that policy rather than whatever the hill-climber last wrote.
-            if promote_from_checkpoint_episode is not None:
-                output_root = Path(job_config.training.output_dir)
-                try:
-                    checkpoint_payload = _load_checkpoint_payload(
-                        output_root, promote_from_checkpoint_episode
-                    )
-                    policy_weights = checkpoint_payload.get("policy_weights")
-                    if policy_weights is not None:
-                        trainer.override_start_weights(policy_weights)
-                except (FileNotFoundError, KeyError, TypeError):
-                    pass  # Fall back to automatic stage-change detection in trainer
+            stage_best_checkpoint_episode: int | None = None
+            stage_best_rank = (-1.0, float("-inf"), float("-inf"), float("-inf"))
+            stage_best_reward = float("-inf")
+            stage_qualified_streak = 0
+            stage_seed_gate_hits = 0
+            stage_full_success_hits = 0
+            stage_seed_count = 0
+            stage_checkpoints_seen = 0
+            stage_no_improvement_streak = 0
 
-            def progress_callback(payload: dict[str, Any]) -> None:
-                checkpoint_episode = payload.get("checkpoint_episode")
-                summary = payload.get("summary")
-                replay_path = payload.get("replay_path")
-                latest_seed = None
-                if summary and summary.get("records"):
-                    latest_seed = summary["records"][0].get("seed")
-                    if replay_path is None:
-                        replay_path = summary["records"][0].get("replay_path")
-                batch_completed = payload.get("batch_completed_episodes", 0)
-                batch_total = payload.get("batch_total_episodes", total_episodes)
-                total_trained = payload.get("total_episodes_trained")
-                update: dict[str, Any] = {
-                    "running": payload.get("phase") != "complete",
-                    "phase": payload.get("phase", "running"),
-                    "requested_episodes": batch_total,
-                    "completed_episodes": batch_completed,
-                    "batch_total_episodes": batch_total,
-                    "batch_completed_episodes": batch_completed,
-                    "current_episode": payload.get("current_episode"),
-                    "checkpoint_episode": checkpoint_episode,
-                    "best_score": payload.get("best_score"),
-                    "message": payload.get("message", "Training"),
-                    "error": None,
-                }
-                if total_trained is not None:
-                    update["total_episodes_trained"] = total_trained
-                if checkpoint_episode is not None:
-                    update["latest_checkpoint_episode"] = checkpoint_episode
-                    update["latest_seed"] = latest_seed
-                    update["latest_replay_path"] = replay_path
-                if isinstance(summary, dict) and payload.get("phase") == "checkpoint":
-                    update["latest_success_rate"] = summary.get("success_rate")
-                    update["latest_avg_sheep_penned"] = summary.get("average_sheep_penned")
-                    update["latest_avg_reward"] = summary.get("average_reward")
-                    update["latest_timeout_rate"] = summary.get("timeout_rate")
-                    update["latest_avg_distance_to_pen"] = summary.get("average_distance_to_pen")
-                if payload.get("phase") == "starting" and payload.get("seed_episode") is not None:
-                    update["seed_episode"] = payload.get("seed_episode")
-                if payload.get("phase") == "starting" and total_trained is not None:
-                    update["starting_episode"] = total_trained
-                self._update_status(update)
+            while True:
+                job_config = _build_training_job_config(
+                    batch_episodes,
+                    fast_mode,
+                    enable_instinct_rewards=enable_instinct_rewards,
+                    curriculum_stage=current_stage,
+                    debug_reward_breakdown=debug_reward_breakdown,
+                )
+                trainer = create_trainer(job_config, job_config.training.output_dir)
 
-            effective_config_path = (
-                Path(job_config.training.output_dir) / "effective-training-config.json"
-            )
-            effective_config_path.parent.mkdir(parents=True, exist_ok=True)
-            config_dict = job_config.to_dict()
-            effective_config_path.write_text(json.dumps(config_dict, indent=2), encoding="utf-8")
-            # Auto-record a config revision each time training starts
-            instincts_on = job_config.rewards.instincts.enable_instinct_rewards
-            stage = job_config.rewards.instincts.curriculum_stage
-            label = (
-                f"Stage {stage} \u00b7 "
-                f"{'instincts ON' if instincts_on else 'instincts OFF'} \u00b7 "
-                f"{'fast' if fast_mode else 'full'} mode \u00b7 "
-                f"{total_episodes} ep"
-            )
-            self.save_config_revision(
-                {
-                    "source": "training_start",
-                    "label": label,
-                    "training_settings": {
-                        "episodes": total_episodes,
-                        "fast_mode": fast_mode,
-                        "enable_instinct_rewards": instincts_on,
-                        "curriculum_stage": stage,
-                        "debug_reward_breakdown": (
-                            job_config.rewards.instincts.debug_reward_breakdown
-                        ),
-                    },
-                    "config": config_dict,
-                }
-            )
-            settings_path = Path(job_config.training.output_dir) / TRAINING_SETTINGS_FILENAME
-            settings_path.write_text(
-                json.dumps(
+                if resume_checkpoint_episode is not None:
+                    try:
+                        checkpoint_payload = _load_checkpoint_payload(
+                            output_root, resume_checkpoint_episode
+                        )
+                        policy_weights = checkpoint_payload.get("policy_weights")
+                        if policy_weights is not None:
+                            trainer.override_start_weights(policy_weights)
+                    except (FileNotFoundError, KeyError, TypeError):
+                        pass
+
+                def progress_callback(payload: dict[str, Any]) -> None:
+                    nonlocal stage_best_checkpoint_episode, stage_best_rank
+                    nonlocal stage_best_reward, stage_qualified_streak
+                    nonlocal stage_seed_gate_hits, stage_full_success_hits, stage_seed_count
+                    nonlocal stage_checkpoints_seen, stage_no_improvement_streak
+
+                    checkpoint_episode = payload.get("checkpoint_episode")
+                    summary = payload.get("summary")
+                    replay_path = payload.get("replay_path")
+                    latest_seed = None
+                    if summary and summary.get("records"):
+                        latest_seed = summary["records"][0].get("seed")
+                        if replay_path is None:
+                            replay_path = summary["records"][0].get("replay_path")
+                    batch_completed = payload.get("batch_completed_episodes", 0)
+                    batch_total = payload.get("batch_total_episodes", total_episodes)
+                    total_trained = payload.get("total_episodes_trained")
+                    update: dict[str, Any] = {
+                        "running": True,
+                        "phase": payload.get("phase", "running"),
+                        "requested_episodes": batch_total,
+                        "completed_episodes": batch_completed,
+                        "batch_total_episodes": batch_total,
+                        "batch_completed_episodes": batch_completed,
+                        "current_episode": payload.get("current_episode"),
+                        "checkpoint_episode": checkpoint_episode,
+                        "best_score": payload.get("best_score"),
+                        "message": payload.get("message", "Training"),
+                        "error": None,
+                        "error_type": None,
+                        "traceback": None,
+                    }
+                    if total_trained is not None:
+                        update["total_episodes_trained"] = total_trained
+                    if checkpoint_episode is not None:
+                        update["latest_checkpoint_episode"] = checkpoint_episode
+                        update["latest_seed"] = latest_seed
+                        update["latest_replay_path"] = replay_path
+                    if isinstance(summary, dict) and payload.get("phase") == "checkpoint":
+                        update["latest_success_rate"] = summary.get("success_rate")
+                        update["latest_avg_sheep_penned"] = summary.get("average_sheep_penned")
+                        update["latest_avg_reward"] = summary.get("average_reward")
+                        update["latest_timeout_rate"] = summary.get("timeout_rate")
+                        update["latest_stopped_rate"] = summary.get("stopped_rate")
+                        update["latest_avg_no_progress_steps"] = summary.get(
+                            "average_no_progress_steps"
+                        )
+                        update["latest_avg_distance_to_pen"] = summary.get(
+                            "average_distance_to_pen"
+                        )
+                        update["latest_avg_flock_spread"] = summary.get("average_flock_spread")
+                        update["latest_avg_farthest_distance_to_pen"] = summary.get(
+                            "average_farthest_distance_to_pen"
+                        )
+                        update["latest_avg_farthest_distance_to_flock_center"] = summary.get(
+                            "average_farthest_distance_to_flock_center"
+                        )
+
+                        success_rate = float(summary.get("success_rate", -1.0))
+                        average_reward = float(summary.get("average_reward", float("-inf")))
+                        timeout_rate = float(summary.get("timeout_rate", 1.0))
+                        avg_penned = float(summary.get("average_sheep_penned", 0.0))
+                        records_raw = summary.get("records", [])
+                        success_count = 0
+                        if isinstance(records_raw, (list, tuple)):
+                            records = [record for record in records_raw if isinstance(record, dict)]
+                            success_count = sum(
+                                1 for record in records if bool(record.get("success"))
+                            )
+                            stage_seed_count = len(records)
+                        seed_gate_ok = _seed_success_gate(success_count, stage_seed_count)
+                        reward_close_to_best = _reward_within_tolerance(
+                            average_reward,
+                            stage_best_reward,
+                        )
+                        qualified_for_promotion = (
+                            seed_gate_ok
+                            and success_rate >= AUTO_PROMOTE_SUCCESS_THRESHOLD
+                            and timeout_rate <= AUTO_PROMOTE_MAX_TIMEOUT_RATE
+                            and reward_close_to_best
+                        )
+                        stage_qualified_streak = (
+                            stage_qualified_streak + 1 if qualified_for_promotion else 0
+                        )
+                        if seed_gate_ok:
+                            stage_seed_gate_hits += 1
+                        if stage_seed_count >= 3 and success_count == stage_seed_count:
+                            stage_full_success_hits += 1
+
+                        candidate_rank = (
+                            success_rate,
+                            average_reward,
+                            -timeout_rate,
+                            avg_penned,
+                        )
+                        if checkpoint_episode is not None and candidate_rank > stage_best_rank:
+                            stage_best_rank = candidate_rank
+                            stage_best_checkpoint_episode = int(checkpoint_episode)
+                            stage_no_improvement_streak = 0
+                        else:
+                            stage_no_improvement_streak += 1
+                        stage_checkpoints_seen += 1
+                        stage_best_reward = max(stage_best_reward, average_reward)
+                        update["auto_promote_gate"] = {
+                            "decision": "pending",
+                            "reason": (
+                                "Checkpoint meets gate"
+                                if qualified_for_promotion
+                                else "Checkpoint below gate"
+                            ),
+                            "seed_count": stage_seed_count,
+                            "success_count": success_count,
+                            "best_success": max(0.0, stage_best_rank[0]),
+                            "best_reward": (
+                                None
+                                if stage_best_reward == float("-inf")
+                                else stage_best_reward
+                            ),
+                            "seed_gate_ok": seed_gate_ok,
+                            "success_rate_ok": success_rate >= AUTO_PROMOTE_SUCCESS_THRESHOLD,
+                            "timeout_ok": timeout_rate <= AUTO_PROMOTE_MAX_TIMEOUT_RATE,
+                            "reward_close_ok": reward_close_to_best,
+                            "qualified_streak": stage_qualified_streak,
+                            "min_qualified_streak": AUTO_PROMOTE_MIN_QUALIFIED_STREAK,
+                            "seed_gate_hits": stage_seed_gate_hits,
+                            "min_seed_gate_hits": AUTO_PROMOTE_MIN_SEED_GATE_HITS,
+                            "seed_gate_target_met": (
+                                stage_seed_gate_hits >= AUTO_PROMOTE_MIN_SEED_GATE_HITS
+                            ),
+                            "full_success_hits": stage_full_success_hits,
+                            "min_full_success_hits": AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS,
+                            "full_success_target_met": (
+                                stage_seed_count >= 5
+                                or stage_full_success_hits >= AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS
+                            ),
+                            "success_threshold": AUTO_PROMOTE_SUCCESS_THRESHOLD,
+                            "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
+                            "reward_tolerance_ratio": AUTO_PROMOTE_REWARD_TOLERANCE_RATIO,
+                        }
+                    if (
+                        payload.get("phase") == "starting"
+                        and payload.get("seed_episode") is not None
+                    ):
+                        update["seed_episode"] = payload.get("seed_episode")
+                    if payload.get("phase") == "starting" and total_trained is not None:
+                        update["starting_episode"] = total_trained
+                    self._update_status(update)
+
+                effective_config_path = (
+                    Path(job_config.training.output_dir) / "effective-training-config.json"
+                )
+                effective_config_path.parent.mkdir(parents=True, exist_ok=True)
+                config_dict = job_config.to_dict()
+                effective_config_path.write_text(json.dumps(config_dict, indent=2),
+                                                 encoding="utf-8")
+
+                instincts_on = job_config.rewards.instincts.enable_instinct_rewards
+                stage = job_config.rewards.instincts.curriculum_stage
+                label = (
+                    f"Stage {stage} \u00b7 "
+                    f"{'instincts ON' if instincts_on else 'instincts OFF'} \u00b7 "
+                    f"{'fast' if fast_mode else 'full'} mode \u00b7 "
+                    f"{total_episodes} ep"
+                )
+                self.save_config_revision(
                     {
-                        "curriculum_stage": job_config.rewards.instincts.curriculum_stage,
+                        "source": "training_start",
+                        "label": label,
+                        "training_settings": {
+                            "episodes": total_episodes,
+                            "fast_mode": fast_mode,
+                            "enable_instinct_rewards": instincts_on,
+                            "curriculum_stage": stage,
+                            "debug_reward_breakdown": (
+                                job_config.rewards.instincts.debug_reward_breakdown
+                            ),
+                            "auto_promote": auto_promote_enabled,
+                        },
+                        "config": config_dict,
+                    }
+                )
+                settings_path = Path(job_config.training.output_dir) / TRAINING_SETTINGS_FILENAME
+                settings_path.write_text(
+                    json.dumps(
+                        {
+                            "curriculum_stage": stage,
+                            "enable_instinct_rewards": (
+                                job_config.rewards.instincts.enable_instinct_rewards
+                            ),
+                            "debug_reward_breakdown": (
+                                job_config.rewards.instincts.debug_reward_breakdown
+                            ),
+                            "auto_promote": auto_promote_enabled,
+                        },
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+
+                self._update_status(
+                    {
+                        "running": True,
+                        "phase": "training",
+                        "fast_mode": fast_mode,
+                        "trainer_type": job_config.training.trainer_type,
+                        "policy_type": job_config.training.policy_type,
                         "enable_instinct_rewards": (
                             job_config.rewards.instincts.enable_instinct_rewards
                         ),
+                        "policy_mode": job_config.policy.policy_mode,
+                        "replay_mode": "baseline",
+                        "allow_instinct_target_awareness": (
+                            job_config.policy.allow_instinct_target_awareness
+                        ),
+                        "handler_target_enabled": job_config.policy.handler_target_enabled,
                         "debug_reward_breakdown": (
                             job_config.rewards.instincts.debug_reward_breakdown
                         ),
-                    },
-                    indent=2,
-                ),
-                encoding="utf-8",
-            )
-            self._update_status(
-                {
-                    "running": True,
-                    "phase": "training",
-                    "fast_mode": fast_mode,
-                    "trainer_type": job_config.training.trainer_type,
-                    "policy_type": job_config.training.policy_type,
-                    "enable_instinct_rewards": job_config.rewards.instincts.enable_instinct_rewards,
-                    "policy_mode": job_config.policy.policy_mode,
-                    "replay_mode": "baseline",
-                    "allow_instinct_target_awareness": (
-                        job_config.policy.allow_instinct_target_awareness
-                    ),
-                    "handler_target_enabled": job_config.policy.handler_target_enabled,
-                    "debug_reward_breakdown": job_config.rewards.instincts.debug_reward_breakdown,
-                    "curriculum_stage": job_config.rewards.instincts.curriculum_stage,
-                    "requested_episodes": total_episodes,
-                    "completed_episodes": 0,
-                    "batch_total_episodes": total_episodes,
-                    "batch_completed_episodes": 0,
-                    "current_episode": None,
-                    "checkpoint_episode": None,
-                    "latest_checkpoint_episode": None,
-                    "latest_seed": None,
-                    "latest_replay_path": None,
-                    "message": "Training in progress",
-                    "error": None,
-                    "starting_episode": trainer.total_episodes_trained,
-                }
-            )
-            trainer.train(progress_callback=progress_callback)
-            stage = job_config.rewards.instincts.curriculum_stage
-            output_root = Path(job_config.training.output_dir)
-            history = _update_stage_history(output_root, stage, total_episodes)
+                        "curriculum_stage": stage,
+                        "auto_promote": auto_promote_enabled,
+                        "auto_promote_threshold": AUTO_PROMOTE_SUCCESS_THRESHOLD,
+                        "auto_promote_stages_completed": promoted_stages,
+                        "auto_promote_gate": {
+                            **_auto_promote_gate_defaults(),
+                            "reason": "Collecting checkpoint evidence",
+                        },
+                        "requested_episodes": total_episodes,
+                        "completed_episodes": 0,
+                        "batch_total_episodes": batch_episodes,
+                        "batch_completed_episodes": 0,
+                        "current_episode": None,
+                        "checkpoint_episode": None,
+                        "latest_checkpoint_episode": None,
+                        "latest_seed": None,
+                        "latest_replay_path": None,
+                        "message": "Training in progress",
+                        "error": None,
+                        "starting_episode": trainer.total_episodes_trained,
+                    }
+                )
+
+                trainer.train(progress_callback=progress_callback)
+                history = _update_stage_history(output_root, stage, batch_episodes)
+                self._update_status(
+                    {
+                        "stage_history": history,
+                        "grand_total_episodes": sum(history.values()),
+                    }
+                )
+
+                best_success = stage_best_rank[0]
+                seed_gate_target_met = stage_seed_gate_hits >= AUTO_PROMOTE_MIN_SEED_GATE_HITS
+                full_success_target_met = (
+                    stage_seed_count >= 5
+                    or stage_full_success_hits >= AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS
+                )
+                should_auto_promote = (
+                    auto_promote_enabled
+                    and stage < max_stage
+                    and stage_best_checkpoint_episode is not None
+                    and best_success >= AUTO_PROMOTE_SUCCESS_THRESHOLD
+                    and seed_gate_target_met
+                    and full_success_target_met
+                    and stage_qualified_streak >= AUTO_PROMOTE_MIN_QUALIFIED_STREAK
+                )
+                if not should_auto_promote:
+                    stage_mastered = (
+                        stage >= max_stage
+                        and stage_qualified_streak >= MAX_STAGE_MASTERY_QUALIFIED_STREAK
+                        and stage_full_success_hits >= MAX_STAGE_MASTERY_FULL_SUCCESS_HITS
+                    )
+                    plateaued = (
+                        stage_checkpoints_seen >= PLATEAU_STOP_MIN_CHECKPOINTS
+                        and stage_no_improvement_streak >= PLATEAU_STOP_NO_IMPROVEMENT_STREAK
+                    )
+                    if stage_mastered:
+                        self._update_status(
+                            {
+                                "auto_promote_gate": {
+                                    "decision": "hold",
+                                    "reason": "Max stage mastered; stopping",
+                                    "seed_count": stage_seed_count,
+                                    "success_count": 0,
+                                    "best_success": max(0.0, best_success),
+                                    "best_reward": (
+                                        None
+                                        if stage_best_reward == float("-inf")
+                                        else stage_best_reward
+                                    ),
+                                    "seed_gate_ok": seed_gate_target_met,
+                                    "success_rate_ok": (
+                                        best_success >= AUTO_PROMOTE_SUCCESS_THRESHOLD
+                                    ),
+                                    "timeout_ok": True,
+                                    "reward_close_ok": True,
+                                    "qualified_streak": stage_qualified_streak,
+                                    "min_qualified_streak": AUTO_PROMOTE_MIN_QUALIFIED_STREAK,
+                                    "seed_gate_hits": stage_seed_gate_hits,
+                                    "min_seed_gate_hits": AUTO_PROMOTE_MIN_SEED_GATE_HITS,
+                                    "seed_gate_target_met": seed_gate_target_met,
+                                    "full_success_hits": stage_full_success_hits,
+                                    "min_full_success_hits": AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS,
+                                    "full_success_target_met": full_success_target_met,
+                                    "success_threshold": AUTO_PROMOTE_SUCCESS_THRESHOLD,
+                                    "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
+                                    "reward_tolerance_ratio": AUTO_PROMOTE_REWARD_TOLERANCE_RATIO,
+                                },
+                                "message": (
+                                    f"Stopped at max stage {stage}: sustained mastery "
+                                    f"(qualified streak {stage_qualified_streak}, "
+                                    f"full-success hits {stage_full_success_hits})."
+                                ),
+                            }
+                        )
+                        break
+                    if plateaued:
+                        self._update_status(
+                            {
+                                "auto_promote_gate": {
+                                    "decision": "hold",
+                                    "reason": "Likely plateau; stopping",
+                                    "seed_count": stage_seed_count,
+                                    "success_count": 0,
+                                    "best_success": max(0.0, best_success),
+                                    "best_reward": (
+                                        None
+                                        if stage_best_reward == float("-inf")
+                                        else stage_best_reward
+                                    ),
+                                    "seed_gate_ok": seed_gate_target_met,
+                                    "success_rate_ok": (
+                                        best_success >= AUTO_PROMOTE_SUCCESS_THRESHOLD
+                                    ),
+                                    "timeout_ok": True,
+                                    "reward_close_ok": True,
+                                    "qualified_streak": stage_qualified_streak,
+                                    "min_qualified_streak": AUTO_PROMOTE_MIN_QUALIFIED_STREAK,
+                                    "seed_gate_hits": stage_seed_gate_hits,
+                                    "min_seed_gate_hits": AUTO_PROMOTE_MIN_SEED_GATE_HITS,
+                                    "seed_gate_target_met": seed_gate_target_met,
+                                    "full_success_hits": stage_full_success_hits,
+                                    "min_full_success_hits": AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS,
+                                    "full_success_target_met": full_success_target_met,
+                                    "success_threshold": AUTO_PROMOTE_SUCCESS_THRESHOLD,
+                                    "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
+                                    "reward_tolerance_ratio": AUTO_PROMOTE_REWARD_TOLERANCE_RATIO,
+                                },
+                                "message": (
+                                    f"Stopped at Stage {stage}: likely plateau after "
+                                    f"{stage_checkpoints_seen} checkpoints with no new best in "
+                                    f"the last {stage_no_improvement_streak}."
+                                ),
+                            }
+                        )
+                        break
+                    # Batch complete: hold the stage and stop this run. The user can
+                    # inspect diagnostics and start the next batch intentionally.
+                    self._update_status(
+                        {
+                            "auto_promote_gate": {
+                                "decision": "hold",
+                                "reason": "Promotion criteria not met yet",
+                                "seed_count": stage_seed_count,
+                                "success_count": 0,
+                                "best_success": max(0.0, best_success),
+                                "best_reward": (
+                                    None
+                                    if stage_best_reward == float("-inf")
+                                    else stage_best_reward
+                                ),
+                                "seed_gate_ok": seed_gate_target_met,
+                                "success_rate_ok": best_success >= AUTO_PROMOTE_SUCCESS_THRESHOLD,
+                                "timeout_ok": True,
+                                "reward_close_ok": True,
+                                "qualified_streak": stage_qualified_streak,
+                                "min_qualified_streak": AUTO_PROMOTE_MIN_QUALIFIED_STREAK,
+                                "seed_gate_hits": stage_seed_gate_hits,
+                                "min_seed_gate_hits": AUTO_PROMOTE_MIN_SEED_GATE_HITS,
+                                "seed_gate_target_met": seed_gate_target_met,
+                                "full_success_hits": stage_full_success_hits,
+                                "min_full_success_hits": AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS,
+                                "full_success_target_met": full_success_target_met,
+                                "success_threshold": AUTO_PROMOTE_SUCCESS_THRESHOLD,
+                                "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
+                                "reward_tolerance_ratio": AUTO_PROMOTE_REWARD_TOLERANCE_RATIO,
+                            },
+                            "message": (
+                                f"Batch complete at Stage {stage}: best success {best_success:.0%}, "
+                                f"qualified streak {stage_qualified_streak}, "
+                                f"seed hits {stage_seed_gate_hits}, "
+                                f"full-success hits {stage_full_success_hits}."
+                            ),
+                        }
+                    )
+                    resume_checkpoint_episode = stage_best_checkpoint_episode
+                    break
+
+                promoted_stages += 1
+                current_stage = stage + 1
+                resume_checkpoint_episode = stage_best_checkpoint_episode
+                stage_best_checkpoint_episode = None
+                stage_best_rank = (-1.0, float("-inf"), float("-inf"), float("-inf"))
+                stage_best_reward = float("-inf")
+                stage_qualified_streak = 0
+                stage_seed_gate_hits = 0
+                stage_full_success_hits = 0
+                stage_seed_count = 0
+                stage_checkpoints_seen = 0
+                stage_no_improvement_streak = 0
+                self._update_status(
+                    {
+                        "curriculum_stage": current_stage,
+                        "auto_promote_stages_completed": promoted_stages,
+                        "auto_promote_gate": {
+                            "decision": "promote",
+                            "reason": "Promotion criteria met",
+                            "seed_count": stage_seed_count,
+                            "success_count": 0,
+                            "best_success": max(0.0, best_success),
+                            "best_reward": (
+                                None
+                                if stage_best_reward == float("-inf")
+                                else stage_best_reward
+                            ),
+                            "seed_gate_ok": True,
+                            "success_rate_ok": True,
+                            "timeout_ok": True,
+                            "reward_close_ok": True,
+                            "qualified_streak": stage_qualified_streak,
+                            "min_qualified_streak": AUTO_PROMOTE_MIN_QUALIFIED_STREAK,
+                            "seed_gate_hits": stage_seed_gate_hits,
+                            "min_seed_gate_hits": AUTO_PROMOTE_MIN_SEED_GATE_HITS,
+                            "seed_gate_target_met": seed_gate_target_met,
+                            "full_success_hits": stage_full_success_hits,
+                            "min_full_success_hits": AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS,
+                            "full_success_target_met": full_success_target_met,
+                            "success_threshold": AUTO_PROMOTE_SUCCESS_THRESHOLD,
+                            "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
+                            "reward_tolerance_ratio": AUTO_PROMOTE_REWARD_TOLERANCE_RATIO,
+                        },
+                        "message": (
+                            f"Auto-promoted to Stage {current_stage} "
+                            f"from checkpoint ep {stage_best_checkpoint_episode}"
+                        ),
+                    }
+                )
+
             with self._lock:
                 self._status["running"] = False
                 self._status["phase"] = "complete"
-                self._status["message"] = "Training complete"
-                self._status["stage_history"] = history
-                self._status["grand_total_episodes"] = sum(history.values())
+                if "Training complete" not in self._status.get("message", ""):
+                    self._status["message"] = "Training complete"
         except Exception as exc:  # pragma: no cover  # pylint: disable=broad-exception-caught
+            full_traceback = traceback.format_exc()
+            # Print the full traceback to the server console so the failure is
+            # always visible even when the UI only surfaces a short message.
+            print("\n===== TRAINING FAILED =====", flush=True)
+            print(full_traceback, flush=True)
+            print("===========================\n", flush=True)
             with self._lock:
                 self._status["running"] = False
                 self._status["phase"] = "error"
-                self._status["message"] = "Training failed"
+                self._status["message"] = f"Training failed ({type(exc).__name__}): {exc}"
                 self._status["error"] = str(exc)
+                self._status["error_type"] = type(exc).__name__
+                self._status["traceback"] = full_traceback
 
 
 class TrainingRequestHandler(BaseHTTPRequestHandler):
@@ -1316,8 +1899,10 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802  # pylint: disable=invalid-name
         """Handle HTTP GET requests."""
-        if self.path.startswith("/generated/"):
-            rel = self.path[len("/generated/") :].split("?")[0]
+        request_path = urlsplit(self.path).path
+
+        if request_path.startswith("/generated/"):
+            rel = request_path[len("/generated/") :]
             if ".." in rel:
                 self._json_response({"error": "Forbidden"}, status=HTTPStatus.FORBIDDEN)
                 return
@@ -1328,22 +1913,25 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                 return
             self._file_response(target)
             return
-        if self.path == "/api/training/status":
+        if request_path == "/api/training/status":
             self._json_response(self.manager.snapshot())
             return
-        if self.path == "/api/health":
+        if request_path == "/api/health":
             self._json_response({"ok": True})
             return
-        if self.path == "/api/config":
+        if request_path == "/api/config":
             self._json_response(self.manager.get_config())
             return
-        if self.path == "/api/config/history":
+        if request_path == "/api/config/history":
             self._json_response(self.manager.get_config_history())
             return
-        if self.path == "/api/config/hyperparams":
+        if request_path == "/api/config/hyperparams":
             self._json_response(self.manager.get_hyperparams())
             return
-        if self.path == "/api/scenarios" or self.path.startswith("/api/scenarios?"):
+        if request_path in {"/api/network/topology", "/api/network/topology/"}:
+            self._json_response(self.manager.get_network_topology())
+            return
+        if request_path == "/api/scenarios":
             self._json_response(self.manager.list_scenarios())
             return
         self._json_response({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
@@ -1352,6 +1940,10 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         """Handle HTTP POST requests."""
         if self.path in {"/api/training/clear", "/api/training/reset"}:
             payload, status = self.manager.clear()
+            self._json_response(payload, status=status)
+            return
+        if self.path == "/api/training/reset-journey":
+            payload, status = self.manager.reset_journey()
             self._json_response(payload, status=status)
             return
 
@@ -1447,6 +2039,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         enable_instinct_rewards = payload.get("enable_instinct_rewards")
         curriculum_stage = payload.get("curriculum_stage")
         debug_reward_breakdown = payload.get("debug_reward_breakdown")
+        auto_promote = payload.get("auto_promote")
         promote_from_checkpoint_episode = payload.get("promote_from_checkpoint_episode")
         self._json_response(
             self.manager.start(
@@ -1459,6 +2052,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                 debug_reward_breakdown=(
                     None if debug_reward_breakdown is None else bool(debug_reward_breakdown)
                 ),
+                auto_promote=(None if auto_promote is None else bool(auto_promote)),
                 promote_from_checkpoint_episode=(
                     None
                     if promote_from_checkpoint_episode is None

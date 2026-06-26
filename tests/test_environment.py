@@ -114,8 +114,12 @@ def test_episode_stops_when_no_progress_occurs() -> None:
     assert snapshot.timeout is False
 
 
-def test_stage_6_counts_flock_spread_reduction_as_progress() -> None:
-    config = make_config(curriculum_stage=6, no_progress_distance_delta=0.2)
+def test_collection_progress_counts_flock_spread_reduction_as_progress() -> None:
+    config = make_config(
+        curriculum_stage=9,
+        count_collection_progress=True,
+        no_progress_distance_delta=0.2,
+    )
     environment = SheepdogEnvironment(config)
 
     progress = environment._progress_made_for_no_progress(
@@ -129,8 +133,12 @@ def test_stage_6_counts_flock_spread_reduction_as_progress() -> None:
     assert progress is True
 
 
-def test_stage_6_counts_farthest_sheep_progress_as_progress() -> None:
-    config = make_config(curriculum_stage=6, no_progress_distance_delta=0.2)
+def test_collection_progress_counts_farthest_sheep_progress_as_progress() -> None:
+    config = make_config(
+        curriculum_stage=9,
+        count_collection_progress=True,
+        no_progress_distance_delta=0.2,
+    )
     environment = SheepdogEnvironment(config)
 
     progress = environment._progress_made_for_no_progress(
@@ -144,7 +152,7 @@ def test_stage_6_counts_farthest_sheep_progress_as_progress() -> None:
     assert progress is True
 
 
-def test_pre_stage_6_ignores_spread_only_progress_signal() -> None:
+def test_non_collection_stage_ignores_spread_only_progress_signal() -> None:
     config = make_config(curriculum_stage=5, no_progress_distance_delta=0.2)
     environment = SheepdogEnvironment(config)
 
@@ -157,6 +165,21 @@ def test_pre_stage_6_ignores_spread_only_progress_signal() -> None:
     )
 
     assert progress is False
+
+
+def test_legacy_stage_6_without_spawn_mix_keeps_collection_progress() -> None:
+    config = make_config(curriculum_stage=6, no_progress_distance_delta=0.2)
+    environment = SheepdogEnvironment(config)
+
+    progress = environment._progress_made_for_no_progress(
+        newly_penned=0,
+        average_distance_delta=0.0,
+        flock_spread_delta=0.10,
+        farthest_to_flock_center_delta=0.0,
+        farthest_to_pen_delta=0.0,
+    )
+
+    assert progress is True
 
 
 def test_action_mask_disallows_useless_wait_when_movement_exists() -> None:

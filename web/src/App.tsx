@@ -3,6 +3,9 @@ import { ControlBar } from "./components/ControlBar";
 import { ConfigPanel } from "./components/ConfigPanel";
 import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
 import { FieldView } from "./components/FieldView";
+import { NetworkTab } from "./components/NetworkTab";
+import { LayersTab } from "./components/LayersTab";
+import { StagesTab } from "./components/StagesTab";
 import { ScenarioPanel } from "./components/ScenarioPanel";
 import { SavedScenariosPanel } from "./components/SavedScenariosPanel";
 import { TrainingPanel } from "./components/TrainingPanel";
@@ -11,12 +14,15 @@ import { ResultsPanel } from "./components/ResultsPanel";
 import {
   clearTraining,
   evaluateScenario,
+  loadEffectiveConfig,
   loadCheckpointIndex,
   loadHyperparams,
+  loadNetworkTopology,
   loadReplay,
   loadScenarioIndex,
   loadTrainingStatus,
   replayScenario,
+  resetJourneyTraining,
   runReplay,
   saveScenario,
   startTraining,
@@ -25,6 +31,7 @@ import type { CheckpointMode } from "./lib/api";
 import type {
   CheckpointEntry,
   CheckpointIndex,
+  NetworkTopologyInfo,
   ReplayBundle,
   ReplaySnapshot,
   ScenarioIndex,
@@ -32,31 +39,57 @@ import type {
 } from "./state/types";
 
 type RunState = "idle" | "running" | "paused" | "success" | "timeout" | "stopped";
-type ActiveTab = "train" | "watch" | "test" | "insights" | "results" | "config";
+type ActiveTab = "train" | "watch" | "test" | "network" | "layers" | "stages" | "insights" | "results" | "config";
+type RightRailTab = "training" | "controls" | "status" | "scenario" | "library";
 
 const APP_TABS: { id: ActiveTab; label: string }[] = [
   { id: "train", label: "Train" },
   { id: "watch", label: "Watch" },
   { id: "test", label: "Scenarios" },
+  { id: "network", label: "Network" },
+  { id: "layers", label: "Layers" },
+  { id: "stages", label: "Stages" },
   { id: "insights", label: "Insights" },
   { id: "results", label: "Results" },
   { id: "config", label: "Config" },
 ];
 
 const CLEAR_TRAINING_MESSAGE = "Training cleared. Baseline replay restored";
-const DEFAULT_MAX_CURRICULUM_STAGE = 8;
+const DEFAULT_MAX_CURRICULUM_STAGE = 30;
 
 /** Mirrors RECOMMENDED_EPISODES in TrainingPanel — update both together. */
 const RECOMMENDED_EPISODES_BY_STAGE: Record<number, number> = {
   0: 50,
   1: 50,
-  2: 100,
-  3: 150,
-  4: 200,
-  5: 300,
-  6: 400,
-  7: 500,
-  8: 600,
+  2: 75,
+  3: 100,
+  4: 125,
+  5: 150,
+  6: 175,
+  7: 200,
+  8: 225,
+  9: 250,
+  10: 275,
+  11: 300,
+  12: 325,
+  13: 350,
+  14: 375,
+  15: 400,
+  16: 450,
+  17: 500,
+  18: 550,
+  19: 600,
+  20: 650,
+  21: 700,
+  22: 750,
+  23: 800,
+  24: 850,
+  25: 900,
+  26: 950,
+  27: 1000,
+  28: 1100,
+  29: 1200,
+  30: 1300,
 };
 
 function recommendedEpisodesForStage(stage: number): number {
@@ -111,9 +144,12 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [trainingError, setTrainingError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [effectiveConfig, setEffectiveConfig] = useState<Record<string, unknown> | null>(null);
+  const [networkTopology, setNetworkTopology] = useState<NetworkTopologyInfo | null>(null);
   const [trainingEpisodes, setTrainingEpisodes] = useState(50);
   const [trainingFastMode, setTrainingFastMode] = useState(true);
   const [trainingEnableInstincts, setTrainingEnableInstincts] = useState(false);
+  const [trainingAutoPromote, setTrainingAutoPromote] = useState(true);
   const [trainingCurriculumStage, setTrainingCurriculumStage] = useState(() => {
     const saved = localStorage.getItem("sheepdog_curriculum_stage");
     const parsed = saved !== null ? parseInt(saved, 10) : NaN;
@@ -126,6 +162,7 @@ export function App() {
   const [runningCurrentReplay, setRunningCurrentReplay] = useState(false);
   const [loadingSelectedReplay, setLoadingSelectedReplay] = useState(false);
   const [activeTab, setActiveTab] = useState<ActiveTab>("train");
+  const [rightRailTab, setRightRailTab] = useState<RightRailTab>("training");
   const [scenarioReplay, setScenarioReplay] = useState<ReplayBundle | null>(null);
   const [scenarioFrameIndex, setScenarioFrameIndex] = useState(0);
   const [scenarioRunState, setScenarioRunState] = useState<RunState>("idle");
@@ -192,6 +229,9 @@ export function App() {
   const effectiveDebugRewardBreakdown = trainingRunning
     ? trainingStatus?.debug_reward_breakdown ?? trainingDebugRewardBreakdown
     : trainingDebugRewardBreakdown;
+  const effectiveAutoPromote = trainingRunning
+    ? trainingStatus?.auto_promote ?? trainingAutoPromote
+    : trainingAutoPromote;
 
   const latestSuccessRate = useMemo(() => {
     const checkpoints = checkpointIndex?.checkpoints;
@@ -341,6 +381,20 @@ export function App() {
     scenarioCurrentFrame?.snapshot ?? scenarioReplay?.final_snapshot ?? null;
   const fieldSnapshot = activeTab === "test" ? scenarioSnapshot : snapshot;
 
+  useEffect(() => {
+    if (activeTab === "train") {
+      setRightRailTab("training");
+      return;
+    }
+    if (activeTab === "watch") {
+      setRightRailTab("controls");
+      return;
+    }
+    if (activeTab === "test") {
+      setRightRailTab("scenario");
+    }
+  }, [activeTab]);
+
   async function refreshScenarioIndex() {
     try {
       const index = await loadScenarioIndex();
@@ -419,6 +473,28 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (activeTab !== "network") {
+      return;
+    }
+    let active = true;
+    void (async () => {
+      try {
+        const topology = await loadNetworkTopology();
+        if (active) {
+          setNetworkTopology(topology);
+        }
+      } catch {
+        if (active) {
+          setNetworkTopology(null);
+        }
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [activeTab]);
+
+  useEffect(() => {
     let active = true;
     void (async () => {
       try {
@@ -428,6 +504,25 @@ export function App() {
         }
       } catch {
         // Keep default when hyperparams are unavailable.
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      try {
+        const config = await loadEffectiveConfig();
+        if (active) {
+          setEffectiveConfig(config);
+        }
+      } catch {
+        if (active) {
+          setEffectiveConfig(null);
+        }
       }
     })();
     return () => {
@@ -664,6 +759,7 @@ export function App() {
         enable_instinct_rewards: trainingEnableInstincts,
         curriculum_stage: trainingCurriculumStage,
         debug_reward_breakdown: trainingDebugRewardBreakdown,
+        auto_promote: trainingAutoPromote,
         promote_from_checkpoint_episode: promoteFromEpisode ?? undefined,
       });
       // Clear the promote hint after it has been consumed by the training request.
@@ -706,6 +802,32 @@ export function App() {
       setRunState("idle");
     } catch (clearError) {
       setTrainingError(clearError instanceof Error ? clearError.message : "Unable to clear training.");
+    } finally {
+      setClearingTraining(false);
+    }
+  }
+
+  async function handleResetJourney() {
+    if (!window.confirm("Archive current results and restart training journey from Stage 1?")) {
+      return;
+    }
+
+    setClearingTraining(true);
+    setTrainingError(null);
+    setError(null);
+    try {
+      const status = await resetJourneyTraining();
+      const index = await loadCheckpointIndex();
+      setTrainingStatus(status);
+      setTrainingCurriculumStage(1);
+      localStorage.setItem("sheepdog_curriculum_stage", "1");
+      setTrainingEpisodes(recommendedEpisodesForStage(1));
+      setPromoteFromEpisode(null);
+      applyCheckpointIndex(index);
+      setFrameIndex(0);
+      setRunState("idle");
+    } catch (resetError) {
+      setTrainingError(resetError instanceof Error ? resetError.message : "Unable to reset training journey.");
     } finally {
       setClearingTraining(false);
     }
@@ -947,6 +1069,25 @@ export function App() {
     </button>
   ));
 
+  const rightRailTabs =
+    activeTab === "train"
+      ? [
+          { id: "training" as const, label: "Training" },
+          { id: "controls" as const, label: "Playback" },
+          { id: "status" as const, label: "Status" },
+        ]
+      : activeTab === "watch"
+        ? [
+            { id: "controls" as const, label: "Playback" },
+            { id: "status" as const, label: "Status" },
+            { id: "training" as const, label: "Training" },
+          ]
+        : [
+            { id: "scenario" as const, label: "Scenario" },
+            { id: "library" as const, label: "Library" },
+            { id: "status" as const, label: "Status" },
+          ];
+
   return (
     <main className="app-shell">
       {error ? <div className="warning-box warning-box--error">{error}</div> : null}
@@ -957,9 +1098,23 @@ export function App() {
         {tabButtons}
       </div>
 
-      {activeTab === "insights" || activeTab === "results" || activeTab === "config" ? (
+      {activeTab === "insights" || activeTab === "results" || activeTab === "config" || activeTab === "network" || activeTab === "layers" || activeTab === "stages" ? (
         <div className="insights-fullscreen">
-          {activeTab === "insights" ? (
+          {activeTab === "stages" ? (
+            <StagesTab />
+          ) : activeTab === "layers" ? (
+            <LayersTab
+              effectiveConfig={effectiveConfig}
+              topologyInfo={networkTopology}
+            />
+          ) : activeTab === "network" ? (
+            <NetworkTab
+              checkpointIndex={checkpointIndex}
+              trainingStatus={trainingStatus}
+              effectiveConfig={effectiveConfig}
+              topologyInfo={networkTopology}
+            />
+          ) : activeTab === "insights" ? (
             <DiagnosticsPanel
               checkpointIndex={checkpointIndex}
               bestCheckpointEpisode={bestCheckpointEpisode}
@@ -974,62 +1129,129 @@ export function App() {
         </div>
       ) : (
         <div className="layout-grid">
-          <FieldView snapshot={fieldSnapshot} />
-          <aside className="side-column">
-            {activeTab === "train" ? (
-              <TrainingPanel
-                episodes={trainingEpisodes}
-                fastMode={trainingFastMode}
-                enableInstincts={effectiveEnableInstincts}
-                curriculumStage={effectiveCurriculumStage}
-                maxCurriculumStage={maxCurriculumStage}
-                debugRewardBreakdown={effectiveDebugRewardBreakdown}
-                running={trainingStatus?.running ?? false}
-                clearing={clearingTraining}
-                batchCompletedEpisodes={trainingStatus?.batch_completed_episodes ?? trainingStatus?.completed_episodes ?? 0}
-                batchTotalEpisodes={trainingStatus?.batch_total_episodes ?? trainingStatus?.requested_episodes ?? 0}
-                currentEpisode={trainingStatus?.current_episode ?? null}
-                totalEpisodesTrained={trainingStatus?.total_episodes_trained ?? 0}
-                startingEpisode={trainingStatus?.starting_episode ?? null}
-                stageHistory={trainingStatus?.stage_history ?? {}}
-                grandTotalEpisodes={trainingStatus?.grand_total_episodes ?? 0}
-                phase={trainingStatus?.phase ?? "idle"}
-                message={statusMessage}
-                error={trainingStatus?.error ?? null}
-                successRate={bestStageFormalEntry?.success_rate ?? null}
-                activeTrainerType={trainingStatus?.trainer_type ?? null}
-                activePolicyType={trainingStatus?.policy_type ?? null}
-                activeInstincts={trainingStatus?.enable_instinct_rewards ?? null}
-                activeCurriculumStage={trainingStatus?.curriculum_stage ?? null}
-                latestSuccessRate={trainingStatus?.latest_success_rate ?? latestSuccessRate}
-                latestAvgSheepPenned={trainingStatus?.latest_avg_sheep_penned ?? null}
-                latestAvgReward={trainingStatus?.latest_avg_reward ?? null}
-                latestTimeoutRate={trainingStatus?.latest_timeout_rate ?? null}
-                latestAvgDistanceToPen={trainingStatus?.latest_avg_distance_to_pen ?? null}
-                latestCheckpointEpisode={trainingStatus?.latest_checkpoint_episode ?? null}
-                onEpisodesChange={setTrainingEpisodes}
-                onFastModeChange={setTrainingFastMode}
-                onEnableInstinctsChange={setTrainingEnableInstincts}
-                onCurriculumStageChange={setTrainingCurriculumStage}
-                onDebugRewardBreakdownChange={setTrainingDebugRewardBreakdown}
-                onStartTraining={handleStartTraining}
-                onClearTraining={handleClearTraining}
-                onPromote={handlePromote}
-                currentBestEntry={currentBestEntry}
-                previousBestEntry={previousBestEntry}
-                seedEpisode={trainingStatus?.seed_episode ?? null}
-              />
-            ) : activeTab === "test" ? (
-              <>
-                <StatusPanel
-                  snapshot={scenarioSnapshot}
-                  replay={scenarioReplay}
-                  selectedCheckpoint={null}
-                  selectedCheckpointEpisode={null}
-                  bestCheckpointEpisode={bestCheckpointEpisode}
-                  selectedSeed={scenarioSeed}
-                  runState={scenarioStatusLabel}
+          <section className="visual-column">
+            <FieldView snapshot={fieldSnapshot} />
+          </section>
+          <aside className="side-column side-column--tabs">
+            <div className="tab-bar side-panel-tabs" role="tablist" aria-label="Operations tabs">
+              {rightRailTabs.map(({ id, label }) => (
+                <button
+                  key={id}
+                  role="tab"
+                  aria-selected={rightRailTab === id}
+                  className={`tab${rightRailTab === id ? " tab--active" : ""}`}
+                  onClick={() => setRightRailTab(id)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="side-panel-body">
+              {activeTab !== "test" && rightRailTab === "training" ? (
+                <TrainingPanel
+                  episodes={trainingEpisodes}
+                  fastMode={trainingFastMode}
+                  enableInstincts={effectiveEnableInstincts}
+                  curriculumStage={effectiveCurriculumStage}
+                  maxCurriculumStage={maxCurriculumStage}
+                  debugRewardBreakdown={effectiveDebugRewardBreakdown}
+                  autoPromote={effectiveAutoPromote}
+                  autoPromoteThreshold={trainingStatus?.auto_promote_threshold ?? null}
+                  autoPromoteStagesCompleted={trainingStatus?.auto_promote_stages_completed ?? 0}
+                  autoPromoteGate={trainingStatus?.auto_promote_gate ?? null}
+                  running={trainingStatus?.running ?? false}
+                  clearing={clearingTraining}
+                  batchCompletedEpisodes={trainingStatus?.batch_completed_episodes ?? trainingStatus?.completed_episodes ?? 0}
+                  batchTotalEpisodes={trainingStatus?.batch_total_episodes ?? trainingStatus?.requested_episodes ?? 0}
+                  currentEpisode={trainingStatus?.current_episode ?? null}
+                  totalEpisodesTrained={trainingStatus?.total_episodes_trained ?? 0}
+                  startingEpisode={trainingStatus?.starting_episode ?? null}
+                  stageHistory={trainingStatus?.stage_history ?? {}}
+                  grandTotalEpisodes={trainingStatus?.grand_total_episodes ?? 0}
+                  phase={trainingStatus?.phase ?? "idle"}
+                  message={statusMessage}
+                  error={trainingStatus?.error ?? null}
+                  errorType={trainingStatus?.error_type ?? null}
+                  traceback={trainingStatus?.traceback ?? null}
+                  successRate={bestStageFormalEntry?.success_rate ?? null}
+                  activeTrainerType={trainingStatus?.trainer_type ?? null}
+                  activePolicyType={trainingStatus?.policy_type ?? null}
+                  activeInstincts={trainingStatus?.enable_instinct_rewards ?? null}
+                  activeCurriculumStage={trainingStatus?.curriculum_stage ?? null}
+                  latestSuccessRate={trainingStatus?.latest_success_rate ?? latestSuccessRate}
+                  latestAvgSheepPenned={trainingStatus?.latest_avg_sheep_penned ?? null}
+                  latestAvgReward={trainingStatus?.latest_avg_reward ?? null}
+                  latestTimeoutRate={trainingStatus?.latest_timeout_rate ?? null}
+                  latestStoppedRate={trainingStatus?.latest_stopped_rate ?? null}
+                  latestAvgNoProgressSteps={trainingStatus?.latest_avg_no_progress_steps ?? null}
+                  latestAvgDistanceToPen={trainingStatus?.latest_avg_distance_to_pen ?? null}
+                  latestAvgFlockSpread={trainingStatus?.latest_avg_flock_spread ?? null}
+                  latestAvgFarthestDistanceToPen={trainingStatus?.latest_avg_farthest_distance_to_pen ?? null}
+                  latestAvgFarthestDistanceToFlockCenter={trainingStatus?.latest_avg_farthest_distance_to_flock_center ?? null}
+                  latestCheckpointEpisode={trainingStatus?.latest_checkpoint_episode ?? null}
+                  onEpisodesChange={setTrainingEpisodes}
+                  onFastModeChange={setTrainingFastMode}
+                  onEnableInstinctsChange={setTrainingEnableInstincts}
+                  onCurriculumStageChange={setTrainingCurriculumStage}
+                  onDebugRewardBreakdownChange={setTrainingDebugRewardBreakdown}
+                  onAutoPromoteChange={setTrainingAutoPromote}
+                  onStartTraining={handleStartTraining}
+                  onClearTraining={handleClearTraining}
+                  onResetJourney={handleResetJourney}
+                  onPromote={handlePromote}
+                  currentBestEntry={currentBestEntry}
+                  previousBestEntry={previousBestEntry}
+                  seedEpisode={trainingStatus?.seed_episode ?? null}
                 />
+              ) : null}
+
+              {activeTab !== "test" && rightRailTab === "controls" ? (
+                <>
+                  <ControlBar
+                    checkpoints={visibleCheckpoints}
+                    selectedCheckpointEpisode={selectedCheckpointEpisode}
+                    bestCheckpointEpisode={bestCheckpointEpisode}
+                    seedOptions={seedOptions}
+                    selectedSeed={selectedSeed}
+                    runningCurrent={runningCurrentReplay}
+                    canEndEpisode={canEndEpisode}
+                    onSelectCheckpointEpisode={handleCheckpointChange}
+                    onSelectSeed={handleSeedChange}
+                    onStart={handleReplaySelected}
+                    runningSelected={loadingSelectedReplay}
+                    onEndEpisode={handleEndEpisode}
+                    onRunCurrent={handleRunCurrentReplay}
+                    disabled={loading}
+                    fastMode={playbackFastMode}
+                    onFastModeChange={setPlaybackFastMode}
+                  />
+                  {activeTab === "watch" ? (
+                    <StatusPanel
+                      snapshot={snapshot}
+                      replay={replay}
+                      selectedCheckpoint={selectedCheckpoint as CheckpointEntry | null}
+                      selectedCheckpointEpisode={selectedCheckpointEpisode}
+                      bestCheckpointEpisode={bestCheckpointEpisode}
+                      selectedSeed={selectedSeed}
+                      runState={statusLabel}
+                    />
+                  ) : null}
+                </>
+              ) : null}
+
+              {activeTab !== "test" && rightRailTab === "status" ? (
+                <StatusPanel
+                  snapshot={snapshot}
+                  replay={replay}
+                  selectedCheckpoint={selectedCheckpoint as CheckpointEntry | null}
+                  selectedCheckpointEpisode={selectedCheckpointEpisode}
+                  bestCheckpointEpisode={bestCheckpointEpisode}
+                  selectedSeed={selectedSeed}
+                  runState={statusLabel}
+                />
+              ) : null}
+
+              {activeTab === "test" && rightRailTab === "scenario" ? (
                 <ScenarioPanel
                   personalityStrength={scenarioPersonalityStrength}
                   seed={scenarioSeed}
@@ -1046,6 +1268,9 @@ export function App() {
                   onEndEpisode={handleEndScenarioEpisode}
                   disabled={loading}
                 />
+              ) : null}
+
+              {activeTab === "test" && rightRailTab === "library" ? (
                 <SavedScenariosPanel
                   scenarioIndex={scenarioIndex}
                   checkpoints={checkpointIndex?.checkpoints ?? []}
@@ -1067,38 +1292,20 @@ export function App() {
                   onRunScenario={handleRunSavedScenario}
                   canSaveFromReplay={Boolean(scenarioSnapshot)}
                 />
-              </>
-            ) : (
-              <>
+              ) : null}
+
+              {activeTab === "test" && rightRailTab === "status" ? (
                 <StatusPanel
-                  snapshot={snapshot}
-                  replay={replay}
-                  selectedCheckpoint={selectedCheckpoint as CheckpointEntry | null}
-                  selectedCheckpointEpisode={selectedCheckpointEpisode}
+                  snapshot={scenarioSnapshot}
+                  replay={scenarioReplay}
+                  selectedCheckpoint={null}
+                  selectedCheckpointEpisode={null}
                   bestCheckpointEpisode={bestCheckpointEpisode}
-                  selectedSeed={selectedSeed}
-                  runState={statusLabel}
+                  selectedSeed={scenarioSeed}
+                  runState={scenarioStatusLabel}
                 />
-                <ControlBar
-                  checkpoints={visibleCheckpoints}
-                  selectedCheckpointEpisode={selectedCheckpointEpisode}
-                  bestCheckpointEpisode={bestCheckpointEpisode}
-                  seedOptions={seedOptions}
-                  selectedSeed={selectedSeed}
-                  runningCurrent={runningCurrentReplay}
-                  canEndEpisode={canEndEpisode}
-                  onSelectCheckpointEpisode={handleCheckpointChange}
-                  onSelectSeed={handleSeedChange}
-                  onStart={handleReplaySelected}
-                  runningSelected={loadingSelectedReplay}
-                  onEndEpisode={handleEndEpisode}
-                  onRunCurrent={handleRunCurrentReplay}
-                  disabled={loading}
-                  fastMode={playbackFastMode}
-                  onFastModeChange={setPlaybackFastMode}
-                />
-              </>
-            )}
+              ) : null}
+            </div>
           </aside>
         </div>
       )}

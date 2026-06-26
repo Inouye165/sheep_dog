@@ -1,28 +1,72 @@
-import type { CheckpointEntry } from "../state/types";
+import type { AutoPromoteGateDiagnostics, CheckpointEntry } from "../state/types";
 
 const STAGE_DESCRIPTIONS: Record<number, string> = {
   0: "Full problem — 3 dogs, 6 sheep, 80×60 grid",
-  1: "1 dog · 1 sheep · 60×45 grid",
-  2: "1 dog · 3 sheep · 72×54 grid",
-  3: "1 dog · 3 sheep · 120×84 grid",
-  4: "2 dogs · 5 sheep · 132×90 grid",
-  5: "3 dogs · 6 sheep · 144×96 grid",
-  6: "3 dogs · 6 sheep · nearby stray recovery",
-  7: "3 dogs · 6 sheep · farther stray recovery",
-  8: "3 dogs · 6 sheep · split/scattered recovery",
+  1: "1 dog · 1 sheep · fixed easy penning",
+  2: "1 dog · 1 sheep · mild start randomization",
+  3: "1 dog · 2 sheep · fixed mini-flock",
+  4: "1 dog · 2 sheep · randomized mini-flock",
+  5: "2 dogs · 3 sheep · fixed teamwork",
+  6: "2 dogs · 3 sheep · tiny nearby stray starts",
+  7: "2 dogs · 4 sheep · early nearby stray collection",
+  8: "3 dogs · 4 sheep · nearby stray emphasis",
+  9: "3 dogs · 4 sheep · stronger nearby stray recovery",
+  10: "3 dogs · 5 sheep · nearby + first farther strays",
+  11: "3 dogs · 5 sheep · farther stray recovery",
+  12: "3 dogs · 6 sheep · group + one stray",
+  13: "3 dogs · 6 sheep · two nearby strays",
+  14: "3 dogs · 6 sheep · split flock (3+3)",
+  15: "3 dogs · 6 sheep · partially scattered",
+  16: "3 dogs · 6 sheep · scattered sheep",
+  17: "3 dogs · 6 sheep · moving pen same wall",
+  18: "3 dogs · 6 sheep · any-wall pen",
+  19: "3 dogs · 6 sheep · wall pen away from corners",
+  20: "3 dogs · 6 sheep · interior pen",
+  21: "3 dogs · 6 sheep · random pen + random sheep",
+  22: "3 dogs · 6 sheep · wider split/stray recovery",
+  23: "3 dogs · 6 sheep · heavy scattered recovery",
+  24: "3 dogs · 6 sheep · all-corners starts",
+  25: "3 dogs · 6 sheep · hard spawn mix (no personality bias)",
+  26: "3 dogs · 6 sheep · add mild personality variation",
+  27: "3 dogs · 6 sheep · moderate personality variation",
+  28: "3 dogs · 6 sheep · disable no-pressure cohesion",
+  29: "3 dogs · 6 sheep · reduce cohesion + stronger personalities",
+  30: "3 dogs · 6 sheep · lowest cohesion + strongest personalities",
 };
 
 /** Ideal episode count to run per curriculum stage before evaluating. */
 const RECOMMENDED_EPISODES: Record<number, number> = {
   0: 50,
   1: 50,
-  2: 100,
-  3: 150,
-  4: 200,
-  5: 300,
-  6: 400,
-  7: 500,
-  8: 600,
+  2: 75,
+  3: 100,
+  4: 125,
+  5: 150,
+  6: 175,
+  7: 200,
+  8: 225,
+  9: 250,
+  10: 275,
+  11: 300,
+  12: 325,
+  13: 350,
+  14: 375,
+  15: 400,
+  16: 450,
+  17: 500,
+  18: 550,
+  19: 600,
+  20: 650,
+  21: 700,
+  22: 750,
+  23: 800,
+  24: 850,
+  25: 900,
+  26: 950,
+  27: 1000,
+  28: 1100,
+  29: 1200,
+  30: 1300,
 };
 
 /** Success rate threshold above which promoting to the next stage is recommended. */
@@ -35,6 +79,10 @@ interface TrainingPanelProps {
   curriculumStage: number;
   maxCurriculumStage: number;
   debugRewardBreakdown: boolean;
+  autoPromote: boolean;
+  autoPromoteThreshold?: number | null;
+  autoPromoteStagesCompleted?: number;
+  autoPromoteGate?: AutoPromoteGateDiagnostics | null;
   running: boolean;
   clearing: boolean;
   batchCompletedEpisodes: number;
@@ -46,6 +94,8 @@ interface TrainingPanelProps {
   phase: string;
   message: string;
   error: string | null;
+  errorType?: string | null;
+  traceback?: string | null;
   successRate: number | null;
   activeTrainerType?: string | null;
   activePolicyType?: string | null;
@@ -55,15 +105,22 @@ interface TrainingPanelProps {
   latestAvgSheepPenned?: number | null;
   latestAvgReward?: number | null;
   latestTimeoutRate?: number | null;
+  latestStoppedRate?: number | null;
+  latestAvgNoProgressSteps?: number | null;
   latestAvgDistanceToPen?: number | null;
+  latestAvgFlockSpread?: number | null;
+  latestAvgFarthestDistanceToPen?: number | null;
+  latestAvgFarthestDistanceToFlockCenter?: number | null;
   latestCheckpointEpisode?: number | null;
   onEpisodesChange: (episodes: number) => void;
   onFastModeChange: (enabled: boolean) => void;
   onEnableInstinctsChange: (enabled: boolean) => void;
   onCurriculumStageChange: (stage: number) => void;
   onDebugRewardBreakdownChange: (enabled: boolean) => void;
+  onAutoPromoteChange: (enabled: boolean) => void;
   onStartTraining: () => void;
   onClearTraining: () => void;
+  onResetJourney: () => void;
   onPromote: () => void;
   currentBestEntry?: CheckpointEntry | null;
   previousBestEntry?: CheckpointEntry | null;
@@ -78,6 +135,10 @@ export function TrainingPanel({
   curriculumStage,
   maxCurriculumStage,
   debugRewardBreakdown,
+  autoPromote,
+  autoPromoteThreshold,
+  autoPromoteStagesCompleted,
+  autoPromoteGate,
   running,
   clearing,
   batchCompletedEpisodes,
@@ -89,6 +150,8 @@ export function TrainingPanel({
   phase,
   message,
   error,
+  errorType,
+  traceback,
   successRate,
   activeTrainerType,
   activePolicyType,
@@ -98,15 +161,22 @@ export function TrainingPanel({
   latestAvgSheepPenned,
   latestAvgReward,
   latestTimeoutRate,
+  latestStoppedRate,
+  latestAvgNoProgressSteps,
   latestAvgDistanceToPen,
+  latestAvgFlockSpread,
+  latestAvgFarthestDistanceToPen,
+  latestAvgFarthestDistanceToFlockCenter,
   latestCheckpointEpisode,
   onEpisodesChange,
   onFastModeChange,
   onEnableInstinctsChange,
   onCurriculumStageChange,
   onDebugRewardBreakdownChange,
+  onAutoPromoteChange,
   onStartTraining,
   onClearTraining,
+  onResetJourney,
   onPromote,
   currentBestEntry,
   previousBestEntry,
@@ -123,12 +193,23 @@ export function TrainingPanel({
     .filter(([, v]) => v > 0)
     .sort(([a], [b]) => Number(a) - Number(b));
   const busy = running || clearing;
-  const canPromote = curriculumStage < maxCurriculumStage && !busy;
   const stageDesc = STAGE_DESCRIPTIONS[curriculumStage] ?? `Stage ${curriculumStage}`;
   const successPct = successRate !== null ? `${Math.round(successRate * 100)}%` : "—";
   const successGood = successRate !== null && successRate >= 0.5;
   const recommendedEpisodes = RECOMMENDED_EPISODES[curriculumStage] ?? 100;
-  const readyToPromote = successRate !== null && successRate >= PROMOTE_THRESHOLD && canPromote;
+  const hasPromotionHeadroom = curriculumStage < maxCurriculumStage;
+  const canPromote = hasPromotionHeadroom && !busy;
+  const readyToPromote = canPromote && successRate !== null && successRate >= PROMOTE_THRESHOLD;
+  const effectiveAutoPromoteThreshold = autoPromoteThreshold ?? PROMOTE_THRESHOLD;
+  const hasAutoPromoteGate = autoPromoteGate != null;
+  const decisionToneClass =
+    autoPromoteGate?.decision === "promote"
+      ? "gate-pill gate-pill--pass"
+      : autoPromoteGate?.decision === "hold"
+        ? "gate-pill gate-pill--fail"
+        : "gate-pill gate-pill--pending";
+  const gateToneClass = (ok: boolean): string =>
+    ok ? "gate-pill gate-pill--pass" : "gate-pill gate-pill--fail";
 
   function formatTimestamp(iso: string | null | undefined): string | null {
     if (!iso) return null;
@@ -167,7 +248,12 @@ export function TrainingPanel({
     latestAvgSheepPenned != null ||
     latestAvgReward != null ||
     latestTimeoutRate != null ||
-    latestAvgDistanceToPen != null;
+    latestStoppedRate != null ||
+    latestAvgNoProgressSteps != null ||
+    latestAvgDistanceToPen != null ||
+    latestAvgFlockSpread != null ||
+    latestAvgFarthestDistanceToPen != null ||
+    latestAvgFarthestDistanceToFlockCenter != null;
   const fmtPct = (v: number | null | undefined) =>
     v != null ? `${Math.round(v * 100)}%` : "—";
   const fmtNum = (v: number | null | undefined, decimals = 2) =>
@@ -177,7 +263,7 @@ export function TrainingPanel({
     <section className="training-card" aria-label="Training controls">
       <div className="training-card__header">
         <div>
-          <p className="eyebrow">Train</p>
+          <p className="eyebrow">Curriculum learning</p>
           <h2>Training</h2>
         </div>
         <span className={`pill ${running ? "pill--live" : "pill--muted"}`}>{phase}</span>
@@ -190,13 +276,19 @@ export function TrainingPanel({
           <span className="stage-chip__desc">{stageDesc}</span>
         </div>
         {canPromote ? (
-          <button type="button" className="button-row__promote" onClick={onPromote}>
+          <button type="button" className="button-row__promote" onClick={onPromote} disabled={!readyToPromote}>
             Promote → Stage {curriculumStage + 1}
           </button>
         ) : curriculumStage >= maxCurriculumStage ? (
           <span className="pill pill--live">Max stage</span>
         ) : null}
       </div>
+
+      {canPromote && !readyToPromote ? (
+        <div className="warning-box" role="status">
+          Promotion locked until Stage {curriculumStage} reaches ≥ {Math.round(PROMOTE_THRESHOLD * 100)}% success.
+        </div>
+      ) : null}
 
       {readyToPromote ? (
         <div className="warning-box warning-box--success" role="status">
@@ -259,6 +351,18 @@ export function TrainingPanel({
         </span>
       </div>
 
+      <div className="button-row">
+        <button type="button" className="button-row__primary" onClick={onStartTraining} disabled={busy}>
+          {running ? "Training..." : `Train ${episodes} more`}
+        </button>
+        <button type="button" className="button-row__danger" onClick={onClearTraining} disabled={busy}>
+          {clearing ? "Clearing..." : "Clear"}
+        </button>
+        <button type="button" onClick={onResetJourney} disabled={busy}>
+          Reset Journey
+        </button>
+      </div>
+
       <div className="training-summary">
         <div>
           <span>Success rate</span>
@@ -284,6 +388,18 @@ export function TrainingPanel({
           <span>Status</span>
           <strong>{message}</strong>
         </div>
+        <div>
+          <span>Auto-promotion</span>
+          <strong>{autoPromote ? "ON" : "OFF"}</strong>
+        </div>
+        <div>
+          <span>Auto threshold</span>
+          <strong>{Math.round(effectiveAutoPromoteThreshold * 100)}%</strong>
+        </div>
+        <div>
+          <span>Auto-promoted</span>
+          <strong>{(autoPromoteStagesCompleted ?? 0).toLocaleString()} stages</strong>
+        </div>
         {seedEpisode != null ? (
           <div>
             <span>Seed ep</span>
@@ -291,6 +407,72 @@ export function TrainingPanel({
           </div>
         ) : null}
       </div>
+
+      {hasAutoPromoteGate ? (
+        <details className="training-advanced" open={autoPromoteGate.decision === "hold"}>
+          <summary>Auto-promotion gate diagnostics</summary>
+          <div className="training-summary">
+            <div>
+              <span>Decision</span>
+              <strong className={decisionToneClass}>{autoPromoteGate.decision.toUpperCase()}</strong>
+            </div>
+            <div>
+              <span>Reason</span>
+              <strong>{autoPromoteGate.reason}</strong>
+            </div>
+            <div>
+              <span>Seed gate</span>
+              <strong className={gateToneClass(autoPromoteGate.seed_gate_target_met)}>
+                {autoPromoteGate.seed_gate_hits}/{autoPromoteGate.min_seed_gate_hits}
+                {autoPromoteGate.seed_gate_target_met ? " ✓" : ""}
+              </strong>
+            </div>
+            <div>
+              <span>Streak</span>
+              <strong
+                className={gateToneClass(
+                  autoPromoteGate.qualified_streak >= autoPromoteGate.min_qualified_streak,
+                )}
+              >
+                {autoPromoteGate.qualified_streak}/{autoPromoteGate.min_qualified_streak}
+              </strong>
+            </div>
+            <div>
+              <span>Best success</span>
+              <strong>{Math.round(autoPromoteGate.best_success * 100)}%</strong>
+            </div>
+            <div>
+              <span>Seeds in eval</span>
+              <strong>{autoPromoteGate.seed_count}</strong>
+            </div>
+            <div>
+              <span>Success gate</span>
+              <strong className={gateToneClass(autoPromoteGate.success_rate_ok)}>
+                {autoPromoteGate.success_rate_ok ? "pass" : "fail"}
+              </strong>
+            </div>
+            <div>
+              <span>Timeout gate</span>
+              <strong className={gateToneClass(autoPromoteGate.timeout_ok)}>
+                {autoPromoteGate.timeout_ok ? "pass" : "fail"}
+              </strong>
+            </div>
+            <div>
+              <span>Reward gate</span>
+              <strong className={gateToneClass(autoPromoteGate.reward_close_ok)}>
+                {autoPromoteGate.reward_close_ok ? "pass" : "fail"}
+              </strong>
+            </div>
+            <div>
+              <span>Full-success hits</span>
+              <strong className={gateToneClass(autoPromoteGate.full_success_target_met)}>
+                {autoPromoteGate.full_success_hits}/{autoPromoteGate.min_full_success_hits}
+                {autoPromoteGate.full_success_target_met ? " ✓" : ""}
+              </strong>
+            </div>
+          </div>
+        </details>
+      ) : null}
 
       {(currentBestEntry || previousBestEntry) ? (
         <div className="best-perf">
@@ -346,16 +528,30 @@ export function TrainingPanel({
       {stageHistoryEntries.length > 0 ? (
         <div className="stage-history">
           <span className="stage-history__label">Per-stage history</span>
-          <div className="stage-history__entries">
-            {stageHistoryEntries.map(([stage, eps]) => (
-              <span key={stage} className="stage-history__entry">
-                S{stage}: {eps.toLocaleString()}
-              </span>
-            ))}
+          <div className="stage-history__bars">
+            {(() => {
+              const maxEps = Math.max(...stageHistoryEntries.map(([, v]) => v));
+              return stageHistoryEntries.map(([stage, eps]) => (
+                <div key={stage} className="stage-history__bar-row">
+                  <span className="stage-history__bar-key">S{stage}</span>
+                  <span className="stage-history__bar-track">
+                    <span
+                      className="stage-history__bar-fill"
+                      style={{ width: `${maxEps > 0 ? (eps / maxEps) * 100 : 0}%` }}
+                    />
+                  </span>
+                  <span className="stage-history__bar-val">{eps.toLocaleString()}</span>
+                </div>
+              ));
+            })()}
             {stageHistoryEntries.length > 1 ? (
-              <span className="stage-history__entry stage-history__entry--total">
-                Total: {stageHistoryEntries.reduce((s, [, v]) => s + v, 0).toLocaleString()}
-              </span>
+              <div className="stage-history__bar-row stage-history__bar-row--total">
+                <span className="stage-history__bar-key">Total</span>
+                <span className="stage-history__bar-track" />
+                <span className="stage-history__bar-val">
+                  {stageHistoryEntries.reduce((s, [, v]) => s + v, 0).toLocaleString()}
+                </span>
+              </div>
             ) : null}
           </div>
         </div>
@@ -384,8 +580,28 @@ export function TrainingPanel({
               <strong>{fmtPct(latestTimeoutRate)}</strong>
             </div>
             <div>
+              <span>No-progress stop</span>
+              <strong>{fmtPct(latestStoppedRate)}</strong>
+            </div>
+            <div>
               <span>Dist-to-pen</span>
               <strong>{fmtNum(latestAvgDistanceToPen, 1)}</strong>
+            </div>
+            <div>
+              <span>Flock spread</span>
+              <strong>{fmtNum(latestAvgFlockSpread, 1)}</strong>
+            </div>
+            <div>
+              <span>Farthest-to-pen</span>
+              <strong>{fmtNum(latestAvgFarthestDistanceToPen, 1)}</strong>
+            </div>
+            <div>
+              <span>Farthest-to-flock</span>
+              <strong>{fmtNum(latestAvgFarthestDistanceToFlockCenter, 1)}</strong>
+            </div>
+            <div>
+              <span>No-progress steps</span>
+              <strong>{fmtNum(latestAvgNoProgressSteps, 1)}</strong>
             </div>
           </div>
         </details>
@@ -439,6 +655,16 @@ export function TrainingPanel({
             <span>Debug rewards</span>
           </label>
 
+          <label className="training-toggle">
+            <input
+              type="checkbox"
+              checked={autoPromote}
+              onChange={(event) => onAutoPromoteChange(event.target.checked)}
+              disabled={busy}
+            />
+            <span>Auto-promote stages</span>
+          </label>
+
           <label>
             <span>Stage (manual)</span>
             <input
@@ -463,16 +689,18 @@ export function TrainingPanel({
         </div>
       ) : null}
 
-      {error ? <div className="warning-box warning-box--error">{error}</div> : null}
-
-      <div className="button-row">
-        <button type="button" className="button-row__primary" onClick={onStartTraining} disabled={busy}>
-          {running ? "Training..." : `Train ${episodes} more`}
-        </button>
-        <button type="button" className="button-row__danger" onClick={onClearTraining} disabled={busy}>
-          {clearing ? "Clearing..." : "Clear"}
-        </button>
-      </div>
+      {error ? (
+        <div className="warning-box warning-box--error" role="alert">
+          <strong>{errorType ? `${errorType}: ` : ""}</strong>
+          {error}
+          {traceback ? (
+            <details className="training-advanced" style={{ marginTop: "0.5rem" }}>
+              <summary>Technical traceback</summary>
+              <pre style={{ whiteSpace: "pre-wrap", margin: "0.5rem 0 0" }}>{traceback}</pre>
+            </details>
+          ) : null}
+        </div>
+      ) : null}
     </section>
   );
 }

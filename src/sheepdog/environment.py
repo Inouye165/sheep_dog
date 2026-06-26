@@ -12,7 +12,12 @@ from random import Random
 from statistics import fmean
 from typing import Any, cast
 
-from sheepdog.config import EnvironmentConfig, LabConfig
+from sheepdog.config import (
+    PEN_PLACEMENTS,
+    SPAWN_MODES,
+    EnvironmentConfig,
+    LabConfig,
+)
 from sheepdog.entities import (
     SHEEP_PERSONALITIES,
     DogRole,
@@ -198,6 +203,7 @@ class SheepdogEnvironment:
         self._right_flank_occupancy_steps = 0
         self._gate_corridor_occupancy_peak = 0.0
         self._gate_corridor_failure_steps = 0
+        self._spawn_mode = ""
 
     @property
     def dog_count(self) -> int:
@@ -266,12 +272,12 @@ class SheepdogEnvironment:
         self._right_flank_occupancy_steps = 0
         self._gate_corridor_occupancy_peak = 0.0
         self._gate_corridor_failure_steps = 0
-        pen_origin = Point(self.env_config.width - self.env_config.pen_width, 1)
+        pen_origin, pen_opening = self._sample_pen_origin_and_opening()
         self._pen = Pen(
             pen_origin,
             self.env_config.pen_width,
             self.env_config.pen_height,
-            opening=self.env_config.pen_opening,
+            opening=pen_opening,
         )
         self._fence_cells = self._pen.fence_cells()
         self._dogs = self._initial_dogs()
@@ -321,6 +327,7 @@ class SheepdogEnvironment:
         self._right_flank_occupancy_steps = 0
         self._gate_corridor_occupancy_peak = 0.0
         self._gate_corridor_failure_steps = 0
+        self._spawn_mode = "scenario"
         self._pen = Pen(
             Point(scenario.pen.origin_x, scenario.pen.origin_y),
             scenario.pen.width,
@@ -354,6 +361,68 @@ class SheepdogEnvironment:
         self._previous_flock_spread = self._flock_spread()
         self._previous_farthest_distance = self._farthest_distance_to_pen()
         return self.get_state_snapshot()
+
+    def _sample_pen_origin_and_opening(self) -> tuple[Point, str]:
+        placement = (self.env_config.pen_placement or "corner").lower()
+        if placement not in PEN_PLACEMENTS:
+            placement = "corner"
+        if placement == "corner":
+            return (
+                Point(self.env_config.width - self.env_config.pen_width, 1),
+                self.env_config.pen_opening,
+            )
+
+        if placement == "same_wall":
+            min_x = 1
+            max_x = max(min_x, self.env_config.width - self.env_config.pen_width - 2)
+            return Point(self._rng.randint(min_x, max_x), 1), "bottom"
+
+        if placement == "any_wall":
+            return self._sample_wall_pen(avoid_corners=False)
+
+        if placement == "away_from_corner":
+            return self._sample_wall_pen(avoid_corners=True)
+
+        if placement == "interior":
+            min_x = 3
+            max_x = max(min_x, self.env_config.width - self.env_config.pen_width - 4)
+            min_y = 3
+            max_y = max(min_y, self.env_config.height - self.env_config.pen_height - 4)
+            x = self._rng.randint(min_x, max_x)
+            y = self._rng.randint(min_y, max_y)
+            return Point(x, y), self.env_config.pen_opening
+
+        # "random": mix wall and interior layouts.
+        if self._rng.random() < 0.75:
+            return self._sample_wall_pen(avoid_corners=False)
+        min_x = 3
+        max_x = max(min_x, self.env_config.width - self.env_config.pen_width - 4)
+        min_y = 3
+        max_y = max(min_y, self.env_config.height - self.env_config.pen_height - 4)
+        x = self._rng.randint(min_x, max_x)
+        y = self._rng.randint(min_y, max_y)
+        return Point(x, y), self.env_config.pen_opening
+
+    def _sample_wall_pen(self, *, avoid_corners: bool) -> tuple[Point, str]:
+        corner_buffer = 4 if avoid_corners else 0
+        wall = self._rng.choice(("top", "bottom", "left", "right"))
+        if wall == "top":
+            min_x = 1 + corner_buffer
+            max_x = max(min_x, self.env_config.width - self.env_config.pen_width - 2 - corner_buffer)
+            return Point(self._rng.randint(min_x, max_x), 1), "bottom"
+        if wall == "bottom":
+            min_x = 1 + corner_buffer
+            max_x = max(min_x, self.env_config.width - self.env_config.pen_width - 2 - corner_buffer)
+            y = max(1, self.env_config.height - self.env_config.pen_height - 2)
+            return Point(self._rng.randint(min_x, max_x), y), "top"
+        if wall == "left":
+            min_y = 1 + corner_buffer
+            max_y = max(min_y, self.env_config.height - self.env_config.pen_height - 2 - corner_buffer)
+            return Point(1, self._rng.randint(min_y, max_y)), "right"
+        min_y = 1 + corner_buffer
+        max_y = max(min_y, self.env_config.height - self.env_config.pen_height - 2 - corner_buffer)
+        x = max(1, self.env_config.width - self.env_config.pen_width - 2)
+        return Point(x, self._rng.randint(min_y, max_y)), "left"
 
     def _advance_position(
         self,
@@ -817,6 +886,9 @@ class SheepdogEnvironment:
             no_progress_steps=self._no_progress_steps,
             final_avg_distance_to_pen=final_snapshot.average_distance_to_pen,
             final_flock_spread=final_snapshot.flock_spread,
+            final_farthest_distance_to_pen=self._farthest_distance_to_pen(),
+            final_farthest_distance_to_flock_center=self._farthest_distance_to_flock_center(),
+            spawn_mode=self._spawn_mode,
             role_distribution=dict(self._role_distribution),
             dog_role_occupancy={
                 dog_index: dict(occupancy)
@@ -891,8 +963,8 @@ class SheepdogEnvironment:
                 if self._pen.contains(pt) or pt in self._fence_cells:
                     continue
                 if (
-                    x >= self.env_config.width - self.env_config.pen_width - 2
-                    and y <= self.env_config.pen_height + 2
+                    self._pen.origin.x - 2 <= x <= self._pen.origin.x + self._pen.width + 1
+                    and self._pen.origin.y - 2 <= y <= self._pen.origin.y + self._pen.height + 1
                 ):
                     continue
                 if y >= self.env_config.height - 4:
@@ -923,6 +995,229 @@ class SheepdogEnvironment:
         )
 
         stage = self.env_config.curriculum_stage
+        spawn_mix = {
+            name: float(weight)
+            for name, weight in self.env_config.spawn_mix.items()
+            if name in SPAWN_MODES and float(weight) > 0.0
+        }
+
+        def append_sheep(index: int, position: Point) -> None:
+            forced_personality = self.env_config.sheep_personality_override
+            if forced_personality in SHEEP_PERSONALITIES:
+                personality = forced_personality
+            else:
+                personality = (
+                    personality_rng.choice(SHEEP_PERSONALITIES)
+                    if assign_personalities
+                    else "obedient"
+                )
+            sheep.append(
+                SheepState(
+                    index=index,
+                    position=position,
+                    personality=personality,
+                )
+            )
+
+        if spawn_mix:
+            mode = self._choose_spawn_mode(spawn_mix)
+            self._spawn_mode = mode
+
+            if mode == "fixed_easy":
+                center = Point(self.env_config.width // 3, self.env_config.height // 2)
+                for index in range(self.env_config.sheep):
+                    position = self._sample_unique_position(
+                        preferred_x=center.x,
+                        preferred_y=center.y,
+                        occupied=occupied,
+                        jitter_x=2,
+                        jitter_y=2,
+                    )
+                    occupied.add(position)
+                    append_sheep(index, position)
+                return sheep
+
+            if mode == "randomized_flock":
+                center = self._random_sheep_spawn_center(occupied)
+                for index in range(self.env_config.sheep):
+                    position = self._sample_unique_position(
+                        preferred_x=center.x,
+                        preferred_y=center.y,
+                        occupied=occupied,
+                        jitter_x=2,
+                        jitter_y=2,
+                    )
+                    occupied.add(position)
+                    append_sheep(index, position)
+                return sheep
+
+            if mode in {"nearby_stray", "farther_stray", "two_strays"}:
+                center = self._random_sheep_spawn_center(occupied)
+                if mode == "nearby_stray":
+                    stray_count = 1
+                    min_distance = self.env_config.stray_near_min
+                    max_distance = self.env_config.stray_near_max
+                elif mode == "farther_stray":
+                    stray_count = 1
+                    min_distance = self.env_config.stray_far_min
+                    max_distance = self.env_config.stray_far_max
+                else:
+                    stray_count = 2
+                    min_distance = self.env_config.stray_near_min
+                    max_distance = self.env_config.stray_near_max
+
+                flock_count = max(1, self.env_config.sheep - stray_count)
+                for index in range(flock_count):
+                    position = self._sample_unique_position(
+                        preferred_x=center.x,
+                        preferred_y=center.y,
+                        occupied=occupied,
+                        jitter_x=2,
+                        jitter_y=2,
+                    )
+                    occupied.add(position)
+                    append_sheep(index, position)
+
+                stray_centers: list[Point] = []
+                for stray_index in range(stray_count):
+                    stray_center = self._sample_center_in_distance_band(
+                        center,
+                        occupied,
+                        min_distance=min_distance,
+                        max_distance=max_distance,
+                        avoid_points=stray_centers,
+                        avoid_min_distance=10.0,
+                    )
+                    stray_centers.append(stray_center)
+                    position = self._sample_unique_position(
+                        preferred_x=stray_center.x,
+                        preferred_y=stray_center.y,
+                        occupied=occupied,
+                        jitter_x=1,
+                        jitter_y=1,
+                    )
+                    occupied.add(position)
+                    append_sheep(flock_count + stray_index, position)
+                return sheep
+
+            if mode == "split_flock":
+                center_a = self._random_sheep_spawn_center(occupied)
+                center_b = self._sample_center_in_distance_band(
+                    center_a,
+                    occupied,
+                    min_distance=max(18.0, self.env_config.stray_far_min),
+                    max_distance=max(30.0, self.env_config.stray_far_max),
+                )
+                flock_a = self.env_config.sheep // 2
+                flock_b = self.env_config.sheep - flock_a
+                for index in range(flock_a):
+                    position = self._sample_unique_position(
+                        preferred_x=center_a.x,
+                        preferred_y=center_a.y,
+                        occupied=occupied,
+                        jitter_x=2,
+                        jitter_y=2,
+                    )
+                    occupied.add(position)
+                    append_sheep(index, position)
+                for offset in range(flock_b):
+                    position = self._sample_unique_position(
+                        preferred_x=center_b.x,
+                        preferred_y=center_b.y,
+                        occupied=occupied,
+                        jitter_x=2,
+                        jitter_y=2,
+                    )
+                    occupied.add(position)
+                    append_sheep(flock_a + offset, position)
+                return sheep
+
+            if mode == "partial_scattered":
+                center_a = self._random_sheep_spawn_center(occupied)
+                center_b = self._sample_center_in_distance_band(
+                    center_a,
+                    occupied,
+                    min_distance=12.0,
+                    max_distance=24.0,
+                )
+                grouped_count = max(2, self.env_config.sheep // 2)
+                pivot = grouped_count // 2 + grouped_count % 2
+                for index in range(grouped_count):
+                    preferred = center_a if index < pivot else center_b
+                    position = self._sample_unique_position(
+                        preferred_x=preferred.x,
+                        preferred_y=preferred.y,
+                        occupied=occupied,
+                        jitter_x=2,
+                        jitter_y=2,
+                    )
+                    occupied.add(position)
+                    append_sheep(index, position)
+                for index in range(grouped_count, self.env_config.sheep):
+                    center = self._random_sheep_spawn_center(occupied)
+                    position = self._sample_unique_position(
+                        preferred_x=center.x,
+                        preferred_y=center.y,
+                        occupied=occupied,
+                        jitter_x=1,
+                        jitter_y=1,
+                    )
+                    occupied.add(position)
+                    append_sheep(index, position)
+                return sheep
+
+            # scattered_sheep
+            if mode == "scattered_sheep":
+                for index in range(self.env_config.sheep):
+                    candidate = None
+                    for _ in range(120):
+                        pt = Point(
+                            self._rng.randint(6, max(6, self.env_config.width - 7)),
+                            self._rng.randint(6, max(6, self.env_config.height - 7)),
+                        )
+                        if pt in occupied or pt in self._fence_cells or self._pen.contains(pt):
+                            continue
+                        if any(pt.distance_to(existing) < 5.0 for existing in occupied):
+                            continue
+                        candidate = pt
+                        break
+                    if candidate is None:
+                        candidate = self._sample_unique_position(
+                            preferred_x=self.env_config.width // 2,
+                            preferred_y=self.env_config.height // 2,
+                            occupied=occupied,
+                            jitter_x=self.env_config.width // 3,
+                            jitter_y=self.env_config.height // 3,
+                        )
+                    occupied.add(candidate)
+                    append_sheep(index, candidate)
+                return sheep
+
+            # all_corners
+            corner_margin = max(2, min(self.env_config.width, self.env_config.height) // 12)
+            corner_targets = [
+                Point(corner_margin, corner_margin),
+                Point(max(1, self.env_config.width - 1 - corner_margin), corner_margin),
+                Point(corner_margin, max(1, self.env_config.height - 1 - corner_margin)),
+                Point(
+                    max(1, self.env_config.width - 1 - corner_margin),
+                    max(1, self.env_config.height - 1 - corner_margin),
+                ),
+            ]
+            for index in range(self.env_config.sheep):
+                corner = corner_targets[index % len(corner_targets)]
+                position = self._sample_unique_position(
+                    preferred_x=corner.x,
+                    preferred_y=corner.y,
+                    occupied=occupied,
+                    jitter_x=1,
+                    jitter_y=1,
+                )
+                occupied.add(position)
+                append_sheep(index, position)
+            return sheep
+
+        self._spawn_mode = "legacy_stage_layout"
 
         if stage == 6:
             # Bridge stage: one compact group plus one nearby stray.
@@ -943,18 +1238,7 @@ class SheepdogEnvironment:
                     jitter_y=2,
                 )
                 occupied.add(position)
-                personality = (
-                    personality_rng.choice(SHEEP_PERSONALITIES)
-                    if assign_personalities
-                    else "obedient"
-                )
-                sheep.append(
-                    SheepState(
-                        index=index,
-                        position=position,
-                        personality=personality,
-                    )
-                )
+                append_sheep(index, position)
 
             position = self._sample_unique_position(
                 preferred_x=center_1.x,
@@ -964,18 +1248,7 @@ class SheepdogEnvironment:
                 jitter_y=0,
             )
             occupied.add(position)
-            personality = (
-                personality_rng.choice(SHEEP_PERSONALITIES)
-                if assign_personalities
-                else "obedient"
-            )
-            sheep.append(
-                SheepState(
-                    index=5,
-                    position=position,
-                    personality=personality,
-                )
-            )
+            append_sheep(5, position)
 
         elif stage == 7:
             # Medium stage: one group of 4 with two farther strays.
@@ -1008,18 +1281,7 @@ class SheepdogEnvironment:
                     jitter_y=2,
                 )
                 occupied.add(position)
-                personality = (
-                    personality_rng.choice(SHEEP_PERSONALITIES)
-                    if assign_personalities
-                    else "obedient"
-                )
-                sheep.append(
-                    SheepState(
-                        index=index,
-                        position=position,
-                        personality=personality,
-                    )
-                )
+                append_sheep(index, position)
 
             for i, center in enumerate(stray_centers):
                 position = self._sample_unique_position(
@@ -1030,18 +1292,7 @@ class SheepdogEnvironment:
                     jitter_y=0,
                 )
                 occupied.add(position)
-                personality = (
-                    personality_rng.choice(SHEEP_PERSONALITIES)
-                    if assign_personalities
-                    else "obedient"
-                )
-                sheep.append(
-                    SheepState(
-                        index=4 + i,
-                        position=position,
-                        personality=personality,
-                    )
-                )
+                append_sheep(4 + i, position)
 
         elif stage == 8:
             # Hard stage: split/scattered recovery (group of 3 + 3 strays).
@@ -1068,18 +1319,7 @@ class SheepdogEnvironment:
                     jitter_y=2,
                 )
                 occupied.add(position)
-                personality = (
-                    personality_rng.choice(SHEEP_PERSONALITIES)
-                    if assign_personalities
-                    else "obedient"
-                )
-                sheep.append(
-                    SheepState(
-                        index=index,
-                        position=position,
-                        personality=personality,
-                    )
-                )
+                append_sheep(index, position)
 
             for i, center in enumerate(split_centers):
                 position = self._sample_unique_position(
@@ -1090,18 +1330,7 @@ class SheepdogEnvironment:
                     jitter_y=0,
                 )
                 occupied.add(position)
-                personality = (
-                    personality_rng.choice(SHEEP_PERSONALITIES)
-                    if assign_personalities
-                    else "obedient"
-                )
-                sheep.append(
-                    SheepState(
-                        index=3 + i,
-                        position=position,
-                        personality=personality,
-                    )
-                )
+                append_sheep(3 + i, position)
 
         else:
             # Stage 0 to 5 default herding layout
@@ -1116,19 +1345,20 @@ class SheepdogEnvironment:
                     jitter_y=2,
                 )
                 occupied.add(position)
-                personality = (
-                    personality_rng.choice(SHEEP_PERSONALITIES)
-                    if assign_personalities
-                    else "obedient"
-                )
-                sheep.append(
-                    SheepState(
-                        index=index,
-                        position=position,
-                        personality=personality,
-                    )
-                )
+                append_sheep(index, position)
         return sheep
+
+    def _choose_spawn_mode(self, spawn_mix: dict[str, float]) -> str:
+        total = sum(max(0.0, weight) for weight in spawn_mix.values())
+        if total <= 0.0:
+            return "fixed_easy"
+        pick = self._rng.random() * total
+        cumulative = 0.0
+        for mode, weight in spawn_mix.items():
+            cumulative += max(0.0, weight)
+            if pick <= cumulative:
+                return mode
+        return next(iter(spawn_mix))
 
     def _sample_unique_position(
         self,
@@ -1144,7 +1374,11 @@ class SheepdogEnvironment:
                 preferred_x + self._rng.randint(-jitter_x, jitter_x),
                 preferred_y + self._rng.randint(-jitter_y, jitter_y),
             ).clamp(self.env_config.width, self.env_config.height)
-            if candidate not in occupied and candidate not in self._fence_cells:
+            if (
+                candidate not in occupied
+                and candidate not in self._fence_cells
+                and not self._pen.contains(candidate)
+            ):
                 return candidate
 
         for y in range(self.env_config.height):
@@ -1370,9 +1604,16 @@ class SheepdogEnvironment:
             # This prevents constant self-driving when no dogs are present
             dogs_nearby = nearest_dog_distance <= self.env_config.sheep_vision
             far_from_flock = position.distance_to(flock_center) > self.env_config.flock_radius
-            if dogs_nearby or far_from_flock:
-                vector_x += (flock_center.x - position.x) * 0.35
-                vector_y += (flock_center.y - position.y) * 0.35
+            allow_far_from_flock = (
+                far_from_flock and self.env_config.sheep_cohere_without_dog_pressure
+            )
+            if dogs_nearby or allow_far_from_flock:
+                vector_x += (
+                    flock_center.x - position.x
+                ) * self.env_config.sheep_flock_cohesion_weight
+                vector_y += (
+                    flock_center.y - position.y
+                ) * self.env_config.sheep_flock_cohesion_weight
         elif personality == "escapist" and strength > 0.0 and flock_center is not None:
             # When scared, an escapist sheep bolts away from the flock instead
             # of cohering with it.
@@ -1876,7 +2117,10 @@ class SheepdogEnvironment:
             return True
         if average_distance_delta >= self.env_config.no_progress_distance_delta:
             return True
-        if self.env_config.curriculum_stage < 6:
+        collection_progress_enabled = self.env_config.count_collection_progress or (
+            not self.env_config.spawn_mix and self.env_config.curriculum_stage >= 6
+        )
+        if not collection_progress_enabled:
             return False
         spread_threshold = max(0.05, self.env_config.no_progress_distance_delta * 0.5)
         farthest_threshold = max(0.10, self.env_config.no_progress_distance_delta * 0.5)
@@ -2252,6 +2496,7 @@ class SheepdogEnvironment:
             "policy_mode": self.config.policy.policy_mode,
             "allow_instinct_target_awareness": self.config.policy.allow_instinct_target_awareness,
             "handler_target_enabled": self.config.policy.handler_target_enabled,
+            "spawn_mode": self._spawn_mode,
             "cumulative_gate_progress": self._cumulative_gate_progress,
             "controlled_stall_steps": self._controlled_stall_steps,
             "gate_corridor_occupancy": self._gate_corridor_occupancy(),
