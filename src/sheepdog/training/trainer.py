@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import json
-import os
 import random
-import time
-import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -14,39 +11,13 @@ from pathlib import Path
 from statistics import fmean
 from typing import Any
 
+from sheepdog.atomic_io import atomic_write_json, atomic_write_text
 from sheepdog.checkpoints.store import CheckpointMetadata, CheckpointStore
 from sheepdog.config import LabConfig, TrainingConfig
 from sheepdog.environment import SheepdogEnvironment
 from sheepdog.evaluation.evaluator import EvaluationSummary, Evaluator
 from sheepdog.evaluation.scenario_evaluator import evaluate_checkpoint_on_scenarios
 from sheepdog.policies.trainable import PolicyWeights, TrainableLinearPolicy
-
-
-def _atomic_replace(tmp: Path, dest: Path) -> None:
-    """Rename *tmp* to *dest*, retrying briefly on Windows file-lock errors."""
-    for attempt in range(6):
-        try:
-            os.replace(tmp, dest)
-            return
-        except PermissionError:
-            if attempt == 5:
-                raise
-            time.sleep(0.05 * (attempt + 1))
-
-
-def _atomic_write_json(path: Path, data: Any) -> None:
-    """Write *data* as JSON to *path* atomically (temp file + rename)."""
-    tmp = path.with_name(f"{path.stem}-{uuid.uuid4().hex}.tmp")
-    with tmp.open("w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=2)
-    _atomic_replace(tmp, path)
-
-
-def _atomic_write_text(path: Path, text: str) -> None:
-    """Write *text* to *path* atomically (temp file + rename)."""
-    tmp = path.with_name(f"{path.stem}-{uuid.uuid4().hex}.tmp")
-    tmp.write_text(text, encoding="utf-8")
-    _atomic_replace(tmp, path)
 
 
 def _checkpoint_replay_mode(policy_name: str, total_training_episodes: int) -> str:
@@ -173,8 +144,7 @@ class Trainer:
             payload["best_formal_weights"] = (
                 asdict(best_formal_weights) if best_formal_weights is not None else None
             )
-        with self._state_path.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2)
+        atomic_write_json(self._state_path, payload)
 
     @property
     def total_episodes_trained(self) -> int:
@@ -632,9 +602,7 @@ class Trainer:
             "replay_mode": "trained_linear" if total_episodes_trained > 0 else "baseline",
             "total_episodes_trained": total_episodes_trained,
         }
-        path = self.output_root / "training-summary.json"
-        with path.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2)
+        atomic_write_json(self.output_root / "training-summary.json", payload)
 
     def _export_web_assets(
         self,
@@ -663,21 +631,170 @@ class Trainer:
         exported_checkpoints: list[dict[str, Any]] = []
         for checkpoint_payload in checkpoint_payloads:
             exported_payload = dict(checkpoint_payload)
+            exported_payload["journey"] = "current"
             exported_payload["records"] = [
                 _export_record(record) for record in checkpoint_payload["records"]
             ]
             exported_checkpoints.append(exported_payload)
 
-        _atomic_write_json(
+        # Prepend archived journey checkpoints so the full timeline is visible.
+        archived_checkpoints = self._load_archived_checkpoints()
+        all_checkpoints = archived_checkpoints + exported_checkpoints
+
+        atomic_write_json(
             web_export_dir / "latest-checkpoint.json", {"checkpoint": checkpoint_path.name}
         )
-        _atomic_write_json(web_export_dir / "latest-evaluation.json", summary_payload)
-        _atomic_write_json(
+        atomic_write_json(web_export_dir / "latest-evaluation.json", summary_payload)
+        atomic_write_json(
             web_export_dir / "checkpoint-index.json",
-            {"checkpoints": exported_checkpoints, "latest": summary_payload},
+            {"checkpoints": all_checkpoints, "latest": summary_payload},
         )
         replay_target = web_export_dir / "latest-replay.json"
-        _atomic_write_text(replay_target, replay_path.read_text(encoding="utf-8"))
+        atomic_write_text(replay_target, replay_path.read_text(encoding="utf-8"))
+
+    def _load_archived_checkpoints(self) -> list[dict[str, Any]]:
+        """Load checkpoints from all archived journeys.
+
+        Scans ``artifacts/archive/journey-*/checkpoint-index.json`` (preferred)
+        or ``training-summary.json`` (fallback) for each archived journey and
+        returns their checkpoint entries tagged with ``"journey"`` metadata.
+        Records are stripped to keep the payload lightweight — archived replays
+        are not expected to be playable from the live UI.
+        """
+        archive_root = self.output_root / "archive"
+        if not archive_root.is_dir():
+            return []
+
+        all_archived: list[dict[str, Any]] = []
+        journey_dirs = sorted(archive_root.iterdir())
+        for journey_dir in journey_dirs:
+            if not journey_dir.is_dir() or not journey_dir.name.startswith("journey-"):
+                continue
+            journey_label = journey_dir.name
+            # Prefer checkpoint-index.json (already web-export shaped) over
+            # training-summary.json (which contains raw replay paths).
+            candidates = [
+                journey_dir / "checkpoint-index.json",
+                journey_dir / "training-summary.json",
+            ]
+            loaded: list[dict[str, Any]] = []
+            for candidate in candidates:
+                if not candidate.exists():
+                    continue
+                try:
+                    payload = json.loads(candidate.read_text(encoding="utf-8"))
+                    loaded = list(payload.get("checkpoints", []))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                break  # use the first file that works
+
+            for entry in loaded:
+                entry["journey"] = journey_label
+                # Strip heavyweight records — archived replays are unavailable
+                # from the live web server, so carrying hundreds of KB of per-seed
+                # data would bloat the checkpoint-index for no benefit.
+                entry.pop("records", None)
+            all_archived.extend(loaded)
+
+        # Sort by recorded_at for a consistent timeline across journeys.
+        all_archived.sort(
+            key=lambda e: e.get("recorded_at", ""),
+        )
+        return all_archived
+
+    def reconcile_web_exports(self, web_export_dir: str | Path) -> int | None:
+        """Rebuild the web export when it lags behind ``training-summary.json``.
+
+        An interrupted run (e.g. an overnight reboot) can leave the trainer's
+        ``training-summary.json`` ahead of the web ``checkpoint-index.json`` that
+        the UI reads, which shows up as "lost progress"/regression in the chart.
+        On startup we compare the two and, if the summary is ahead, re-export the
+        web assets from the summary so the UI catches up without re-training.
+
+        Returns the checkpoint episode the web export was advanced to, or ``None``
+        when no reconciliation was needed.
+        """
+        web_dir = Path(web_export_dir)
+        summary_path = self.output_root / "training-summary.json"
+        index_path = web_dir / "checkpoint-index.json"
+
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        checkpoints = summary.get("checkpoints")
+        if not isinstance(checkpoints, list) or not checkpoints:
+            return None
+
+        def _episode(payload: Any) -> int:
+            if isinstance(payload, dict):
+                value = payload.get("checkpoint_episode")
+                if isinstance(value, (int, float)):
+                    return int(value)
+            return -1
+
+        summary_latest = max((_episode(item) for item in checkpoints), default=-1)
+        if summary_latest < 0:
+            return None
+
+        web_latest = -1
+        try:
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+            web_latest = _episode(index.get("latest"))
+            if web_latest < 0:
+                web_latest = max(
+                    (_episode(item) for item in index.get("checkpoints", [])),
+                    default=-1,
+                )
+        except (OSError, json.JSONDecodeError):
+            web_latest = -1
+
+        if web_latest >= summary_latest:
+            return None
+
+        replay_output_dir = web_dir / "replays"
+        replay_output_dir.mkdir(parents=True, exist_ok=True)
+
+        def _export_record(record: dict[str, Any]) -> dict[str, Any]:
+            source_path = Path(record["replay_path"])
+            target_path = replay_output_dir / source_path.name
+            if source_path.exists():
+                target_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
+            exported_record = dict(record)
+            exported_record["replay_path"] = f"/generated/replays/{target_path.name}"
+            return exported_record
+
+        exported_checkpoints: list[dict[str, Any]] = []
+        for checkpoint_payload in checkpoints:
+            exported_payload = dict(checkpoint_payload)
+            exported_payload["journey"] = "current"
+            exported_payload["records"] = [
+                _export_record(record) for record in checkpoint_payload.get("records", [])
+            ]
+            exported_checkpoints.append(exported_payload)
+
+        # Prepend archived journey checkpoints so the full timeline is visible.
+        archived_checkpoints = self._load_archived_checkpoints()
+        all_checkpoints = archived_checkpoints + exported_checkpoints
+
+        latest_payload = exported_checkpoints[-1]
+        atomic_write_json(
+            web_dir / "latest-checkpoint.json", {"checkpoint": latest_payload.get("checkpoint")}
+        )
+        atomic_write_json(web_dir / "latest-evaluation.json", latest_payload)
+        atomic_write_json(
+            web_dir / "checkpoint-index.json",
+            {"checkpoints": all_checkpoints, "latest": latest_payload},
+        )
+        latest_records = latest_payload.get("records") or []
+        if latest_records:
+            replay_rel = latest_records[0].get("replay_path", "")
+            replay_src = web_dir / replay_rel.removeprefix("/generated/")
+            if replay_src.exists():
+                atomic_write_text(
+                    web_dir / "latest-replay.json", replay_src.read_text(encoding="utf-8")
+                )
+        return summary_latest
 
     def _evaluate_saved_scenarios(
         self, policy: TrainableLinearPolicy, checkpoint_episode: int

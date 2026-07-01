@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+
+from sheepdog.atomic_io import atomic_write_json
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +44,5 @@ class CheckpointStore:
 
     def write(self, metadata: CheckpointMetadata) -> Path:
         path = self.root / f"checkpoint-{metadata.checkpoint_episode:06d}.json"
-        with path.open("w", encoding="utf-8") as handle:
-            json.dump(metadata.to_dict(), handle, indent=2)
+        atomic_write_json(path, metadata.to_dict())
         return path

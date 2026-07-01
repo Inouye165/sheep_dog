@@ -59,7 +59,7 @@ export function ControlBar({
               const isBest = episode === bestCheckpointEpisode;
               const stage = entry.reward_config?.instincts?.curriculum_stage;
               const stageStr = stage != null ? `S${stage} · ` : "";
-              const totalSeeds = entry.records.length;
+              const totalSeeds = entry.records?.length ?? 0;
               const successCount = totalSeeds > 0 ? Math.round(entry.success_rate * totalSeeds) : Math.round(entry.success_rate * 100);
               const successStr = totalSeeds > 0 ? `${successCount}/${totalSeeds} seeds` : `${Math.round(entry.success_rate * 100)}%`;
               const steps = Math.round(entry.average_completion_steps);
@@ -88,7 +88,7 @@ export function ControlBar({
               const selectedEntry = checkpoints.find((c) => c.checkpoint_episode === selectedCheckpointEpisode) ?? null;
               const totalSheep = selectedEntry?.environment_config?.sheep ?? null;
               return seedOptions.map((seed) => {
-                const record = selectedEntry?.records.find((r) => r.seed === seed);
+                const record = selectedEntry?.records?.find((r) => r.seed === seed);
                 let seedLabel = `Seed ${seed}`;
                 if (record) {
                   const outcome = record.success ? "success" : record.timeout ? "timeout" : "stopped";

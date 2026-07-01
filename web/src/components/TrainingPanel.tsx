@@ -26,12 +26,14 @@ const STAGE_DESCRIPTIONS: Record<number, string> = {
   22: "3 dogs · 6 sheep · wider split/stray recovery",
   23: "3 dogs · 6 sheep · heavy scattered recovery",
   24: "3 dogs · 6 sheep · all-corners starts",
-  25: "3 dogs · 6 sheep · hard spawn mix (no personality bias)",
-  26: "3 dogs · 6 sheep · add mild personality variation",
-  27: "3 dogs · 6 sheep · moderate personality variation",
-  28: "3 dogs · 6 sheep · disable no-pressure cohesion",
-  29: "3 dogs · 6 sheep · reduce cohesion + stronger personalities",
-  30: "3 dogs · 6 sheep · lowest cohesion + strongest personalities",
+  25: "3 dogs · 6 sheep · bridge: corner-heavy starts before hard random mix",
+  26: "3 dogs · 6 sheep · hard spawn mix (no personality bias)",
+  27: "3 dogs · 6 sheep · add mild personality variation",
+  28: "3 dogs · 6 sheep · moderate personality variation",
+  29: "3 dogs · 6 sheep · bridge: weaker cohesion but still pressure-coupled",
+  30: "3 dogs · 6 sheep · disable no-pressure cohesion",
+  31: "3 dogs · 6 sheep · reduce cohesion + stronger personalities",
+  32: "3 dogs · 6 sheep · lowest cohesion + strongest personalities",
 };
 
 /** Ideal episode count to run per curriculum stage before evaluating. */
@@ -64,9 +66,11 @@ const RECOMMENDED_EPISODES: Record<number, number> = {
   25: 900,
   26: 950,
   27: 1000,
-  28: 1100,
-  29: 1200,
-  30: 1300,
+  28: 1050,
+  29: 1100,
+  30: 1200,
+  31: 1300,
+  32: 1400,
 };
 
 /** Success rate threshold above which promoting to the next stage is recommended. */
@@ -334,6 +338,16 @@ export function TrainingPanel({
           ) : null}
         </div>
       </div>
+
+      <label className="training-toggle training-toggle--inline">
+        <input
+          type="checkbox"
+          checked={enableInstincts}
+          onChange={(event) => onEnableInstinctsChange(event.target.checked)}
+          disabled={busy}
+        />
+        <span>Enable instincts</span>
+      </label>
 
       <div
         className="progress-shell"
@@ -633,16 +647,6 @@ export function TrainingPanel({
               disabled={busy}
             />
             <span>Fast mode</span>
-          </label>
-
-          <label className="training-toggle">
-            <input
-              type="checkbox"
-              checked={enableInstincts}
-              onChange={(event) => onEnableInstinctsChange(event.target.checked)}
-              disabled={busy}
-            />
-            <span>Enable instincts</span>
           </label>
 
           <label className="training-toggle">

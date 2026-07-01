@@ -22,6 +22,7 @@ import {
   loadScenarioIndex,
   loadTrainingStatus,
   replayScenario,
+  rewindTraining,
   resetJourneyTraining,
   runReplay,
   saveScenario,
@@ -55,7 +56,7 @@ const APP_TABS: { id: ActiveTab; label: string }[] = [
 ];
 
 const CLEAR_TRAINING_MESSAGE = "Training cleared. Baseline replay restored";
-const DEFAULT_MAX_CURRICULUM_STAGE = 30;
+const DEFAULT_MAX_CURRICULUM_STAGE = 32;
 
 /** Mirrors RECOMMENDED_EPISODES in TrainingPanel — update both together. */
 const RECOMMENDED_EPISODES_BY_STAGE: Record<number, number> = {
@@ -87,9 +88,11 @@ const RECOMMENDED_EPISODES_BY_STAGE: Record<number, number> = {
   25: 900,
   26: 950,
   27: 1000,
-  28: 1100,
-  29: 1200,
-  30: 1300,
+  28: 1050,
+  29: 1100,
+  30: 1200,
+  31: 1300,
+  32: 1400,
 };
 
 function recommendedEpisodesForStage(stage: number): number {
@@ -181,23 +184,69 @@ export function App() {
   const [promoteFromEpisode, setPromoteFromEpisode] = useState<number | null>(null);
   // Track previous running state so we can detect the running→idle transition.
   const prevTrainingRunning = useRef(false);
+  // When true, the user explicitly picked a stage in the UI and idle polling
+  // should not auto-bounce it back to a higher server-reported stage.
+  const manualStageOverrideRef = useRef(false);
 
   const syncTrainingStageFromStatus = useCallback((status: TrainingStatus | null): void => {
     const reportedStage = status?.curriculum_stage;
     if (reportedStage == null || reportedStage < 1) {
       return;
     }
+    manualStageOverrideRef.current = false;
     setTrainingCurriculumStage(reportedStage);
     localStorage.setItem("sheepdog_curriculum_stage", String(reportedStage));
     setTrainingEpisodes(recommendedEpisodesForStage(reportedStage));
   }, []);
+
+  async function handleCurriculumStageChange(nextStage: number) {
+    const normalized = Number.isFinite(nextStage) ? Math.floor(nextStage) : 0;
+    const clamped = Math.max(0, Math.min(maxCurriculumStage, normalized));
+
+    if (clamped < effectiveCurriculumStage && !trainingRunning) {
+      const shouldRewind = window.confirm(
+        `Restart from Stage ${clamped} and remove saved progress from higher stages? ` +
+          "This hides those stages from the UI and prevents training from resuming from them.",
+      );
+
+      if (shouldRewind) {
+        setTrainingError(null);
+        setError(null);
+        try {
+          const status = await rewindTraining(clamped);
+          setTrainingStatus(status);
+          setPromoteFromEpisode(null);
+          manualStageOverrideRef.current = true;
+          setTrainingCurriculumStage(clamped);
+          localStorage.setItem("sheepdog_curriculum_stage", String(clamped));
+          setTrainingEpisodes(recommendedEpisodesForStage(clamped));
+          const index = await loadCheckpointIndex();
+          applyCheckpointIndex(index);
+          await refreshScenarioIndex();
+          return;
+        } catch (rewindError) {
+          setTrainingError(
+            rewindError instanceof Error
+              ? rewindError.message
+              : "Unable to rewind training state.",
+          );
+          return;
+        }
+      }
+    }
+
+    manualStageOverrideRef.current = true;
+    setTrainingCurriculumStage(clamped);
+    localStorage.setItem("sheepdog_curriculum_stage", String(clamped));
+    setTrainingEpisodes(recommendedEpisodesForStage(clamped));
+  }
 
   const selectedCheckpoint = useMemo(() => {
     return checkpointIndex?.checkpoints.find((entry) => entry.checkpoint_episode === selectedCheckpointEpisode) ?? null;
   }, [checkpointIndex, selectedCheckpointEpisode]);
 
   const seedOptions = useMemo(
-    () => (selectedCheckpoint ? selectedCheckpoint.records.map((record) => record.seed) : []),
+    () => (selectedCheckpoint?.records ? selectedCheckpoint.records.map((record) => record.seed) : []),
     [selectedCheckpoint],
   );
 
@@ -445,7 +494,7 @@ export function App() {
     const latestCheckpoint = index.checkpoints[index.checkpoints.length - 1] ?? null;
     const checkpointEpisode = latestCheckpoint?.checkpoint_episode ?? index.latest?.checkpoint_episode ?? null;
     setSelectedCheckpointEpisode(checkpointEpisode);
-    const seed = latestCheckpoint?.records[0]?.seed ?? index.latest?.records[0]?.seed ?? null;
+    const seed = latestCheckpoint?.records?.[0]?.seed ?? index.latest?.records?.[0]?.seed ?? null;
     setSelectedSeed(seed);
   }
 
@@ -532,12 +581,53 @@ export function App() {
 
   useEffect(() => {
     let active = true;
+    // Exponential-backoff polling: 500 ms when connected, capping at 8 s when
+    // the backend is unreachable.  Resets to fast-poll the moment it reconnects.
+    const POLL_FAST = 500;
+    const POLL_MAX = 8_000;
+    let pollDelay = POLL_FAST;
+    let timerId: number | null = null;
 
+    const applyStatus = (status: TrainingStatus) => {
+      if (!active) return;
+      pollDelay = POLL_FAST; // reconnected — go back to fast poll
+      setTrainingStatus((previous) => mergeTrainingStatus(previous, status));
+    };
+
+    const handleError = () => {
+      if (!active) return;
+      setTrainingStatus(null);
+      // Back off: double the delay, cap at POLL_MAX
+      pollDelay = Math.min(pollDelay * 2, POLL_MAX);
+    };
+
+    const scheduleNext = () => {
+      if (!active) return;
+      timerId = window.setTimeout(() => {
+        void (async () => {
+          try {
+            const status = await loadTrainingStatus();
+            applyStatus(status);
+            // Guard: only overwrite the UI stage while a batch is in flight.
+            // The running→idle useEffect handles locking the stage once done.
+            if (status.running) {
+              syncTrainingStageFromStatus(status);
+            }
+          } catch {
+            handleError();
+          } finally {
+            scheduleNext();
+          }
+        })();
+      }, pollDelay);
+    };
+
+    // Initial fetch (no delay)
     void (async () => {
       try {
         const status = await loadTrainingStatus();
         if (active) {
-          setTrainingStatus((previous) => mergeTrainingStatus(previous, status));
+          applyStatus(status);
           // Adopt the server's stage on initial load when training is running,
           // or when the server reports a HIGHER stage than localStorage (the
           // user trained further on another session).  Never overwrite a local
@@ -549,55 +639,42 @@ export function App() {
           );
           if (
             status.running ||
-            (status.curriculum_stage != null && status.curriculum_stage > localStage)
+            (
+              !manualStageOverrideRef.current &&
+              status.curriculum_stage != null &&
+              status.curriculum_stage > localStage
+            )
           ) {
             syncTrainingStageFromStatus(status);
           }
         }
       } catch {
-        if (active) {
-          setTrainingStatus(null);
-        }
+        handleError();
+      } finally {
+        scheduleNext();
       }
     })();
-
-    const timer = window.setInterval(() => {
-      void (async () => {
-        try {
-          const status = await loadTrainingStatus();
-          if (active) {
-            setTrainingStatus((previous) => mergeTrainingStatus(previous, status));
-            // Guard: only overwrite the UI stage while a batch is in flight.
-            // The running→idle useEffect handles locking the stage once done.
-            if (status.running) {
-              syncTrainingStageFromStatus(status);
-            }
-          }
-        } catch {
-          if (active) {
-            setTrainingStatus(null);
-          }
-        }
-      })();
-    }, 500);
 
     const refreshNow = () => {
       if (document.visibilityState !== "visible") {
         return;
       }
+      // Cancel the pending scheduled poll and fire immediately.
+      if (timerId !== null) {
+        window.clearTimeout(timerId);
+        timerId = null;
+      }
       void (async () => {
         try {
           const status = await loadTrainingStatus();
-          if (active) {
-            setTrainingStatus((previous) => mergeTrainingStatus(previous, status));
-            if (status.running) {
-              syncTrainingStageFromStatus(status);
-            }
+          applyStatus(status);
+          if (status.running) {
+            syncTrainingStageFromStatus(status);
           }
         } catch {
-          if (active) {
-            setTrainingStatus(null);
-          }
+          handleError();
+        } finally {
+          scheduleNext();
         }
       })();
     };
@@ -606,7 +683,7 @@ export function App() {
 
     return () => {
       active = false;
-      window.clearInterval(timer);
+      if (timerId !== null) window.clearTimeout(timerId);
       document.removeEventListener("visibilitychange", refreshNow);
       window.removeEventListener("focus", refreshNow);
     };
@@ -632,9 +709,9 @@ export function App() {
           null;
         if (checkpoint) {
           setSelectedCheckpointEpisode(checkpoint.checkpoint_episode);
-          const seed = checkpoint.records[0]?.seed ?? null;
+          const seed = checkpoint.records?.[0]?.seed ?? null;
           setSelectedSeed(seed);
-          const record = checkpoint.records.find((entry) => entry.seed === seed) ?? checkpoint.records[0];
+          const record = checkpoint.records?.find((entry) => entry.seed === seed) ?? checkpoint.records?.[0];
           if (record) {
             const bundle = await loadReplay(record.replay_path);
             if (cancelled) {
@@ -660,11 +737,11 @@ export function App() {
     if (!selectedCheckpoint) {
       return;
     }
-    const seed = selectedSeed ?? selectedCheckpoint.records[0]?.seed ?? null;
+    const seed = selectedSeed ?? selectedCheckpoint.records?.[0]?.seed ?? null;
     if (seed === null) {
       return;
     }
-    const record = selectedCheckpoint.records.find((entry) => entry.seed === seed) ?? selectedCheckpoint.records[0];
+    const record = selectedCheckpoint.records?.find((entry) => entry.seed === seed) ?? selectedCheckpoint.records?.[0];
     if (!record) {
       return;
     }
@@ -725,7 +802,7 @@ export function App() {
   function handleCheckpointChange(episode: number) {
     setSelectedCheckpointEpisode(episode);
     const checkpoint = checkpointIndex?.checkpoints.find((entry) => entry.checkpoint_episode === episode);
-    setSelectedSeed(checkpoint?.records[0]?.seed ?? null);
+    setSelectedSeed(checkpoint?.records?.[0]?.seed ?? null);
   }
 
   function handleSeedChange(seed: number) {
@@ -788,9 +865,9 @@ export function App() {
       setPromoteFromEpisode(null);
       applyCheckpointIndex(index);
       const latestCheckpoint = index?.checkpoints[index.checkpoints.length - 1] ?? null;
-      const seed = latestCheckpoint?.records[0]?.seed ?? null;
+      const seed = latestCheckpoint?.records?.[0]?.seed ?? null;
       if (latestCheckpoint && seed !== null) {
-        const record = latestCheckpoint.records.find((entry) => entry.seed === seed) ?? latestCheckpoint.records[0];
+        const record = latestCheckpoint.records?.find((entry) => entry.seed === seed) ?? latestCheckpoint.records?.[0];
         if (record) {
           const bundle = await loadReplay(record.replay_path);
           setReplay(bundle);
@@ -1006,8 +1083,8 @@ export function App() {
       (entry) => entry.checkpoint_episode === selectedCheckpointEpisode,
     );
     const record =
-      checkpoint?.records.find((r) => r.seed === selectedSeed) ??
-      checkpoint?.records[0];
+      checkpoint?.records?.find((r) => r.seed === selectedSeed) ??
+      checkpoint?.records?.[0];
     if (!record) {
       // No specific record found — just restart the current replay from the top.
       setFrameIndex(0);
@@ -1192,7 +1269,7 @@ export function App() {
                   onEpisodesChange={setTrainingEpisodes}
                   onFastModeChange={setTrainingFastMode}
                   onEnableInstinctsChange={setTrainingEnableInstincts}
-                  onCurriculumStageChange={setTrainingCurriculumStage}
+                  onCurriculumStageChange={handleCurriculumStageChange}
                   onDebugRewardBreakdownChange={setTrainingDebugRewardBreakdown}
                   onAutoPromoteChange={setTrainingAutoPromote}
                   onStartTraining={handleStartTraining}

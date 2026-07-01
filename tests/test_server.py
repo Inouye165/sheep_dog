@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -516,4 +516,78 @@ def test_training_manager_error_handling_on_setup_failure(tmp_path: Path) -> Non
         assert snap["error_type"] == "ValueError"
         assert "Simulated setup error" in str(snap["error"])
         assert "ValueError: Simulated setup error" in str(snap["traceback"])
+
+
+def test_stage_25_does_not_plateau_stop_before_max_stage(tmp_path: Path) -> None:
+    base_config = LabConfig()
+    config = replace(
+        base_config,
+        training=replace(
+            base_config.training,
+            output_dir=str(tmp_path / "artifacts"),
+            web_export_dir=str(tmp_path / "web" / "public" / "generated"),
+        ),
+    )
+    artifacts = Path(config.training.output_dir)
+    generated = Path(config.training.web_export_dir)
+    artifacts.mkdir(parents=True)
+    generated.mkdir(parents=True)
+
+    manager = TrainingManager()
+
+    class TestConfig:
+        def __new__(cls):
+            return config
+
+    class FakeTrainer:
+        total_episodes_trained = 0
+
+        def train(self, progress_callback=None):
+            assert progress_callback is not None
+            for checkpoint_episode in range(21):
+                progress_callback(
+                    {
+                        "phase": "checkpoint",
+                        "batch_completed_episodes": checkpoint_episode + 1,
+                        "current_episode": checkpoint_episode,
+                        "total_episodes_trained": checkpoint_episode,
+                        "checkpoint_episode": checkpoint_episode,
+                        "best_score": 0.0,
+                        "summary": {
+                            "success_rate": 0.0,
+                            "average_reward": -100.0,
+                            "timeout_rate": 0.0,
+                            "average_sheep_penned": 0.0,
+                            "average_completion_steps": 100.0,
+                            "average_no_progress_steps": 0.0,
+                            "average_distance_to_pen": 0.0,
+                            "average_flock_spread": 0.0,
+                            "average_farthest_distance_to_pen": 0.0,
+                            "average_farthest_distance_to_flock_center": 0.0,
+                            "records": [
+                                {"seed": 11, "success": False, "replay_path": "replay-11.json"},
+                                {"seed": 23, "success": False, "replay_path": "replay-23.json"},
+                                {"seed": 37, "success": False, "replay_path": "replay-37.json"},
+                            ],
+                        },
+                        "replay_path": str(artifacts / "replay.json"),
+                        "message": f"Checkpoint {checkpoint_episode} exported",
+                    }
+                )
+
+    with (
+        patch("sheepdog.server.LabConfig", TestConfig),
+        patch("sheepdog.server.create_trainer", return_value=FakeTrainer()),
+    ):
+        manager.start(requested_episodes=21, fast_mode=True, curriculum_stage=25)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            snap = manager.snapshot()
+            if not snap["running"]:
+                break
+            time.sleep(0.05)
+
+    snap = manager.snapshot()
+    assert snap["auto_promote_gate"]["reason"] == "Promotion criteria not met yet"
+    assert snap["auto_promote_gate"]["decision"] == "hold"
 

@@ -44,7 +44,9 @@ export async function loadCheckpointIndex(): Promise<CheckpointIndex | null> {
     return await fetchJson<CheckpointIndex>("/generated/checkpoint-index.json");
   } catch (error) {
     const fetchError = error as { status?: number; contentType?: string };
-    if (fetchError.status === 404) {
+    // Treat 404 and 500 (Vite serves 500 when the file doesn't exist yet)
+    // as "not available yet" rather than a hard error.
+    if (fetchError.status === 404 || fetchError.status === 500) {
       return null;
     }
     if (fetchError.status === 200 && fetchError.contentType?.toLowerCase().includes("text/html")) {
@@ -85,6 +87,16 @@ export async function resetTraining(): Promise<TrainingStatus> {
 export async function resetJourneyTraining(): Promise<TrainingStatus> {
   return fetchJson<TrainingStatus>("/api/training/reset-journey", {
     method: "POST",
+  }, API_BASE_URL);
+}
+
+export async function rewindTraining(stage: number): Promise<TrainingStatus> {
+  return fetchJson<TrainingStatus>("/api/training/rewind", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ stage }),
   }, API_BASE_URL);
 }
 

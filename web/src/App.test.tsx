@@ -141,6 +141,101 @@ const checkpointIndex = {
   },
 };
 
+const multiStageCheckpointIndex = {
+  checkpoints: [
+    checkpointIndex.checkpoints[0],
+    {
+      ...checkpointIndex.checkpoints[0],
+      checkpoint_episode: 40,
+      checkpoint: "checkpoint-000040.json",
+      evaluation: "evaluation-checkpoint-000040.json",
+      total_training_episodes: 40,
+      reward_config: {
+        instincts: {
+          curriculum_stage: 2,
+          enable_instinct_rewards: true,
+        },
+      },
+      success_rate: 0.42,
+      timeout_rate: 0.58,
+      average_completion_steps: 210,
+      average_completion_seconds: 210,
+      average_sheep_penned: 1.3,
+      average_reward: 22,
+      records: [
+        {
+          ...checkpointIndex.checkpoints[0].records[0],
+          steps: 210,
+          reward_total: 22,
+        },
+      ],
+    },
+    {
+      ...checkpointIndex.checkpoints[0],
+      checkpoint_episode: 90,
+      checkpoint: "checkpoint-000090.json",
+      evaluation: "evaluation-checkpoint-000090.json",
+      total_training_episodes: 90,
+      reward_config: {
+        instincts: {
+          curriculum_stage: 3,
+          enable_instinct_rewards: true,
+        },
+      },
+      success_rate: 0.71,
+      timeout_rate: 0.29,
+      average_completion_steps: 160,
+      average_completion_seconds: 160,
+      average_sheep_penned: 1.8,
+      average_reward: 39,
+      records: [
+        {
+          ...checkpointIndex.checkpoints[0].records[0],
+          steps: 160,
+          reward_total: 39,
+        },
+      ],
+    },
+    {
+      ...checkpointIndex.checkpoints[0],
+      checkpoint_episode: 200,
+      checkpoint: "checkpoint-000200.json",
+      evaluation: "evaluation-checkpoint-000200.json",
+      total_training_episodes: 200,
+      journey: "journey-20260625-193907",
+      reward_config: {
+        instincts: {
+          curriculum_stage: 11,
+          enable_instinct_rewards: true,
+        },
+      },
+      success_rate: 0.85,
+      timeout_rate: 0.15,
+      average_completion_steps: 120,
+      average_completion_seconds: 120,
+      average_sheep_penned: 2.0,
+      average_reward: 50,
+      records: [
+        {
+          ...checkpointIndex.checkpoints[0].records[0],
+          steps: 120,
+          reward_total: 50,
+        },
+      ],
+    },
+  ],
+  latest: {
+    ...checkpointIndex.latest,
+    checkpoint_episode: 90,
+    success_rate: 0.71,
+    timeout_rate: 0.29,
+    average_completion_steps: 160,
+    average_completion_seconds: 160,
+    average_sheep_penned: 1.8,
+    average_reward: 39,
+  },
+};
+
 const replay = {
   seed: 11,
   policy_name: "trained_policy",
@@ -375,6 +470,76 @@ describe("App", () => {
     expect(screen.getByText(/Latest success/)).toBeInTheDocument();
     expect(screen.getByText(/Latest timeout rate/)).toBeInTheDocument();
     expect(screen.getByText(/No-progress guard/)).toBeInTheDocument();
+  });
+
+  it("lets you browse insights across all stages or one specific stage", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.mocked(fetch);
+
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.includes("/api/training/status")) {
+        return jsonResponse({
+          ...idleTrainingStatus,
+          curriculum_stage: 3,
+          latest_checkpoint_episode: 90,
+          total_episodes_trained: 90,
+        });
+      }
+      if (path.includes("checkpoint-index.json")) {
+        return jsonResponse(multiStageCheckpointIndex);
+      }
+      if (path.includes("checkpoint-000000-seed-000011.json")) {
+        return jsonResponse(replay);
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    render(<App />);
+
+    await user.click(screen.getByRole("tab", { name: "Insights" }));
+    await user.click(screen.getByRole("tab", { name: "History" }));
+    const historyTable = await screen.findByRole("table");
+    const historyRows = () => within(historyTable).getAllByRole("row").slice(1);
+    const rowEpisodes = () =>
+      historyRows().map((row) => {
+        const cells = within(row).getAllByRole("cell");
+        return {
+          episode: cells[0].textContent?.replace(/[^0-9]/g, "") ?? "",
+          stage: cells[1].textContent?.trim() ?? "",
+        };
+      });
+
+    expect(historyRows()).toHaveLength(3);
+    expect(rowEpisodes()).toEqual(
+      expect.arrayContaining([
+        { episode: "90", stage: "3" },
+        { episode: "40", stage: "2" },
+        { episode: "0", stage: "1" },
+      ]),
+    );
+
+    // Switch to all journeys to see the archived checkpoints
+    await user.selectOptions(screen.getByLabelText("Stage scope"), "all");
+    await waitFor(() => expect(historyRows()).toHaveLength(4));
+    expect(rowEpisodes()).toEqual(
+      expect.arrayContaining([
+        { episode: "90", stage: "3" },
+        { episode: "40", stage: "2" },
+        { episode: "0", stage: "1" },
+        { episode: "200", stage: "11" },
+      ]),
+    );
+
+    // Select archived stage 11
+    await user.selectOptions(screen.getByLabelText("Stage scope"), "11");
+    await waitFor(() => expect(historyRows()).toHaveLength(1));
+    expect(rowEpisodes()).toEqual([{ episode: "200", stage: "11" }]);
+
+    // Select current journey stage 2
+    await user.selectOptions(screen.getByLabelText("Stage scope"), "2");
+    await waitFor(() => expect(historyRows()).toHaveLength(1));
+    expect(rowEpisodes()).toEqual([{ episode: "40", stage: "2" }]);
   });
 
   it("clears training artifacts from the UI", async () => {

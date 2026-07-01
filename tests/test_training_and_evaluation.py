@@ -14,7 +14,12 @@ from sheepdog.policies.factory import create_policy_from_name
 from sheepdog.policies.heuristic import HeuristicExpertPolicy, InstinctOnlyPolicy
 from sheepdog.policies.random_policy import RandomPolicy
 from sheepdog.policies.trainable import PolicyWeights, TrainableLinearPolicy
-from sheepdog.server import TrainingManager, _build_training_job_config, _load_playable_policy
+from sheepdog.server import (
+    TrainingManager,
+    _build_training_job_config,
+    _load_playable_policy,
+    _seed_success_gate,
+)
 from sheepdog.training.factory import create_trainer
 from sheepdog.training.trainer import CandidateEvaluationSummary, Trainer
 
@@ -171,6 +176,21 @@ def test_build_training_job_config_applies_fast_mode_and_curriculum() -> None:
     assert config.rewards.instincts.enable_instinct_rewards is True
     assert config.rewards.instincts.curriculum_stage == 2
     assert config.environment.dogs == 1
+
+
+def test_build_training_job_config_scales_fast_mode_budget_for_late_stage() -> None:
+    config = _build_training_job_config(
+        4,
+        True,
+        curriculum_stage=25,
+    )
+
+    assert config.training.total_timesteps >= 4 * 12_000
+
+
+def test_seed_success_gate_allows_two_of_three() -> None:
+    assert _seed_success_gate(2, 3) is True
+    assert _seed_success_gate(1, 3) is False
 
 
 def test_lab_config_old_training_payload_falls_back_to_single_candidate_seed(

@@ -430,10 +430,10 @@ function LineChart({
 // ── Chart sub-tab types & legend ───────────────────────────────────────────
 
 type ChartTab = "health" | "success" | "reward" | "sheep" | "history" | "learningSignal";
-type ViewWindow = "stage" | "all" | 25 | 50 | 100;
+type ViewWindow = "all" | 25 | 50 | 100;
+type StageScope = "all" | "current" | "current-journey" | number;
 
 const VIEW_WINDOW_OPTIONS: Array<{ value: ViewWindow; label: string }> = [
-  { value: "stage", label: "This stage" },
   { value: 25, label: "Last 25" },
   { value: 50, label: "Last 50" },
   { value: 100, label: "Last 100" },
@@ -441,7 +441,6 @@ const VIEW_WINDOW_OPTIONS: Array<{ value: ViewWindow; label: string }> = [
 ];
 
 const LEARNING_SIGNAL_WINDOW_OPTIONS: Array<{ value: ViewWindow; label: string }> = [
-  { value: "stage", label: "This stage" },
   { value: 25, label: "Last 25" },
   { value: 50, label: "Last 50" },
   { value: "all", label: "All" },
@@ -698,6 +697,10 @@ function trendSummary(current: number | null, previous: number | null, format: (
   }
   const sign = delta > 0 ? "+" : "-";
   return `${format(current)} · ${sign}${format(Math.abs(delta))}`;
+}
+
+function stageLabel(stage: number): string {
+  return stage === 0 ? "Base difficulty" : `Stage ${stage}`;
 }
 
 interface LearningPoint {
@@ -1097,17 +1100,56 @@ export function DiagnosticsPanel({
     [stageScopedCheckpoints],
   );
 
-  const [viewWindow, setViewWindow] = useState<ViewWindow>("stage");
+  const [viewWindow, setViewWindow] = useState<ViewWindow>("all");
+  const [selectedStageScope, setSelectedStageScope] = useState<StageScope>("current-journey");
+
+  const hasArchivedCheckpoints = useMemo(
+    () => checkpoints.some((c) => c.journey != null && c.journey !== "current"),
+    [checkpoints],
+  );
+
+  const currentJourneyCheckpoints = useMemo(
+    () => checkpoints.filter((c) => !c.journey || c.journey === "current"),
+    [checkpoints],
+  );
+
+  const archivedJourneyCheckpoints = useMemo(
+    () => checkpoints.filter((c) => c.journey != null && c.journey !== "current"),
+    [checkpoints],
+  );
+
+  const availableStages = useMemo(
+    () => [...new Set(checkpoints.map((c) => c.reward_config?.instincts?.curriculum_stage ?? 0))].sort((a, b) => a - b),
+    [checkpoints],
+  );
+
+  const currentJourneyStages = useMemo(
+    () => [...new Set(currentJourneyCheckpoints.map((c) => c.reward_config?.instincts?.curriculum_stage ?? 0))].sort((a, b) => a - b),
+    [currentJourneyCheckpoints],
+  );
+
+  const archivedStages = useMemo(
+    () => [...new Set(archivedJourneyCheckpoints.map((c) => c.reward_config?.instincts?.curriculum_stage ?? 0))].sort((a, b) => a - b),
+    [archivedJourneyCheckpoints],
+  );
+
+  const stageScopedViewCheckpoints = useMemo(() => {
+    if (selectedStageScope === "all") {
+      return checkpoints;
+    }
+    if (selectedStageScope === "current-journey") {
+      return currentJourneyCheckpoints;
+    }
+    const targetStage = selectedStageScope === "current" ? effectiveCurriculumStage : selectedStageScope;
+    return checkpoints.filter(
+      (c) => (c.reward_config?.instincts?.curriculum_stage ?? 0) === targetStage,
+    );
+  }, [checkpoints, currentJourneyCheckpoints, selectedStageScope, effectiveCurriculumStage]);
 
   const filteredCheckpoints = useMemo(() => {
-    if (viewWindow === "all") return checkpoints;
-    if (viewWindow === "stage")
-      return checkpoints.filter(
-        (c) =>
-          (c.reward_config?.instincts?.curriculum_stage ?? 0) === effectiveCurriculumStage,
-      );
-    return checkpoints.slice(-viewWindow);
-  }, [checkpoints, viewWindow, effectiveCurriculumStage]);
+    if (viewWindow === "all") return stageScopedViewCheckpoints;
+    return stageScopedViewCheckpoints.slice(-viewWindow);
+  }, [stageScopedViewCheckpoints, viewWindow]);
 
   const stages = useMemo(
     () => filteredCheckpoints.map((c) => c.reward_config?.instincts?.curriculum_stage ?? 0),
@@ -1206,6 +1248,7 @@ export function DiagnosticsPanel({
   const [focusedBreakthroughCheckpoint, setFocusedBreakthroughCheckpoint] = useState<number | null>(null);
   const [advisorExplainOpen, setAdvisorExplainOpen] = useState(false);
   const [breakthroughNotes, setBreakthroughNotes] = useState<Record<number, string>>({});
+  const [isHelpOpen, setIsHelpOpen] = useState(false);
 
   const latestCheckpoint = checkpoints[checkpoints.length - 1] ?? null;
   const recentCheckpoints = useMemo(() => checkpoints.slice(-RECENT_WINDOW), [checkpoints]);
@@ -1277,14 +1320,9 @@ export function DiagnosticsPanel({
           : "muted";
 
   const learningSignalSource = useMemo(() => {
-    if (learningSignalWindow === "all") return checkpoints;
-    if (learningSignalWindow === "stage") {
-      return checkpoints.filter(
-        (entry) => (entry.reward_config?.instincts?.curriculum_stage ?? 0) === effectiveCurriculumStage,
-      );
-    }
-    return checkpoints.slice(-learningSignalWindow);
-  }, [checkpoints, learningSignalWindow, effectiveCurriculumStage]);
+    if (learningSignalWindow === "all") return stageScopedViewCheckpoints;
+    return stageScopedViewCheckpoints.slice(-learningSignalWindow);
+  }, [stageScopedViewCheckpoints, learningSignalWindow]);
 
   const learningSignalPoints = useMemo<LearningPoint[]>(
     () =>
@@ -1414,7 +1452,7 @@ export function DiagnosticsPanel({
 
   // ── Full panel ────────────────────────────────────────────────────────────
   return (
-    <section className="training-card" aria-label="Diagnostics">
+    <section className="training-card training-card--insights" aria-label="Diagnostics">
       <div className="training-card__header">
         <div>
           <p className="eyebrow">Insights</p>
@@ -1423,6 +1461,29 @@ export function DiagnosticsPanel({
         <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
           {isLiveTraining ? <span className="pill pill--live">live</span> : null}
           <span className="pill pill--muted">{checkpoints.length} pts</span>
+          <button
+            onClick={() => setIsHelpOpen(true)}
+            className="insights-help-btn"
+            title="What this page means?"
+            aria-label="What this page means?"
+          >
+            <svg
+              width="13"
+              height="13"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              style={{ marginRight: "0.35rem" }}
+            >
+              <circle cx="12" cy="12" r="10" />
+              <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+              <line x1="12" y1="17" x2="12.01" y2="17" />
+            </svg>
+            What this page means?
+          </button>
         </div>
       </div>
 
@@ -1483,7 +1544,46 @@ export function DiagnosticsPanel({
 
       {/* View window filter */}
       <div className="view-filter">
-        <span className="view-filter__label">Show</span>
+        <label className="view-filter__label" htmlFor="insights-stage-scope">Stage</label>
+        <select
+          id="insights-stage-scope"
+          aria-label="Stage scope"
+          className="view-filter__select"
+          value={selectedStageScope === "all" ? "all" : selectedStageScope === "current" ? "current" : selectedStageScope === "current-journey" ? "current-journey" : String(selectedStageScope)}
+          onChange={(event) => {
+            const nextValue = event.target.value;
+            if (nextValue === "all" || nextValue === "current" || nextValue === "current-journey") {
+              setSelectedStageScope(nextValue);
+              return;
+            }
+            setSelectedStageScope(Number.parseInt(nextValue, 10));
+          }}
+        >
+          <option value="current-journey">Current journey</option>
+          <option value="current">Current stage ({stageLabel(effectiveCurriculumStage)})</option>
+          {hasArchivedCheckpoints && (
+            <option value="all">All journeys</option>
+          )}
+          {currentJourneyStages.length > 1 && (
+            <optgroup label="Current journey stages">
+              {currentJourneyStages.map((stage) => (
+                <option key={`current-stage-${stage}`} value={String(stage)}>
+                  {stageLabel(stage)}
+                </option>
+              ))}
+            </optgroup>
+          )}
+          {hasArchivedCheckpoints && archivedStages.length > 0 && (
+            <optgroup label="Archived journey stages">
+              {archivedStages.map((stage) => (
+                <option key={`archived-stage-${stage}`} value={String(stage)}>
+                  {stageLabel(stage)}
+                </option>
+              ))}
+            </optgroup>
+          )}
+        </select>
+        <span className="view-filter__label">Window</span>
         <div className="chart-tabs" role="group" aria-label="Chart window">
           {VIEW_WINDOW_OPTIONS.map(({ value, label }) => (
             <button
@@ -1522,6 +1622,7 @@ export function DiagnosticsPanel({
         })}
       </div>
 
+      <div className="insights-tab-content">
       {activeChart === "learningSignal" && (
         <div className="chart-view">
           <section className="learning-signal" aria-label="Learning Signal">
@@ -1844,7 +1945,7 @@ export function DiagnosticsPanel({
               { symbol: { kind: "dash", color: "rgba(74,222,128,0.65)" }, label: "50% target", detail: "recommended threshold to promote to next curriculum stage" },
               { symbol: { kind: "diamond", color: "#9ca3af" }, label: "Running best", detail: "each point where a new personal best success rate was set — label shows the rate" },
               { symbol: { kind: "ring", color: "#9ca3af" }, label: "All-time best", detail: "the model currently loaded for inference — also shown with an outer ring" },
-              ...uniqueStages.map((s) => ({ symbol: { kind: "dot" as const, color: stageColor(s) }, label: `Stage ${s}`, detail: s === 0 ? "no curriculum — base difficulty" : `curriculum stage ${s}` })),
+              ...uniqueStages.map((s) => ({ symbol: { kind: "dot" as const, color: stageColor(s) }, label: stageLabel(s), detail: s === 0 ? "no curriculum — base difficulty" : `curriculum stage ${s}` })),
             ]}
           />
         </div>
@@ -1863,7 +1964,7 @@ export function DiagnosticsPanel({
           <ChartLegend
             entries={[
               { symbol: { kind: "line", color: "var(--accent)" }, label: "Avg reward", detail: "mean total reward per episode — higher is better, but success rate matters more" },
-              ...uniqueStages.map((s) => ({ symbol: { kind: "dot" as const, color: stageColor(s) }, label: `Stage ${s}`, detail: s === 0 ? "no curriculum — base difficulty" : `curriculum stage ${s}` })),
+              ...uniqueStages.map((s) => ({ symbol: { kind: "dot" as const, color: stageColor(s) }, label: stageLabel(s), detail: s === 0 ? "no curriculum — base difficulty" : `curriculum stage ${s}` })),
               { symbol: { kind: "ring", color: "#9ca3af" }, label: "Best checkpoint", detail: "the model currently loaded for inference — shown with an outer ring" },
             ]}
           />
@@ -1883,7 +1984,7 @@ export function DiagnosticsPanel({
           <ChartLegend
             entries={[
               { symbol: { kind: "line", color: "#c084fc" }, label: "Avg sheep penned", detail: "average sheep penned per episode — flat at 0 = cliff; rising trend = learning" },
-              ...uniqueStages.map((s) => ({ symbol: { kind: "dot" as const, color: stageColor(s) }, label: `Stage ${s}`, detail: s === 0 ? "no curriculum — base difficulty" : `curriculum stage ${s}` })),
+              ...uniqueStages.map((s) => ({ symbol: { kind: "dot" as const, color: stageColor(s) }, label: stageLabel(s), detail: s === 0 ? "no curriculum — base difficulty" : `curriculum stage ${s}` })),
               { symbol: { kind: "ring", color: "#9ca3af" }, label: "Best checkpoint", detail: "the model currently loaded for inference — shown with an outer ring" },
             ]}
           />
@@ -1909,10 +2010,11 @@ export function DiagnosticsPanel({
                 {tableRows.map((c) => {
                   const isBest = c.checkpoint_episode === bestCheckpointEpisode;
                   const cStage = c.reward_config?.instincts?.curriculum_stage;
+                  const isArchived = c.journey != null && c.journey !== "current";
                   return (
                     <tr
-                      key={c.checkpoint_episode}
-                      className={isBest ? "diag-table__row--best" : undefined}
+                      key={`${c.journey ?? "current"}-${c.checkpoint_episode}`}
+                      className={isBest ? "diag-table__row--best" : isArchived ? "diag-table__row--archived" : undefined}
                     >
                       <td>
                         <span
@@ -1921,6 +2023,7 @@ export function DiagnosticsPanel({
                       />
                       {isBest ? "★ " : ""}
                       {c.checkpoint_episode}
+                      {isArchived && <span className="diag-table__archived-badge" title={c.journey}>⏪</span>}
                     </td>
                     <td>{cStage ?? "—"}</td>
                     <td
@@ -1963,6 +2066,112 @@ export function DiagnosticsPanel({
               ...uniqueStages.map((s) => ({ symbol: { kind: "dot" as const, color: stageColor(s) }, label: `Stage ${s} dot`, detail: `dot in Ep column — checkpoint recorded at stage ${s}` })),
             ]}
           />
+        </div>
+      )}
+      </div>
+
+      {isHelpOpen && (
+        <div className="insights-help-overlay" onClick={() => setIsHelpOpen(false)}>
+          <div className="insights-help-panel" onClick={(e) => e.stopPropagation()}>
+            <header className="insights-help-panel__header">
+              <div>
+                <span className="eyebrow">Interpretive Guide</span>
+                <h3>Understanding Training Progress</h3>
+              </div>
+              <button
+                className="insights-help-panel__close"
+                onClick={() => setIsHelpOpen(false)}
+                aria-label="Close guide"
+              >
+                &times;
+              </button>
+            </header>
+
+            <div className="insights-help-panel__body">
+              <section className="help-section">
+                <h4>Overview</h4>
+                <div className="help-card">
+                  This panel displays real-time performance telemetry for the Reinforcement Learning (RL) sheepdog agent. As the agent interacts with the environment, it learns optimal movement control policies to herd and pen sheep. Use this tab to audit convergence stability, evaluate pathfinding efficiency, and decide when to promote curriculum stages.
+                </div>
+              </section>
+
+              <section className="help-section">
+                <h4>Quick-Reference Playbook</h4>
+                
+                <div className="help-card">
+                  <div className="help-badge help-badge--success">Ready to Promote</div>
+                  <strong>Success Rate &ge; 50%</strong>
+                  <p>When the success rate reaches 50% and stabilizes over 5+ checkpoints, the agent has successfully generalized the current stage dynamics. It is safe to promote the training to the next curriculum stage.</p>
+                </div>
+
+                <div className="help-card">
+                  <div className="help-badge help-badge--info">Hidden Learning</div>
+                  <strong>Success Rate = 0%, but Reward is Climbing</strong>
+                  <p>Do not stop training! Even if the agent has not penned all sheep (0% success), a rising average reward combined with falling steps/timeouts shows the agent is learning to group and steer sheep. A breakthrough is typically imminent.</p>
+                </div>
+
+                <div className="help-card">
+                  <div className="help-badge help-badge--danger">Cliff State (Stuck)</div>
+                  <strong>Success Rate stays at 0% for 8+ checkpoints</strong>
+                  <p>The agent is struggling to find the sparse success reward. <strong>Action:</strong> Promote to a simpler curriculum stage, or toggle <em>Instinct Rewards</em> in the Config tab to provide dense proxy shape-rewards.</p>
+                </div>
+
+                <div className="help-card">
+                  <div className="help-badge help-badge--warning">Policy Instability</div>
+                  <strong>Success Rate oscillates or drops sharply</strong>
+                  <p>Standard PPO oscillation. The best performing model checkpoint is automatically preserved. Consider reducing the <span className="help-term">entropy_coef</span> in the Config tab to stabilize training convergence.</p>
+                </div>
+              </section>
+
+              <section className="help-section">
+                <h4>Key Metrics & Glossary</h4>
+                
+                <div className="help-card">
+                  <strong>Success Rate</strong>
+                  <p>The fraction of evaluation episodes where all sheep are successfully steered into the pen within the step limit. Primary metric for upper management review.</p>
+                </div>
+
+                <div className="help-card">
+                  <strong>Average Reward</strong>
+                  <p>Cumulative step-by-step reinforcement feedback. Composed of positive rewards (sheep proximity, herding alignment) and negative penalties (timeouts, collisions).</p>
+                </div>
+
+                <div className="help-card">
+                  <strong>PPO (Proximal Policy Optimization)</strong>
+                  <p>The core training algorithm. It uses a clip objective function to bound policy updates, ensuring stable updates and preventing sudden performance crashes.</p>
+                </div>
+
+                <div className="help-card">
+                  <strong>Actor-Critic Architecture</strong>
+                  <p>The network structure. The <span className="help-term">Actor</span> maps observations to actions (movement directions). The <span className="help-term">Critic</span> estimates state values to guide the actor's learning.</p>
+                </div>
+
+                <div className="help-card">
+                  <strong>Entropy Coefficient</strong>
+                  <p>Controls exploration. Higher values prevent premature convergence by encouraging random movements. Lower values encourage exploitation of learned paths.</p>
+                </div>
+
+                <div className="help-card">
+                  <strong>No-Progress Guard</strong>
+                  <p>A safety threshold that aborts episodes early if the dogs are inactive or fail to move sheep, avoiding wasting compute on dead-ends.</p>
+                </div>
+              </section>
+
+              <section className="help-section">
+                <h4>Evaluation Examples</h4>
+                
+                <div className="help-card">
+                  <strong>Example A: Ideal Convergence</strong>
+                  <p>At Stage 2, Success Rate rises smoothly to 65% by Episode 4,000. Average steps drop from 600 to 280. Reward rises from -150 to +220. <em>Interpretation:</em> The agent has mastered herding. Promote immediately.</p>
+                </div>
+
+                <div className="help-card">
+                  <strong>Example B: Dense Reward Exploration</strong>
+                  <p>At Stage 3, Success Rate remains at 0% for 3,000 episodes. However, Average Reward rises from -300 to -110, and Timeout Rate falls from 100% to 40%. <em>Interpretation:</em> The agent is herding sheep but runs out of time to pen them. Allow training to continue; success will soon follow.</p>
+                </div>
+              </section>
+            </div>
+          </div>
         </div>
       )}
     </section>
