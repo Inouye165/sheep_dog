@@ -38,6 +38,18 @@ That launcher will:
 - start the Vite viewer at `http://127.0.0.1:5173`
 - write process ids and startup log paths to `artifacts/startup/pids.json`
 
+To stop both services:
+
+```powershell
+.\stop-app.ps1
+```
+
+To restart both services:
+
+```powershell
+.\restart-app.ps1
+```
+
 If you want to start the services manually from PowerShell instead of using the launcher:
 
 ```powershell

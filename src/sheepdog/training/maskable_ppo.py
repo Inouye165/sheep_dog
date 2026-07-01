@@ -11,6 +11,7 @@ from typing import Any
 
 from stable_baselines3.common.callbacks import BaseCallback
 
+from sheepdog.atomic_io import atomic_write_json
 from sheepdog.checkpoints.store import CheckpointMetadata
 from sheepdog.environment import ACTION_ORDER
 from sheepdog.policies.neural import NeuralPolicy
@@ -301,7 +302,7 @@ class MaskablePPOTrainer(Trainer):
         }
         _pre_loop_state = dict(self._loaded_state)
         _pre_loop_state["incomplete_batch"] = _batch_marker_pre
-        self._state_path.write_text(json.dumps(_pre_loop_state, indent=2), encoding="utf-8")
+        atomic_write_json(self._state_path, _pre_loop_state)
 
         for completed_checkpoints, _checkpoint_slot in enumerate(
             train_config.checkpoint_episodes,
@@ -454,7 +455,7 @@ class MaskablePPOTrainer(Trainer):
                     "batch_steps_per_segment": steps_per_segment,
                 },
             }
-            self._state_path.write_text(json.dumps(intermediate_state, indent=2), encoding="utf-8")
+            atomic_write_json(self._state_path, intermediate_state)
             self._loaded_state = intermediate_state
             # Also keep training-summary.json current so that checkpoint
             # history is complete when a run resumes after a crash/reboot.
@@ -503,7 +504,7 @@ class MaskablePPOTrainer(Trainer):
             "training_signature": self._training_signature(),
             "incomplete_batch": None,
         }
-        self._state_path.write_text(json.dumps(state_payload, indent=2), encoding="utf-8")
+        atomic_write_json(self._state_path, state_payload)
         self._loaded_state = state_payload
         self._export_neural_training_summary(
             checkpoint_payloads,
@@ -554,5 +555,4 @@ class MaskablePPOTrainer(Trainer):
             "replay_mode": "neural_ppo",
             "total_episodes_trained": total_episodes_trained,
         }
-        path = self.output_root / "training-summary.json"
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        atomic_write_json(self.output_root / "training-summary.json", payload)

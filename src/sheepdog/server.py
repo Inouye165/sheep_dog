@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlsplit
 
+from sheepdog.atomic_io import atomic_write_json, atomic_write_text
 from sheepdog.checkpoints.store import CheckpointMetadata
 from sheepdog.config import (
     EnvironmentConfig,
@@ -25,6 +26,7 @@ from sheepdog.config import (
 )
 from sheepdog.curriculum import apply_training_profile
 from sheepdog.curriculum import available_stages
+from sheepdog.curriculum import validate_curriculum_stage
 from sheepdog.environment import ACTION_ORDER, SheepdogEnvironment
 from sheepdog.evaluation.scenario_evaluator import (
     config_for_scenario,
@@ -51,6 +53,26 @@ class ReplaySelection:
     policy_mode: str
     replay_mode: str
     total_training_episodes: int = 0
+
+
+class _EarlyPromotionSignal(Exception):
+    """Internal control-flow signal for immediate stage promotion."""
+
+    def __init__(
+        self,
+        *,
+        checkpoint_episode: int,
+        best_success: float,
+        qualified_streak: int,
+        seed_gate_hits: int,
+        full_success_hits: int,
+    ) -> None:
+        super().__init__("early-promotion")
+        self.checkpoint_episode = checkpoint_episode
+        self.best_success = best_success
+        self.qualified_streak = qualified_streak
+        self.seed_gate_hits = seed_gate_hits
+        self.full_success_hits = full_success_hits
 
 
 def _policy_metadata(
@@ -268,12 +290,13 @@ def _read_persisted_total() -> int:
 STAGE_HISTORY_FILENAME = "stage-history.json"
 TRAINING_SETTINGS_FILENAME = "training-settings.json"
 HYPERPARAMS_FILENAME = "user-hyperparams.json"
-AUTO_PROMOTE_SUCCESS_THRESHOLD = 0.5
-AUTO_PROMOTE_MAX_TIMEOUT_RATE = 0.5
-AUTO_PROMOTE_REWARD_TOLERANCE_RATIO = 0.10
-AUTO_PROMOTE_MIN_QUALIFIED_STREAK = 2
-AUTO_PROMOTE_MIN_SEED_GATE_HITS = 2
-AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS = 1
+AUTO_PROMOTE_SUCCESS_THRESHOLD = 0.9
+AUTO_PROMOTE_MAX_TIMEOUT_RATE = 0.1
+AUTO_PROMOTE_REWARD_TOLERANCE_RATIO = 0.05
+AUTO_PROMOTE_MIN_QUALIFIED_STREAK = 3
+AUTO_PROMOTE_MIN_SEED_GATE_HITS = 3
+AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS = 2
+AUTO_PROMOTE_FULL_SUCCESS_RATE_THRESHOLD = 0.999
 MAX_STAGE_MASTERY_QUALIFIED_STREAK = 5
 MAX_STAGE_MASTERY_FULL_SUCCESS_HITS = 3
 PLATEAU_STOP_MIN_CHECKPOINTS = 20
@@ -302,6 +325,7 @@ def _auto_promote_gate_defaults() -> dict[str, Any]:
         "full_success_hits": 0,
         "min_full_success_hits": AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS,
         "full_success_target_met": False,
+        "full_success_rate_threshold": AUTO_PROMOTE_FULL_SUCCESS_RATE_THRESHOLD,
         "success_threshold": AUTO_PROMOTE_SUCCESS_THRESHOLD,
         "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
         "reward_tolerance_ratio": AUTO_PROMOTE_REWARD_TOLERANCE_RATIO,
@@ -315,8 +339,10 @@ def _seed_success_gate(success_count: int, seed_count: int) -> bool:
         return False
     if seed_count >= 5:
         return success_count >= 3
-    if seed_count >= 3:
-        return success_count == seed_count
+    if seed_count == 4:
+        return success_count >= 3
+    if seed_count == 3:
+        return success_count >= 2
     return success_count >= seed_count
 
 
@@ -525,11 +551,21 @@ def _build_training_job_config(
     checkpoint_episodes = tuple(range(total_episodes))
     # Scale total_timesteps with the number of checkpoints so each segment
     # receives a meaningful training budget.  Use at least the config default.
-    # rollout_steps=2048 > max_steps=600 so each rollout spans 3+ complete
-    # Stage-1 episodes, giving clean non-truncated advantage estimates.
-    # Fast-mode uses 4 000 steps/ep (≥2 full rollouts per checkpoint).
-    # Full-mode keeps 25 000 for thorough exploration.
-    steps_per_episode = 4_000 if fast_mode else 25_000
+    # Late curriculum stages need more rollouts to avoid timeout-only drift.
+    stage_for_budget = int(
+        curriculum_stage
+        if curriculum_stage is not None
+        else config.rewards.instincts.curriculum_stage
+    )
+    if fast_mode:
+        if stage_for_budget >= 25:
+            steps_per_episode = 12_000
+        elif stage_for_budget >= 21:
+            steps_per_episode = 8_000
+        else:
+            steps_per_episode = 4_000
+    else:
+        steps_per_episode = 25_000
     # Fast mode keeps latency low while using a small fixed seed set to reduce
     # overfitting to a single deterministic scenario.
     evaluation_seeds = (11, 23, 37) if fast_mode else config.training.evaluation_seeds
@@ -641,7 +677,24 @@ class TrainingManager:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
+        self._reconcile_web_exports()
         self._status: dict[str, Any] = self._initial_status()
+
+    @staticmethod
+    def _reconcile_web_exports() -> None:
+        """Catch the UI's web export up to the trainer state on startup.
+
+        An interrupted run (e.g. an overnight reboot) can leave the web
+        ``checkpoint-index.json`` behind the trainer's ``training-summary.json``,
+        which the UI shows as lost progress.  Rebuild the web assets from the
+        summary when they are out of sync.  Startup must never fail on this.
+        """
+        try:
+            config = LabConfig()
+            trainer = Trainer(config, config.training.output_dir)
+            trainer.reconcile_web_exports(config.training.web_export_dir)
+        except Exception:  # noqa: BLE001 - reconciliation must not block startup
+            pass
 
     def _initial_status(self) -> dict[str, Any]:
         config = LabConfig()
@@ -783,6 +836,7 @@ class TrainingManager:
 
         config = LabConfig()
         self._clear_training_outputs(config)
+        self._remove_path(Path(config.training.output_dir) / "archive")
 
         with self._lock:
             self._thread = None
@@ -847,6 +901,272 @@ class TrainingManager:
 
         with self._lock:
             return dict(self._status), HTTPStatus.OK
+
+    def rewind_to_stage(self, stage: int) -> tuple[dict[str, Any], int]:
+        """Drop artifacts from stages above *stage* and reset active stage to *stage*."""
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                payload = dict(self._status)
+                payload["message"] = "Cannot rewind stages while a job is running"
+                return payload, HTTPStatus.CONFLICT
+
+        try:
+            normalized_stage = validate_curriculum_stage(stage)
+            if normalized_stage <= 0:
+                normalized_stage = 1
+        except ValueError as exc:
+            return {"error": str(exc)}, HTTPStatus.BAD_REQUEST
+
+        config = LabConfig()
+        output_root = Path(config.training.output_dir)
+        summary_path = output_root / "training-summary.json"
+        summary_payload = _load_json(summary_path) or {}
+        checkpoints = summary_payload.get("checkpoints", [])
+        checkpoints = checkpoints if isinstance(checkpoints, list) else []
+
+        kept_checkpoints = [
+            entry for entry in checkpoints if self._checkpoint_stage(entry) <= normalized_stage
+        ]
+        kept_checkpoint_names = {
+            str(entry.get("checkpoint"))
+            for entry in kept_checkpoints
+            if isinstance(entry.get("checkpoint"), str)
+        }
+
+        checkpoints_dir = output_root / "checkpoints"
+        if checkpoints_dir.exists():
+            for checkpoint_file in checkpoints_dir.glob("checkpoint-*.json"):
+                if checkpoint_file.name not in kept_checkpoint_names:
+                    self._remove_path(checkpoint_file)
+
+        total_trained = 0
+        latest_policy_state_path: str | None = None
+        latest_checkpoint_payload: dict[str, Any] | None = None
+        if kept_checkpoints:
+            latest_checkpoint = max(
+                kept_checkpoints,
+                key=lambda entry: int(entry.get("checkpoint_episode", -1)),
+            )
+            total_trained = int(
+                latest_checkpoint.get(
+                    "total_training_episodes",
+                    latest_checkpoint.get("checkpoint_episode", 0),
+                )
+            )
+            latest_policy_state_path = latest_checkpoint.get("policy_state_path")
+            latest_checkpoint_name = latest_checkpoint.get("checkpoint")
+            if isinstance(latest_checkpoint_name, str):
+                latest_checkpoint_payload = _load_json(checkpoints_dir / latest_checkpoint_name)
+
+        new_summary_payload = dict(summary_payload)
+        new_summary_payload["checkpoints"] = kept_checkpoints
+        new_summary_payload["total_episodes_trained"] = total_trained
+        if "final_model_path" in new_summary_payload:
+            new_summary_payload["final_model_path"] = latest_policy_state_path or ""
+        summary_path.write_text(json.dumps(new_summary_payload, indent=2), encoding="utf-8")
+
+        stage_history = _read_stage_history(output_root)
+        truncated_history = {
+            str(key): int(value)
+            for key, value in stage_history.items()
+            if int(key) <= normalized_stage
+        }
+        (output_root / STAGE_HISTORY_FILENAME).write_text(
+            json.dumps(truncated_history, indent=2),
+            encoding="utf-8",
+        )
+
+        settings_path = output_root / TRAINING_SETTINGS_FILENAME
+        persisted_settings = _read_persisted_settings(output_root)
+        persisted_settings["curriculum_stage"] = normalized_stage
+        persisted_settings["updated_at"] = datetime.datetime.now(datetime.UTC).isoformat()
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        settings_path.write_text(json.dumps(persisted_settings, indent=2), encoding="utf-8")
+
+        self._rewrite_state_for_kept_checkpoints(
+            output_root,
+            kept_checkpoints,
+            latest_checkpoint_payload,
+        )
+        self._rewrite_web_exports_from_checkpoints(config, kept_checkpoints)
+
+        with self._lock:
+            self._thread = None
+            self._status = self._initial_status()
+            self._status["curriculum_stage"] = normalized_stage
+            self._status["phase"] = "idle"
+            self._status["message"] = (
+                f"Rewound to Stage {normalized_stage}. Removed artifacts above this stage."
+            )
+            return dict(self._status), HTTPStatus.OK
+
+    @staticmethod
+    def _checkpoint_stage(payload: dict[str, Any]) -> int:
+        """Extract curriculum stage from a checkpoint payload-like dict."""
+        reward_stage = (
+            payload.get("reward_config", {})
+            .get("instincts", {})
+            .get("curriculum_stage")
+        )
+        if isinstance(reward_stage, (int, float)):
+            return int(reward_stage)
+        env_stage = payload.get("environment_config", {}).get("curriculum_stage")
+        if isinstance(env_stage, (int, float)):
+            return int(env_stage)
+        return 0
+
+    def _rewrite_state_for_kept_checkpoints(
+        self,
+        output_root: Path,
+        kept_checkpoints: list[dict[str, Any]],
+        latest_checkpoint_payload: dict[str, Any] | None,
+    ) -> None:
+        """Rebuild trainer state so resumed training cannot see pruned higher-stage models."""
+        state_path = output_root / Trainer.STATE_FILENAME
+        existing_state = _load_json(state_path) or {}
+
+        if not kept_checkpoints:
+            self._remove_path(state_path)
+            return
+
+        latest_checkpoint = max(
+            kept_checkpoints,
+            key=lambda entry: int(entry.get("checkpoint_episode", -1)),
+        )
+        latest_stage = self._checkpoint_stage(latest_checkpoint)
+        latest_total = int(
+            latest_checkpoint.get(
+                "total_training_episodes",
+                latest_checkpoint.get("checkpoint_episode", 0),
+            )
+        )
+
+        best_checkpoint = max(
+            kept_checkpoints,
+            key=lambda entry: (
+                self._checkpoint_stage(entry),
+                float(entry.get("success_rate", -1.0) or -1.0),
+                float(entry.get("average_reward", float("-inf")) or float("-inf")),
+                -float(entry.get("average_completion_steps", float("inf")) or float("inf")),
+            ),
+        )
+        best_stage = self._checkpoint_stage(best_checkpoint)
+        best_checkpoint_name = best_checkpoint.get("checkpoint")
+        best_checkpoint_payload = (
+            _load_json(output_root / "checkpoints" / best_checkpoint_name)
+            if isinstance(best_checkpoint_name, str)
+            else None
+        )
+
+        new_state = dict(existing_state)
+        new_state["total_episodes_trained"] = latest_total
+        new_state["incomplete_batch"] = None
+
+        latest_policy_state = latest_checkpoint.get("policy_state_path")
+        if isinstance(latest_policy_state, str):
+            new_state["policy_state_path"] = latest_policy_state
+        elif "policy_state_path" in new_state:
+            new_state["policy_state_path"] = None
+
+        if isinstance(latest_checkpoint_payload, dict) and latest_checkpoint_payload.get("policy_config") is not None:
+            new_state["policy_config"] = latest_checkpoint_payload.get("policy_config")
+
+        if isinstance(latest_checkpoint_payload, dict) and latest_checkpoint_payload.get("policy_weights") is not None:
+            new_state["weights"] = latest_checkpoint_payload.get("policy_weights")
+
+        best_policy_state = best_checkpoint.get("policy_state_path")
+        if isinstance(best_policy_state, str):
+            new_state["best_model_path"] = best_policy_state
+        if best_policy_state is not None:
+            new_state["best_model_curriculum_stage"] = best_stage
+            new_state["best_success_rate"] = best_checkpoint.get("success_rate")
+            new_state["best_average_reward"] = best_checkpoint.get("average_reward")
+            new_state["best_completion_steps"] = best_checkpoint.get("average_completion_steps")
+
+        if isinstance(best_checkpoint_payload, dict) and best_checkpoint_payload.get("policy_weights") is not None:
+            new_state["best_formal_weights"] = best_checkpoint_payload.get("policy_weights")
+            new_state["best_formal_episode"] = best_checkpoint.get("checkpoint_episode")
+            new_state["best_formal_success_rate"] = best_checkpoint.get("success_rate")
+            new_state["best_formal_avg_reward"] = best_checkpoint.get("average_reward")
+            new_state["best_formal_avg_steps"] = best_checkpoint.get("average_completion_steps")
+            new_state["best_formal_curriculum_stage"] = best_stage
+            new_state["hill_climb_curriculum_stage"] = latest_stage
+
+        state_path.write_text(json.dumps(new_state, indent=2), encoding="utf-8")
+
+    def _rewrite_web_exports_from_checkpoints(
+        self,
+        config: LabConfig,
+        checkpoints: list[dict[str, Any]],
+    ) -> None:
+        """Rewrite generated checkpoint index/replays from kept checkpoints only."""
+        output_root = Path(config.training.output_dir)
+        web_dir = Path(config.training.web_export_dir)
+        web_dir.mkdir(parents=True, exist_ok=True)
+        replay_output_dir = web_dir / "replays"
+        self._remove_path(replay_output_dir)
+        replay_output_dir.mkdir(parents=True, exist_ok=True)
+
+        def resolve_source(path_str: str) -> Path:
+            source = Path(path_str)
+            if source.is_absolute():
+                return source
+            repo_root = output_root.parent
+            return repo_root / source
+
+        def export_record(record: dict[str, Any]) -> dict[str, Any]:
+            exported_record = dict(record)
+            source_path_str = exported_record.get("replay_path")
+            if not isinstance(source_path_str, str):
+                return exported_record
+            source_path = resolve_source(source_path_str)
+            target_path = replay_output_dir / source_path.name
+            if source_path.exists():
+                target_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
+                exported_record["replay_path"] = f"/generated/replays/{target_path.name}"
+            return exported_record
+
+        exported_checkpoints: list[dict[str, Any]] = []
+        for checkpoint in checkpoints:
+            exported_checkpoint = dict(checkpoint)
+            records = checkpoint.get("records", [])
+            exported_checkpoint["records"] = [
+                export_record(record)
+                for record in records
+                if isinstance(record, dict)
+            ]
+            exported_checkpoints.append(exported_checkpoint)
+
+        latest_payload = exported_checkpoints[-1] if exported_checkpoints else None
+        atomic_write_json(
+            web_dir / "checkpoint-index.json",
+            {"checkpoints": exported_checkpoints, "latest": latest_payload},
+        )
+
+        if latest_payload is not None:
+            atomic_write_json(
+                web_dir / "latest-checkpoint.json",
+                {"checkpoint": latest_payload.get("checkpoint")},
+            )
+            atomic_write_json(web_dir / "latest-evaluation.json", latest_payload)
+            latest_records = latest_payload.get("records") or []
+            if latest_records:
+                replay_rel = latest_records[0].get("replay_path", "")
+                replay_src = web_dir / str(replay_rel).removeprefix("/generated/")
+                if replay_src.exists():
+                    atomic_write_text(
+                        web_dir / "latest-replay.json",
+                        replay_src.read_text(encoding="utf-8"),
+                    )
+                else:
+                    self._remove_path(web_dir / "latest-replay.json")
+            else:
+                self._remove_path(web_dir / "latest-replay.json")
+            return
+
+        self._remove_path(web_dir / "latest-checkpoint.json")
+        self._remove_path(web_dir / "latest-evaluation.json")
+        self._remove_path(web_dir / "latest-replay.json")
 
     # ── Config / history helpers ─────────────────────────────────────────────
 
@@ -1361,6 +1681,7 @@ class TrainingManager:
             stage_seed_count = 0
             stage_checkpoints_seen = 0
             stage_no_improvement_streak = 0
+            stage_batch_completed_episodes = 0
 
             while True:
                 job_config = _build_training_job_config(
@@ -1388,6 +1709,7 @@ class TrainingManager:
                     nonlocal stage_best_reward, stage_qualified_streak
                     nonlocal stage_seed_gate_hits, stage_full_success_hits, stage_seed_count
                     nonlocal stage_checkpoints_seen, stage_no_improvement_streak
+                    nonlocal stage_batch_completed_episodes
 
                     checkpoint_episode = payload.get("checkpoint_episode")
                     summary = payload.get("summary")
@@ -1399,6 +1721,11 @@ class TrainingManager:
                             replay_path = summary["records"][0].get("replay_path")
                     batch_completed = payload.get("batch_completed_episodes", 0)
                     batch_total = payload.get("batch_total_episodes", total_episodes)
+                    if isinstance(batch_completed, (int, float)):
+                        stage_batch_completed_episodes = max(
+                            stage_batch_completed_episodes,
+                            int(batch_completed),
+                        )
                     total_trained = payload.get("total_episodes_trained")
                     update: dict[str, Any] = {
                         "running": True,
@@ -1454,6 +1781,14 @@ class TrainingManager:
                             )
                             stage_seed_count = len(records)
                         seed_gate_ok = _seed_success_gate(success_count, stage_seed_count)
+                        if stage_seed_count <= 0:
+                            # Some checkpoints may not include per-seed records in the
+                            # callback payload; fall back to aggregate quality signals so
+                            # promotion does not get permanently blocked.
+                            seed_gate_ok = (
+                                success_rate >= AUTO_PROMOTE_SUCCESS_THRESHOLD
+                                and timeout_rate <= AUTO_PROMOTE_MAX_TIMEOUT_RATE
+                            )
                         reward_close_to_best = _reward_within_tolerance(
                             average_reward,
                             stage_best_reward,
@@ -1469,7 +1804,15 @@ class TrainingManager:
                         )
                         if seed_gate_ok:
                             stage_seed_gate_hits += 1
-                        if stage_seed_count >= 3 and success_count == stage_seed_count:
+                        full_success_checkpoint = (
+                            success_rate >= AUTO_PROMOTE_FULL_SUCCESS_RATE_THRESHOLD
+                            and timeout_rate <= AUTO_PROMOTE_MAX_TIMEOUT_RATE
+                            and (
+                                seed_gate_ok
+                                or stage_seed_count <= 0
+                            )
+                        )
+                        if full_success_checkpoint:
                             stage_full_success_hits += 1
 
                         candidate_rank = (
@@ -1491,7 +1834,7 @@ class TrainingManager:
                             "reason": (
                                 "Checkpoint meets gate"
                                 if qualified_for_promotion
-                                else "Checkpoint below gate"
+                                                                else "Checkpoint below gate"
                             ),
                             "seed_count": stage_seed_count,
                             "success_count": success_count,
@@ -1515,8 +1858,10 @@ class TrainingManager:
                             "full_success_hits": stage_full_success_hits,
                             "min_full_success_hits": AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS,
                             "full_success_target_met": (
-                                stage_seed_count >= 5
-                                or stage_full_success_hits >= AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS
+                                stage_full_success_hits >= AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS
+                            ),
+                            "full_success_rate_threshold": (
+                                AUTO_PROMOTE_FULL_SUCCESS_RATE_THRESHOLD
                             ),
                             "success_threshold": AUTO_PROMOTE_SUCCESS_THRESHOLD,
                             "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
@@ -1529,7 +1874,78 @@ class TrainingManager:
                         update["seed_episode"] = payload.get("seed_episode")
                     if payload.get("phase") == "starting" and total_trained is not None:
                         update["starting_episode"] = total_trained
+                    early_promotion_signal: _EarlyPromotionSignal | None = None
+                    if isinstance(summary, dict) and payload.get("phase") == "checkpoint":
+                        promotion_checkpoint_episode: int | None = None
+                        if stage_best_checkpoint_episode is not None:
+                            promotion_checkpoint_episode = int(stage_best_checkpoint_episode)
+                        elif checkpoint_episode is not None:
+                            promotion_checkpoint_episode = int(checkpoint_episode)
+
+                        best_success_for_gate = max(stage_best_rank[0], success_rate)
+                        seed_gate_target_met = (
+                            stage_seed_gate_hits >= AUTO_PROMOTE_MIN_SEED_GATE_HITS
+                        )
+                        full_success_target_met = (
+                            stage_full_success_hits >= AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS
+                        )
+                        should_auto_promote_now = (
+                            auto_promote_enabled
+                            and stage < max_stage
+                            and promotion_checkpoint_episode is not None
+                            and best_success_for_gate >= AUTO_PROMOTE_SUCCESS_THRESHOLD
+                            and seed_gate_target_met
+                            and full_success_target_met
+                            and stage_qualified_streak >= AUTO_PROMOTE_MIN_QUALIFIED_STREAK
+                        )
+                        update["auto_promote_gate_ready"] = bool(should_auto_promote_now)
+                        if should_auto_promote_now:
+                            update["auto_promote_gate"] = {
+                                "decision": "promote_ready",
+                                "reason": "Promotion criteria met mid-batch",
+                                "seed_count": stage_seed_count,
+                                "success_count": success_count,
+                                "best_success": max(0.0, best_success_for_gate),
+                                "best_reward": (
+                                    None
+                                    if stage_best_reward == float("-inf")
+                                    else stage_best_reward
+                                ),
+                                "seed_gate_ok": seed_gate_target_met,
+                                "success_rate_ok": (
+                                    best_success_for_gate >= AUTO_PROMOTE_SUCCESS_THRESHOLD
+                                ),
+                                "timeout_ok": True,
+                                "reward_close_ok": True,
+                                "qualified_streak": stage_qualified_streak,
+                                "min_qualified_streak": AUTO_PROMOTE_MIN_QUALIFIED_STREAK,
+                                "seed_gate_hits": stage_seed_gate_hits,
+                                "min_seed_gate_hits": AUTO_PROMOTE_MIN_SEED_GATE_HITS,
+                                "seed_gate_target_met": seed_gate_target_met,
+                                "full_success_hits": stage_full_success_hits,
+                                "min_full_success_hits": AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS,
+                                "full_success_target_met": full_success_target_met,
+                                "full_success_rate_threshold": (
+                                    AUTO_PROMOTE_FULL_SUCCESS_RATE_THRESHOLD
+                                ),
+                                "success_threshold": AUTO_PROMOTE_SUCCESS_THRESHOLD,
+                                "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
+                                "reward_tolerance_ratio": AUTO_PROMOTE_REWARD_TOLERANCE_RATIO,
+                            }
+                            update["message"] = (
+                                f"Stage {stage} mastered at checkpoint "
+                                f"ep {promotion_checkpoint_episode}; promoting now"
+                            )
+                            early_promotion_signal = _EarlyPromotionSignal(
+                                checkpoint_episode=int(promotion_checkpoint_episode),
+                                best_success=max(0.0, best_success_for_gate),
+                                qualified_streak=stage_qualified_streak,
+                                seed_gate_hits=stage_seed_gate_hits,
+                                full_success_hits=stage_full_success_hits,
+                            )
                     self._update_status(update)
+                    if early_promotion_signal is not None:
+                        raise early_promotion_signal
 
                 effective_config_path = (
                     Path(job_config.training.output_dir) / "effective-training-config.json"
@@ -1624,8 +2040,19 @@ class TrainingManager:
                     }
                 )
 
-                trainer.train(progress_callback=progress_callback)
-                history = _update_stage_history(output_root, stage, batch_episodes)
+                early_promotion: _EarlyPromotionSignal | None = None
+                try:
+                    trainer.train(progress_callback=progress_callback)
+                except _EarlyPromotionSignal as signal:
+                    early_promotion = signal
+                    stage_best_checkpoint_episode = signal.checkpoint_episode
+
+                completed_for_stage = (
+                    stage_batch_completed_episodes
+                    if early_promotion is not None
+                    else batch_episodes
+                )
+                history = _update_stage_history(output_root, stage, completed_for_stage)
                 self._update_status(
                     {
                         "stage_history": history,
@@ -1636,8 +2063,7 @@ class TrainingManager:
                 best_success = stage_best_rank[0]
                 seed_gate_target_met = stage_seed_gate_hits >= AUTO_PROMOTE_MIN_SEED_GATE_HITS
                 full_success_target_met = (
-                    stage_seed_count >= 5
-                    or stage_full_success_hits >= AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS
+                    stage_full_success_hits >= AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS
                 )
                 should_auto_promote = (
                     auto_promote_enabled
@@ -1648,6 +2074,9 @@ class TrainingManager:
                     and full_success_target_met
                     and stage_qualified_streak >= AUTO_PROMOTE_MIN_QUALIFIED_STREAK
                 )
+                if early_promotion is not None:
+                    should_auto_promote = True
+                    best_success = max(best_success, early_promotion.best_success)
                 if not should_auto_promote:
                     stage_mastered = (
                         stage >= max_stage
@@ -1686,6 +2115,9 @@ class TrainingManager:
                                     "full_success_hits": stage_full_success_hits,
                                     "min_full_success_hits": AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS,
                                     "full_success_target_met": full_success_target_met,
+                                    "full_success_rate_threshold": (
+                                        AUTO_PROMOTE_FULL_SUCCESS_RATE_THRESHOLD
+                                    ),
                                     "success_threshold": AUTO_PROMOTE_SUCCESS_THRESHOLD,
                                     "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
                                     "reward_tolerance_ratio": AUTO_PROMOTE_REWARD_TOLERANCE_RATIO,
@@ -1698,7 +2130,7 @@ class TrainingManager:
                             }
                         )
                         break
-                    if plateaued:
+                    if stage >= max_stage and plateaued:
                         self._update_status(
                             {
                                 "auto_promote_gate": {
@@ -1726,6 +2158,9 @@ class TrainingManager:
                                     "full_success_hits": stage_full_success_hits,
                                     "min_full_success_hits": AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS,
                                     "full_success_target_met": full_success_target_met,
+                                    "full_success_rate_threshold": (
+                                        AUTO_PROMOTE_FULL_SUCCESS_RATE_THRESHOLD
+                                    ),
                                     "success_threshold": AUTO_PROMOTE_SUCCESS_THRESHOLD,
                                     "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
                                     "reward_tolerance_ratio": AUTO_PROMOTE_REWARD_TOLERANCE_RATIO,
@@ -1765,6 +2200,9 @@ class TrainingManager:
                                 "full_success_hits": stage_full_success_hits,
                                 "min_full_success_hits": AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS,
                                 "full_success_target_met": full_success_target_met,
+                                "full_success_rate_threshold": (
+                                    AUTO_PROMOTE_FULL_SUCCESS_RATE_THRESHOLD
+                                ),
                                 "success_threshold": AUTO_PROMOTE_SUCCESS_THRESHOLD,
                                 "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
                                 "reward_tolerance_ratio": AUTO_PROMOTE_REWARD_TOLERANCE_RATIO,
@@ -1819,6 +2257,9 @@ class TrainingManager:
                             "full_success_hits": stage_full_success_hits,
                             "min_full_success_hits": AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS,
                             "full_success_target_met": full_success_target_met,
+                            "full_success_rate_threshold": (
+                                AUTO_PROMOTE_FULL_SUCCESS_RATE_THRESHOLD
+                            ),
                             "success_threshold": AUTO_PROMOTE_SUCCESS_THRESHOLD,
                             "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
                             "reward_tolerance_ratio": AUTO_PROMOTE_REWARD_TOLERANCE_RATIO,
@@ -1944,6 +2385,12 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/training/reset-journey":
             payload, status = self.manager.reset_journey()
+            self._json_response(payload, status=status)
+            return
+        if self.path == "/api/training/rewind":
+            body = self._read_json()
+            target_stage = int(body.get("stage", 1))
+            payload, status = self.manager.rewind_to_stage(target_stage)
             self._json_response(payload, status=status)
             return
 

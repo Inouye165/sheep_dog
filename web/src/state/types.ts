@@ -285,6 +285,8 @@ export interface CheckpointEntry {
   average_sheep_penned: number;
   average_reward: number;
   records: EvaluationRecord[];
+  /** Journey identifier — "current" for the active journey, "journey-YYYYMMDD-HHMMSS" for archived ones. */
+  journey?: string;
 }
 
 export interface EvaluationSummary {

@@ -20,6 +20,23 @@ That command will:
 
 Open the web viewer after both services report that they are running.
 
+## Stop and Restart
+
+Stop both backend and web services:
+
+```powershell
+.\stop-app.ps1
+```
+
+Restart both services in one command:
+
+```powershell
+.\restart-app.ps1
+```
+
+`stop-app.ps1` stops tracked PIDs from `artifacts/startup/pids.json` and also
+cleans up any listeners still bound to ports `8000` and `5173`.
+
 ## Manual Start Commands
 
 If you need the separate commands the launcher uses, they are:
