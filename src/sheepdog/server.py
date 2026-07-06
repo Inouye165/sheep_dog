@@ -287,9 +287,42 @@ def _read_persisted_total() -> int:
         return 0
 
 
+def _training_session_path(output_root: Path) -> Path:
+    """Return the path used to persist pause/stop resume state."""
+
+    return output_root / "startup" / TRAINING_SESSION_FILENAME
+
+
+def _read_training_session_state(output_root: Path) -> dict[str, Any] | None:
+    """Load the persisted pause/stop marker if one exists."""
+
+    payload = _load_json(_training_session_path(output_root))
+    if isinstance(payload, dict):
+        return payload
+    return None
+
+
+def _write_training_session_state(output_root: Path, payload: dict[str, Any]) -> None:
+    """Persist the current pause/stop marker atomically."""
+
+    session_path = _training_session_path(output_root)
+    session_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(session_path, payload)
+
+
+def _clear_training_session_state(output_root: Path) -> None:
+    """Remove any persisted pause/stop marker."""
+
+    session_path = _training_session_path(output_root)
+    if session_path.exists():
+        session_path.unlink()
+
+
 STAGE_HISTORY_FILENAME = "stage-history.json"
+PROMOTION_HISTORY_FILENAME = "promotion-history.json"
 TRAINING_SETTINGS_FILENAME = "training-settings.json"
 HYPERPARAMS_FILENAME = "user-hyperparams.json"
+TRAINING_SESSION_FILENAME = "training-session.json"
 AUTO_PROMOTE_SUCCESS_THRESHOLD = 0.9
 AUTO_PROMOTE_MAX_TIMEOUT_RATE = 0.1
 AUTO_PROMOTE_REWARD_TOLERANCE_RATIO = 0.05
@@ -301,11 +334,61 @@ MAX_STAGE_MASTERY_QUALIFIED_STREAK = 5
 MAX_STAGE_MASTERY_FULL_SUCCESS_HITS = 3
 PLATEAU_STOP_MIN_CHECKPOINTS = 20
 PLATEAU_STOP_NO_IMPROVEMENT_STREAK = 20
+RECOMMENDED_EPISODES_BY_STAGE = {
+    0: 50,
+    1: 50,
+    2: 75,
+    3: 100,
+    4: 125,
+    5: 150,
+    6: 175,
+    7: 200,
+    8: 225,
+    9: 250,
+    10: 250,
+    11: 275,
+    12: 300,
+    13: 325,
+    14: 350,
+    15: 375,
+    16: 400,
+    17: 425,
+    18: 450,
+    19: 475,
+    20: 500,
+    21: 525,
+    22: 550,
+    23: 600,
+    24: 650,
+    25: 700,
+    26: 750,
+    27: 800,
+    28: 850,
+    29: 900,
+    30: 950,
+    31: 1000,
+    32: 1050,
+    33: 1100,
+    34: 1150,
+    35: 1200,
+    36: 1300,
+    37: 1400,
+    38: 1500,
+}
 
 
-def _auto_promote_gate_defaults() -> dict[str, Any]:
+def _get_success_threshold(stage: int) -> float:
+    """Return the success threshold for a given curriculum stage."""
+    from sheepdog.curriculum import CURRICULUM_STAGES
+    stage_config = CURRICULUM_STAGES.get(stage)
+    if isinstance(stage_config, dict) and "success_threshold" in stage_config:
+        return float(stage_config["success_threshold"])
+    return AUTO_PROMOTE_SUCCESS_THRESHOLD
+
+
+def _auto_promote_gate_defaults(stage: int = 1) -> dict[str, Any]:
     """Return the default auto-promotion diagnostics payload."""
-
+    threshold = _get_success_threshold(stage)
     return {
         "decision": "pending",
         "reason": "Awaiting checkpoint evaluation",
@@ -326,7 +409,7 @@ def _auto_promote_gate_defaults() -> dict[str, Any]:
         "min_full_success_hits": AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS,
         "full_success_target_met": False,
         "full_success_rate_threshold": AUTO_PROMOTE_FULL_SUCCESS_RATE_THRESHOLD,
-        "success_threshold": AUTO_PROMOTE_SUCCESS_THRESHOLD,
+        "success_threshold": threshold,
         "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
         "reward_tolerance_ratio": AUTO_PROMOTE_REWARD_TOLERANCE_RATIO,
     }
@@ -533,6 +616,29 @@ def _update_stage_history(output_root: Path, stage: int, episodes_added: int) ->
     return history
 
 
+def _read_promotion_history(output_root: Path) -> list[dict[str, Any]]:
+    """Read promotion audit trail entries; returns empty list on any error."""
+
+    path = output_root / PROMOTION_HISTORY_FILENAME
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        return []
+    if not isinstance(payload, list):
+        return []
+    return [entry for entry in payload if isinstance(entry, dict)]
+
+
+def _append_promotion_history(output_root: Path, event: dict[str, Any]) -> list[dict[str, Any]]:
+    """Append a promotion audit event and return the full persisted list."""
+
+    history = _read_promotion_history(output_root)
+    history.append(event)
+    path = output_root / PROMOTION_HISTORY_FILENAME
+    path.write_text(json.dumps(history, indent=2), encoding="utf-8")
+    return history
+
+
 def _build_training_job_config(
     requested_episodes: int,
     fast_mode: bool,
@@ -677,8 +783,11 @@ class TrainingManager:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
+        self._control_request: str | None = None
+        self._active_start_request: dict[str, Any] | None = None
         self._reconcile_web_exports()
         self._status: dict[str, Any] = self._initial_status()
+        self._resume_interrupted_session()
 
     @staticmethod
     def _reconcile_web_exports() -> None:
@@ -693,7 +802,7 @@ class TrainingManager:
             config = LabConfig()
             trainer = Trainer(config, config.training.output_dir)
             trainer.reconcile_web_exports(config.training.web_export_dir)
-        except Exception:  # noqa: BLE001 - reconciliation must not block startup
+        except (OSError, ValueError, TypeError, RuntimeError, json.JSONDecodeError):
             pass
 
     def _initial_status(self) -> dict[str, Any]:
@@ -704,7 +813,8 @@ class TrainingManager:
         output_root = Path(config.training.output_dir)
         stage_history = _read_stage_history(output_root)
         persisted = _read_persisted_settings(output_root)
-        return {
+        stg = persisted.get("curriculum_stage") or instincts.curriculum_stage or 1
+        status = {
             "running": False,
             "fast_mode": True,
             "trainer_type": trainer_type,
@@ -720,9 +830,9 @@ class TrainingManager:
                 "debug_reward_breakdown", instincts.debug_reward_breakdown
             ),
             "auto_promote": persisted.get("auto_promote", True),
-            "auto_promote_threshold": AUTO_PROMOTE_SUCCESS_THRESHOLD,
+            "auto_promote_threshold": _get_success_threshold(stg),
             "auto_promote_stages_completed": 0,
-            "auto_promote_gate": _auto_promote_gate_defaults(),
+            "auto_promote_gate": _auto_promote_gate_defaults(stg),
             "available_curriculum_stages": available_curriculum_stages,
             "max_curriculum_stage": max_curriculum_stage,
             "curriculum_stage": persisted.get("curriculum_stage", instincts.curriculum_stage),
@@ -758,10 +868,168 @@ class TrainingManager:
             "starting_episode": None,
         }
 
+        session_state = _read_training_session_state(output_root)
+        if isinstance(session_state, dict):
+            resume_status = session_state.get("status")
+            if isinstance(resume_status, dict):
+                status.update(resume_status)
+            status["running"] = False
+            status["phase"] = str(session_state.get("state") or status.get("phase") or "paused")
+            resume_remaining = session_state.get("remaining_episodes")
+            if isinstance(resume_remaining, (int, float)):
+                status["resume_remaining_episodes"] = max(0, int(resume_remaining))
+            status["resume_available"] = bool(session_state.get("training_request"))
+            status["resume_request"] = session_state.get("training_request")
+            if status.get("message") in {None, "Idle", ""}:
+                state_label = "paused" if status["phase"] == "paused" else "stopped"
+                remaining = status.get("resume_remaining_episodes")
+                if isinstance(remaining, int) and remaining > 0:
+                    status["message"] = (
+                        f"Training {state_label}; {remaining} episodes remain for resume"
+                    )
+                else:
+                    status["message"] = f"Training {state_label}; resume available"
+        else:
+            status["resume_available"] = False
+            status["resume_remaining_episodes"] = None
+            status["resume_request"] = None
+
+        return status
+
     def snapshot(self) -> dict[str, Any]:
         """Return a thread-safe copy of the current training status."""
         with self._lock:
             return dict(self._status)
+
+    def _training_request_payload(
+        self,
+        requested_episodes: int,
+        fast_mode: bool,
+        *,
+        enable_instinct_rewards: bool | None = None,
+        curriculum_stage: int | None = None,
+        debug_reward_breakdown: bool | None = None,
+        auto_promote: bool | None = None,
+        promote_from_checkpoint_episode: int | None = None,
+    ) -> dict[str, Any]:
+        """Return a JSON-serializable request payload for resume prompts."""
+
+        return {
+            "episodes": max(1, int(requested_episodes)),
+            "fast_mode": bool(fast_mode),
+            "enable_instinct_rewards": enable_instinct_rewards,
+            "curriculum_stage": curriculum_stage,
+            "debug_reward_breakdown": debug_reward_breakdown,
+            "auto_promote": auto_promote,
+            "promote_from_checkpoint_episode": promote_from_checkpoint_episode,
+        }
+
+    def _persist_training_session(
+        self,
+        *,
+        state: str,
+        status: dict[str, Any],
+        request: dict[str, Any] | None,
+    ) -> None:
+        """Persist the pause/stop marker for launcher prompts after restart."""
+
+        output_root = Path(LabConfig().training.output_dir)
+        remaining = max(
+            0,
+            int(status.get("requested_episodes", 0))
+            - int(status.get("batch_completed_episodes", 0)),
+        )
+        payload = {
+            "state": state,
+            "requested_at": datetime.datetime.now(datetime.UTC).isoformat(),
+            "remaining_episodes": remaining,
+            "training_request": request,
+            "status": status,
+        }
+        _write_training_session_state(output_root, payload)
+
+    def _resume_interrupted_session(self) -> None:
+        """Auto-resume an interrupted run after crash/reboot from the last safe point."""
+
+        output_root = Path(LabConfig().training.output_dir)
+        session_state = _read_training_session_state(output_root)
+        if not isinstance(session_state, dict):
+            return
+        if session_state.get("state") != "running":
+            return
+        request = session_state.get("training_request")
+        if not isinstance(request, dict):
+            return
+        remaining = session_state.get("remaining_episodes")
+        if not isinstance(remaining, (int, float)):
+            return
+        remaining_episodes = max(0, int(remaining))
+        if remaining_episodes <= 0:
+            self._clear_training_session()
+            return
+        raw_curriculum_stage = request.get("curriculum_stage")
+        raw_promote_from_checkpoint = request.get("promote_from_checkpoint_episode")
+        self.start(
+            remaining_episodes,
+            bool(request.get("fast_mode", True)),
+            enable_instinct_rewards=(
+                None
+                if request.get("enable_instinct_rewards") is None
+                else bool(request.get("enable_instinct_rewards"))
+            ),
+            curriculum_stage=(
+                None
+                if raw_curriculum_stage is None
+                else int(raw_curriculum_stage)
+            ),
+            debug_reward_breakdown=(
+                None
+                if request.get("debug_reward_breakdown") is None
+                else bool(request.get("debug_reward_breakdown"))
+            ),
+            auto_promote=(
+                None if request.get("auto_promote") is None else bool(request.get("auto_promote"))
+            ),
+            promote_from_checkpoint_episode=(
+                None
+                if raw_promote_from_checkpoint is None
+                else int(raw_promote_from_checkpoint)
+            ),
+        )
+
+    def _clear_training_session(self) -> None:
+        """Clear any persisted pause/stop marker."""
+
+        output_root = Path(LabConfig().training.output_dir)
+        _clear_training_session_state(output_root)
+
+    def _request_training_control(self, state: str, message: str) -> dict[str, Any]:
+        """Persist a pause/stop request and update the live status."""
+
+        with self._lock:
+            self._control_request = state
+            is_running = self._thread is not None and self._thread.is_alive()
+            status = dict(self._status)
+            status["running"] = is_running
+            status["phase"] = state
+            status["message"] = message
+            status["resume_available"] = True
+            self._status.update(
+                {
+                    "phase": state,
+                    "message": message,
+                    "resume_available": True,
+                    "resume_remaining_episodes": max(
+                        0,
+                        int(status.get("requested_episodes", 0))
+                        - int(status.get("batch_completed_episodes", 0)),
+                    ),
+                }
+            )
+            request = self._active_start_request
+
+        self._persist_training_session(state=state, status=status, request=request)
+        return dict(self._status)
 
     def start(
         self,
@@ -779,7 +1047,17 @@ class TrainingManager:
             if self._thread is not None and self._thread.is_alive():
                 return dict(self._status)
 
+            self._control_request = None
             self._status = self._initial_status()
+            self._active_start_request = self._training_request_payload(
+                requested_episodes,
+                fast_mode,
+                enable_instinct_rewards=enable_instinct_rewards,
+                curriculum_stage=curriculum_stage,
+                debug_reward_breakdown=debug_reward_breakdown,
+                auto_promote=auto_promote,
+                promote_from_checkpoint_episode=promote_from_checkpoint_episode,
+            )
             self._status.update(
                 {
                     "running": True,
@@ -797,19 +1075,35 @@ class TrainingManager:
                     "curriculum_stage": (
                         self._status["curriculum_stage"]
                         if curriculum_stage is None
-                        else max(0, int(curriculum_stage))
+                        else max(1, int(curriculum_stage))
                     ),
                     "auto_promote": (
                         self._status["auto_promote"]
                         if auto_promote is None
                         else bool(auto_promote)
                     ),
-                    "auto_promote_threshold": AUTO_PROMOTE_SUCCESS_THRESHOLD,
+                    "auto_promote_threshold": _get_success_threshold(
+                        self._status["curriculum_stage"]
+                        if curriculum_stage is None
+                        else max(1, int(curriculum_stage))
+                    ),
                     "auto_promote_stages_completed": 0,
-                    "auto_promote_gate": _auto_promote_gate_defaults(),
+                    "auto_promote_gate": _auto_promote_gate_defaults(
+                        self._status["curriculum_stage"]
+                        if curriculum_stage is None
+                        else max(1, int(curriculum_stage))
+                    ),
                     "requested_episodes": requested_episodes,
                     "message": "Queued training job",
+                    "resume_available": False,
+                    "resume_remaining_episodes": None,
+                    "resume_request": None,
                 }
+            )
+            self._persist_training_session(
+                state="running",
+                status=dict(self._status),
+                request=self._active_start_request,
             )
             self._thread = threading.Thread(
                 target=self._run_training,
@@ -826,6 +1120,22 @@ class TrainingManager:
             self._thread.start()
             return dict(self._status)
 
+    def pause(self) -> dict[str, Any]:
+        """Request a graceful pause and persist the last complete state."""
+
+        return self._request_training_control(
+            "paused",
+            "Pause requested; waiting for the current checkpoint to finish",
+        )
+
+    def stop(self) -> dict[str, Any]:
+        """Request a graceful stop and persist the last complete state."""
+
+        return self._request_training_control(
+            "stopped",
+            "Stop requested; waiting for the current checkpoint to finish",
+        )
+
     def clear(self) -> tuple[dict[str, Any], int]:
         """Stop any running job, clear outputs, and restore the baseline replay."""
         with self._lock:
@@ -836,6 +1146,7 @@ class TrainingManager:
 
         config = LabConfig()
         self._clear_training_outputs(config)
+        self._clear_training_session()
         self._remove_path(Path(config.training.output_dir) / "archive")
 
         with self._lock:
@@ -866,6 +1177,7 @@ class TrainingManager:
         config = LabConfig()
         archive_dir = self._archive_training_outputs(config)
         self._clear_training_outputs(config)
+        self._clear_training_session()
 
         output_root = Path(config.training.output_dir)
         settings_path = output_root / TRAINING_SETTINGS_FILENAME
@@ -982,6 +1294,7 @@ class TrainingManager:
         persisted_settings["updated_at"] = datetime.datetime.now(datetime.UTC).isoformat()
         settings_path.parent.mkdir(parents=True, exist_ok=True)
         settings_path.write_text(json.dumps(persisted_settings, indent=2), encoding="utf-8")
+        self._clear_training_session()
 
         self._rewrite_state_for_kept_checkpoints(
             output_root,
@@ -1068,10 +1381,16 @@ class TrainingManager:
         elif "policy_state_path" in new_state:
             new_state["policy_state_path"] = None
 
-        if isinstance(latest_checkpoint_payload, dict) and latest_checkpoint_payload.get("policy_config") is not None:
+        if (
+            isinstance(latest_checkpoint_payload, dict)
+            and latest_checkpoint_payload.get("policy_config") is not None
+        ):
             new_state["policy_config"] = latest_checkpoint_payload.get("policy_config")
 
-        if isinstance(latest_checkpoint_payload, dict) and latest_checkpoint_payload.get("policy_weights") is not None:
+        if (
+            isinstance(latest_checkpoint_payload, dict)
+            and latest_checkpoint_payload.get("policy_weights") is not None
+        ):
             new_state["weights"] = latest_checkpoint_payload.get("policy_weights")
 
         best_policy_state = best_checkpoint.get("policy_state_path")
@@ -1083,7 +1402,10 @@ class TrainingManager:
             new_state["best_average_reward"] = best_checkpoint.get("average_reward")
             new_state["best_completion_steps"] = best_checkpoint.get("average_completion_steps")
 
-        if isinstance(best_checkpoint_payload, dict) and best_checkpoint_payload.get("policy_weights") is not None:
+        if (
+            isinstance(best_checkpoint_payload, dict)
+            and best_checkpoint_payload.get("policy_weights") is not None
+        ):
             new_state["best_formal_weights"] = best_checkpoint_payload.get("policy_weights")
             new_state["best_formal_episode"] = best_checkpoint.get("checkpoint_episode")
             new_state["best_formal_success_rate"] = best_checkpoint.get("success_rate")
@@ -1284,6 +1606,7 @@ class TrainingManager:
         self._remove_path(output_root / Trainer.STATE_FILENAME)
         self._remove_path(output_root / "training-summary.json")
         self._remove_path(output_root / STAGE_HISTORY_FILENAME)
+        self._remove_path(output_root / PROMOTION_HISTORY_FILENAME)
         self._remove_path(output_root / TRAINING_SETTINGS_FILENAME)
         self._remove_path(generated_root / "replays")
         self._remove_path(generated_root / "latest-checkpoint.json")
@@ -1302,6 +1625,7 @@ class TrainingManager:
             (output_root / Trainer.STATE_FILENAME, archive_root / Trainer.STATE_FILENAME),
             (output_root / "training-summary.json", archive_root / "training-summary.json"),
             (output_root / STAGE_HISTORY_FILENAME, archive_root / STAGE_HISTORY_FILENAME),
+            (output_root / PROMOTION_HISTORY_FILENAME, archive_root / PROMOTION_HISTORY_FILENAME),
             (output_root / TRAINING_SETTINGS_FILENAME, archive_root / TRAINING_SETTINGS_FILENAME),
             (
                 output_root / "effective-training-config.json",
@@ -1684,6 +2008,15 @@ class TrainingManager:
             stage_batch_completed_episodes = 0
 
             while True:
+                self._active_start_request = self._training_request_payload(
+                    batch_episodes,
+                    fast_mode,
+                    enable_instinct_rewards=enable_instinct_rewards,
+                    curriculum_stage=current_stage,
+                    debug_reward_breakdown=debug_reward_breakdown,
+                    auto_promote=auto_promote_enabled,
+                    promote_from_checkpoint_episode=resume_checkpoint_episode,
+                )
                 job_config = _build_training_job_config(
                     batch_episodes,
                     fast_mode,
@@ -1692,6 +2025,25 @@ class TrainingManager:
                     debug_reward_breakdown=debug_reward_breakdown,
                 )
                 trainer = create_trainer(job_config, job_config.training.output_dir)
+
+                resuming_policy = trainer.total_episodes_trained > 0
+                if not resuming_policy:
+                    training_state = _load_json(output_root / Trainer.STATE_FILENAME)
+                    if isinstance(training_state, dict):
+                        policy_state_path = training_state.get("policy_state_path")
+                        resuming_policy = bool(policy_state_path)
+
+                summary_path = output_root / "training-summary.json"
+                has_checkpoints = False
+                if summary_path.exists():
+                    summary_payload = _load_json(summary_path)
+                    if isinstance(summary_payload, dict):
+                        has_checkpoints = bool(summary_payload.get("checkpoints"))
+
+                if not resuming_policy and has_checkpoints:
+                    self._archive_training_outputs(job_config)
+                    trainer = create_trainer(job_config, job_config.training.output_dir)
+
 
                 if resume_checkpoint_episode is not None:
                     try:
@@ -1704,12 +2056,16 @@ class TrainingManager:
                     except (FileNotFoundError, KeyError, TypeError):
                         pass
 
+                def should_stop() -> bool:
+                    return self._control_request in {"paused", "stopped"}
+
                 def progress_callback(payload: dict[str, Any]) -> None:
                     nonlocal stage_best_checkpoint_episode, stage_best_rank
                     nonlocal stage_best_reward, stage_qualified_streak
                     nonlocal stage_seed_gate_hits, stage_full_success_hits, stage_seed_count
                     nonlocal stage_checkpoints_seen, stage_no_improvement_streak
                     nonlocal stage_batch_completed_episodes
+                    nonlocal last_persisted_completed_episodes
 
                     checkpoint_episode = payload.get("checkpoint_episode")
                     summary = payload.get("summary")
@@ -1727,9 +2083,12 @@ class TrainingManager:
                             int(batch_completed),
                         )
                     total_trained = payload.get("total_episodes_trained")
+                    phase = payload.get("phase")
+                    success_rate = -1.0
+                    success_count = 0
                     update: dict[str, Any] = {
                         "running": True,
-                        "phase": payload.get("phase", "running"),
+                        "phase": phase or "running",
                         "requested_episodes": batch_total,
                         "completed_episodes": batch_completed,
                         "batch_total_episodes": batch_total,
@@ -1748,7 +2107,7 @@ class TrainingManager:
                         update["latest_checkpoint_episode"] = checkpoint_episode
                         update["latest_seed"] = latest_seed
                         update["latest_replay_path"] = replay_path
-                    if isinstance(summary, dict) and payload.get("phase") == "checkpoint":
+                    if isinstance(summary, dict) and phase == "checkpoint":
                         update["latest_success_rate"] = summary.get("success_rate")
                         update["latest_avg_sheep_penned"] = summary.get("average_sheep_penned")
                         update["latest_avg_reward"] = summary.get("average_reward")
@@ -1786,7 +2145,7 @@ class TrainingManager:
                             # callback payload; fall back to aggregate quality signals so
                             # promotion does not get permanently blocked.
                             seed_gate_ok = (
-                                success_rate >= AUTO_PROMOTE_SUCCESS_THRESHOLD
+                                success_rate >= _get_success_threshold(stage)
                                 and timeout_rate <= AUTO_PROMOTE_MAX_TIMEOUT_RATE
                             )
                         reward_close_to_best = _reward_within_tolerance(
@@ -1795,7 +2154,7 @@ class TrainingManager:
                         )
                         qualified_for_promotion = (
                             seed_gate_ok
-                            and success_rate >= AUTO_PROMOTE_SUCCESS_THRESHOLD
+                            and success_rate >= _get_success_threshold(stage)
                             and timeout_rate <= AUTO_PROMOTE_MAX_TIMEOUT_RATE
                             and reward_close_to_best
                         )
@@ -1845,7 +2204,7 @@ class TrainingManager:
                                 else stage_best_reward
                             ),
                             "seed_gate_ok": seed_gate_ok,
-                            "success_rate_ok": success_rate >= AUTO_PROMOTE_SUCCESS_THRESHOLD,
+                            "success_rate_ok": success_rate >= _get_success_threshold(stage),
                             "timeout_ok": timeout_rate <= AUTO_PROMOTE_MAX_TIMEOUT_RATE,
                             "reward_close_ok": reward_close_to_best,
                             "qualified_streak": stage_qualified_streak,
@@ -1863,19 +2222,16 @@ class TrainingManager:
                             "full_success_rate_threshold": (
                                 AUTO_PROMOTE_FULL_SUCCESS_RATE_THRESHOLD
                             ),
-                            "success_threshold": AUTO_PROMOTE_SUCCESS_THRESHOLD,
+                            "success_threshold": _get_success_threshold(stage),
                             "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
                             "reward_tolerance_ratio": AUTO_PROMOTE_REWARD_TOLERANCE_RATIO,
                         }
-                    if (
-                        payload.get("phase") == "starting"
-                        and payload.get("seed_episode") is not None
-                    ):
+                    if phase == "starting" and payload.get("seed_episode") is not None:
                         update["seed_episode"] = payload.get("seed_episode")
-                    if payload.get("phase") == "starting" and total_trained is not None:
+                    if phase == "starting" and total_trained is not None:
                         update["starting_episode"] = total_trained
                     early_promotion_signal: _EarlyPromotionSignal | None = None
-                    if isinstance(summary, dict) and payload.get("phase") == "checkpoint":
+                    if isinstance(summary, dict) and phase == "checkpoint":
                         promotion_checkpoint_episode: int | None = None
                         if stage_best_checkpoint_episode is not None:
                             promotion_checkpoint_episode = int(stage_best_checkpoint_episode)
@@ -1893,13 +2249,13 @@ class TrainingManager:
                             auto_promote_enabled
                             and stage < max_stage
                             and promotion_checkpoint_episode is not None
-                            and best_success_for_gate >= AUTO_PROMOTE_SUCCESS_THRESHOLD
+                            and best_success_for_gate >= _get_success_threshold(stage)
                             and seed_gate_target_met
                             and full_success_target_met
                             and stage_qualified_streak >= AUTO_PROMOTE_MIN_QUALIFIED_STREAK
                         )
                         update["auto_promote_gate_ready"] = bool(should_auto_promote_now)
-                        if should_auto_promote_now:
+                        if should_auto_promote_now and promotion_checkpoint_episode is not None:
                             update["auto_promote_gate"] = {
                                 "decision": "promote_ready",
                                 "reason": "Promotion criteria met mid-batch",
@@ -1913,7 +2269,7 @@ class TrainingManager:
                                 ),
                                 "seed_gate_ok": seed_gate_target_met,
                                 "success_rate_ok": (
-                                    best_success_for_gate >= AUTO_PROMOTE_SUCCESS_THRESHOLD
+                                    best_success_for_gate >= _get_success_threshold(stage)
                                 ),
                                 "timeout_ok": True,
                                 "reward_close_ok": True,
@@ -1928,7 +2284,7 @@ class TrainingManager:
                                 "full_success_rate_threshold": (
                                     AUTO_PROMOTE_FULL_SUCCESS_RATE_THRESHOLD
                                 ),
-                                "success_threshold": AUTO_PROMOTE_SUCCESS_THRESHOLD,
+                                "success_threshold": _get_success_threshold(stage),
                                 "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
                                 "reward_tolerance_ratio": AUTO_PROMOTE_REWARD_TOLERANCE_RATIO,
                             }
@@ -1944,6 +2300,26 @@ class TrainingManager:
                                 full_success_hits=stage_full_success_hits,
                             )
                     self._update_status(update)
+                    completed_int = (
+                        int(batch_completed)
+                        if isinstance(batch_completed, (int, float))
+                        else 0
+                    )
+                    should_persist_running = (
+                        self._control_request not in {"paused", "stopped"}
+                        and (
+                            phase == "starting"
+                            or phase == "checkpoint"
+                            or completed_int > last_persisted_completed_episodes
+                        )
+                    )
+                    if should_persist_running:
+                        last_persisted_completed_episodes = completed_int
+                        self._persist_training_session(
+                            state="running",
+                            status=dict(self._status),
+                            request=self._active_start_request,
+                        )
                     if early_promotion_signal is not None:
                         raise early_promotion_signal
 
@@ -2019,10 +2395,10 @@ class TrainingManager:
                         ),
                         "curriculum_stage": stage,
                         "auto_promote": auto_promote_enabled,
-                        "auto_promote_threshold": AUTO_PROMOTE_SUCCESS_THRESHOLD,
+                        "auto_promote_threshold": _get_success_threshold(stage),
                         "auto_promote_stages_completed": promoted_stages,
                         "auto_promote_gate": {
-                            **_auto_promote_gate_defaults(),
+                            **_auto_promote_gate_defaults(stage),
                             "reason": "Collecting checkpoint evidence",
                         },
                         "requested_episodes": total_episodes,
@@ -2039,17 +2415,24 @@ class TrainingManager:
                         "starting_episode": trainer.total_episodes_trained,
                     }
                 )
+                last_persisted_completed_episodes = 0
+                self._persist_training_session(
+                    state="running",
+                    status=dict(self._status),
+                    request=self._active_start_request,
+                )
 
                 early_promotion: _EarlyPromotionSignal | None = None
                 try:
-                    trainer.train(progress_callback=progress_callback)
+                    trainer.train(progress_callback=progress_callback, should_stop=should_stop)
                 except _EarlyPromotionSignal as signal:
                     early_promotion = signal
                     stage_best_checkpoint_episode = signal.checkpoint_episode
+                control_request = self._control_request
 
                 completed_for_stage = (
                     stage_batch_completed_episodes
-                    if early_promotion is not None
+                    if early_promotion is not None or control_request in {"paused", "stopped"}
                     else batch_episodes
                 )
                 history = _update_stage_history(output_root, stage, completed_for_stage)
@@ -2060,6 +2443,24 @@ class TrainingManager:
                     }
                 )
 
+                if control_request in {"paused", "stopped"}:
+                    final_message = self._status.get("message") or (
+                        "Training paused" if control_request == "paused" else "Training stopped"
+                    )
+                    self._update_status(
+                        {
+                            "running": False,
+                            "phase": control_request,
+                            "message": final_message,
+                        }
+                    )
+                    self._persist_training_session(
+                        state=control_request,
+                        status=dict(self._status),
+                        request=self._active_start_request,
+                    )
+                    break
+
                 best_success = stage_best_rank[0]
                 seed_gate_target_met = stage_seed_gate_hits >= AUTO_PROMOTE_MIN_SEED_GATE_HITS
                 full_success_target_met = (
@@ -2069,7 +2470,7 @@ class TrainingManager:
                     auto_promote_enabled
                     and stage < max_stage
                     and stage_best_checkpoint_episode is not None
-                    and best_success >= AUTO_PROMOTE_SUCCESS_THRESHOLD
+                    and best_success >= _get_success_threshold(stage)
                     and seed_gate_target_met
                     and full_success_target_met
                     and stage_qualified_streak >= AUTO_PROMOTE_MIN_QUALIFIED_STREAK
@@ -2103,7 +2504,7 @@ class TrainingManager:
                                     ),
                                     "seed_gate_ok": seed_gate_target_met,
                                     "success_rate_ok": (
-                                        best_success >= AUTO_PROMOTE_SUCCESS_THRESHOLD
+                                        best_success >= _get_success_threshold(stage)
                                     ),
                                     "timeout_ok": True,
                                     "reward_close_ok": True,
@@ -2118,7 +2519,7 @@ class TrainingManager:
                                     "full_success_rate_threshold": (
                                         AUTO_PROMOTE_FULL_SUCCESS_RATE_THRESHOLD
                                     ),
-                                    "success_threshold": AUTO_PROMOTE_SUCCESS_THRESHOLD,
+                                    "success_threshold": _get_success_threshold(stage),
                                     "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
                                     "reward_tolerance_ratio": AUTO_PROMOTE_REWARD_TOLERANCE_RATIO,
                                 },
@@ -2146,7 +2547,7 @@ class TrainingManager:
                                     ),
                                     "seed_gate_ok": seed_gate_target_met,
                                     "success_rate_ok": (
-                                        best_success >= AUTO_PROMOTE_SUCCESS_THRESHOLD
+                                        best_success >= _get_success_threshold(stage)
                                     ),
                                     "timeout_ok": True,
                                     "reward_close_ok": True,
@@ -2161,7 +2562,7 @@ class TrainingManager:
                                     "full_success_rate_threshold": (
                                         AUTO_PROMOTE_FULL_SUCCESS_RATE_THRESHOLD
                                     ),
-                                    "success_threshold": AUTO_PROMOTE_SUCCESS_THRESHOLD,
+                                    "success_threshold": _get_success_threshold(stage),
                                     "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
                                     "reward_tolerance_ratio": AUTO_PROMOTE_REWARD_TOLERANCE_RATIO,
                                 },
@@ -2189,7 +2590,7 @@ class TrainingManager:
                                     else stage_best_reward
                                 ),
                                 "seed_gate_ok": seed_gate_target_met,
-                                "success_rate_ok": best_success >= AUTO_PROMOTE_SUCCESS_THRESHOLD,
+                                "success_rate_ok": best_success >= _get_success_threshold(stage),
                                 "timeout_ok": True,
                                 "reward_close_ok": True,
                                 "qualified_streak": stage_qualified_streak,
@@ -2203,12 +2604,13 @@ class TrainingManager:
                                 "full_success_rate_threshold": (
                                     AUTO_PROMOTE_FULL_SUCCESS_RATE_THRESHOLD
                                 ),
-                                "success_threshold": AUTO_PROMOTE_SUCCESS_THRESHOLD,
+                                "success_threshold": _get_success_threshold(stage),
                                 "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
                                 "reward_tolerance_ratio": AUTO_PROMOTE_REWARD_TOLERANCE_RATIO,
                             },
                             "message": (
-                                f"Batch complete at Stage {stage}: best success {best_success:.0%}, "
+                                f"Batch complete at Stage {stage}: "
+                                f"best success {best_success:.0%}, "
                                 f"qualified streak {stage_qualified_streak}, "
                                 f"seed hits {stage_seed_gate_hits}, "
                                 f"full-success hits {stage_full_success_hits}."
@@ -2220,6 +2622,35 @@ class TrainingManager:
 
                 promoted_stages += 1
                 current_stage = stage + 1
+                _append_promotion_history(
+                    output_root,
+                    {
+                        "promoted_at": datetime.datetime.now(datetime.UTC).isoformat(),
+                        "from_stage": stage,
+                        "to_stage": current_stage,
+                        "trigger_checkpoint_episode": stage_best_checkpoint_episode,
+                        "best_success": max(0.0, best_success),
+                        "best_reward": (
+                            None if stage_best_reward == float("-inf") else stage_best_reward
+                        ),
+                        "qualified_streak": stage_qualified_streak,
+                        "min_qualified_streak": AUTO_PROMOTE_MIN_QUALIFIED_STREAK,
+                        "seed_gate_hits": stage_seed_gate_hits,
+                        "min_seed_gate_hits": AUTO_PROMOTE_MIN_SEED_GATE_HITS,
+                        "seed_gate_target_met": seed_gate_target_met,
+                        "full_success_hits": stage_full_success_hits,
+                        "min_full_success_hits": AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS,
+                        "full_success_target_met": full_success_target_met,
+                        "success_threshold": _get_success_threshold(stage),
+                        "full_success_rate_threshold": AUTO_PROMOTE_FULL_SUCCESS_RATE_THRESHOLD,
+                        "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
+                        "reward_tolerance_ratio": AUTO_PROMOTE_REWARD_TOLERANCE_RATIO,
+                        "checkpoints_seen_in_stage": stage_checkpoints_seen,
+                        "episodes_recorded_in_stage": int(history.get(str(stage), 0)),
+                    },
+                )
+                batch_episodes = RECOMMENDED_EPISODES_BY_STAGE.get(current_stage, 100)
+                total_episodes = batch_episodes
                 resume_checkpoint_episode = stage_best_checkpoint_episode
                 stage_best_checkpoint_episode = None
                 stage_best_rank = (-1.0, float("-inf"), float("-inf"), float("-inf"))
@@ -2230,10 +2661,15 @@ class TrainingManager:
                 stage_seed_count = 0
                 stage_checkpoints_seen = 0
                 stage_no_improvement_streak = 0
+                stage_batch_completed_episodes = 0
                 self._update_status(
                     {
                         "curriculum_stage": current_stage,
                         "auto_promote_stages_completed": promoted_stages,
+                        "requested_episodes": total_episodes,
+                        "batch_total_episodes": batch_episodes,
+                        "batch_completed_episodes": 0,
+
                         "auto_promote_gate": {
                             "decision": "promote",
                             "reason": "Promotion criteria met",
@@ -2260,7 +2696,7 @@ class TrainingManager:
                             "full_success_rate_threshold": (
                                 AUTO_PROMOTE_FULL_SUCCESS_RATE_THRESHOLD
                             ),
-                            "success_threshold": AUTO_PROMOTE_SUCCESS_THRESHOLD,
+                            "success_threshold": _get_success_threshold(stage),
                             "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
                             "reward_tolerance_ratio": AUTO_PROMOTE_REWARD_TOLERANCE_RATIO,
                         },
@@ -2271,11 +2707,25 @@ class TrainingManager:
                     }
                 )
 
+            final_control_request = self._control_request
             with self._lock:
                 self._status["running"] = False
-                self._status["phase"] = "complete"
-                if "Training complete" not in self._status.get("message", ""):
-                    self._status["message"] = "Training complete"
+                if final_control_request in {"paused", "stopped"}:
+                    self._status["phase"] = final_control_request
+                    if "pause" in self._status.get("message", "").lower():
+                        self._status["message"] = self._status["message"]
+                    elif final_control_request == "paused":
+                        self._status["message"] = "Training paused"
+                    else:
+                        self._status["message"] = "Training stopped"
+                else:
+                    self._status["phase"] = "complete"
+                    if "Training complete" not in self._status.get("message", ""):
+                        self._status["message"] = "Training complete"
+                self._active_start_request = None
+                self._control_request = None
+            if final_control_request not in {"paused", "stopped"}:
+                self._clear_training_session()
         except Exception as exc:  # pragma: no cover  # pylint: disable=broad-exception-caught
             full_traceback = traceback.format_exc()
             # Print the full traceback to the server console so the failure is
@@ -2290,6 +2740,8 @@ class TrainingManager:
                 self._status["error"] = str(exc)
                 self._status["error_type"] = type(exc).__name__
                 self._status["traceback"] = full_traceback
+                self._active_start_request = None
+            self._clear_training_session()
 
 
 class TrainingRequestHandler(BaseHTTPRequestHandler):
@@ -2379,6 +2831,14 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802  # pylint: disable=invalid-name
         """Handle HTTP POST requests."""
+        if self.path == "/api/training/pause":
+            payload = self.manager.pause()
+            self._json_response(payload)
+            return
+        if self.path == "/api/training/stop":
+            payload = self.manager.stop()
+            self._json_response(payload)
+            return
         if self.path in {"/api/training/clear", "/api/training/reset"}:
             payload, status = self.manager.clear()
             self._json_response(payload, status=status)

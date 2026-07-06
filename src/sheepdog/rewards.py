@@ -367,6 +367,24 @@ class RewardComputer:
             # Scale by the normalised distance so nearer strays cost less.
             stray_penalty = -inputs.current_farthest_distance * si_scale
 
+            # Add dense dog approach penalty for isolated strays
+            if inputs.flock_centroid is not None and inputs.dog_positions and inputs.sheep_positions:
+                farthest_sheep = None
+                max_dist = -1.0
+                for s in inputs.sheep_positions:
+                    dist = _distance(s, inputs.target_position)
+                    if dist > max_dist:
+                        max_dist = dist
+                        farthest_sheep = s
+                
+                if farthest_sheep is not None:
+                    dist_to_centroid = _distance(farthest_sheep, inputs.flock_centroid)
+                    # A sheep is isolated if it's more than 8.0 cells from the flock centroid
+                    if dist_to_centroid > 8.0:
+                        min_dog_dist = min(_distance(dog, farthest_sheep) for dog in inputs.dog_positions)
+                        # Dense approach penalty: 10x the stray ignore scale to provide a clear gradient
+                        stray_penalty -= min_dog_dist * (si_scale * 10.0)
+
         return farthest_progress, stray_penalty
 
     def _lane_crowding_penalty(self, inputs: RewardInputs) -> float:

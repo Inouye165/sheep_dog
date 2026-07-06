@@ -20,8 +20,8 @@ def test_available_stages_are_sorted_and_non_empty() -> None:
     assert stages
     assert list(stages) == sorted(stages)
     assert stages[0] == 1
-    assert stages[-1] == 32
-    assert len(stages) == 32
+    assert stages[-1] == 38
+    assert len(stages) == 38
 
 
 def test_stage_one_is_simpler_than_stage_eight() -> None:
@@ -107,6 +107,14 @@ def test_curriculum_includes_stage_32() -> None:
     assert 32 in CURRICULUM_STAGES
 
 
+def test_curriculum_includes_stage_33() -> None:
+    assert 33 in CURRICULUM_STAGES
+
+
+def test_curriculum_includes_stage_38() -> None:
+    assert 38 in CURRICULUM_STAGES
+
+
 def test_stage_9_enables_collection_progress_signals() -> None:
     stage_eight = apply_curriculum_stage(LabConfig(), 8)
     stage_nine = apply_curriculum_stage(LabConfig(), 9)
@@ -131,8 +139,8 @@ def test_stage_9_enables_collection_reward_shaping() -> None:
     assert stage_nine.rewards.scatter_penalty_scale > stage_eight.rewards.scatter_penalty_scale
 
 
-def test_stage_11_spawn_mix_matches_expected_blend() -> None:
-    config = apply_curriculum_stage(LabConfig(), 11)
+def test_stage_15_spawn_mix_matches_expected_blend() -> None:
+    config = apply_curriculum_stage(LabConfig(), 15)
     mix = config.environment.spawn_mix
     assert mix == {
         "randomized_flock": 0.35,
@@ -142,24 +150,24 @@ def test_stage_11_spawn_mix_matches_expected_blend() -> None:
     }
 
 
-def test_stage_21_uses_random_pen_placement() -> None:
-    config = apply_curriculum_stage(LabConfig(), 21)
+def test_stage_27_uses_random_pen_placement() -> None:
+    config = apply_curriculum_stage(LabConfig(), 27)
     assert config.environment.pen_placement == "random"
 
 
-def test_stage_24_uses_all_corners_spawn_mode() -> None:
-    config = apply_curriculum_stage(LabConfig(), 24)
+def test_stage_30_uses_all_corners_spawn_mode() -> None:
+    config = apply_curriculum_stage(LabConfig(), 30)
     assert config.environment.spawn_mix == {"all_corners": 1.0}
 
 
-def test_stage_25_keeps_personality_bias_disabled() -> None:
-    config = apply_curriculum_stage(LabConfig(), 25)
+def test_stage_31_keeps_personality_bias_disabled() -> None:
+    config = apply_curriculum_stage(LabConfig(), 31)
     assert config.environment.sheep_personality_override == ""
     assert config.environment.sheep_personality_strength == 0.0
 
 
-def test_stage_24_spawns_sheep_near_field_corners() -> None:
-    config = apply_curriculum_stage(LabConfig(), 24)
+def test_stage_30_spawns_sheep_near_field_corners() -> None:
+    config = apply_curriculum_stage(LabConfig(), 30)
     env = SheepdogEnvironment(config)
     env.reset(seed=123)
 
@@ -181,72 +189,72 @@ def test_stage_24_spawns_sheep_near_field_corners() -> None:
         assert nearest_corner_dist <= 3.0
 
 
-def test_stage_25_spawned_sheep_are_pen_fearful() -> None:
-    config = apply_curriculum_stage(LabConfig(), 26)
+def test_stage_32_spawned_sheep_are_not_all_pen_fearful() -> None:
+    config = apply_curriculum_stage(LabConfig(), 32)
     env = SheepdogEnvironment(config)
     env.reset(seed=321)
 
     assert any(sheep.personality != "pen_fearful" for sheep in env.sheep)
 
 
-def test_stage_26_to_32_phase_personality_and_grouping_changes() -> None:
-    stage_26 = apply_curriculum_stage(LabConfig(), 26)
-    stage_27 = apply_curriculum_stage(LabConfig(), 27)
-    stage_28 = apply_curriculum_stage(LabConfig(), 28)
-    stage_29 = apply_curriculum_stage(LabConfig(), 29)
-    stage_30 = apply_curriculum_stage(LabConfig(), 30)
-    stage_31 = apply_curriculum_stage(LabConfig(), 31)
+def test_stage_32_to_38_phase_personality_and_grouping_changes() -> None:
     stage_32 = apply_curriculum_stage(LabConfig(), 32)
+    stage_33 = apply_curriculum_stage(LabConfig(), 33)
+    stage_34 = apply_curriculum_stage(LabConfig(), 34)
+    stage_35 = apply_curriculum_stage(LabConfig(), 35)
+    stage_36 = apply_curriculum_stage(LabConfig(), 36)
+    stage_37 = apply_curriculum_stage(LabConfig(), 37)
+    stage_38 = apply_curriculum_stage(LabConfig(), 38)
 
-    assert stage_26.environment.sheep_personality_strength == 0.0
+    assert stage_32.environment.sheep_personality_strength == 0.0
     assert (
-        stage_27.environment.sheep_personality_strength
-        > stage_26.environment.sheep_personality_strength
+        stage_33.environment.sheep_personality_strength
+        > stage_32.environment.sheep_personality_strength
     )
     assert (
-        stage_28.environment.sheep_personality_strength
-        > stage_27.environment.sheep_personality_strength
+        stage_34.environment.sheep_personality_strength
+        > stage_33.environment.sheep_personality_strength
     )
     assert (
-        stage_29.environment.sheep_personality_strength
-        == stage_28.environment.sheep_personality_strength
+        stage_35.environment.sheep_personality_strength
+        == stage_34.environment.sheep_personality_strength
     )
     assert (
-        stage_30.environment.sheep_personality_strength
-        == stage_29.environment.sheep_personality_strength
+        stage_36.environment.sheep_personality_strength
+        == stage_35.environment.sheep_personality_strength
     )
     assert (
-        stage_31.environment.sheep_personality_strength
-        > stage_30.environment.sheep_personality_strength
+        stage_37.environment.sheep_personality_strength
+        > stage_36.environment.sheep_personality_strength
     )
     assert (
-        stage_32.environment.sheep_personality_strength
-        > stage_31.environment.sheep_personality_strength
+        stage_38.environment.sheep_personality_strength
+        > stage_37.environment.sheep_personality_strength
     )
 
-    assert stage_26.environment.sheep_cohere_without_dog_pressure is True
-    assert stage_27.environment.sheep_cohere_without_dog_pressure is True
-    assert stage_28.environment.sheep_cohere_without_dog_pressure is True
-    assert stage_29.environment.sheep_cohere_without_dog_pressure is True
-    assert stage_30.environment.sheep_cohere_without_dog_pressure is False
-    assert stage_31.environment.sheep_cohere_without_dog_pressure is False
-    assert stage_32.environment.sheep_cohere_without_dog_pressure is False
+    assert stage_32.environment.sheep_cohere_without_dog_pressure is True
+    assert stage_33.environment.sheep_cohere_without_dog_pressure is True
+    assert stage_34.environment.sheep_cohere_without_dog_pressure is True
+    assert stage_35.environment.sheep_cohere_without_dog_pressure is True
+    assert stage_36.environment.sheep_cohere_without_dog_pressure is False
+    assert stage_37.environment.sheep_cohere_without_dog_pressure is False
+    assert stage_38.environment.sheep_cohere_without_dog_pressure is False
 
     assert (
-        stage_29.environment.sheep_flock_cohesion_weight
-        == stage_28.environment.sheep_flock_cohesion_weight
+        stage_35.environment.sheep_flock_cohesion_weight
+        == stage_34.environment.sheep_flock_cohesion_weight
     )
     assert (
-        stage_30.environment.sheep_flock_cohesion_weight
-        < stage_29.environment.sheep_flock_cohesion_weight
+        stage_36.environment.sheep_flock_cohesion_weight
+        < stage_35.environment.sheep_flock_cohesion_weight
     )
     assert (
-        stage_31.environment.sheep_flock_cohesion_weight
-        < stage_30.environment.sheep_flock_cohesion_weight
+        stage_37.environment.sheep_flock_cohesion_weight
+        < stage_36.environment.sheep_flock_cohesion_weight
     )
     assert (
-        stage_32.environment.sheep_flock_cohesion_weight
-        < stage_31.environment.sheep_flock_cohesion_weight
+        stage_38.environment.sheep_flock_cohesion_weight
+        < stage_37.environment.sheep_flock_cohesion_weight
     )
 
 

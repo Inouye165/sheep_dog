@@ -56,6 +56,7 @@ class _HierarchicalProgressCallback(BaseCallback):
         self,
         emit: Callable[[dict[str, Any]], None],
         *,
+        should_stop: Callable[[], bool] | None,
         report_interval: int,
         total_timesteps: int,
         completed_segments: int,
@@ -65,6 +66,7 @@ class _HierarchicalProgressCallback(BaseCallback):
     ) -> None:
         super().__init__()
         self._emit = emit
+        self._should_stop = should_stop
         self._report_interval = max(1, report_interval)
         self._total_timesteps = max(1, total_timesteps)
         self._completed_segments = completed_segments
@@ -74,6 +76,8 @@ class _HierarchicalProgressCallback(BaseCallback):
         self._last_reported = 0
 
     def _on_step(self) -> bool:
+        if self._should_stop is not None and self._should_stop():
+            return False
         n = int(self.num_timesteps)
         if n < self._total_timesteps and n - self._last_reported < self._report_interval:
             return True
@@ -192,6 +196,7 @@ class HierarchicalMaskablePPOTrainer(Trainer):
     def train(
         self,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         """Train neural dogs; return a summary dict of saved checkpoints."""
 
@@ -250,8 +255,12 @@ class HierarchicalMaskablePPOTrainer(Trainer):
 
         checkpoint_records: list[dict[str, Any]] = []
         saved_model_path: Path = model_root / "model-initial.zip"
+        interrupted = False
 
         for seg_idx, checkpoint_episode in enumerate(train_config.checkpoint_episodes, start=1):
+            if should_stop is not None and should_stop():
+                interrupted = True
+                break
             cumulative_ts = starting_ts + seg_idx * steps_per_segment
             emit(
                 {
@@ -266,6 +275,7 @@ class HierarchicalMaskablePPOTrainer(Trainer):
             )
             callback = _HierarchicalProgressCallback(
                 emit,
+                should_stop=should_stop,
                 report_interval=max(1, steps_per_segment // 10),
                 total_timesteps=steps_per_segment,
                 completed_segments=seg_idx - 1,
@@ -278,6 +288,9 @@ class HierarchicalMaskablePPOTrainer(Trainer):
                 callback=callback,
                 reset_num_timesteps=False,
             )
+            if should_stop is not None and should_stop():
+                interrupted = True
+                break
 
             # Save model
             model_filename = f"model-{checkpoint_episode:06d}.zip"
@@ -348,6 +361,13 @@ class HierarchicalMaskablePPOTrainer(Trainer):
                     ),
                 }
             )
+
+        if interrupted:
+            return {
+                "checkpoints": checkpoint_records,
+                "final_model_path": str(saved_model_path),
+                "policy_config": policy.policy_config.to_dict(),
+            }
 
         return {
             "checkpoints": checkpoint_records,

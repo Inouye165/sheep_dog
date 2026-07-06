@@ -74,6 +74,18 @@ export async function startTraining(request: TrainingStartRequest): Promise<Trai
   }, API_BASE_URL);
 }
 
+export async function pauseTraining(): Promise<TrainingStatus> {
+  return fetchJson<TrainingStatus>("/api/training/pause", {
+    method: "POST",
+  }, API_BASE_URL);
+}
+
+export async function stopTraining(): Promise<TrainingStatus> {
+  return fetchJson<TrainingStatus>("/api/training/stop", {
+    method: "POST",
+  }, API_BASE_URL);
+}
+
 export async function clearTraining(): Promise<TrainingStatus> {
   return fetchJson<TrainingStatus>("/api/training/clear", {
     method: "POST",

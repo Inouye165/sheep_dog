@@ -42,6 +42,7 @@ class _TrainingProgressCallback(BaseCallback):
         self,
         emit: Callable[[dict[str, Any]], None],
         *,
+        should_stop: Callable[[], bool] | None,
         report_interval: int,
         total_timesteps: int,
         starting_total_episodes: int,
@@ -51,6 +52,7 @@ class _TrainingProgressCallback(BaseCallback):
     ) -> None:
         super().__init__()
         self._emit = emit
+        self._should_stop = should_stop
         self._report_interval = max(1, report_interval)
         self._total_timesteps = max(1, total_timesteps)
         self._starting_total_episodes = starting_total_episodes
@@ -60,6 +62,8 @@ class _TrainingProgressCallback(BaseCallback):
         self._last_reported_steps = 0
 
     def _on_step(self) -> bool:
+        if self._should_stop is not None and self._should_stop():
+            return False
         num_timesteps = int(self.num_timesteps)
         if (
             num_timesteps < self._total_timesteps
@@ -122,35 +126,37 @@ class MaskablePPOTrainer(Trainer):
         import copy
         sig = copy.deepcopy(sig)
 
-        # 1. Identify curriculum stage
-        stage = 0
-        if "rewards" in sig and isinstance(sig["rewards"], dict):
-            instincts = sig["rewards"].get("instincts")
-            if isinstance(instincts, dict):
-                stage = int(instincts.get("curriculum_stage", 0))
+        from sheepdog.curriculum import CURRICULUM_REWARD_OVERRIDES
 
-        # 2. Strip instinct toggles
+        # 1. Strip instinct toggles (runtime flags, not architecture).
         if "rewards" in sig and isinstance(sig["rewards"], dict):
             instincts = sig["rewards"].get("instincts")
             if isinstance(instincts, dict):
                 for key in ("curriculum_stage", "debug_reward_breakdown", "enable_instinct_rewards"):
                     instincts.pop(key, None)
 
-        # 3. Strip environment overrides if curriculum stage is active
-        from sheepdog.curriculum import CURRICULUM_STAGES, CURRICULUM_REWARD_OVERRIDES
-        if stage in CURRICULUM_STAGES:
-            env_overrides = CURRICULUM_STAGES[stage]
-            if "environment" in sig and isinstance(sig["environment"], dict):
-                for key in ("dog_speed", "sheep_speed"):
-                    if key in env_overrides:
-                        sig["environment"].pop(key, None)
+        # 2. Strip curriculum-controlled environment speeds symmetrically.
+        # These are tuned per stage and do not affect the network architecture,
+        # so they must be dropped from every signature regardless of the stage
+        # embedded in it.
+        if "environment" in sig and isinstance(sig["environment"], dict):
+            for key in ("dog_speed", "sheep_speed"):
+                sig["environment"].pop(key, None)
 
-        # 4. Strip reward overrides if curriculum reward overrides are active
-        if stage in CURRICULUM_REWARD_OVERRIDES:
-            reward_overrides = CURRICULUM_REWARD_OVERRIDES[stage]
-            if "rewards" in sig and isinstance(sig["rewards"], dict):
-                for key in reward_overrides:
-                    sig["rewards"].pop(key, None)
+        # 3. Strip every curriculum reward-override key symmetrically.
+        # Stripping only the current stage's override keys is asymmetric: the
+        # first stage that introduces overrides (stage 7) would never match the
+        # prior stage's stored signature, forcing a needless from-scratch model
+        # reset on promotion. Dropping the union of all override keys from every
+        # signature keeps the comparison stable across the whole curriculum.
+        if "rewards" in sig and isinstance(sig["rewards"], dict):
+            override_keys = {
+                key
+                for overrides in CURRICULUM_REWARD_OVERRIDES.values()
+                for key in overrides
+            }
+            for key in override_keys:
+                sig["rewards"].pop(key, None)
 
         return sig
 
@@ -197,6 +203,7 @@ class MaskablePPOTrainer(Trainer):
     def train(
         self,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> NeuralTrainingRunSummary:  # type: ignore[override]
         train_config = self.config.training
         web_export_dir = Path(train_config.web_export_dir)
@@ -292,6 +299,7 @@ class MaskablePPOTrainer(Trainer):
             list(self._load_summary_checkpoints()) if resuming_policy else []
         )
         saved_model_path: Path | None = None
+        interrupted = False
 
         # Stamp an in-progress batch marker before the loop so a crash mid-batch
         # is resumable on the next call with the same episode count.
@@ -308,6 +316,9 @@ class MaskablePPOTrainer(Trainer):
             train_config.checkpoint_episodes,
             start=1,
         ):
+            if should_stop is not None and should_stop():
+                interrupted = True
+                break
             if completed_checkpoints <= skip_segments:
                 continue
             new_segments = completed_checkpoints - skip_segments
@@ -328,6 +339,7 @@ class MaskablePPOTrainer(Trainer):
             )
             progress_reporter = _TrainingProgressCallback(
                 emit,
+                should_stop=should_stop,
                 # Emit progress frequently enough that long PPO segments do not
                 # look stalled in the UI. Cap the update rate to avoid chatty logs.
                 report_interval=max(250, min(5_000, steps_per_segment // 100)),
@@ -354,6 +366,9 @@ class MaskablePPOTrainer(Trainer):
                 progress_bar=False,
                 callback=progress_reporter,
             )
+            if should_stop is not None and should_stop():
+                interrupted = True
+                break
             saved_model_path = policy.save(model_root / f"maskable-ppo-{cumulative_ts:08d}")
             total_eps_this_checkpoint = starting_total + _checkpoint_slot
             summary, evaluation_json, _csv_path = self.evaluator.evaluate(
@@ -486,6 +501,13 @@ class MaskablePPOTrainer(Trainer):
                     "best_score": summary.average_reward,
                     "message": f"Checkpoint {total_eps_this_checkpoint} exported",
                 }
+            )
+
+        if interrupted:
+            return NeuralTrainingRunSummary(
+                checkpoints=checkpoint_payloads,
+                final_model_path=str(saved_model_path) if saved_model_path is not None else "",
+                policy_config=policy.config.to_dict(),
             )
 
         total_episodes_trained = starting_total + (batch_total - skip_segments)

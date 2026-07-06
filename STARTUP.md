@@ -37,6 +37,8 @@ Restart both services in one command:
 `stop-app.ps1` stops tracked PIDs from `artifacts/startup/pids.json` and also
 cleans up any listeners still bound to ports `8000` and `5173`.
 
+When a training job is active, `stop-app.ps1` now requests a graceful pause/stop first so the last completed checkpoint is persisted before shutdown. On the next `start-app.ps1` launch, you will be asked whether to resume that saved session. If the process was interrupted unexpectedly while training was still running, the backend now resumes automatically from the last persisted safe episode or checkpoint instead of waiting for a prompt.
+
 ## Manual Start Commands
 
 If you need the separate commands the launcher uses, they are:

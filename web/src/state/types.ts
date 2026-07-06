@@ -181,6 +181,9 @@ export interface TrainingStatus {
   traceback?: string | null;
   seed_episode?: number | null;
   starting_episode: number | null;
+  resume_available?: boolean;
+  resume_remaining_episodes?: number | null;
+  resume_request?: TrainingStartRequest | null;
 }
 
 export interface AutoPromoteGateDiagnostics {

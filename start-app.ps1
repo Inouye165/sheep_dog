@@ -265,6 +265,90 @@ function Stop-ExistingServices {
     Stop-ListenerOnPort -Port $webPort
 }
 
+function Get-TrainingSessionState {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    if (-not (Test-Path $Path)) {
+        return $null
+    }
+
+    try {
+        return Get-Content $Path -Raw | ConvertFrom-Json
+    }
+    catch {
+        return $null
+    }
+}
+
+function ConvertTo-ResumeRequest {
+    param(
+        [Parameter(Mandatory = $true)][object]$TrainingRequest,
+        [Parameter(Mandatory = $true)][int]$RemainingEpisodes
+    )
+
+    $resumeRequest = [ordered]@{}
+    foreach ($property in $TrainingRequest.PSObject.Properties) {
+        $resumeRequest[$property.Name] = $property.Value
+    }
+    $resumeRequest['episodes'] = $RemainingEpisodes
+    return $resumeRequest
+}
+
+function Invoke-JsonPost {
+    param(
+        [Parameter(Mandatory = $true)][string]$Uri,
+        [Parameter(Mandatory = $true)][object]$Body
+    )
+
+    return Invoke-RestMethod -Method Post -Uri $Uri -ContentType 'application/json' -Body (
+        $Body | ConvertTo-Json -Depth 10 -Compress
+    )
+}
+
+function Get-ResumeTrainingRequest {
+    param(
+        [AllowNull()][object]$SessionState = $null
+    )
+
+    if ($null -eq $SessionState) {
+        return $null
+    }
+
+    $sessionState = [string]$SessionState.state
+    if ($sessionState -notin @('paused', 'stopped')) {
+        return $null
+    }
+
+    $remainingEpisodes = 0
+    if ($null -ne $SessionState.remaining_episodes) {
+        $remainingEpisodes = [int]$SessionState.remaining_episodes
+    }
+    $trainingRequest = $SessionState.training_request
+    if ($remainingEpisodes -le 0 -or $null -eq $trainingRequest) {
+        return $null
+    }
+
+    $prompt = if ($sessionState -eq 'paused') {
+        "A paused training session has $remainingEpisodes episodes remaining. Resume it after launch? [y/N]"
+    }
+    else {
+        "A stopped training session has $remainingEpisodes episodes remaining. Resume it after launch? [y/N]"
+    }
+
+    $answer = Read-Host $prompt
+    if ($answer -match '^(?i)y(es)?$') {
+        return [pscustomobject]@{
+            request = (ConvertTo-ResumeRequest -TrainingRequest $trainingRequest -RemainingEpisodes $remainingEpisodes)
+            remainingEpisodes = $remainingEpisodes
+            state = $sessionState
+        }
+    }
+
+    return $null
+}
+
 function Invoke-CommandChecked {
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
@@ -340,6 +424,9 @@ if (-not (Test-Path (Join-Path $webDir 'node_modules'))) {
 Write-Host 'Stopping any existing sheepdog services...'
 Stop-ExistingServices
 
+$trainingSessionPath = Join-Path $artifactDir 'training-session.json'
+$resumeTraining = Get-ResumeTrainingRequest -SessionState (Get-TrainingSessionState -Path $trainingSessionPath)
+
 Ensure-WatchdogScript -Path $watchdogScript
 Set-Content -Path $watchdogLog -Value ("{0}`tWATCHDOG_READY" -f (Get-Date).ToString('o')) -Encoding UTF8
 
@@ -362,6 +449,12 @@ try {
         -StdOutLog $backendOut `
         -StdErrLog $backendErr `
         -TimeoutSeconds $backendStartupTimeoutSeconds
+
+    if ($null -ne $resumeTraining) {
+        Write-Host "Resuming training with $($resumeTraining.remainingEpisodes) remaining episodes..."
+        $resumeResponse = Invoke-JsonPost -Uri "http://127.0.0.1:$backendPort/api/training/start" -Body $resumeTraining.request
+        Write-Host ($resumeResponse.message ?? 'Training resume requested.')
+    }
 
     Write-Host 'Starting web viewer on http://127.0.0.1:5173'
     $web = Start-ManagedProcess `

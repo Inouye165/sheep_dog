@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from functools import partial
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +26,12 @@ def _make_rl_adapter(config_payload: dict[str, Any]) -> SheepdogRLAdapter:
 
 def _resolve_env_workers(config: LabConfig) -> int:
     """Resolve PPO worker count from config and optional env override."""
+    # Python 3.13 on Windows can deadlock while worker processes import SB3
+    # modules under spawned subprocess startup. Use a single in-process env
+    # to keep training progress reliable for interactive server runs.
+    if os.name == "nt" and sys.version_info >= (3, 13):
+        return 1
+
     raw_override = os.getenv("SHEEPDOG_PPO_NUM_ENVS")
     if raw_override is not None:
         try:

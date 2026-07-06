@@ -218,6 +218,7 @@ class Trainer:
     def train(
         self,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> TrainingRunSummary:
         """Run hill-climbing training and export evaluated checkpoints."""
         train_config: TrainingConfig = self.config.training
@@ -289,6 +290,7 @@ class Trainer:
         web_export_dir.mkdir(parents=True, exist_ok=True)
         batch_total = train_config.episodes + 1
         candidate_pool_size = train_config.candidate_pool_size
+        executed_iterations = 0
 
         def emit(payload: dict[str, Any]) -> None:
             if progress_callback is None:
@@ -313,6 +315,8 @@ class Trainer:
         )
 
         for episode in range(batch_total):
+            if should_stop is not None and should_stop():
+                break
             cumulative_episode = starting_total + episode
             if episode > 0:
                 candidate_policies = [
@@ -445,7 +449,6 @@ class Trainer:
                     checkpoint_path,
                 )
                 self._evaluate_saved_scenarios(best_policy, cumulative_episode)
-
                 emit(
                     {
                         "phase": "checkpoint",
@@ -460,8 +463,11 @@ class Trainer:
                         "message": f"Checkpoint {cumulative_episode} exported",
                     }
                 )
+            executed_iterations += 1
 
         final_total = starting_total + max(0, batch_total - 1)
+        if executed_iterations < batch_total:
+            final_total = starting_total + max(0, executed_iterations - 1)
         self._save_state(
             final_total,
             best_policy.weights,
@@ -578,13 +584,42 @@ class Trainer:
         checkpoints: list[dict[str, Any]],
         new_entry: dict[str, Any],
     ) -> list[dict[str, Any]]:
+        def _entry_key(entry: dict[str, Any]) -> tuple[int | None, int | None]:
+            stage_raw = (
+                (entry.get("environment_config") or {}).get("curriculum_stage")
+                if isinstance(entry.get("environment_config"), dict)
+                else None
+            )
+            try:
+                stage = int(stage_raw) if stage_raw is not None else None
+            except (TypeError, ValueError):
+                stage = None
+            return entry.get("checkpoint_episode"), stage
+
+        new_key = _entry_key(new_entry)
         filtered = [
             entry
             for entry in checkpoints
-            if entry.get("checkpoint_episode") != new_entry["checkpoint_episode"]
+            if _entry_key(entry) != new_key
         ]
         filtered.append(new_entry)
-        filtered.sort(key=lambda entry: entry.get("checkpoint_episode", 0))
+        def _stage_value(entry: dict[str, Any]) -> int:
+            stage_raw = (
+                (entry.get("environment_config") or {}).get("curriculum_stage")
+                if isinstance(entry.get("environment_config"), dict)
+                else 0
+            )
+            try:
+                return int(stage_raw)
+            except (TypeError, ValueError):
+                return 0
+
+        filtered.sort(
+            key=lambda entry: (
+                entry.get("checkpoint_episode", 0),
+                _stage_value(entry),
+            )
+        )
         return filtered
 
     def _export_training_summary(

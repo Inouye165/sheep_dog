@@ -9,9 +9,9 @@ pen-location generalization.
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import fields, replace
 
-from sheepdog.config import LabConfig
+from sheepdog.config import EnvironmentConfig, LabConfig
 
 def _mix(**weights: float) -> dict[str, float]:
     """Small helper to keep spawn-mixture declarations readable."""
@@ -195,21 +195,14 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "pen_opening": "bottom",
         "dog_speed": 2.0,
         "sheep_speed": 1,
-        "max_steps": 1260,
-        "no_progress_window": 360,
-        "no_progress_distance_delta": 0.11,
+        "max_steps": 1200,
+        "no_progress_window": 320,
+        "no_progress_distance_delta": 0.12,
         "curriculum_stage": 10,
         "count_collection_progress": True,
-        "spawn_mix": _mix(
-            fixed_easy=0.1,
-            randomized_flock=0.5,
-            nearby_stray=0.3,
-            farther_stray=0.1,
-        ),
-        "stray_near_min": 12.0,
-        "stray_near_max": 18.0,
-        "stray_far_min": 18.0,
-        "stray_far_max": 26.0,
+        "spawn_mix": _mix(fixed_easy=0.15, randomized_flock=0.6, nearby_stray=0.25),
+        "stray_near_min": 8.0,
+        "stray_near_max": 12.0,
         "pen_placement": "corner",
     },
     11: {
@@ -222,24 +215,132 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "pen_opening": "bottom",
         "dog_speed": 2.0,
         "sheep_speed": 1,
+        "max_steps": 1220,
+        "no_progress_window": 330,
+        "no_progress_distance_delta": 0.12,
+        "curriculum_stage": 11,
+        "count_collection_progress": True,
+        "spawn_mix": _mix(fixed_easy=0.1, randomized_flock=0.6, nearby_stray=0.3),
+        "stray_near_min": 10.0,
+        "stray_near_max": 15.0,
+        "pen_placement": "corner",
+    },
+    12: {
+        "dogs": 3,
+        "sheep": 5,
+        "width": 120,
+        "height": 84,
+        "pen_width": 14,
+        "pen_height": 14,
+        "pen_opening": "bottom",
+        "dog_speed": 2.0,
+        "sheep_speed": 1,
+        "max_steps": 1240,
+        "no_progress_window": 340,
+        "no_progress_distance_delta": 0.11,
+        "curriculum_stage": 12,
+        "count_collection_progress": True,
+        "spawn_mix": _mix(fixed_easy=0.1, randomized_flock=0.55, nearby_stray=0.3, farther_stray=0.05),
+        "stray_near_min": 10.0,
+        "stray_near_max": 15.0,
+        "stray_far_min": 12.0,
+        "stray_far_max": 18.0,
+        "pen_placement": "corner",
+        "success_threshold": 0.75,
+    },
+    13: {
+        "dogs": 3,
+        "sheep": 5,
+        "width": 120,
+        "height": 84,
+        "pen_width": 14,
+        "pen_height": 14,
+        "pen_opening": "bottom",
+        "dog_speed": 2.0,
+        "sheep_speed": 1,
+        "max_steps": 1260,
+        "no_progress_window": 350,
+        "no_progress_distance_delta": 0.11,
+        "curriculum_stage": 13,
+        "count_collection_progress": True,
+        "spawn_mix": _mix(fixed_easy=0.1, randomized_flock=0.5, nearby_stray=0.3, farther_stray=0.1),
+        "stray_near_min": 11.0,
+        "stray_near_max": 16.0,
+        "stray_far_min": 15.0,
+        "stray_far_max": 22.0,
+        "pen_placement": "corner",
+        "success_threshold": 0.75,
+    },
+    14: {
+        "dogs": 3,
+        "sheep": 5,
+        "width": 120,
+        "height": 84,
+        "pen_width": 14,
+        "pen_height": 14,
+        "pen_opening": "bottom",
+        "dog_speed": 2.0,
+        "sheep_speed": 1,
+        "max_steps": 1280,
+        "no_progress_window": 360,
+        "no_progress_distance_delta": 0.11,
+        "curriculum_stage": 14,
+        "count_collection_progress": True,
+        "spawn_mix": _mix(fixed_easy=0.1, randomized_flock=0.5, nearby_stray=0.3, farther_stray=0.1),
+        "stray_near_min": 12.0,
+        "stray_near_max": 18.0,
+        "stray_far_min": 18.0,
+        "stray_far_max": 26.0,
+        "pen_placement": "corner",
+        "success_threshold": 0.8,
+    },
+    15: {
+        "dogs": 3,
+        "sheep": 5,
+        "width": 120,
+        "height": 84,
+        "pen_width": 14,
+        "pen_height": 14,
+        "pen_opening": "bottom",
+        "dog_speed": 2.0,
+        "sheep_speed": 1,
         "max_steps": 1340,
         "no_progress_window": 390,
         "no_progress_distance_delta": 0.1,
-        "curriculum_stage": 11,
+        "curriculum_stage": 15,
         "count_collection_progress": True,
-        "spawn_mix": _mix(
-            randomized_flock=0.35,
-            nearby_stray=0.3,
-            farther_stray=0.25,
-            split_flock=0.1,
-        ),
+        "spawn_mix": _mix(randomized_flock=0.35, nearby_stray=0.3, farther_stray=0.25, split_flock=0.1),
         "stray_near_min": 12.0,
         "stray_near_max": 18.0,
         "stray_far_min": 18.0,
         "stray_far_max": 28.0,
         "pen_placement": "corner",
+        "success_threshold": 0.9,
     },
-    12: {
+    16: {
+        "dogs": 3,
+        "sheep": 6,
+        "width": 120,
+        "height": 84,
+        "pen_width": 14,
+        "pen_height": 14,
+        "pen_opening": "bottom",
+        "dog_speed": 2.0,
+        "sheep_speed": 1,
+        "max_steps": 1360,
+        "no_progress_window": 400,
+        "no_progress_distance_delta": 0.1,
+        "curriculum_stage": 16,
+        "count_collection_progress": True,
+        "spawn_mix": _mix(randomized_flock=0.5, nearby_stray=0.35, farther_stray=0.15),
+        "stray_near_min": 8.0,
+        "stray_near_max": 12.0,
+        "stray_far_min": 12.0,
+        "stray_far_max": 18.0,
+        "pen_placement": "corner",
+        "success_threshold": 0.75,
+    },
+    17: {
         "dogs": 3,
         "sheep": 6,
         "width": 120,
@@ -252,21 +353,16 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "max_steps": 1420,
         "no_progress_window": 430,
         "no_progress_distance_delta": 0.1,
-        "curriculum_stage": 12,
+        "curriculum_stage": 17,
         "count_collection_progress": True,
-        "spawn_mix": _mix(
-            randomized_flock=0.35,
-            nearby_stray=0.35,
-            farther_stray=0.2,
-            split_flock=0.1,
-        ),
+        "spawn_mix": _mix(randomized_flock=0.35, nearby_stray=0.35, farther_stray=0.2, split_flock=0.1),
         "stray_near_min": 10.0,
         "stray_near_max": 16.0,
         "stray_far_min": 20.0,
         "stray_far_max": 30.0,
         "pen_placement": "corner",
     },
-    13: {
+    18: {
         "dogs": 3,
         "sheep": 6,
         "width": 126,
@@ -279,21 +375,16 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "max_steps": 1480,
         "no_progress_window": 450,
         "no_progress_distance_delta": 0.1,
-        "curriculum_stage": 13,
+        "curriculum_stage": 18,
         "count_collection_progress": True,
-        "spawn_mix": _mix(
-            nearby_stray=0.4,
-            two_strays=0.3,
-            farther_stray=0.2,
-            split_flock=0.1,
-        ),
+        "spawn_mix": _mix(nearby_stray=0.4, two_strays=0.3, farther_stray=0.2, split_flock=0.1),
         "stray_near_min": 8.0,
         "stray_near_max": 14.0,
         "stray_far_min": 18.0,
         "stray_far_max": 28.0,
         "pen_placement": "corner",
     },
-    14: {
+    19: {
         "dogs": 3,
         "sheep": 6,
         "width": 126,
@@ -306,21 +397,34 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "max_steps": 1520,
         "no_progress_window": 460,
         "no_progress_distance_delta": 0.1,
-        "curriculum_stage": 14,
+        "curriculum_stage": 19,
         "count_collection_progress": True,
-        "spawn_mix": _mix(
-            split_flock=0.5,
-            randomized_flock=0.2,
-            nearby_stray=0.2,
-            farther_stray=0.1,
-        ),
+        "spawn_mix": _mix(split_flock=0.5, randomized_flock=0.2, nearby_stray=0.2, farther_stray=0.1),
         "stray_near_min": 10.0,
         "stray_near_max": 16.0,
         "stray_far_min": 20.0,
         "stray_far_max": 30.0,
         "pen_placement": "corner",
     },
-    15: {
+    20: {
+        "dogs": 3,
+        "sheep": 6,
+        "width": 126,
+        "height": 90,
+        "pen_width": 14,
+        "pen_height": 14,
+        "pen_opening": "bottom",
+        "dog_speed": 2.0,
+        "sheep_speed": 1,
+        "max_steps": 1540,
+        "no_progress_window": 465,
+        "no_progress_distance_delta": 0.1,
+        "curriculum_stage": 20,
+        "count_collection_progress": True,
+        "spawn_mix": _mix(split_flock=0.35, partial_scattered=0.3, randomized_flock=0.15, nearby_stray=0.1, farther_stray=0.1),
+        "pen_placement": "corner",
+    },
+    21: {
         "dogs": 3,
         "sheep": 6,
         "width": 126,
@@ -333,17 +437,12 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "max_steps": 1560,
         "no_progress_window": 470,
         "no_progress_distance_delta": 0.1,
-        "curriculum_stage": 15,
+        "curriculum_stage": 21,
         "count_collection_progress": True,
-        "spawn_mix": _mix(
-            partial_scattered=0.5,
-            split_flock=0.25,
-            nearby_stray=0.15,
-            farther_stray=0.1,
-        ),
+        "spawn_mix": _mix(partial_scattered=0.5, split_flock=0.25, nearby_stray=0.15, farther_stray=0.1),
         "pen_placement": "corner",
     },
-    16: {
+    22: {
         "dogs": 3,
         "sheep": 6,
         "width": 126,
@@ -356,17 +455,12 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "max_steps": 1600,
         "no_progress_window": 480,
         "no_progress_distance_delta": 0.1,
-        "curriculum_stage": 16,
+        "curriculum_stage": 22,
         "count_collection_progress": True,
-        "spawn_mix": _mix(
-            scattered_sheep=0.55,
-            partial_scattered=0.25,
-            split_flock=0.1,
-            farther_stray=0.1,
-        ),
+        "spawn_mix": _mix(scattered_sheep=0.55, partial_scattered=0.25, split_flock=0.1, farther_stray=0.1),
         "pen_placement": "corner",
     },
-    17: {
+    23: {
         "dogs": 3,
         "sheep": 6,
         "width": 132,
@@ -379,18 +473,12 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "max_steps": 1660,
         "no_progress_window": 500,
         "no_progress_distance_delta": 0.1,
-        "curriculum_stage": 17,
+        "curriculum_stage": 23,
         "count_collection_progress": True,
-        "spawn_mix": _mix(
-            scattered_sheep=0.35,
-            partial_scattered=0.25,
-            split_flock=0.2,
-            farther_stray=0.1,
-            nearby_stray=0.1,
-        ),
+        "spawn_mix": _mix(scattered_sheep=0.35, partial_scattered=0.25, split_flock=0.2, farther_stray=0.1, nearby_stray=0.1),
         "pen_placement": "same_wall",
     },
-    18: {
+    24: {
         "dogs": 3,
         "sheep": 6,
         "width": 132,
@@ -403,18 +491,12 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "max_steps": 1720,
         "no_progress_window": 520,
         "no_progress_distance_delta": 0.1,
-        "curriculum_stage": 18,
+        "curriculum_stage": 24,
         "count_collection_progress": True,
-        "spawn_mix": _mix(
-            scattered_sheep=0.35,
-            partial_scattered=0.2,
-            split_flock=0.2,
-            farther_stray=0.15,
-            nearby_stray=0.1,
-        ),
+        "spawn_mix": _mix(scattered_sheep=0.35, partial_scattered=0.2, split_flock=0.2, farther_stray=0.15, nearby_stray=0.1),
         "pen_placement": "any_wall",
     },
-    19: {
+    25: {
         "dogs": 3,
         "sheep": 6,
         "width": 132,
@@ -427,18 +509,12 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "max_steps": 1760,
         "no_progress_window": 530,
         "no_progress_distance_delta": 0.1,
-        "curriculum_stage": 19,
+        "curriculum_stage": 25,
         "count_collection_progress": True,
-        "spawn_mix": _mix(
-            scattered_sheep=0.35,
-            partial_scattered=0.2,
-            split_flock=0.2,
-            farther_stray=0.15,
-            nearby_stray=0.1,
-        ),
+        "spawn_mix": _mix(scattered_sheep=0.35, partial_scattered=0.2, split_flock=0.2, farther_stray=0.15, nearby_stray=0.1),
         "pen_placement": "away_from_corner",
     },
-    20: {
+    26: {
         "dogs": 3,
         "sheep": 6,
         "width": 132,
@@ -451,18 +527,12 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "max_steps": 1820,
         "no_progress_window": 560,
         "no_progress_distance_delta": 0.1,
-        "curriculum_stage": 20,
+        "curriculum_stage": 26,
         "count_collection_progress": True,
-        "spawn_mix": _mix(
-            scattered_sheep=0.4,
-            partial_scattered=0.2,
-            split_flock=0.2,
-            farther_stray=0.1,
-            nearby_stray=0.1,
-        ),
+        "spawn_mix": _mix(scattered_sheep=0.4, partial_scattered=0.2, split_flock=0.2, farther_stray=0.1, nearby_stray=0.1),
         "pen_placement": "interior",
     },
-    21: {
+    27: {
         "dogs": 3,
         "sheep": 6,
         "width": 132,
@@ -475,19 +545,12 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "max_steps": 1900,
         "no_progress_window": 600,
         "no_progress_distance_delta": 0.1,
-        "curriculum_stage": 21,
+        "curriculum_stage": 27,
         "count_collection_progress": True,
-        "spawn_mix": _mix(
-            randomized_flock=0.25,
-            nearby_stray=0.2,
-            farther_stray=0.2,
-            split_flock=0.15,
-            partial_scattered=0.1,
-            scattered_sheep=0.1,
-        ),
+        "spawn_mix": _mix(randomized_flock=0.25, nearby_stray=0.2, farther_stray=0.2, split_flock=0.15, partial_scattered=0.1, scattered_sheep=0.1),
         "pen_placement": "random",
     },
-    22: {
+    28: {
         "dogs": 3,
         "sheep": 6,
         "width": 144,
@@ -500,20 +563,16 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "max_steps": 1980,
         "no_progress_window": 640,
         "no_progress_distance_delta": 0.1,
-        "curriculum_stage": 22,
+        "curriculum_stage": 28,
         "count_collection_progress": True,
-        "spawn_mix": _mix(
-            farther_stray=0.4,
-            split_flock=0.3,
-            two_strays=0.3,
-        ),
+        "spawn_mix": _mix(farther_stray=0.4, split_flock=0.3, two_strays=0.3),
         "stray_near_min": 16.0,
         "stray_near_max": 26.0,
         "stray_far_min": 30.0,
         "stray_far_max": 44.0,
         "pen_placement": "random",
     },
-    23: {
+    29: {
         "dogs": 3,
         "sheep": 6,
         "width": 144,
@@ -526,16 +585,12 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "max_steps": 2060,
         "no_progress_window": 680,
         "no_progress_distance_delta": 0.1,
-        "curriculum_stage": 23,
+        "curriculum_stage": 29,
         "count_collection_progress": True,
-        "spawn_mix": _mix(
-            scattered_sheep=0.6,
-            randomized_flock=0.2,
-            split_flock=0.2,
-        ),
+        "spawn_mix": _mix(scattered_sheep=0.6, randomized_flock=0.2, split_flock=0.2),
         "pen_placement": "random",
     },
-    24: {
+    30: {
         "dogs": 3,
         "sheep": 6,
         "width": 144,
@@ -548,12 +603,12 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "max_steps": 2140,
         "no_progress_window": 700,
         "no_progress_distance_delta": 0.1,
-        "curriculum_stage": 24,
+        "curriculum_stage": 30,
         "count_collection_progress": True,
         "spawn_mix": _mix(all_corners=1.0),
         "pen_placement": "random",
     },
-    25: {
+    31: {
         "dogs": 3,
         "sheep": 6,
         "width": 144,
@@ -566,17 +621,13 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "max_steps": 2190,
         "no_progress_window": 720,
         "no_progress_distance_delta": 0.1,
-        "curriculum_stage": 25,
+        "curriculum_stage": 31,
         "count_collection_progress": True,
-        "spawn_mix": _mix(
-            all_corners=0.7,
-            split_flock=0.2,
-            randomized_flock=0.1,
-        ),
+        "spawn_mix": _mix(all_corners=0.7, split_flock=0.2, randomized_flock=0.1),
         "pen_placement": "random",
         "sheep_personality_strength": 0.0,
     },
-    26: {
+    32: {
         "dogs": 3,
         "sheep": 6,
         "width": 144,
@@ -589,20 +640,15 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "max_steps": 2240,
         "no_progress_window": 740,
         "no_progress_distance_delta": 0.1,
-        "curriculum_stage": 26,
+        "curriculum_stage": 32,
         "count_collection_progress": True,
-        "spawn_mix": _mix(
-            all_corners=0.35,
-            scattered_sheep=0.35,
-            split_flock=0.2,
-            farther_stray=0.1,
-        ),
+        "spawn_mix": _mix(all_corners=0.35, scattered_sheep=0.35, split_flock=0.2, farther_stray=0.1),
         "stray_far_min": 30.0,
         "stray_far_max": 44.0,
         "pen_placement": "random",
         "sheep_personality_strength": 0.0,
     },
-    27: {
+    33: {
         "dogs": 3,
         "sheep": 6,
         "width": 144,
@@ -615,20 +661,15 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "max_steps": 2280,
         "no_progress_window": 760,
         "no_progress_distance_delta": 0.1,
-        "curriculum_stage": 27,
+        "curriculum_stage": 33,
         "count_collection_progress": True,
-        "spawn_mix": _mix(
-            all_corners=0.3,
-            scattered_sheep=0.4,
-            split_flock=0.2,
-            farther_stray=0.1,
-        ),
+        "spawn_mix": _mix(all_corners=0.3, scattered_sheep=0.4, split_flock=0.2, farther_stray=0.1),
         "stray_far_min": 32.0,
         "stray_far_max": 46.0,
         "pen_placement": "random",
         "sheep_personality_strength": 0.35,
     },
-    28: {
+    34: {
         "dogs": 3,
         "sheep": 6,
         "width": 144,
@@ -641,20 +682,15 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "max_steps": 2320,
         "no_progress_window": 780,
         "no_progress_distance_delta": 0.1,
-        "curriculum_stage": 28,
+        "curriculum_stage": 34,
         "count_collection_progress": True,
-        "spawn_mix": _mix(
-            all_corners=0.25,
-            scattered_sheep=0.45,
-            split_flock=0.2,
-            farther_stray=0.1,
-        ),
+        "spawn_mix": _mix(all_corners=0.25, scattered_sheep=0.45, split_flock=0.2, farther_stray=0.1),
         "stray_far_min": 34.0,
         "stray_far_max": 48.0,
         "pen_placement": "random",
         "sheep_personality_strength": 0.7,
     },
-    29: {
+    35: {
         "dogs": 3,
         "sheep": 6,
         "width": 144,
@@ -669,20 +705,15 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "max_steps": 2340,
         "no_progress_window": 790,
         "no_progress_distance_delta": 0.1,
-        "curriculum_stage": 29,
+        "curriculum_stage": 35,
         "count_collection_progress": True,
-        "spawn_mix": _mix(
-            all_corners=0.22,
-            scattered_sheep=0.48,
-            split_flock=0.2,
-            farther_stray=0.1,
-        ),
+        "spawn_mix": _mix(all_corners=0.22, scattered_sheep=0.48, split_flock=0.2, farther_stray=0.1),
         "stray_far_min": 35.0,
         "stray_far_max": 49.0,
         "pen_placement": "random",
         "sheep_personality_strength": 0.7,
     },
-    30: {
+    36: {
         "dogs": 3,
         "sheep": 6,
         "width": 144,
@@ -697,20 +728,15 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "max_steps": 2360,
         "no_progress_window": 800,
         "no_progress_distance_delta": 0.1,
-        "curriculum_stage": 30,
+        "curriculum_stage": 36,
         "count_collection_progress": True,
-        "spawn_mix": _mix(
-            all_corners=0.2,
-            scattered_sheep=0.5,
-            split_flock=0.2,
-            farther_stray=0.1,
-        ),
+        "spawn_mix": _mix(all_corners=0.2, scattered_sheep=0.5, split_flock=0.2, farther_stray=0.1),
         "stray_far_min": 36.0,
         "stray_far_max": 50.0,
         "pen_placement": "random",
         "sheep_personality_strength": 0.7,
     },
-    31: {
+    37: {
         "dogs": 3,
         "sheep": 6,
         "width": 144,
@@ -725,20 +751,15 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "max_steps": 2400,
         "no_progress_window": 820,
         "no_progress_distance_delta": 0.1,
-        "curriculum_stage": 31,
+        "curriculum_stage": 37,
         "count_collection_progress": True,
-        "spawn_mix": _mix(
-            all_corners=0.15,
-            scattered_sheep=0.55,
-            split_flock=0.2,
-            farther_stray=0.1,
-        ),
+        "spawn_mix": _mix(all_corners=0.15, scattered_sheep=0.55, split_flock=0.2, farther_stray=0.1),
         "stray_far_min": 38.0,
         "stray_far_max": 52.0,
         "pen_placement": "random",
         "sheep_personality_strength": 1.0,
     },
-    32: {
+    38: {
         "dogs": 3,
         "sheep": 6,
         "width": 144,
@@ -753,14 +774,9 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "max_steps": 2440,
         "no_progress_window": 840,
         "no_progress_distance_delta": 0.1,
-        "curriculum_stage": 32,
+        "curriculum_stage": 38,
         "count_collection_progress": True,
-        "spawn_mix": _mix(
-            all_corners=0.1,
-            scattered_sheep=0.6,
-            split_flock=0.2,
-            farther_stray=0.1,
-        ),
+        "spawn_mix": _mix(all_corners=0.1, scattered_sheep=0.6, split_flock=0.2, farther_stray=0.1),
         "stray_far_min": 40.0,
         "stray_far_max": 54.0,
         "pen_placement": "random",
@@ -810,6 +826,46 @@ CURRICULUM_REWARD_OVERRIDES: dict[int, dict[str, object]] = {
         "terminal_success_reward": 75.0,
     },
     11: {
+        "time_penalty": 0.021,
+        "no_progress_penalty": 0.032,
+        "flock_cohesion_scale": 0.68,
+        "scatter_penalty_scale": 0.32,
+        "farthest_sheep_progress_scale": 0.55,
+        "stray_ignore_penalty_scale": 0.0055,
+        "sheep_penned_reward": 10.0,
+        "terminal_success_reward": 75.0,
+    },
+    12: {
+        "time_penalty": 0.021,
+        "no_progress_penalty": 0.032,
+        "flock_cohesion_scale": 0.68,
+        "scatter_penalty_scale": 0.32,
+        "farthest_sheep_progress_scale": 0.55,
+        "stray_ignore_penalty_scale": 0.0055,
+        "sheep_penned_reward": 10.0,
+        "terminal_success_reward": 75.0,
+    },
+    13: {
+        "time_penalty": 0.021,
+        "no_progress_penalty": 0.032,
+        "flock_cohesion_scale": 0.68,
+        "scatter_penalty_scale": 0.32,
+        "farthest_sheep_progress_scale": 0.55,
+        "stray_ignore_penalty_scale": 0.0055,
+        "sheep_penned_reward": 10.0,
+        "terminal_success_reward": 75.0,
+    },
+    14: {
+        "time_penalty": 0.021,
+        "no_progress_penalty": 0.032,
+        "flock_cohesion_scale": 0.68,
+        "scatter_penalty_scale": 0.32,
+        "farthest_sheep_progress_scale": 0.55,
+        "stray_ignore_penalty_scale": 0.0055,
+        "sheep_penned_reward": 10.0,
+        "terminal_success_reward": 75.0,
+    },
+    15: {
         "time_penalty": 0.022,
         "no_progress_penalty": 0.034,
         "flock_cohesion_scale": 0.66,
@@ -819,7 +875,7 @@ CURRICULUM_REWARD_OVERRIDES: dict[int, dict[str, object]] = {
         "sheep_penned_reward": 10.0,
         "terminal_success_reward": 74.0,
     },
-    12: {
+    16: {
         "time_penalty": 0.023,
         "no_progress_penalty": 0.036,
         "flock_cohesion_scale": 0.64,
@@ -829,7 +885,17 @@ CURRICULUM_REWARD_OVERRIDES: dict[int, dict[str, object]] = {
         "sheep_penned_reward": 10.0,
         "terminal_success_reward": 73.0,
     },
-    13: {
+    17: {
+        "time_penalty": 0.023,
+        "no_progress_penalty": 0.036,
+        "flock_cohesion_scale": 0.64,
+        "scatter_penalty_scale": 0.36,
+        "farthest_sheep_progress_scale": 0.65,
+        "stray_ignore_penalty_scale": 0.0065,
+        "sheep_penned_reward": 10.0,
+        "terminal_success_reward": 73.0,
+    },
+    18: {
         "time_penalty": 0.024,
         "no_progress_penalty": 0.038,
         "flock_cohesion_scale": 0.62,
@@ -839,7 +905,7 @@ CURRICULUM_REWARD_OVERRIDES: dict[int, dict[str, object]] = {
         "sheep_penned_reward": 10.0,
         "terminal_success_reward": 72.0,
     },
-    14: {
+    19: {
         "time_penalty": 0.025,
         "no_progress_penalty": 0.04,
         "flock_cohesion_scale": 0.6,
@@ -849,7 +915,17 @@ CURRICULUM_REWARD_OVERRIDES: dict[int, dict[str, object]] = {
         "sheep_penned_reward": 10.0,
         "terminal_success_reward": 72.0,
     },
-    15: {
+    20: {
+        "time_penalty": 0.0255,
+        "no_progress_penalty": 0.041,
+        "flock_cohesion_scale": 0.59,
+        "scatter_penalty_scale": 0.41,
+        "farthest_sheep_progress_scale": 0.775,
+        "stray_ignore_penalty_scale": 0.00775,
+        "sheep_penned_reward": 10.0,
+        "terminal_success_reward": 71.5,
+    },
+    21: {
         "time_penalty": 0.026,
         "no_progress_penalty": 0.042,
         "flock_cohesion_scale": 0.58,
@@ -859,7 +935,7 @@ CURRICULUM_REWARD_OVERRIDES: dict[int, dict[str, object]] = {
         "sheep_penned_reward": 10.0,
         "terminal_success_reward": 71.0,
     },
-    16: {
+    22: {
         "time_penalty": 0.027,
         "no_progress_penalty": 0.044,
         "flock_cohesion_scale": 0.56,
@@ -869,7 +945,7 @@ CURRICULUM_REWARD_OVERRIDES: dict[int, dict[str, object]] = {
         "sheep_penned_reward": 10.0,
         "terminal_success_reward": 70.0,
     },
-    17: {
+    23: {
         "time_penalty": 0.028,
         "no_progress_penalty": 0.045,
         "flock_cohesion_scale": 0.55,
@@ -879,7 +955,7 @@ CURRICULUM_REWARD_OVERRIDES: dict[int, dict[str, object]] = {
         "sheep_penned_reward": 10.0,
         "terminal_success_reward": 70.0,
     },
-    18: {
+    24: {
         "time_penalty": 0.029,
         "no_progress_penalty": 0.046,
         "flock_cohesion_scale": 0.54,
@@ -889,7 +965,7 @@ CURRICULUM_REWARD_OVERRIDES: dict[int, dict[str, object]] = {
         "sheep_penned_reward": 10.0,
         "terminal_success_reward": 69.0,
     },
-    19: {
+    25: {
         "time_penalty": 0.029,
         "no_progress_penalty": 0.047,
         "flock_cohesion_scale": 0.53,
@@ -899,7 +975,7 @@ CURRICULUM_REWARD_OVERRIDES: dict[int, dict[str, object]] = {
         "sheep_penned_reward": 10.0,
         "terminal_success_reward": 68.0,
     },
-    20: {
+    26: {
         "time_penalty": 0.03,
         "no_progress_penalty": 0.048,
         "flock_cohesion_scale": 0.52,
@@ -909,7 +985,7 @@ CURRICULUM_REWARD_OVERRIDES: dict[int, dict[str, object]] = {
         "sheep_penned_reward": 10.0,
         "terminal_success_reward": 68.0,
     },
-    21: {
+    27: {
         "time_penalty": 0.03,
         "no_progress_penalty": 0.05,
         "flock_cohesion_scale": 0.5,
@@ -919,7 +995,7 @@ CURRICULUM_REWARD_OVERRIDES: dict[int, dict[str, object]] = {
         "sheep_penned_reward": 10.0,
         "terminal_success_reward": 67.0,
     },
-    22: {
+    28: {
         "time_penalty": 0.031,
         "no_progress_penalty": 0.051,
         "flock_cohesion_scale": 0.49,
@@ -929,7 +1005,7 @@ CURRICULUM_REWARD_OVERRIDES: dict[int, dict[str, object]] = {
         "sheep_penned_reward": 10.0,
         "terminal_success_reward": 66.0,
     },
-    23: {
+    29: {
         "time_penalty": 0.032,
         "no_progress_penalty": 0.052,
         "flock_cohesion_scale": 0.48,
@@ -939,7 +1015,7 @@ CURRICULUM_REWARD_OVERRIDES: dict[int, dict[str, object]] = {
         "sheep_penned_reward": 10.0,
         "terminal_success_reward": 65.0,
     },
-    24: {
+    30: {
         "time_penalty": 0.033,
         "no_progress_penalty": 0.053,
         "flock_cohesion_scale": 0.47,
@@ -949,7 +1025,7 @@ CURRICULUM_REWARD_OVERRIDES: dict[int, dict[str, object]] = {
         "sheep_penned_reward": 10.0,
         "terminal_success_reward": 64.0,
     },
-    25: {
+    31: {
         "time_penalty": 0.0335,
         "no_progress_penalty": 0.054,
         "flock_cohesion_scale": 0.465,
@@ -959,7 +1035,7 @@ CURRICULUM_REWARD_OVERRIDES: dict[int, dict[str, object]] = {
         "sheep_penned_reward": 10.0,
         "terminal_success_reward": 63.5,
     },
-    26: {
+    32: {
         "time_penalty": 0.034,
         "no_progress_penalty": 0.055,
         "flock_cohesion_scale": 0.46,
@@ -969,7 +1045,7 @@ CURRICULUM_REWARD_OVERRIDES: dict[int, dict[str, object]] = {
         "sheep_penned_reward": 10.0,
         "terminal_success_reward": 63.0,
     },
-    27: {
+    33: {
         "time_penalty": 0.035,
         "no_progress_penalty": 0.056,
         "flock_cohesion_scale": 0.44,
@@ -979,7 +1055,7 @@ CURRICULUM_REWARD_OVERRIDES: dict[int, dict[str, object]] = {
         "sheep_penned_reward": 10.0,
         "terminal_success_reward": 62.0,
     },
-    28: {
+    34: {
         "time_penalty": 0.036,
         "no_progress_penalty": 0.057,
         "flock_cohesion_scale": 0.42,
@@ -989,7 +1065,7 @@ CURRICULUM_REWARD_OVERRIDES: dict[int, dict[str, object]] = {
         "sheep_penned_reward": 10.0,
         "terminal_success_reward": 61.0,
     },
-    29: {
+    35: {
         "time_penalty": 0.0365,
         "no_progress_penalty": 0.0575,
         "flock_cohesion_scale": 0.41,
@@ -999,7 +1075,7 @@ CURRICULUM_REWARD_OVERRIDES: dict[int, dict[str, object]] = {
         "sheep_penned_reward": 10.0,
         "terminal_success_reward": 60.5,
     },
-    30: {
+    36: {
         "time_penalty": 0.037,
         "no_progress_penalty": 0.058,
         "flock_cohesion_scale": 0.4,
@@ -1009,7 +1085,7 @@ CURRICULUM_REWARD_OVERRIDES: dict[int, dict[str, object]] = {
         "sheep_penned_reward": 10.0,
         "terminal_success_reward": 60.0,
     },
-    31: {
+    37: {
         "time_penalty": 0.038,
         "no_progress_penalty": 0.059,
         "flock_cohesion_scale": 0.39,
@@ -1019,7 +1095,7 @@ CURRICULUM_REWARD_OVERRIDES: dict[int, dict[str, object]] = {
         "sheep_penned_reward": 10.0,
         "terminal_success_reward": 59.0,
     },
-    32: {
+    38: {
         "time_penalty": 0.039,
         "no_progress_penalty": 0.06,
         "flock_cohesion_scale": 0.38,
@@ -1030,6 +1106,84 @@ CURRICULUM_REWARD_OVERRIDES: dict[int, dict[str, object]] = {
         "terminal_success_reward": 58.0,
     },
 }
+
+# Hyperparameter overrides for transitional/challenging stages to boost exploration
+CURRICULUM_TRAINING_OVERRIDES: dict[int, dict[str, object]] = {
+    # transitional 5-sheep stages (boost entropy, set slightly higher learning rates)
+    12: {"entropy_coef": 0.025, "learning_rate": 1.5e-4, "learning_rate_final": 5e-5},
+    13: {"entropy_coef": 0.025, "learning_rate": 1.5e-4, "learning_rate_final": 5e-5},
+    14: {"entropy_coef": 0.020, "learning_rate": 1.2e-4, "learning_rate_final": 4e-5},
+    15: {"entropy_coef": 0.015, "learning_rate": 1.0e-4, "learning_rate_final": 3e-5},
+    # transitional 6-sheep stage (boost entropy)
+    16: {"entropy_coef": 0.020, "learning_rate": 1.2e-4, "learning_rate_final": 4e-5},
+}
+
+def apply_curriculum_stage(config: LabConfig, stage: int) -> LabConfig:
+    """Return a copy of ``config`` with the stage's environment overrides applied.
+
+    Stage ``0`` returns the original config unchanged so curriculum is opt-in.
+    """
+
+    overrides = CURRICULUM_STAGES.get(stage)
+    if not overrides:
+        return config
+    # Filter only keys that are actually fields of EnvironmentConfig
+    env_keys = {f.name for f in fields(EnvironmentConfig)}
+    env_overrides = {k: v for k, v in overrides.items() if k in env_keys}
+    new_environment = replace(config.environment, **env_overrides)
+    
+    reward_overrides = CURRICULUM_REWARD_OVERRIDES.get(stage)
+    new_rewards = replace(config.rewards, **reward_overrides) if reward_overrides else config.rewards
+    
+    training_overrides = CURRICULUM_TRAINING_OVERRIDES.get(stage)
+    new_training = replace(config.training, **training_overrides) if training_overrides else config.training
+    
+    return replace(config, environment=new_environment, rewards=new_rewards, training=new_training)
+
+def stage_summary(stage: int) -> str:
+    """Return a short human-readable description of a curriculum stage."""
+
+    descriptions = {
+        1: "1 dog, 1 sheep, fixed easy placement.",
+        2: "1 dog, 1 sheep, mild random starts.",
+        3: "1 dog, 2 sheep, fixed easy flock.",
+        4: "1 dog, 2 sheep, randomized flock start.",
+        5: "2 dogs, 3 sheep, fixed easy teamwork.",
+        6: "2 dogs, 3 sheep, mostly grouped with occasional tiny nearby stray.",
+        7: "2 dogs, 4 sheep, early nearby stray collection starts (6-9 cells).",
+        8: "3 dogs, 4 sheep, larger field with frequent nearby strays (7-10 cells).",
+        9: "3 dogs, 4 sheep, nearby stray recovery emphasis (8-12 cells).",
+        10: "3 dogs, 5 sheep, nearby stray introduction with 5 sheep (8-12 cells).",
+        11: "3 dogs, 5 sheep, nearby stray distance scaling (10-15 cells).",
+        12: "3 dogs, 5 sheep, farther stray introduction (12-18 cells, 5% spawn).",
+        13: "3 dogs, 5 sheep, farther stray distance scaling (15-22 cells, 10% spawn).",
+        14: "3 dogs, 5 sheep, farther stray full distance (18-26 cells, 10% spawn).",
+        15: "3 dogs, 5 sheep, stronger farther stray recovery (18-28 cells, 25% spawn).",
+        16: "3 dogs, 6 sheep, transitional 6 sheep introduction (12-18 cells, 15% spawn).",
+        17: "3 dogs, 6 sheep, group + one stray collection.",
+        18: "3 dogs, 6 sheep, two nearby strays collection.",
+        19: "3 dogs, 6 sheep, split flock (3+3) recovery.",
+        20: "3 dogs, 6 sheep, split-to-scatter bridge (mixed layouts).",
+        21: "3 dogs, 6 sheep, partially scattered recovery.",
+        22: "3 dogs, 6 sheep, scattered sheep recovery.",
+        23: "3 dogs, 6 sheep, pen moves on same wall.",
+        24: "3 dogs, 6 sheep, pen can be on any wall.",
+        25: "3 dogs, 6 sheep, pen away from corners.",
+        26: "3 dogs, 6 sheep, interior pen challenge.",
+        27: "3 dogs, 6 sheep, random pen + random sheep.",
+        28: "3 dogs, 6 sheep, very far stray/split recovery.",
+        29: "3 dogs, 6 sheep, fully random scattered placements.",
+        30: "3 dogs, 6 sheep, all sheep spawned in field corners.",
+        31: "3 dogs, 6 sheep, corner-heavy bridge before hard random mixes.",
+        32: "3 dogs, 6 sheep, hard spawn mix with personality bias still off.",
+        33: "3 dogs, 6 sheep, phase 1 mild personality variation.",
+        34: "3 dogs, 6 sheep, phase 2 moderate personality variation.",
+        35: "3 dogs, 6 sheep, bridge stage with weaker cohesion but dog-pressure grouping still on.",
+        36: "3 dogs, 6 sheep, disable no-pressure cohesion.",
+        37: "3 dogs, 6 sheep, lower cohesion and stronger personalities.",
+        38: "3 dogs, 6 sheep, lowest cohesion and strongest personalities.",
+    }
+    return descriptions.get(stage, "Custom stage.")
 
 
 def available_stages() -> tuple[int, ...]:
@@ -1083,59 +1237,3 @@ def apply_training_profile(
     )
     return apply_curriculum_stage(updated_config, stage)
 
-
-def apply_curriculum_stage(config: LabConfig, stage: int) -> LabConfig:
-    """Return a copy of ``config`` with the stage's environment overrides applied.
-
-    Stage ``0`` returns the original config unchanged so curriculum is opt-in.
-    """
-
-    overrides = CURRICULUM_STAGES.get(stage)
-    if not overrides:
-        return config
-    new_environment = replace(config.environment, **overrides)
-    reward_overrides = CURRICULUM_REWARD_OVERRIDES.get(stage)
-    if reward_overrides:
-        new_rewards = replace(config.rewards, **reward_overrides)
-        return replace(config, environment=new_environment, rewards=new_rewards)
-    return replace(config, environment=new_environment)
-
-
-def stage_summary(stage: int) -> str:
-    """Return a short human-readable description of a curriculum stage."""
-
-    descriptions = {
-        1: "1 dog, 1 sheep, fixed easy placement.",
-        2: "1 dog, 1 sheep, mild random starts.",
-        3: "1 dog, 2 sheep, fixed easy flock.",
-        4: "1 dog, 2 sheep, randomized flock start.",
-        5: "2 dogs, 3 sheep, fixed easy teamwork.",
-        6: "2 dogs, 3 sheep, mostly grouped with occasional tiny nearby stray.",
-        7: "2 dogs, 4 sheep, early nearby stray collection starts (6-9 cells).",
-        8: "3 dogs, 4 sheep, larger field with frequent nearby strays (7-10 cells).",
-        9: "3 dogs, 4 sheep, nearby stray recovery emphasis (8-12 cells).",
-        10: "3 dogs, 5 sheep, nearby strays plus first farther stray (18-26 cells).",
-        11: "3 dogs, 5 sheep, stronger farther stray recovery (18-28 cells).",
-        12: "3 dogs, 6 sheep, group + one stray collection.",
-        13: "3 dogs, 6 sheep, two nearby strays collection.",
-        14: "3 dogs, 6 sheep, split flock (3+3) recovery.",
-        15: "3 dogs, 6 sheep, partially scattered recovery.",
-        16: "3 dogs, 6 sheep, scattered sheep recovery.",
-        17: "3 dogs, 6 sheep, pen moves on same wall.",
-        18: "3 dogs, 6 sheep, pen can be on any wall.",
-        19: "3 dogs, 6 sheep, pen away from corners.",
-        20: "3 dogs, 6 sheep, interior pen challenge.",
-        21: "3 dogs, 6 sheep, random pen + random sheep.",
-        22: "3 dogs, 6 sheep, very far stray/split recovery.",
-        23: "3 dogs, 6 sheep, fully random scattered placements.",
-        24: "3 dogs, 6 sheep, all sheep spawned in field corners.",
-        25: "3 dogs, 6 sheep, corner-heavy bridge before hard random mixes.",
-        26: "3 dogs, 6 sheep, hard spawn mix with personality bias still off.",
-        27: "3 dogs, 6 sheep, phase 1 mild personality variation.",
-        28: "3 dogs, 6 sheep, phase 2 moderate personality variation.",
-        29: "3 dogs, 6 sheep, bridge stage with weaker cohesion but dog-pressure grouping still on.",
-        30: "3 dogs, 6 sheep, disable no-pressure cohesion.",
-        31: "3 dogs, 6 sheep, lower cohesion and stronger personalities.",
-        32: "3 dogs, 6 sheep, lowest cohesion and strongest personalities.",
-    }
-    return descriptions.get(stage, "Custom stage.")

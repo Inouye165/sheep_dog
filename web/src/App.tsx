@@ -21,12 +21,14 @@ import {
   loadReplay,
   loadScenarioIndex,
   loadTrainingStatus,
+  pauseTraining,
   replayScenario,
   rewindTraining,
   resetJourneyTraining,
   runReplay,
   saveScenario,
   startTraining,
+  stopTraining,
 } from "./lib/api";
 import type { CheckpointMode } from "./lib/api";
 import type {
@@ -847,8 +849,52 @@ export function App() {
     }
   }
 
+  async function handlePauseTraining() {
+    setTrainingError(null);
+    setError(null);
+    try {
+      const status = await pauseTraining();
+      setTrainingStatus(status);
+    } catch (pauseError) {
+      setTrainingError(pauseError instanceof Error ? pauseError.message : "Unable to pause training.");
+    }
+  }
+
+  async function handleStopTraining() {
+    setTrainingError(null);
+    setError(null);
+    try {
+      const status = await stopTraining();
+      setTrainingStatus(status);
+    } catch (stopError) {
+      setTrainingError(stopError instanceof Error ? stopError.message : "Unable to stop training.");
+    }
+  }
+
+  async function handleResumeTraining() {
+    const request = trainingStatus?.resume_request;
+    const remainingEpisodes = trainingStatus?.resume_remaining_episodes ?? 0;
+    if (!request || remainingEpisodes <= 0) {
+      setTrainingError("No resumable training session is available.");
+      return;
+    }
+
+    setTrainingError(null);
+    setError(null);
+    try {
+      const status = await startTraining({
+        ...request,
+        episodes: remainingEpisodes,
+      });
+      setPromoteFromEpisode(null);
+      setTrainingStatus(status);
+    } catch (resumeError) {
+      setTrainingError(resumeError instanceof Error ? resumeError.message : "Unable to resume training.");
+    }
+  }
+
   async function handleClearTraining() {
-    if (!window.confirm("Clear all saved checkpoints, evaluations, and training state?")) {
+    if (!window.confirm("Permanently delete all checkpoints, evaluations, training state, AND ALL ARCHIVED JOURNEY HISTORY? This action is destructive and cannot be undone.")) {
       return;
     }
 
@@ -885,7 +931,7 @@ export function App() {
   }
 
   async function handleResetJourney() {
-    if (!window.confirm("Archive current results and restart training journey from Stage 1?")) {
+    if (!window.confirm("Archive your current training run/journey to the history log and start a fresh training journey from Stage 1? (Your current progress will be preserved in the archive).")) {
       return;
     }
 
@@ -1273,12 +1319,17 @@ export function App() {
                   onDebugRewardBreakdownChange={setTrainingDebugRewardBreakdown}
                   onAutoPromoteChange={setTrainingAutoPromote}
                   onStartTraining={handleStartTraining}
+                  onPauseTraining={handlePauseTraining}
+                  onStopTraining={handleStopTraining}
+                  onResumeTraining={handleResumeTraining}
                   onClearTraining={handleClearTraining}
                   onResetJourney={handleResetJourney}
                   onPromote={handlePromote}
                   currentBestEntry={currentBestEntry}
                   previousBestEntry={previousBestEntry}
                   seedEpisode={trainingStatus?.seed_episode ?? null}
+                  resumeAvailable={trainingStatus?.resume_available ?? false}
+                  resumeRemainingEpisodes={trainingStatus?.resume_remaining_episodes ?? null}
                 />
               ) : null}
 

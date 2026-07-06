@@ -26,8 +26,6 @@ def test_clear_training_restores_untrained_baseline(tmp_path: Path) -> None:
     (artifacts / "training-summary.json").write_text("{}", encoding="utf-8")
     (generated / "latest-replay.json").write_text("{}", encoding="utf-8")
 
-    manager = TrainingManager()
-
     config = LabConfig(
         training=TrainingConfig(
             episodes=1,
@@ -43,6 +41,7 @@ def test_clear_training_restores_untrained_baseline(tmp_path: Path) -> None:
             return config
 
     with patch("sheepdog.server.LabConfig", TestConfig):
+        manager = TrainingManager()
         payload, status = manager.clear()
 
     assert status == 200
@@ -88,7 +87,6 @@ def test_reset_journey_archives_and_resets_to_stage_one(tmp_path: Path) -> None:
     (artifacts / "training-summary.json").write_text("{}", encoding="utf-8")
     (generated / "latest-replay.json").write_text("{}", encoding="utf-8")
 
-    manager = TrainingManager()
     config = LabConfig(
         training=TrainingConfig(
             episodes=1,
@@ -104,6 +102,7 @@ def test_reset_journey_archives_and_resets_to_stage_one(tmp_path: Path) -> None:
             return config
 
     with patch("sheepdog.server.LabConfig", TestConfig):
+        manager = TrainingManager()
         payload, status = manager.reset_journey()
 
     assert status == 200
@@ -251,8 +250,6 @@ def test_run_live_replay_prefers_latest_trained_linear_artifact(tmp_path: Path) 
         encoding="utf-8",
     )
 
-    manager = TrainingManager()
-
     config = LabConfig(
         training=TrainingConfig(
             output_dir=str(artifacts),
@@ -297,6 +294,7 @@ def test_run_live_replay_prefers_latest_trained_linear_artifact(tmp_path: Path) 
         patch("sheepdog.server._load_playable_policy", fake_load_playable_policy),
         patch("sheepdog.server.SheepdogEnvironment", FakeEnvironment),
     ):
+        manager = TrainingManager()
         payload = manager.run_live_replay(11)
 
     effective_config = captured["config"]
@@ -315,8 +313,6 @@ def test_run_live_replay_honors_effective_stage_for_baseline(tmp_path: Path) -> 
     artifacts = tmp_path / "artifacts"
     generated = tmp_path / "web" / "public" / "generated"
     generated.mkdir(parents=True)
-
-    manager = TrainingManager()
 
     config = LabConfig(
         training=TrainingConfig(
@@ -361,6 +357,7 @@ def test_run_live_replay_honors_effective_stage_for_baseline(tmp_path: Path) -> 
         patch("sheepdog.server._load_playable_policy", fake_load_playable_policy),
         patch("sheepdog.server.SheepdogEnvironment", FakeEnvironment),
     ):
+        manager = TrainingManager()
         payload = manager.run_live_replay(
             17,
             policy_mode="instinct_only",
@@ -386,8 +383,6 @@ def test_run_live_replay_applies_environment_overrides(tmp_path: Path) -> None:
     generated = tmp_path / "web" / "public" / "generated"
     generated.mkdir(parents=True)
 
-    manager = TrainingManager()
-
     config = LabConfig(
         training=TrainingConfig(
             output_dir=str(artifacts),
@@ -431,6 +426,7 @@ def test_run_live_replay_applies_environment_overrides(tmp_path: Path) -> None:
         patch("sheepdog.server._load_playable_policy", fake_load_playable_policy),
         patch("sheepdog.server.SheepdogEnvironment", FakeEnvironment),
     ):
+        manager = TrainingManager()
         payload = manager.run_live_replay(
             42,
             policy_mode="instinct_only",
@@ -479,13 +475,153 @@ def test_initial_status_prefers_saved_stage_over_history_max(tmp_path: Path) -> 
     assert status["stage_history"] == {"2": 50, "5": 300}
 
 
+def test_initial_status_loads_paused_training_session(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    generated = tmp_path / "web" / "public" / "generated"
+    session_dir = artifacts / "startup"
+    artifacts.mkdir(parents=True)
+    generated.mkdir(parents=True)
+    session_dir.mkdir(parents=True)
+    (artifacts / "training-settings.json").write_text(
+        json.dumps(
+            {
+                "curriculum_stage": 3,
+                "enable_instinct_rewards": True,
+                "debug_reward_breakdown": False,
+                "auto_promote": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    session_payload = {
+        "state": "paused",
+        "requested_at": "2026-07-01T12:00:00Z",
+        "remaining_episodes": 12,
+        "training_request": {
+            "episodes": 50,
+            "fast_mode": True,
+            "enable_instinct_rewards": True,
+            "curriculum_stage": 3,
+            "debug_reward_breakdown": False,
+            "auto_promote": True,
+            "promote_from_checkpoint_episode": None,
+        },
+        "status": {
+            "message": "Pause requested; waiting for the current checkpoint to finish",
+            "requested_episodes": 24,
+            "batch_completed_episodes": 12,
+            "curriculum_stage": 3,
+        },
+    }
+    (session_dir / "training-session.json").write_text(json.dumps(session_payload), encoding="utf-8")
+
+    config = LabConfig(
+        training=TrainingConfig(
+            output_dir=str(artifacts),
+            web_export_dir=str(generated),
+        )
+    )
+
+    class TestConfig:
+        def __new__(cls):
+            return config
+
+    with patch("sheepdog.server.LabConfig", TestConfig):
+        manager = TrainingManager()
+        status = manager.snapshot()
+
+    assert status["phase"] == "paused"
+    assert status["running"] is False
+    assert status["resume_available"] is True
+    assert status["resume_remaining_episodes"] == 12
+    assert status["resume_request"]["episodes"] == 50
+    assert status["message"].startswith("Pause requested")
+
+
+def test_startup_auto_resumes_interrupted_running_session(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    generated = tmp_path / "web" / "public" / "generated"
+    session_dir = artifacts / "startup"
+    artifacts.mkdir(parents=True)
+    generated.mkdir(parents=True)
+    session_dir.mkdir(parents=True)
+    (session_dir / "training-session.json").write_text(
+        json.dumps(
+            {
+                "state": "running",
+                "remaining_episodes": 250,
+                "training_request": {
+                    "episodes": 500,
+                    "fast_mode": True,
+                    "enable_instinct_rewards": True,
+                    "curriculum_stage": 6,
+                    "debug_reward_breakdown": False,
+                    "auto_promote": True,
+                    "promote_from_checkpoint_episode": 249,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = LabConfig(
+        training=TrainingConfig(
+            output_dir=str(artifacts),
+            web_export_dir=str(generated),
+        )
+    )
+
+    class TestConfig:
+        def __new__(cls):
+            return config
+
+    start_calls: list[dict[str, object]] = []
+
+    def fake_start(
+        self,
+        requested_episodes,
+        fast_mode,
+        *,
+        enable_instinct_rewards=None,
+        curriculum_stage=None,
+        debug_reward_breakdown=None,
+        auto_promote=None,
+        promote_from_checkpoint_episode=None,
+    ):
+        start_calls.append(
+            {
+                "requested_episodes": requested_episodes,
+                "fast_mode": fast_mode,
+                "enable_instinct_rewards": enable_instinct_rewards,
+                "curriculum_stage": curriculum_stage,
+                "debug_reward_breakdown": debug_reward_breakdown,
+                "auto_promote": auto_promote,
+                "promote_from_checkpoint_episode": promote_from_checkpoint_episode,
+            }
+        )
+        return {"running": True}
+
+    with (
+        patch("sheepdog.server.LabConfig", TestConfig),
+        patch.object(TrainingManager, "start", autospec=True, side_effect=fake_start),
+    ):
+        TrainingManager()
+
+    assert len(start_calls) == 1
+    assert start_calls[0]["requested_episodes"] == 250
+    assert start_calls[0]["fast_mode"] is True
+    assert start_calls[0]["curriculum_stage"] == 6
+    assert start_calls[0]["enable_instinct_rewards"] is True
+    assert start_calls[0]["promote_from_checkpoint_episode"] == 249
+
+
+def test_training_manager_error_handling_on_setup_failure(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
 def test_training_manager_error_handling_on_setup_failure(tmp_path: Path) -> None:
     artifacts = tmp_path / "artifacts"
     generated = tmp_path / "web" / "public" / "generated"
     artifacts.mkdir(parents=True)
     generated.mkdir(parents=True)
-
-    manager = TrainingManager()
 
     config = LabConfig(
         training=TrainingConfig(
@@ -502,6 +638,7 @@ def test_training_manager_error_handling_on_setup_failure(tmp_path: Path) -> Non
         patch("sheepdog.server.LabConfig", TestConfig),
         patch("sheepdog.server._build_training_job_config", side_effect=ValueError("Simulated setup error")),
     ):
+        manager = TrainingManager()
         manager.start(requested_episodes=10, fast_mode=True)
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
@@ -533,8 +670,6 @@ def test_stage_25_does_not_plateau_stop_before_max_stage(tmp_path: Path) -> None
     artifacts.mkdir(parents=True)
     generated.mkdir(parents=True)
 
-    manager = TrainingManager()
-
     class TestConfig:
         def __new__(cls):
             return config
@@ -542,7 +677,7 @@ def test_stage_25_does_not_plateau_stop_before_max_stage(tmp_path: Path) -> None
     class FakeTrainer:
         total_episodes_trained = 0
 
-        def train(self, progress_callback=None):
+        def train(self, progress_callback=None, should_stop=None):
             assert progress_callback is not None
             for checkpoint_episode in range(21):
                 progress_callback(
@@ -579,6 +714,7 @@ def test_stage_25_does_not_plateau_stop_before_max_stage(tmp_path: Path) -> None
         patch("sheepdog.server.LabConfig", TestConfig),
         patch("sheepdog.server.create_trainer", return_value=FakeTrainer()),
     ):
+        manager = TrainingManager()
         manager.start(requested_episodes=21, fast_mode=True, curriculum_stage=25)
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
@@ -590,4 +726,148 @@ def test_stage_25_does_not_plateau_stop_before_max_stage(tmp_path: Path) -> None
     snap = manager.snapshot()
     assert snap["auto_promote_gate"]["reason"] == "Promotion criteria not met yet"
     assert snap["auto_promote_gate"]["decision"] == "hold"
+
+
+def test_start_training_auto_archives_existing_if_not_resuming(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    generated = tmp_path / "web" / "public" / "generated"
+    (artifacts / "checkpoints").mkdir(parents=True)
+    (artifacts / "evaluations").mkdir(parents=True)
+    (generated / "replays").mkdir(parents=True)
+
+    (artifacts / "checkpoints" / "checkpoint-000123.json").write_text("{}", encoding="utf-8")
+    (artifacts / "training-summary.json").write_text(
+        json.dumps({
+            "checkpoints": [
+                {
+                    "checkpoint_episode": 123,
+                    "checkpoint": "checkpoint-000123.json",
+                    "reward_config": {"instincts": {"curriculum_stage": 2}},
+                    "records": []
+                }
+            ]
+        }),
+        encoding="utf-8"
+    )
+
+    config = LabConfig(
+        training=TrainingConfig(
+            episodes=1,
+            checkpoint_episodes=(0,),
+            evaluation_seeds=(11,),
+            output_dir=str(artifacts),
+            web_export_dir=str(generated),
+        )
+    )
+
+    class TestConfig:
+        def __new__(cls):
+            return config
+
+    class FakeTrainer:
+        total_episodes_trained = 0
+        def train(self, progress_callback=None, should_stop=None):
+            pass
+
+    with (
+        patch("sheepdog.server.LabConfig", TestConfig),
+        patch("sheepdog.server.create_trainer", return_value=FakeTrainer()),
+    ):
+        manager = TrainingManager()
+        payload = manager.start(
+            requested_episodes=1,
+            fast_mode=True,
+            curriculum_stage=3,
+        )
+
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            snap = manager.snapshot()
+            if not snap["running"]:
+                break
+            time.sleep(0.1)
+
+    archive_root = artifacts / "archive"
+    archived_runs = sorted(path for path in archive_root.glob("journey-*") if path.is_dir())
+    assert archived_runs
+    latest_archive = archived_runs[-1]
+    assert (latest_archive / "checkpoints" / "checkpoint-000123.json").exists()
+    assert (latest_archive / "training-summary.json").exists()
+
+
+def test_auto_promotion_updates_batch_episodes(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    generated = tmp_path / "web" / "public" / "generated"
+    artifacts.mkdir(parents=True)
+    generated.mkdir(parents=True)
+
+    config = LabConfig(
+        training=TrainingConfig(
+            episodes=50,
+            checkpoint_episodes=(0,),
+            evaluation_seeds=(11,),
+            output_dir=str(artifacts),
+            web_export_dir=str(generated),
+        )
+    )
+
+    class TestConfig:
+        def __new__(cls):
+            return config
+
+    configs_seen = []
+
+    class FakeTrainer:
+        total_episodes_trained = 0
+        def __init__(self, cfg, output_dir):
+            self.cfg = cfg
+            configs_seen.append(cfg)
+
+        def train(self, progress_callback=None, should_stop=None):
+            # When Stage 1 runs, trigger early promotion
+            if self.cfg.rewards.instincts.curriculum_stage == 1:
+                from sheepdog.server import _EarlyPromotionSignal
+                raise _EarlyPromotionSignal(
+                    checkpoint_episode=10,
+                    best_success=1.0,
+                    qualified_streak=3,
+                    seed_gate_hits=3,
+                    full_success_hits=3,
+                )
+            else:
+                # For Stage 2, just raise an error to break the infinite loop once verified
+                raise ValueError("Stage 2 reached successfully")
+
+    with (
+        patch("sheepdog.server.LabConfig", TestConfig),
+        patch("sheepdog.server.create_trainer", side_effect=FakeTrainer),
+    ):
+        manager = TrainingManager()
+        manager.start(
+            requested_episodes=50,
+            fast_mode=True,
+            curriculum_stage=1,
+            auto_promote=True,
+        )
+
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            snap = manager.snapshot()
+            if not snap["running"]:
+                break
+            time.sleep(0.05)
+
+    snap = manager.snapshot()
+    assert not snap["running"]
+    assert snap["phase"] == "error"
+    assert "Stage 2 reached successfully" in str(snap["error"])
+
+    assert len(configs_seen) == 2
+    assert configs_seen[0].rewards.instincts.curriculum_stage == 1
+    assert configs_seen[0].training.episodes == 49
+
+    assert configs_seen[1].rewards.instincts.curriculum_stage == 2
+    assert configs_seen[1].training.episodes == 74
+
+
 
