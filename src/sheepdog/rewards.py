@@ -85,6 +85,8 @@ class RewardInputs:
     target_position: Position | None = None
     previous_farthest_distance: float = 0.0
     current_farthest_distance: float = 0.0
+    previous_dog_positions: tuple[Position, ...] = field(default_factory=tuple)
+    previous_sheep_positions: tuple[Position, ...] = field(default_factory=tuple)
 
 
 def _distance(a: Position, b: Position) -> float:
@@ -367,7 +369,7 @@ class RewardComputer:
             # Scale by the normalised distance so nearer strays cost less.
             stray_penalty = -inputs.current_farthest_distance * si_scale
 
-            # Add dense dog approach penalty for isolated strays
+            # Add dense dog approach penalty and progress reward for isolated strays
             if inputs.flock_centroid is not None and inputs.dog_positions and inputs.sheep_positions:
                 farthest_sheep = None
                 max_dist = -1.0
@@ -384,6 +386,17 @@ class RewardComputer:
                         min_dog_dist = min(_distance(dog, farthest_sheep) for dog in inputs.dog_positions)
                         # Dense approach penalty: 10x the stray ignore scale to provide a clear gradient
                         stray_penalty -= min_dog_dist * (si_scale * 10.0)
+
+                        # Dense approach progress reward: localized distance-based multiplier
+                        # when moving toward isolated farther_stray sheep.
+                        if inputs.previous_dog_positions:
+                            prev_min_dog_dist = min(_distance(dog, farthest_sheep) for dog in inputs.previous_dog_positions)
+                            progress = prev_min_dog_dist - min_dog_dist
+                            # Localized distance-based multiplier: increases as the sheep is more isolated
+                            isolation_multiplier = max(1.0, dist_to_centroid / 8.0)
+                            # Progress reward is scaled by the stray ignore penalty scale
+                            stray_approach_reward = progress * (si_scale * 20.0) * isolation_multiplier
+                            stray_penalty += stray_approach_reward
 
         return farthest_progress, stray_penalty
 

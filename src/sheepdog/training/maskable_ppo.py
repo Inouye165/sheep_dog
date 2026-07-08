@@ -356,16 +356,34 @@ class MaskablePPOTrainer(Trainer):
             _batch_done = completed_checkpoints - skip_segments - 1
             _batch_span = max(1, n_checkpoints - skip_segments - 1)
             _batch_progress = _batch_done / _batch_span
-            policy.model.learning_rate = (
+            
+            # Enforce 5e-5 floor on learning rate annealing
+            policy.model.learning_rate = max(
+                5e-5,
                 train_config.learning_rate
                 + (train_config.learning_rate_final - train_config.learning_rate) * _batch_progress
             )
+            # Apply training overrides for exploration and advantage estimation
+            policy.model.ent_coef = train_config.entropy_coef
+            policy.model.gae_lambda = train_config.gae_lambda
+            
             policy.model.learn(
                 total_timesteps=steps_per_segment,
                 reset_num_timesteps=True,
                 progress_bar=False,
                 callback=progress_reporter,
             )
+            
+            # Extract PPO diagnostics from model logger
+            logger_obj = getattr(policy.model, "logger", None)
+            approx_kl = 0.0
+            clip_fraction = 0.0
+            explained_variance = 0.0
+            if logger_obj is not None:
+                name_to_value = getattr(logger_obj, "name_to_value", {})
+                approx_kl = float(name_to_value.get("train/approx_kl", 0.0))
+                clip_fraction = float(name_to_value.get("train/clip_fraction", 0.0))
+                explained_variance = float(name_to_value.get("train/explained_variance", 0.0))
             if should_stop is not None and should_stop():
                 interrupted = True
                 break
@@ -500,6 +518,10 @@ class MaskablePPOTrainer(Trainer):
                     "summary": summary.to_dict(),
                     "best_score": summary.average_reward,
                     "message": f"Checkpoint {total_eps_this_checkpoint} exported",
+                    "approx_kl": approx_kl,
+                    "clip_fraction": clip_fraction,
+                    "explained_variance": explained_variance,
+                    "total_timesteps": cumulative_ts,
                 }
             )
 

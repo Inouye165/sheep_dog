@@ -498,7 +498,8 @@ describe("App", () => {
     render(<App />);
 
     await user.click(screen.getByRole("tab", { name: "Insights" }));
-    await user.click(screen.getByRole("tab", { name: "History" }));
+    const diagSection = screen.getByRole("region", { name: "Diagnostics" });
+    await user.click(within(diagSection).getByRole("tab", { name: "History" }));
     const historyTable = await screen.findByRole("table");
     const historyRows = () => within(historyTable).getAllByRole("row").slice(1);
     const rowEpisodes = () =>

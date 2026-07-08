@@ -102,8 +102,8 @@ select {
   width: min(1720px, 100%);
   margin: 0 auto;
   padding: 0.65rem 0.85rem max(0.85rem, env(safe-area-inset-bottom));
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   gap: 0.55rem;
   overflow: hidden;
 }
@@ -188,9 +188,11 @@ select {
 
 .layout-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.65fr) minmax(380px, 0.95fr);
+  grid-template-columns: minmax(0, 1.35fr) minmax(380px, 0.95fr);
+  grid-template-rows: minmax(0, 1fr);
   gap: 0.75rem;
   align-items: stretch;
+  flex: 1;
   min-height: 0;
 }
 
@@ -199,18 +201,21 @@ select {
   grid-template-rows: minmax(0, 1fr);
   gap: 0.7rem;
   min-height: 0;
+  height: 100%;
 }
 
 .side-column {
   display: grid;
   gap: 0.5rem;
   min-height: 0;
+  height: 100%;
 }
 
 .side-column--tabs {
   grid-template-rows: auto minmax(0, 1fr);
   min-height: 0;
   overflow: hidden;
+  height: 100%;
 }
 
 .side-panel-tabs {
@@ -269,6 +274,7 @@ select {
   grid-template-rows: auto auto auto minmax(0, 1fr);
   gap: 0.45rem;
   min-height: 0;
+  height: 100%;
 }
 
 .training-card {
@@ -791,6 +797,7 @@ select {
 /* ── Tab bar ── */
 .app-tab-bar {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.4rem;
   padding: 0.3rem;
   background: rgba(12, 24, 38, 0.9);
@@ -798,7 +805,7 @@ select {
   border-radius: 0.9rem;
   box-shadow: var(--shadow);
   margin-bottom: 0;
-  max-width: 680px;
+  max-width: 100%;
   backdrop-filter: blur(8px);
 }
 
@@ -1041,6 +1048,24 @@ select {
   gap: 0.65rem;
   height: 100%;
   min-height: 0;
+}
+
+.network-tab--scrollable {
+  display: flex !important;
+  flex-direction: column;
+  overflow-y: auto !important;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.4) transparent;
+  padding-right: 0.45rem;
+}
+
+.network-tab--scrollable::-webkit-scrollbar {
+  width: 6px;
+}
+
+.network-tab--scrollable::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.35);
+  border-radius: 999px;
 }
 
 .network-tab__header h2 {
@@ -1626,6 +1651,24 @@ select {
 }
 
 /* ── Config Panel ─────────────────────────────────────────────────────────── */
+
+.config-panel {
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto !important;
+  padding-right: 0.45rem;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.4) transparent;
+}
+
+.config-panel::-webkit-scrollbar {
+  width: 6px;
+}
+
+.config-panel::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.35);
+  border-radius: 999px;
+}
 
 .config-panel .training-card__header {
   align-items: flex-start;
@@ -2589,7 +2632,7 @@ select {
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
-  height: 100%;
+  flex: 1;
   min-height: 0;
 }
 
@@ -2825,6 +2868,9 @@ select {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
 }
 
 .results-panel__header {

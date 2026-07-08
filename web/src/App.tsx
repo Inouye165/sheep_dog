@@ -6,6 +6,7 @@ import { FieldView } from "./components/FieldView";
 import { NetworkTab } from "./components/NetworkTab";
 import { LayersTab } from "./components/LayersTab";
 import { StagesTab } from "./components/StagesTab";
+import { HistoryTab } from "./components/HistoryTab";
 import { ScenarioPanel } from "./components/ScenarioPanel";
 import { SavedScenariosPanel } from "./components/SavedScenariosPanel";
 import { TrainingPanel } from "./components/TrainingPanel";
@@ -42,7 +43,7 @@ import type {
 } from "./state/types";
 
 type RunState = "idle" | "running" | "paused" | "success" | "timeout" | "stopped";
-type ActiveTab = "train" | "watch" | "test" | "network" | "layers" | "stages" | "insights" | "results" | "config";
+type ActiveTab = "train" | "watch" | "test" | "network" | "layers" | "stages" | "insights" | "results" | "config" | "history";
 type RightRailTab = "training" | "controls" | "status" | "scenario" | "library";
 
 const APP_TABS: { id: ActiveTab; label: string }[] = [
@@ -52,6 +53,7 @@ const APP_TABS: { id: ActiveTab; label: string }[] = [
   { id: "network", label: "Network" },
   { id: "layers", label: "Layers" },
   { id: "stages", label: "Stages" },
+  { id: "history", label: "History" },
   { id: "insights", label: "Insights" },
   { id: "results", label: "Results" },
   { id: "config", label: "Config" },
@@ -1221,7 +1223,7 @@ export function App() {
         {tabButtons}
       </div>
 
-      {activeTab === "insights" || activeTab === "results" || activeTab === "config" || activeTab === "network" || activeTab === "layers" || activeTab === "stages" ? (
+      {activeTab === "insights" || activeTab === "results" || activeTab === "config" || activeTab === "network" || activeTab === "layers" || activeTab === "stages" || activeTab === "history" ? (
         <div className="insights-fullscreen">
           {activeTab === "stages" ? (
             <StagesTab />
@@ -1246,6 +1248,8 @@ export function App() {
             />
           ) : activeTab === "results" ? (
             <ResultsPanel checkpointIndex={checkpointIndex} />
+          ) : activeTab === "history" ? (
+            <HistoryTab />
           ) : (
             <ConfigPanel />
           )}

@@ -434,3 +434,24 @@ export interface NetworkTopologyInfo {
   action_masking_enabled: boolean;
   connectivity: string;
 }
+
+export interface TelemetryRecord {
+  timestamp: string;
+  step: number;
+  stage: number;
+  success_rate: number;
+  metrics: {
+    average_reward: number;
+    timeout_rate: number;
+    average_sheep_penned: number;
+    approx_kl?: number;
+    clip_fraction?: number;
+    explained_variance?: number;
+  };
+  hyperparameters: {
+    learning_rate: number;
+    learning_rate_final: number;
+    entropy_coef: number;
+    gae_lambda: number;
+  };
+}

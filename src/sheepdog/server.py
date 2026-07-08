@@ -40,6 +40,7 @@ from sheepdog.policies.factory import load_playable_policy
 from sheepdog.policies.heuristic import InstinctOnlyPolicy
 from sheepdog.training.factory import create_trainer
 from sheepdog.training.trainer import Trainer
+from sheepdog.training.telemetry import CurriculumTelemetryManager
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +54,22 @@ class ReplaySelection:
     policy_mode: str
     replay_mode: str
     total_training_episodes: int = 0
+
+
+class _RollbackSignal(Exception):
+    """Internal control-flow signal for curriculum rollback/demotion."""
+
+    def __init__(self, target_stage: int, healthy_checkpoint: int) -> None:
+        super().__init__("rollback")
+        self.target_stage = target_stage
+        self.healthy_checkpoint = healthy_checkpoint
+
+
+EVAL_SEED_BANK = (
+    101, 103, 107, 109, 113, 127, 131, 137, 139, 149,
+    151, 157, 163, 167, 173, 179, 181, 191, 193, 197,
+    199, 211, 223, 227, 229, 233, 239, 241, 251, 257
+)
 
 
 class _EarlyPromotionSignal(Exception):
@@ -672,9 +689,7 @@ def _build_training_job_config(
             steps_per_episode = 4_000
     else:
         steps_per_episode = 25_000
-    # Fast mode keeps latency low while using a small fixed seed set to reduce
-    # overfitting to a single deterministic scenario.
-    evaluation_seeds = (11, 23, 37) if fast_mode else config.training.evaluation_seeds
+    evaluation_seeds = (11, 23, 37) if fast_mode else EVAL_SEED_BANK
     total_timesteps = max(config.training.total_timesteps, total_episodes * steps_per_episode)
     training_config = TrainingConfig(
         trainer_type="maskable_ppo",
@@ -785,6 +800,7 @@ class TrainingManager:
         self._thread: threading.Thread | None = None
         self._control_request: str | None = None
         self._active_start_request: dict[str, Any] | None = None
+        self.telemetry_manager = CurriculumTelemetryManager(LabConfig().training.output_dir)
         self._reconcile_web_exports()
         self._status: dict[str, Any] = self._initial_status()
         self._resume_interrupted_session()
@@ -1994,6 +2010,7 @@ class TrainingManager:
                 current_stage = max(1, min(current_stage, max_stage))
             resume_checkpoint_episode = promote_from_checkpoint_episode
             promoted_stages = 0
+            last_healthy_checkpoint_episode: int | None = None
             output_root = Path(LabConfig().training.output_dir)
 
             stage_best_checkpoint_episode: int | None = None
@@ -2024,6 +2041,7 @@ class TrainingManager:
                     curriculum_stage=current_stage,
                     debug_reward_breakdown=debug_reward_breakdown,
                 )
+                self.telemetry_manager.initialize_wandb(config_dict=job_config.to_dict())
                 trainer = create_trainer(job_config, job_config.training.output_dir)
 
                 resuming_policy = trainer.total_episodes_trained > 0
@@ -2066,6 +2084,7 @@ class TrainingManager:
                     nonlocal stage_checkpoints_seen, stage_no_improvement_streak
                     nonlocal stage_batch_completed_episodes
                     nonlocal last_persisted_completed_episodes
+                    nonlocal last_healthy_checkpoint_episode
 
                     checkpoint_episode = payload.get("checkpoint_episode")
                     summary = payload.get("summary")
@@ -2101,6 +2120,12 @@ class TrainingManager:
                         "error_type": None,
                         "traceback": None,
                     }
+                    if "approx_kl" in payload:
+                        update["approx_kl"] = payload["approx_kl"]
+                    if "clip_fraction" in payload:
+                        update["clip_fraction"] = payload["clip_fraction"]
+                    if "explained_variance" in payload:
+                        update["explained_variance"] = payload["explained_variance"]
                     if total_trained is not None:
                         update["total_episodes_trained"] = total_trained
                     if checkpoint_episode is not None:
@@ -2232,6 +2257,60 @@ class TrainingManager:
                         update["starting_episode"] = total_trained
                     early_promotion_signal: _EarlyPromotionSignal | None = None
                     if isinstance(summary, dict) and phase == "checkpoint":
+                        # Auto-Demotion Gate (Rollback):
+                        # check if the success rate plummets below 35% after a promotion
+                        if (
+                            promoted_stages > 0
+                            and success_rate >= 0.0
+                            and success_rate < 0.35
+                            and last_healthy_checkpoint_episode is not None
+                        ):
+                            target_stage = max(1, current_stage - 1)
+                            update["message"] = (
+                                f"Success rate ({success_rate:.0%}) plummeted below 35% after promotion; "
+                                f"rolling back to Stage {target_stage} and reloading checkpoint ep {last_healthy_checkpoint_episode}"
+                            )
+                            self._update_status(update)
+                            self._persist_training_session(
+                                state="running",
+                                status=dict(self._status),
+                                request=self._active_start_request,
+                            )
+                            raise _RollbackSignal(
+                                target_stage=target_stage,
+                                healthy_checkpoint=last_healthy_checkpoint_episode,
+                            )
+
+                        # Log telemetry at checkpoint evaluation
+                        approx_kl = float(payload.get("approx_kl", 0.0))
+                        clip_fraction = float(payload.get("clip_fraction", 0.0))
+                        explained_variance = float(payload.get("explained_variance", 0.0))
+                        total_ts = int(payload.get("total_timesteps", 0))
+
+                        metrics_dict = {
+                            "average_reward": float(summary.get("average_reward", 0.0)),
+                            "timeout_rate": float(summary.get("timeout_rate", 0.0)),
+                            "average_sheep_penned": float(summary.get("average_sheep_penned", 0.0)),
+                            "approx_kl": approx_kl,
+                            "clip_fraction": clip_fraction,
+                            "explained_variance": explained_variance,
+                        }
+
+                        hyperparameters_dict = {
+                            "learning_rate": job_config.training.learning_rate,
+                            "learning_rate_final": job_config.training.learning_rate_final,
+                            "entropy_coef": job_config.training.entropy_coef,
+                            "gae_lambda": job_config.training.gae_lambda,
+                        }
+
+                        self.telemetry_manager.log(
+                            step=total_ts,
+                            stage=stage,
+                            success_rate=success_rate,
+                            metrics=metrics_dict,
+                            hyperparameters=hyperparameters_dict,
+                        )
+
                         promotion_checkpoint_episode: int | None = None
                         if stage_best_checkpoint_episode is not None:
                             promotion_checkpoint_episode = int(stage_best_checkpoint_episode)
@@ -2423,11 +2502,49 @@ class TrainingManager:
                 )
 
                 early_promotion: _EarlyPromotionSignal | None = None
+                rollback_signal: _RollbackSignal | None = None
                 try:
                     trainer.train(progress_callback=progress_callback, should_stop=should_stop)
                 except _EarlyPromotionSignal as signal:
                     early_promotion = signal
                     stage_best_checkpoint_episode = signal.checkpoint_episode
+                except _RollbackSignal as signal:
+                    rollback_signal = signal
+
+                if rollback_signal is not None:
+                    promoted_stages = max(0, promoted_stages - 1)
+                    current_stage = rollback_signal.target_stage
+                    resume_checkpoint_episode = rollback_signal.healthy_checkpoint
+                    stage_best_checkpoint_episode = None
+                    stage_best_rank = (-1.0, float("-inf"), float("-inf"), float("-inf"))
+                    stage_best_reward = float("-inf")
+                    stage_qualified_streak = 0
+                    stage_seed_gate_hits = 0
+                    stage_full_success_hits = 0
+                    stage_seed_count = 0
+                    stage_checkpoints_seen = 0
+                    stage_no_improvement_streak = 0
+                    stage_batch_completed_episodes = 0
+                    
+                    batch_episodes = RECOMMENDED_EPISODES_BY_STAGE.get(current_stage, 100)
+                    total_episodes = batch_episodes
+
+                    self._update_status(
+                        {
+                            "curriculum_stage": current_stage,
+                            "auto_promote_stages_completed": promoted_stages,
+                            "requested_episodes": total_episodes,
+                            "batch_total_episodes": batch_episodes,
+                            "batch_completed_episodes": 0,
+                            "completed_episodes": 0,
+                            "message": (
+                                f"Curriculum rolled back to Stage {current_stage} after post-promotion collapse. "
+                                f"Resuming from checkpoint ep {resume_checkpoint_episode}."
+                            ),
+                        }
+                    )
+                    continue
+
                 control_request = self._control_request
 
                 completed_for_stage = (
@@ -2620,6 +2737,7 @@ class TrainingManager:
                     resume_checkpoint_episode = stage_best_checkpoint_episode
                     break
 
+                last_healthy_checkpoint_episode = stage_best_checkpoint_episode
                 promoted_stages += 1
                 current_stage = stage + 1
                 _append_promotion_history(
@@ -2805,6 +2923,18 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                 self._json_response({"error": "Forbidden"}, status=HTTPStatus.FORBIDDEN)
                 return
             self._file_response(target)
+            return
+        if request_path == "/api/training/history":
+            history_path = Path(LabConfig().training.output_dir) / "training_history.json"
+            if history_path.exists():
+                try:
+                    with open(history_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    self._json_response(data)
+                except Exception:
+                    self._json_response([])
+            else:
+                self._json_response([])
             return
         if request_path == "/api/training/status":
             self._json_response(self.manager.snapshot())

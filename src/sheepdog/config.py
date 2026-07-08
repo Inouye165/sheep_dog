@@ -205,7 +205,7 @@ class TrainingConfig:
     batch_size: int = 64
     total_timesteps: int = 500_000
     gamma: float = 0.99
-    gae_lambda: float = 0.95
+    gae_lambda: float = 0.98
     clip_range: float = 0.2
     entropy_coef: float = 0.01
     value_coef: float = 0.5

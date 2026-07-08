@@ -793,7 +793,7 @@ class Trainer:
         def _export_record(record: dict[str, Any]) -> dict[str, Any]:
             source_path = Path(record["replay_path"])
             target_path = replay_output_dir / source_path.name
-            if source_path.exists():
+            if source_path.exists() and not target_path.exists():
                 target_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
             exported_record = dict(record)
             exported_record["replay_path"] = f"/generated/replays/{target_path.name}"

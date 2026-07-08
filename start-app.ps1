@@ -449,11 +449,12 @@ try {
         -StdOutLog $backendOut `
         -StdErrLog $backendErr `
         -TimeoutSeconds $backendStartupTimeoutSeconds
-
     if ($null -ne $resumeTraining) {
         Write-Host "Resuming training with $($resumeTraining.remainingEpisodes) remaining episodes..."
         $resumeResponse = Invoke-JsonPost -Uri "http://127.0.0.1:$backendPort/api/training/start" -Body $resumeTraining.request
-        Write-Host ($resumeResponse.message ?? 'Training resume requested.')
+        $msg = $resumeResponse.message
+        if ($null -eq $msg) { $msg = 'Training resume requested.' }
+        Write-Host $msg
     }
 
     Write-Host 'Starting web viewer on http://127.0.0.1:5173'

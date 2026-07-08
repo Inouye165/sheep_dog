@@ -289,6 +289,14 @@ class SheepdogEnvironment:
         self._previous_average_distance = self._average_distance_to_pen()
         self._previous_flock_spread = self._flock_spread()
         self._previous_farthest_distance = self._farthest_distance_to_pen()
+        self._previous_dog_positions = tuple(
+            (float(dog.position.x), float(dog.position.y)) for dog in self._dogs
+        )
+        self._previous_sheep_positions = tuple(
+            (float(sheep.position.x), float(sheep.position.y))
+            for sheep in self._sheep
+            if not sheep.penned
+        )
         return self.get_state_snapshot()
 
     def reset_from_scenario(self, scenario: object) -> EnvironmentSnapshot:
@@ -360,6 +368,14 @@ class SheepdogEnvironment:
         self._previous_average_distance = self._average_distance_to_pen()
         self._previous_flock_spread = self._flock_spread()
         self._previous_farthest_distance = self._farthest_distance_to_pen()
+        self._previous_dog_positions = tuple(
+            (float(dog.position.x), float(dog.position.y)) for dog in self._dogs
+        )
+        self._previous_sheep_positions = tuple(
+            (float(sheep.position.x), float(sheep.position.y))
+            for sheep in self._sheep
+            if not sheep.penned
+        )
         return self.get_state_snapshot()
 
     def _sample_pen_origin_and_opening(self) -> tuple[Point, str]:
@@ -864,12 +880,18 @@ class SheepdogEnvironment:
                 target_position=(float(self._pen.center.x), float(self._pen.center.y)),
                 previous_farthest_distance=self._previous_farthest_distance,
                 current_farthest_distance=current_farthest_to_pen,
+                previous_dog_positions=self._previous_dog_positions,
+                previous_sheep_positions=self._previous_sheep_positions,
             )
         )
         self._reward_total += breakdown.total
         self._previous_average_distance = current_snapshot.average_distance_to_pen
         self._previous_flock_spread = current_snapshot.flock_spread
         self._previous_farthest_distance = current_farthest_to_pen
+        self._previous_dog_positions = tuple(
+            (float(dog.position.x), float(dog.position.y)) for dog in self._dogs
+        )
+        self._previous_sheep_positions = unpenned_sheep_positions
 
         final_snapshot = self.get_state_snapshot()
 

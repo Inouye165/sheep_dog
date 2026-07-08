@@ -131,7 +131,7 @@ export function NetworkTab({ checkpointIndex, trainingStatus, effectiveConfig, t
   const maskEnabled = topologyInfo?.action_masking_enabled ?? trainingConfig.invalidActionMasking ?? true;
 
   return (
-    <section className="network-tab" aria-label="Neural network architecture">
+    <section className="network-tab network-tab--scrollable" aria-label="Neural network architecture">
       <div className="network-tab__header">
         <div>
           <p className="eyebrow">Model Card</p>
