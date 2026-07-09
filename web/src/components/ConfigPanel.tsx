@@ -146,7 +146,7 @@ const TRAINING_FIELDS: HParamFieldDef[] = [
   { key: "gae_lambda", label: "GAE lambda (λ)", note: "advantage estimation smoothing", min: 0.8, max: 1, step: 0.005 },
   { key: "clip_range", label: "Clip range", note: "PPO clip ε", min: 0.05, max: 0.5, step: 0.01 },
   { key: "rollout_steps", label: "Rollout steps", note: "steps per update buffer", min: 512, max: 8192, step: 512 },
-  { key: "batch_size", label: "Batch size", note: "mini-batch size for gradient updates", min: 32, max: 512, step: 32 },
+  { key: "batch_size", label: "Batch size", note: "mini-batch size for gradient updates", min: 32, max: 2048, step: 32 },
   { key: "value_coef", label: "Value coef", note: "weight of the value-function loss", min: 0.1, max: 1, step: 0.05 },
 ];
 

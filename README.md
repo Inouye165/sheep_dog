@@ -44,6 +44,8 @@ To stop both services:
 .\stop-app.ps1
 ```
 
+If training is active, `stop-app.ps1` now asks the backend to persist the last complete checkpoint before it shuts the processes down. The next `start-app.ps1` run will prompt you to resume a paused or stopped training session if one is available. If the app was interrupted unexpectedly during a running batch, startup now auto-resumes from the last persisted safe point instead.
+
 To restart both services:
 
 ```powershell

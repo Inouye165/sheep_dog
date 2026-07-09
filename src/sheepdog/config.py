@@ -198,14 +198,14 @@ class TrainingConfig:
     candidate_evaluation_seeds: tuple[int, ...] = (91, 92, 93, 94, 95)
     candidate_pool_size: int = 4
     mutation_scale: float = 0.08
-    neural_hidden_sizes: tuple[int, ...] = (128, 128)
+    neural_hidden_sizes: tuple[int, ...] = (256, 256)
     learning_rate: float = 1e-4
     learning_rate_final: float = 3e-5
     rollout_steps: int = 2048
-    batch_size: int = 64
+    batch_size: int = 1024
     total_timesteps: int = 500_000
     gamma: float = 0.99
-    gae_lambda: float = 0.95
+    gae_lambda: float = 0.98
     clip_range: float = 0.2
     entropy_coef: float = 0.01
     value_coef: float = 0.5
@@ -230,6 +230,8 @@ class TrainingConfig:
     # strategy targets; "emergent" strips roles/targets so the model must learn
     # herding purely from raw observations and reward signal.
     observation_mode: str = "guided"
+    # Weights & Biases telemetry tracking integration toggle.
+    wandb_enabled: bool = False
 
 
 @dataclass(frozen=True, slots=True)

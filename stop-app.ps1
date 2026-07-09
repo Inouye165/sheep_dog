@@ -7,6 +7,40 @@ $backendPort = 8000
 $webPort = 5173
 $stoppedPidSet = @{}
 
+function Invoke-JsonPost {
+    param(
+        [Parameter(Mandatory = $true)][string]$Uri,
+        [object]$Body = @{}
+    )
+
+    return Invoke-RestMethod -Method Post -Uri $Uri -ContentType 'application/json' -Body (
+        $Body | ConvertTo-Json -Depth 10 -Compress
+    )
+}
+
+function Wait-ForTrainingShutdown {
+    param(
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $status = Invoke-RestMethod -Method Get -Uri "http://127.0.0.1:$backendPort/api/training/status" -TimeoutSec 2
+            if ($null -eq $status.running -or -not [bool]$status.running) {
+                return $true
+            }
+        }
+        catch {
+            return $true
+        }
+
+        Start-Sleep -Milliseconds 500
+    }
+
+    return $false
+}
+
 function Stop-ProcessIfRunning {
     param(
         [Parameter(Mandatory = $true)][int]$Id
@@ -61,6 +95,16 @@ $watchdogPid = $null
 $stoppedByPort = @()
 
 Write-Host 'Stopping sheepdog services...'
+
+try {
+    Invoke-JsonPost -Uri "http://127.0.0.1:$backendPort/api/training/stop" | Out-Null
+    if (-not (Wait-ForTrainingShutdown -TimeoutSeconds 30)) {
+        Write-Host 'Training stop request timed out; forcing process shutdown.'
+    }
+}
+catch {
+    Write-Host 'Unable to request a graceful training stop; falling back to process shutdown.'
+}
 
 if (Test-Path $pidFile) {
     try {

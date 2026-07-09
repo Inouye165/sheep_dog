@@ -123,6 +123,9 @@ interface TrainingPanelProps {
   onDebugRewardBreakdownChange: (enabled: boolean) => void;
   onAutoPromoteChange: (enabled: boolean) => void;
   onStartTraining: () => void;
+  onPauseTraining: () => void;
+  onStopTraining: () => void;
+  onResumeTraining: () => void;
   onClearTraining: () => void;
   onResetJourney: () => void;
   onPromote: () => void;
@@ -130,6 +133,8 @@ interface TrainingPanelProps {
   previousBestEntry?: CheckpointEntry | null;
   seedEpisode?: number | null;
   startingEpisode?: number | null;
+  resumeAvailable?: boolean;
+  resumeRemainingEpisodes?: number | null;
 }
 
 export function TrainingPanel({
@@ -179,6 +184,9 @@ export function TrainingPanel({
   onDebugRewardBreakdownChange,
   onAutoPromoteChange,
   onStartTraining,
+  onPauseTraining,
+  onStopTraining,
+  onResumeTraining,
   onClearTraining,
   onResetJourney,
   onPromote,
@@ -186,6 +194,8 @@ export function TrainingPanel({
   previousBestEntry,
   seedEpisode,
   startingEpisode,
+  resumeAvailable = false,
+  resumeRemainingEpisodes = null,
 }: TrainingPanelProps) {
   const denominator = batchTotalEpisodes || episodes;
   const progress = denominator === 0 ? 0 : Math.min(1, batchCompletedEpisodes / denominator);
@@ -204,6 +214,7 @@ export function TrainingPanel({
   const hasPromotionHeadroom = curriculumStage < maxCurriculumStage;
   const canPromote = hasPromotionHeadroom && !busy;
   const readyToPromote = canPromote && successRate !== null && successRate >= PROMOTE_THRESHOLD;
+  const canResume = !busy && resumeAvailable && (resumeRemainingEpisodes ?? 0) > 0;
   const effectiveAutoPromoteThreshold = autoPromoteThreshold ?? PROMOTE_THRESHOLD;
   const hasAutoPromoteGate = autoPromoteGate != null;
   const decisionToneClass =
@@ -369,12 +380,35 @@ export function TrainingPanel({
         <button type="button" className="button-row__primary" onClick={onStartTraining} disabled={busy}>
           {running ? "Training..." : `Train ${episodes} more`}
         </button>
+        {running ? (
+          <>
+            <button type="button" onClick={onPauseTraining} disabled={clearing}>
+              Pause after checkpoint
+            </button>
+            <button type="button" className="button-row__danger" onClick={onStopTraining} disabled={clearing}>
+              Stop after checkpoint
+            </button>
+          </>
+        ) : canResume ? (
+          <button type="button" onClick={onResumeTraining} disabled={clearing}>
+            Resume {resumeRemainingEpisodes} remaining
+          </button>
+        ) : null}
         <button type="button" className="button-row__danger" onClick={onClearTraining} disabled={busy}>
           {clearing ? "Clearing..." : "Clear"}
         </button>
         <button type="button" onClick={onResetJourney} disabled={busy}>
           Reset Journey
         </button>
+      </div>
+
+      <div style={{ marginTop: "0.75rem", fontSize: "0.75rem", color: "var(--muted)", display: "flex", flexDirection: "column", gap: "0.35rem", borderTop: "1px solid var(--panel-border)", paddingTop: "0.75rem", lineHeight: "1.4" }}>
+        <div>
+          <strong style={{ color: "var(--accent)" }}>Clear:</strong> Deletes current checkpoints, evaluations, and permanently deletes all archived journey history.
+        </div>
+        <div>
+          <strong style={{ color: "var(--text)", opacity: 0.9 }}>Reset Journey:</strong> Archives current training progress to the history log and starts a fresh journey from Stage 1.
+        </div>
       </div>
 
       <div className="training-summary">

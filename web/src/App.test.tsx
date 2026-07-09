@@ -498,7 +498,8 @@ describe("App", () => {
     render(<App />);
 
     await user.click(screen.getByRole("tab", { name: "Insights" }));
-    await user.click(screen.getByRole("tab", { name: "History" }));
+    const diagSection = screen.getByRole("region", { name: "Diagnostics" });
+    await user.click(within(diagSection).getByRole("tab", { name: "History" }));
     const historyTable = await screen.findByRole("table");
     const historyRows = () => within(historyTable).getAllByRole("row").slice(1);
     const rowEpisodes = () =>
@@ -829,6 +830,121 @@ describe("App", () => {
           fast_mode: true,
           enable_instinct_rewards: false,
           curriculum_stage: 1,
+          debug_reward_breakdown: false,
+          auto_promote: true,
+        }),
+      }),
+    );
+  });
+
+  it("requests a graceful pause from the training panel while a run is active", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.includes("/api/training/pause")) {
+        return jsonResponse({
+          ...idleTrainingStatus,
+          running: true,
+          phase: "paused",
+          message: "Pause requested; waiting for the current checkpoint to finish",
+        });
+      }
+      if (path.includes("/api/training/status")) {
+        return jsonResponse({
+          ...idleTrainingStatus,
+          running: true,
+          requested_episodes: 50,
+          batch_total_episodes: 50,
+          batch_completed_episodes: 12,
+          current_episode: 12,
+          message: "Training in progress",
+        });
+      }
+      if (path.includes("checkpoint-index.json")) {
+        return jsonResponse(checkpointIndex);
+      }
+      if (path.includes("checkpoint-000000-seed-000011.json")) {
+        return jsonResponse(replay);
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Pause after checkpoint" })).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: "Pause after checkpoint" }));
+
+    const pauseCall = fetchMock.mock.calls.find(([request]) =>
+      String(request).includes("/api/training/pause"),
+    );
+    expect(pauseCall?.[1]).toEqual(
+      expect.objectContaining({
+        cache: "no-store",
+        method: "POST",
+      }),
+    );
+  });
+
+  it("resumes a saved training session using only the remaining episodes", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.includes("/api/training/start")) {
+        return jsonResponse({
+          ...idleTrainingStatus,
+          running: true,
+          requested_episodes: 12,
+          batch_total_episodes: 12,
+          curriculum_stage: 4,
+          enable_instinct_rewards: true,
+          message: "Queued training job",
+        });
+      }
+      if (path.includes("/api/training/status")) {
+        return jsonResponse({
+          ...idleTrainingStatus,
+          phase: "paused",
+          message: "Training paused; 12 episodes remain for resume",
+          curriculum_stage: 4,
+          enable_instinct_rewards: true,
+          resume_available: true,
+          resume_remaining_episodes: 12,
+          resume_request: {
+            episodes: 50,
+            fast_mode: true,
+            enable_instinct_rewards: true,
+            curriculum_stage: 4,
+            debug_reward_breakdown: false,
+            auto_promote: true,
+          },
+        });
+      }
+      if (path.includes("checkpoint-index.json")) {
+        return jsonResponse(checkpointIndex);
+      }
+      if (path.includes("checkpoint-000000-seed-000011.json")) {
+        return jsonResponse(replay);
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Resume 12 remaining" })).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: "Resume 12 remaining" }));
+
+    const resumeCall = fetchMock.mock.calls.find(([request]) =>
+      String(request).includes("/api/training/start"),
+    );
+    expect(resumeCall?.[1]).toEqual(
+      expect.objectContaining({
+        cache: "no-store",
+        method: "POST",
+        body: JSON.stringify({
+          episodes: 12,
+          fast_mode: true,
+          enable_instinct_rewards: true,
+          curriculum_stage: 4,
           debug_reward_breakdown: false,
           auto_promote: true,
         }),

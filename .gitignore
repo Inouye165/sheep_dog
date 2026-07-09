@@ -17,3 +17,28 @@ web/public/generated/
 
 .DS_Store
 Thumbs.db
+
+# Logs
+*.log
+
+# Zips
+*.zip
+
+# Test outputs
+pytest_out.txt
+pytest_rest.txt
+pytest_subset.txt
+web/test_output.txt
+web/test_full_output.txt
+
+# Environment variables
+.env
+.env.*
+
+# WandB logs
+wandb/
+
+# Local test outputs
+fresh_test_artifacts/
+
+

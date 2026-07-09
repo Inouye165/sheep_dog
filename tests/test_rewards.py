@@ -200,3 +200,62 @@ def test_wrong_hold_penalty_triggers_only_for_stalled_control() -> None:
     assert penalty_breakdown.wrong_hold_penalty < 0
     assert valid_hold_breakdown.stalled_control_penalty == 0.0
     assert valid_hold_breakdown.wrong_hold_penalty == 0.0
+
+
+def test_stray_approach_reward_for_isolated_stray() -> None:
+    config = RewardConfig(stray_ignore_penalty_scale=0.01)
+    computer = RewardComputer(config)
+
+    # 1. Moving closer to isolated stray -> positive approach reward should reduce the penalty
+    closer_inputs = RewardInputs(
+        previous_average_distance=10.0,
+        current_average_distance=10.0,
+        previous_flock_spread=2.0,
+        current_flock_spread=2.0,
+        newly_penned=0,
+        no_progress_step=False,
+        touched_wall=False,
+        waited_without_reason=False,
+        terminated=False,
+        timeout=False,
+        success=False,
+        # Farthest sheep is at (30.0, 10.0), target/pen is at (0.0, 10.0) -> current_farthest_distance = 30.0
+        current_farthest_distance=30.0,
+        previous_farthest_distance=30.0,
+        # Flock centroid is at (10.0, 10.0) -> farthest sheep is isolated (dist = 20.0 > 8.0)
+        flock_centroid=(10.0, 10.0),
+        target_position=(0.0, 10.0),
+        sheep_positions=((30.0, 10.0), (10.0, 10.0)),
+        # Dog moved from (25.0, 10.0) to (27.0, 10.0) -> closer by 2.0 units
+        previous_dog_positions=((25.0, 10.0),),
+        dog_positions=((27.0, 10.0),),
+    )
+
+    # 2. Moving away from isolated stray -> negative progress should increase the penalty
+    further_inputs = RewardInputs(
+        previous_average_distance=10.0,
+        current_average_distance=10.0,
+        previous_flock_spread=2.0,
+        current_flock_spread=2.0,
+        newly_penned=0,
+        no_progress_step=False,
+        touched_wall=False,
+        waited_without_reason=False,
+        terminated=False,
+        timeout=False,
+        success=False,
+        current_farthest_distance=30.0,
+        previous_farthest_distance=30.0,
+        flock_centroid=(10.0, 10.0),
+        target_position=(0.0, 10.0),
+        sheep_positions=((30.0, 10.0), (10.0, 10.0)),
+        # Dog moved from (27.0, 10.0) to (25.0, 10.0) -> further by 2.0 units
+        previous_dog_positions=((27.0, 10.0),),
+        dog_positions=((25.0, 10.0),),
+    )
+
+    breakdown_closer = computer.compute(closer_inputs)
+    breakdown_further = computer.compute(further_inputs)
+
+    assert breakdown_closer.stray_ignore_penalty > breakdown_further.stray_ignore_penalty
+

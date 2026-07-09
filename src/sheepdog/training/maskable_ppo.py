@@ -42,6 +42,7 @@ class _TrainingProgressCallback(BaseCallback):
         self,
         emit: Callable[[dict[str, Any]], None],
         *,
+        should_stop: Callable[[], bool] | None,
         report_interval: int,
         total_timesteps: int,
         starting_total_episodes: int,
@@ -51,6 +52,7 @@ class _TrainingProgressCallback(BaseCallback):
     ) -> None:
         super().__init__()
         self._emit = emit
+        self._should_stop = should_stop
         self._report_interval = max(1, report_interval)
         self._total_timesteps = max(1, total_timesteps)
         self._starting_total_episodes = starting_total_episodes
@@ -60,6 +62,8 @@ class _TrainingProgressCallback(BaseCallback):
         self._last_reported_steps = 0
 
     def _on_step(self) -> bool:
+        if self._should_stop is not None and self._should_stop():
+            return False
         num_timesteps = int(self.num_timesteps)
         if (
             num_timesteps < self._total_timesteps
@@ -86,6 +90,24 @@ class _TrainingProgressCallback(BaseCallback):
             }
         )
         return True
+
+
+import functools
+
+def _wandb_finish_on_exit(func):
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return func(self, *args, **kwargs)
+        finally:
+            try:
+                import wandb
+                if wandb.run is not None:
+                    wandb.finish()
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Failed to finish wandb run: {e}")
+    return wrapper
 
 
 class MaskablePPOTrainer(Trainer):
@@ -122,35 +144,37 @@ class MaskablePPOTrainer(Trainer):
         import copy
         sig = copy.deepcopy(sig)
 
-        # 1. Identify curriculum stage
-        stage = 0
-        if "rewards" in sig and isinstance(sig["rewards"], dict):
-            instincts = sig["rewards"].get("instincts")
-            if isinstance(instincts, dict):
-                stage = int(instincts.get("curriculum_stage", 0))
+        from sheepdog.curriculum import CURRICULUM_REWARD_OVERRIDES
 
-        # 2. Strip instinct toggles
+        # 1. Strip instinct toggles (runtime flags, not architecture).
         if "rewards" in sig and isinstance(sig["rewards"], dict):
             instincts = sig["rewards"].get("instincts")
             if isinstance(instincts, dict):
                 for key in ("curriculum_stage", "debug_reward_breakdown", "enable_instinct_rewards"):
                     instincts.pop(key, None)
 
-        # 3. Strip environment overrides if curriculum stage is active
-        from sheepdog.curriculum import CURRICULUM_STAGES, CURRICULUM_REWARD_OVERRIDES
-        if stage in CURRICULUM_STAGES:
-            env_overrides = CURRICULUM_STAGES[stage]
-            if "environment" in sig and isinstance(sig["environment"], dict):
-                for key in ("dog_speed", "sheep_speed"):
-                    if key in env_overrides:
-                        sig["environment"].pop(key, None)
+        # 2. Strip curriculum-controlled environment speeds symmetrically.
+        # These are tuned per stage and do not affect the network architecture,
+        # so they must be dropped from every signature regardless of the stage
+        # embedded in it.
+        if "environment" in sig and isinstance(sig["environment"], dict):
+            for key in ("dog_speed", "sheep_speed"):
+                sig["environment"].pop(key, None)
 
-        # 4. Strip reward overrides if curriculum reward overrides are active
-        if stage in CURRICULUM_REWARD_OVERRIDES:
-            reward_overrides = CURRICULUM_REWARD_OVERRIDES[stage]
-            if "rewards" in sig and isinstance(sig["rewards"], dict):
-                for key in reward_overrides:
-                    sig["rewards"].pop(key, None)
+        # 3. Strip every curriculum reward-override key symmetrically.
+        # Stripping only the current stage's override keys is asymmetric: the
+        # first stage that introduces overrides (stage 7) would never match the
+        # prior stage's stored signature, forcing a needless from-scratch model
+        # reset on promotion. Dropping the union of all override keys from every
+        # signature keeps the comparison stable across the whole curriculum.
+        if "rewards" in sig and isinstance(sig["rewards"], dict):
+            override_keys = {
+                key
+                for overrides in CURRICULUM_REWARD_OVERRIDES.values()
+                for key in overrides
+            }
+            for key in override_keys:
+                sig["rewards"].pop(key, None)
 
         return sig
 
@@ -194,9 +218,11 @@ class MaskablePPOTrainer(Trainer):
             "incomplete_batch": payload.get("incomplete_batch"),
         }
 
+    @_wandb_finish_on_exit
     def train(
         self,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> NeuralTrainingRunSummary:  # type: ignore[override]
         train_config = self.config.training
         web_export_dir = Path(train_config.web_export_dir)
@@ -209,6 +235,33 @@ class MaskablePPOTrainer(Trainer):
         )
         starting_total = self.total_episodes_trained if resuming_policy else 0
         batch_total = max(1, len(train_config.checkpoint_episodes))
+
+        # Initialize Weights & Biases if enabled
+        wandb_enabled = False
+        import os
+        if getattr(train_config, "wandb_enabled", False) or os.getenv("SHEEPDOG_WANDB_ENABLED", "").lower() in ("true", "1"):
+            wandb_enabled = True
+
+        if wandb_enabled:
+            try:
+                import wandb
+                wandb_config = {
+                    "learning_rate": train_config.learning_rate,
+                    "learning_rate_final": train_config.learning_rate_final,
+                    "total_timesteps": train_config.total_timesteps,
+                    "batch_total": batch_total,
+                    "environment": self.config.to_dict().get("environment", {}),
+                    "rewards": self.config.to_dict().get("rewards", {}),
+                }
+                wandb.init(
+                    project="sheepdog-herding",
+                    config=wandb_config,
+                    sync_tensorboard=True,
+                )
+            except (ImportError, Exception) as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Could not initialize wandb: {e}. Running without wandb.")
+                wandb_enabled = False
         n_checkpoints = batch_total
         steps_per_segment = max(1, train_config.total_timesteps // n_checkpoints)
         starting_total_timesteps = (
@@ -292,6 +345,7 @@ class MaskablePPOTrainer(Trainer):
             list(self._load_summary_checkpoints()) if resuming_policy else []
         )
         saved_model_path: Path | None = None
+        interrupted = False
 
         # Stamp an in-progress batch marker before the loop so a crash mid-batch
         # is resumable on the next call with the same episode count.
@@ -308,6 +362,9 @@ class MaskablePPOTrainer(Trainer):
             train_config.checkpoint_episodes,
             start=1,
         ):
+            if should_stop is not None and should_stop():
+                interrupted = True
+                break
             if completed_checkpoints <= skip_segments:
                 continue
             new_segments = completed_checkpoints - skip_segments
@@ -328,6 +385,7 @@ class MaskablePPOTrainer(Trainer):
             )
             progress_reporter = _TrainingProgressCallback(
                 emit,
+                should_stop=should_stop,
                 # Emit progress frequently enough that long PPO segments do not
                 # look stalled in the UI. Cap the update rate to avoid chatty logs.
                 report_interval=max(250, min(5_000, steps_per_segment // 100)),
@@ -337,6 +395,18 @@ class MaskablePPOTrainer(Trainer):
                 completed_segments=completed_checkpoints - 1,
                 segment_index=completed_checkpoints - 1,
             )
+            from stable_baselines3.common.callbacks import CallbackList
+            callbacks_to_use = [progress_reporter]
+            if wandb_enabled:
+                try:
+                    from wandb.integration.sb3 import WandbCallback
+                    callbacks_to_use.append(WandbCallback(verbose=0))
+                except Exception as e:
+                    import logging
+                    logging.getLogger(__name__).warning(f"Failed to create WandbCallback: {e}")
+
+            callback_list = CallbackList(callbacks_to_use)
+
             # Linear LR annealing across the batch: full LR at segment 0,
             # learning_rate_final at the last segment.  This keeps updates
             # aggressive early (fast cliff recovery) and conservative late
@@ -344,16 +414,37 @@ class MaskablePPOTrainer(Trainer):
             _batch_done = completed_checkpoints - skip_segments - 1
             _batch_span = max(1, n_checkpoints - skip_segments - 1)
             _batch_progress = _batch_done / _batch_span
-            policy.model.learning_rate = (
+            
+            # Enforce 5e-5 floor on learning rate annealing
+            policy.model.learning_rate = max(
+                5e-5,
                 train_config.learning_rate
                 + (train_config.learning_rate_final - train_config.learning_rate) * _batch_progress
             )
+            # Apply training overrides for exploration and advantage estimation
+            policy.model.ent_coef = train_config.entropy_coef
+            policy.model.gae_lambda = train_config.gae_lambda
+            
             policy.model.learn(
                 total_timesteps=steps_per_segment,
                 reset_num_timesteps=True,
                 progress_bar=False,
-                callback=progress_reporter,
+                callback=callback_list,
             )
+            
+            # Extract PPO diagnostics from model logger
+            logger_obj = getattr(policy.model, "logger", None)
+            approx_kl = 0.0
+            clip_fraction = 0.0
+            explained_variance = 0.0
+            if logger_obj is not None:
+                name_to_value = getattr(logger_obj, "name_to_value", {})
+                approx_kl = float(name_to_value.get("train/approx_kl", 0.0))
+                clip_fraction = float(name_to_value.get("train/clip_fraction", 0.0))
+                explained_variance = float(name_to_value.get("train/explained_variance", 0.0))
+            if should_stop is not None and should_stop():
+                interrupted = True
+                break
             saved_model_path = policy.save(model_root / f"maskable-ppo-{cumulative_ts:08d}")
             total_eps_this_checkpoint = starting_total + _checkpoint_slot
             summary, evaluation_json, _csv_path = self.evaluator.evaluate(
@@ -485,7 +576,18 @@ class MaskablePPOTrainer(Trainer):
                     "summary": summary.to_dict(),
                     "best_score": summary.average_reward,
                     "message": f"Checkpoint {total_eps_this_checkpoint} exported",
+                    "approx_kl": approx_kl,
+                    "clip_fraction": clip_fraction,
+                    "explained_variance": explained_variance,
+                    "total_timesteps": cumulative_ts,
                 }
+            )
+
+        if interrupted:
+            return NeuralTrainingRunSummary(
+                checkpoints=checkpoint_payloads,
+                final_model_path=str(saved_model_path) if saved_model_path is not None else "",
+                policy_config=policy.config.to_dict(),
             )
 
         total_episodes_trained = starting_total + (batch_total - skip_segments)

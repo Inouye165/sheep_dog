@@ -11,6 +11,7 @@ import type {
   TrainingStartRequest,
   TrainingStatus,
   UserHyperparams,
+  TelemetryRecord,
 } from "../state/types";
 
 const API_BASE_URL = "http://127.0.0.1:8000";
@@ -71,6 +72,18 @@ export async function startTraining(request: TrainingStartRequest): Promise<Trai
       "Content-Type": "application/json",
     },
     body: JSON.stringify(request),
+  }, API_BASE_URL);
+}
+
+export async function pauseTraining(): Promise<TrainingStatus> {
+  return fetchJson<TrainingStatus>("/api/training/pause", {
+    method: "POST",
+  }, API_BASE_URL);
+}
+
+export async function stopTraining(): Promise<TrainingStatus> {
+  return fetchJson<TrainingStatus>("/api/training/stop", {
+    method: "POST",
   }, API_BASE_URL);
 }
 
@@ -195,4 +208,8 @@ export async function replayScenario(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),
   }, API_BASE_URL);
+}
+
+export async function loadTrainingHistory(): Promise<TelemetryRecord[]> {
+  return fetchJson<TelemetryRecord[]>("/api/training/history", undefined, API_BASE_URL);
 }
