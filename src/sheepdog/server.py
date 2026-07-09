@@ -2961,6 +2961,19 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802  # pylint: disable=invalid-name
         """Handle HTTP POST requests."""
+        if self.path == "/api/shutdown":
+            self._json_response({"status": "shutdown"})
+            import threading
+            import time
+            def shutdown_server():
+                time.sleep(0.5)
+                try:
+                    self.manager.stop()
+                except Exception:
+                    pass
+                self.server.shutdown()
+            threading.Thread(target=shutdown_server, daemon=True).start()
+            return
         if self.path == "/api/training/pause":
             payload = self.manager.pause()
             self._json_response(payload)

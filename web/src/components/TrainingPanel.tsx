@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { AutoPromoteGateDiagnostics, CheckpointEntry } from "../state/types";
 
 const STAGE_DESCRIPTIONS: Record<number, string> = {
@@ -76,6 +77,74 @@ const RECOMMENDED_EPISODES: Record<number, number> = {
 /** Success rate threshold above which promoting to the next stage is recommended. */
 const PROMOTE_THRESHOLD = 0.5;
 
+interface GlossaryItem {
+  term: string;
+  keyword: string; // Used for exact triggers
+  category: string;
+  definition: string;
+  relevance: string;
+}
+
+const GLOSSARY_ITEMS: GlossaryItem[] = [
+  {
+    term: "Curriculum Learning",
+    keyword: "curriculum",
+    category: "Training Strategy",
+    definition: "An optimization method where the agent starts learning very simple tasks and gradually advances to the full, complex task. Here, it scales from 1 dog herding 1 sheep to 3 dogs coordinating to herd 6 scattered sheep.",
+    relevance: "Governs the training stage progression from Stage 1 up to Stage 32."
+  },
+  {
+    term: "Episodes (Batch)",
+    keyword: "episodes",
+    category: "Reinforcement Learning",
+    definition: "A single trial of herding from start to completion (either penning all sheep or reaching the timeout). Batches are groups of episodes run sequentially before policy evaluations and checkpoints are generated.",
+    relevance: "Determined by the 'Episodes this batch' input value."
+  },
+  {
+    term: "Instinct Rewards",
+    keyword: "instincts",
+    category: "Reward Shaping",
+    definition: "Pre-programmed helper rewards based on expert heuristics (e.g. keeping dogs behind the flock, spatial spacing, stray recovery pressure). This guides the neural network before it discovers sparse success rewards.",
+    relevance: "Controlled by the 'Enable instincts' toggle. Highly recommended for early curriculum stages."
+  },
+  {
+    term: "Auto-Promotion",
+    keyword: "auto-promote",
+    category: "Curriculum Strategy",
+    definition: "An automation checkpoint logic that promotes the network to the next curriculum stage when a set of criteria (minimum success rate, timeout threshold, low stray counts) are consistently met across multiple seeds.",
+    relevance: "Managed by the 'Auto-promote stages' toggle and monitored via the diagnostics gate."
+  },
+  {
+    term: "Success Rate",
+    keyword: "success rate",
+    category: "Evaluation Metric",
+    definition: "The percentage of episodes within an evaluation batch where all sheep were successfully penned before timing out.",
+    relevance: "The primary gate requirement for promoting to subsequent stages (target is >= 50%)."
+  },
+  {
+    term: "No-progress Stop",
+    keyword: "no-progress",
+    category: "Simulation Controls",
+    definition: "An early-termination check that stops an episode if the sheepdog flock hasn't advanced closer to the pen for too many steps, preventing wasted CPU cycles on frozen or deadlocked policies.",
+    relevance: "Reflected in the 'No-progress stop' rate under metrics."
+  },
+  {
+    term: "Timeout Rate",
+    keyword: "timeout",
+    category: "Evaluation Metric",
+    definition: "The percentage of herding runs that reached the maximum step limit (e.g. 500 steps) before successfully penning all sheep.",
+    relevance: "Ideally should be minimized (< 20%) to qualify for promotion."
+  },
+  {
+    term: "Checkpoints",
+    keyword: "checkpoints",
+    category: "Model Lifecycle",
+    definition: "Periodic snapshots of the policy's neural network weights. They allow the trainer to evaluate performance, rewind to previous stages, or resume interrupted training batches.",
+    relevance: "Saved automatically at the end of each batch run."
+  }
+];
+
+
 interface TrainingPanelProps {
   episodes: number;
   fastMode: boolean;
@@ -135,6 +204,7 @@ interface TrainingPanelProps {
   startingEpisode?: number | null;
   resumeAvailable?: boolean;
   resumeRemainingEpisodes?: number | null;
+  onCloseApp: () => void;
 }
 
 export function TrainingPanel({
@@ -196,6 +266,7 @@ export function TrainingPanel({
   startingEpisode,
   resumeAvailable = false,
   resumeRemainingEpisodes = null,
+  onCloseApp,
 }: TrainingPanelProps) {
   const denominator = batchTotalEpisodes || episodes;
   const progress = denominator === 0 ? 0 : Math.min(1, batchCompletedEpisodes / denominator);
@@ -274,471 +345,794 @@ export function TrainingPanel({
   const fmtNum = (v: number | null | undefined, decimals = 2) =>
     v != null ? v.toFixed(decimals) : "—";
 
+  const [activeSubTab, setActiveSubTab] = useState<"console" | "curriculum" | "metrics" | "help">("console");
+  const [glossarySearch, setGlossarySearch] = useState("");
+  const [highlightedTerm, setHighlightedTerm] = useState<string | null>(null);
+  const [adminOpen, setAdminOpen] = useState(false);
+
+  const navigateToHelp = (term: string) => {
+    setActiveSubTab("help");
+    setGlossarySearch(term);
+    setHighlightedTerm(term);
+    setTimeout(() => setHighlightedTerm(null), 2500);
+  };
+
   return (
-    <section className="training-card" aria-label="Training controls">
-      <div className="training-card__header">
+    <section className="training-card" aria-label="Training controls" style={{ display: "flex", flexDirection: "column", height: "100%", maxHeight: "100%", minHeight: 0, overflow: "hidden" }}>
+      {/* 1. FIXED HEADER */}
+      <div className="training-card__header" style={{ flexShrink: 0, marginBottom: "0.5rem" }}>
         <div>
           <p className="eyebrow">Curriculum learning</p>
-          <h2>Training</h2>
+          <h2 style={{ fontSize: "1.3rem", margin: "0.1rem 0" }}>Training</h2>
         </div>
         <span className={`pill ${running ? "pill--live" : "pill--muted"}`}>{phase}</span>
       </div>
 
-      {/* Stage row */}
-      <div className="stage-row">
-        <div className="stage-chip">
-          <span className="stage-chip__label">Stage {curriculumStage}</span>
-          <span className="stage-chip__desc">{stageDesc}</span>
-        </div>
-        {canPromote ? (
-          <button type="button" className="button-row__promote" onClick={onPromote} disabled={!readyToPromote}>
-            Promote → Stage {curriculumStage + 1}
-          </button>
-        ) : curriculumStage >= maxCurriculumStage ? (
-          <span className="pill pill--live">Max stage</span>
-        ) : null}
+      {/* 2. FIXED SUB-TABS */}
+      <div style={{ display: "flex", borderBottom: "1px solid var(--panel-border)", gap: "0.15rem", marginBottom: "0.6rem", flexShrink: 0 }}>
+        {([
+          { id: "console", label: "Console", desc: "Run Controls" },
+          { id: "curriculum", label: "Curriculum", desc: "Stage Progression" },
+          { id: "metrics", label: "Metrics", desc: "Performance Stats" },
+          { id: "help", label: "Help & Terms", desc: "Glossary" }
+        ] as const).map(tab => {
+          const isActive = activeSubTab === tab.id;
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setActiveSubTab(tab.id)}
+              style={{
+                background: "transparent",
+                border: "none",
+                borderBottom: isActive ? "3px solid var(--accent)" : "3px solid transparent",
+                borderRadius: 0,
+                padding: "0.35rem 0.15rem",
+                color: isActive ? "var(--text)" : "var(--muted)",
+                cursor: "pointer",
+                transition: "all 150ms ease",
+                textAlign: "center",
+                transform: "none",
+                flex: 1
+              }}
+            >
+              <div style={{ fontWeight: "700", color: isActive ? "var(--accent)" : "var(--text)", fontSize: "0.76rem", whiteSpace: "nowrap" }}>{tab.label}</div>
+              <div style={{ fontSize: "0.56rem", color: "var(--muted)", marginTop: "0.05rem", whiteSpace: "nowrap" }}>{tab.desc}</div>
+            </button>
+          );
+        })}
       </div>
 
-      {canPromote && !readyToPromote ? (
-        <div className="warning-box" role="status">
-          Promotion locked until Stage {curriculumStage} reaches ≥ {Math.round(PROMOTE_THRESHOLD * 100)}% success.
-        </div>
-      ) : null}
-
-      {readyToPromote ? (
-        <div className="warning-box warning-box--success" role="status">
-          ✓ {Math.round(successRate! * 100)}% success — ready to promote to Stage {curriculumStage + 1}
-        </div>
-      ) : successRate !== null && successRate < PROMOTE_THRESHOLD && !running && curriculumStage < maxCurriculumStage ? (
-        <div className="warning-box" role="status">
-          {Math.round(successRate * 100)}% success — train more before promoting
-          (target ≥ {Math.round(PROMOTE_THRESHOLD * 100)}%)
-        </div>
-      ) : null}
-
-      {curriculumStage === 0 ? (
-        <div className="warning-box warning-box--error" role="status">
-          Stage 0 is the full problem — dogs rarely discover the pen from scratch.
-          Promote to <strong>Stage 1</strong> to start simple.
-        </div>
-      ) : null}
-
-      {/* Episodes + train */}
-      <div className="training-primary">
-        <label>
-          <span>Episodes this batch</span>
-          <input
-            type="number"
-            min={1}
-            max={1000}
-            value={episodes}
-            onChange={(event) => onEpisodesChange(Number(event.target.value) || 1)}
-            disabled={busy}
-          />
-        </label>
-        <div className="episodes-hint">
-          Suggested: {recommendedEpisodes} for Stage {curriculumStage}
-          {episodes !== recommendedEpisodes && !busy ? (
+      {/* 3. SCROLLABLE INNER CONTENT WRAPPER */}
+      <div style={{ flex: 1, overflowY: "auto", paddingRight: "0.2rem", minHeight: 0, display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+        
+        {/* SUB-TAB: CONSOLE */}
+        <div style={{
+          height: activeSubTab === "console" ? "auto" : 0,
+          overflow: "hidden",
+          opacity: activeSubTab === "console" ? 1 : 0,
+          pointerEvents: activeSubTab === "console" ? "auto" : "none",
+          display: "flex",
+          flexDirection: "column",
+          gap: "0.75rem",
+          flexShrink: 0
+        }}>
+          {/* Quick Curriculum Stage Summary */}
+          <div style={{
+            background: "rgba(10, 20, 35, 0.4)",
+            border: "1px solid var(--panel-border)",
+            borderRadius: "0.6rem",
+            padding: "0.6rem 0.8rem",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center"
+          }}>
+            <div>
+              <span style={{ fontSize: "0.7rem", color: "var(--accent)", textTransform: "uppercase", fontWeight: "600", display: "block" }}>
+                Active Curriculum Stage
+              </span>
+              <strong style={{ fontSize: "0.9rem", color: "var(--text)" }}>Stage {curriculumStage}</strong>
+              <span style={{ fontSize: "0.72rem", color: "var(--muted)", marginLeft: "0.5rem" }}>({stageDesc})</span>
+            </div>
             <button
               type="button"
-              className="episodes-hint__use"
-              onClick={() => onEpisodesChange(recommendedEpisodes)}
+              onClick={() => setActiveSubTab("curriculum")}
+              title="Manage stages and curriculum details"
+              style={{ padding: "0.3rem 0.6rem", fontSize: "0.7rem" }}
             >
-              Use suggested
+              Curriculum &rarr;
             </button>
-          ) : null}
-        </div>
-      </div>
-
-      <label className="training-toggle training-toggle--inline">
-        <input
-          type="checkbox"
-          checked={enableInstincts}
-          onChange={(event) => onEnableInstinctsChange(event.target.checked)}
-          disabled={busy}
-        />
-        <span>Enable instincts</span>
-      </label>
-
-      <div
-        className="progress-shell"
-        role="progressbar"
-        aria-label="Current batch progress"
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={progressPct}
-      >
-        <div className="progress-shell__bar" style={{ width: `${progress * 100}%` }} />
-        <span className="progress-shell__label">
-          {running && currentEpisode !== null
-            ? `Episode ${currentEpisode + 1} of ${denominator || "—"} · ${progressPct}%`
-            : `${completedDisplay}/${denominator || "—"} · ${progressPct}%`}
-        </span>
-      </div>
-
-      <div className="button-row">
-        <button type="button" className="button-row__primary" onClick={onStartTraining} disabled={busy}>
-          {running ? "Training..." : `Train ${episodes} more`}
-        </button>
-        {running ? (
-          <>
-            <button type="button" onClick={onPauseTraining} disabled={clearing}>
-              Pause after checkpoint
-            </button>
-            <button type="button" className="button-row__danger" onClick={onStopTraining} disabled={clearing}>
-              Stop after checkpoint
-            </button>
-          </>
-        ) : canResume ? (
-          <button type="button" onClick={onResumeTraining} disabled={clearing}>
-            Resume {resumeRemainingEpisodes} remaining
-          </button>
-        ) : null}
-        <button type="button" className="button-row__danger" onClick={onClearTraining} disabled={busy}>
-          {clearing ? "Clearing..." : "Clear"}
-        </button>
-        <button type="button" onClick={onResetJourney} disabled={busy}>
-          Reset Journey
-        </button>
-      </div>
-
-      <div style={{ marginTop: "0.75rem", fontSize: "0.75rem", color: "var(--muted)", display: "flex", flexDirection: "column", gap: "0.35rem", borderTop: "1px solid var(--panel-border)", paddingTop: "0.75rem", lineHeight: "1.4" }}>
-        <div>
-          <strong style={{ color: "var(--accent)" }}>Clear:</strong> Deletes current checkpoints, evaluations, and permanently deletes all archived journey history.
-        </div>
-        <div>
-          <strong style={{ color: "var(--text)", opacity: 0.9 }}>Reset Journey:</strong> Archives current training progress to the history log and starts a fresh journey from Stage 1.
-        </div>
-      </div>
-
-      <div className="training-summary">
-        <div>
-          <span>Success rate</span>
-          <strong style={{ color: successGood ? "var(--good)" : undefined }}>{successPct}</strong>
-        </div>
-        <div>
-          <span>Total trained</span>
-          <strong>{(safeGrand || safeTotal).toLocaleString()}</strong>
-        </div>
-        {startingEpisode != null ? (
-          <div>
-            <span>Starts from</span>
-            <strong>{startingEpisode.toLocaleString()}</strong>
           </div>
-        ) : null}
-        <div>
-          <span>Batch</span>
-          <strong>
-            {completedDisplay}/{denominator || "—"}
-          </strong>
-        </div>
-        <div>
-          <span>Status</span>
-          <strong>{message}</strong>
-        </div>
-        <div>
-          <span>Auto-promotion</span>
-          <strong>{autoPromote ? "ON" : "OFF"}</strong>
-        </div>
-        <div>
-          <span>Auto threshold</span>
-          <strong>{Math.round(effectiveAutoPromoteThreshold * 100)}%</strong>
-        </div>
-        <div>
-          <span>Auto-promoted</span>
-          <strong>{(autoPromoteStagesCompleted ?? 0).toLocaleString()} stages</strong>
-        </div>
-        {seedEpisode != null ? (
-          <div>
-            <span>Seed ep</span>
-            <strong>{seedEpisode}</strong>
-          </div>
-        ) : null}
-      </div>
 
-      {hasAutoPromoteGate ? (
-        <details className="training-advanced" open={autoPromoteGate.decision === "hold"}>
-          <summary>Auto-promotion gate diagnostics</summary>
-          <div className="training-summary">
-            <div>
-              <span>Decision</span>
-              <strong className={decisionToneClass}>{autoPromoteGate.decision.toUpperCase()}</strong>
-            </div>
-            <div>
-              <span>Reason</span>
-              <strong>{autoPromoteGate.reason}</strong>
-            </div>
-            <div>
-              <span>Seed gate</span>
-              <strong className={gateToneClass(autoPromoteGate.seed_gate_target_met)}>
-                {autoPromoteGate.seed_gate_hits}/{autoPromoteGate.min_seed_gate_hits}
-                {autoPromoteGate.seed_gate_target_met ? " ✓" : ""}
-              </strong>
-            </div>
-            <div>
-              <span>Streak</span>
-              <strong
-                className={gateToneClass(
-                  autoPromoteGate.qualified_streak >= autoPromoteGate.min_qualified_streak,
-                )}
+          {/* Training Control Card */}
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.65rem" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ fontSize: "0.82rem", fontWeight: "600", color: "var(--text)" }}>
+                Batch Configuration
+              </span>
+              <button
+                type="button"
+                onClick={() => navigateToHelp("episodes")}
+                style={{ background: "transparent", border: "none", color: "var(--accent)", cursor: "pointer", padding: "0.1rem 0.3rem", fontSize: "0.8rem" }}
+                title="What is an episode/batch?"
               >
-                {autoPromoteGate.qualified_streak}/{autoPromoteGate.min_qualified_streak}
-              </strong>
+                ❓ Help
+              </button>
             </div>
-            <div>
-              <span>Best success</span>
-              <strong>{Math.round(autoPromoteGate.best_success * 100)}%</strong>
-            </div>
-            <div>
-              <span>Seeds in eval</span>
-              <strong>{autoPromoteGate.seed_count}</strong>
-            </div>
-            <div>
-              <span>Success gate</span>
-              <strong className={gateToneClass(autoPromoteGate.success_rate_ok)}>
-                {autoPromoteGate.success_rate_ok ? "pass" : "fail"}
-              </strong>
-            </div>
-            <div>
-              <span>Timeout gate</span>
-              <strong className={gateToneClass(autoPromoteGate.timeout_ok)}>
-                {autoPromoteGate.timeout_ok ? "pass" : "fail"}
-              </strong>
-            </div>
-            <div>
-              <span>Reward gate</span>
-              <strong className={gateToneClass(autoPromoteGate.reward_close_ok)}>
-                {autoPromoteGate.reward_close_ok ? "pass" : "fail"}
-              </strong>
-            </div>
-            <div>
-              <span>Full-success hits</span>
-              <strong className={gateToneClass(autoPromoteGate.full_success_target_met)}>
-                {autoPromoteGate.full_success_hits}/{autoPromoteGate.min_full_success_hits}
-                {autoPromoteGate.full_success_target_met ? " ✓" : ""}
-              </strong>
-            </div>
-          </div>
-        </details>
-      ) : null}
 
-      {(currentBestEntry || previousBestEntry) ? (
-        <div className="best-perf">
-          <div className={`best-perf__col${currentBestEntry ? " best-perf__col--current" : ""}`}>
-            {currentBestEntry ? (
-              <>
-                <span className="best-perf__label">★ Best so far</span>
-                <span className="best-perf__ep">{bestEntryLabel(currentBestEntry)}</span>
-                <span
-                  className="best-perf__rate"
-                  style={{ color: currentBestEntry.success_rate >= 0.5 ? "var(--good)" : undefined }}
-                >
-                  {Math.round(currentBestEntry.success_rate * 100)}%
-                </span>
-                <span className="best-perf__reward">
-                  {currentBestEntry.average_reward.toFixed(1)} R
-                  {currentBestEntry.average_completion_steps != null
-                    ? ` · ${Math.round(currentBestEntry.average_completion_steps)} steps`
-                    : ""}
-                </span>
-                {formatTimestamp(currentBestEntry.recorded_at) ? (
-                  <span className="best-perf__time">{formatTimestamp(currentBestEntry.recorded_at)}</span>
-                ) : null}
-              </>
-            ) : null}
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                <div style={{ flex: 1 }}>
+                  <label htmlFor="episodes-input" style={{ fontSize: "0.72rem", color: "var(--muted)", display: "block", marginBottom: "0.2rem" }}>
+                    Episodes this batch
+                  </label>
+                  <input
+                    id="episodes-input"
+                    type="number"
+                    min={1}
+                    max={1000}
+                    value={episodes}
+                    onChange={(event) => onEpisodesChange(Number(event.target.value) || 1)}
+                    disabled={busy}
+                    style={{ padding: "0.5rem", fontSize: "0.85rem" }}
+                  />
+                </div>
+                <div style={{ display: "flex", alignSelf: "flex-end" }}>
+                  {episodes !== recommendedEpisodes && !busy ? (
+                    <button
+                      type="button"
+                      onClick={() => onEpisodesChange(recommendedEpisodes)}
+                      style={{ padding: "0.5rem 0.6rem", fontSize: "0.72rem" }}
+                      title={`Use suggested ${recommendedEpisodes} episodes for Stage ${curriculumStage}`}
+                    >
+                      Use suggested ({recommendedEpisodes})
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "rgba(148, 163, 184, 0.05)", padding: "0.5rem", borderRadius: "0.5rem" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: "0.45rem", cursor: "pointer", fontSize: "0.78rem" }}>
+                <input
+                  type="checkbox"
+                  checked={enableInstincts}
+                  onChange={(event) => onEnableInstinctsChange(event.target.checked)}
+                  disabled={busy}
+                />
+                <span>Enable instinct rewards</span>
+              </label>
+              <button
+                type="button"
+                onClick={() => navigateToHelp("instincts")}
+                style={{ background: "transparent", border: "none", color: "var(--accent)", cursor: "pointer", padding: 0, fontSize: "0.78rem" }}
+                title="What are instincts?"
+              >
+                ❓
+              </button>
+            </div>
           </div>
-          <div className="best-perf__col">
-            {previousBestEntry ? (
-              <>
-                <span className="best-perf__label">Previous best</span>
-                <span className="best-perf__ep">{bestEntryLabel(previousBestEntry)}</span>
-                <span
-                  className="best-perf__rate"
-                  style={{ color: previousBestEntry.success_rate >= 0.5 ? "var(--good)" : "var(--muted)" }}
+
+          {curriculumStage === 0 ? (
+            <div className="warning-box warning-box--error" role="status" style={{ margin: 0, padding: "0.5rem", fontSize: "0.72rem" }}>
+              Stage 0 is the full problem — dogs rarely discover the pen from scratch.
+              Promote to <strong>Stage 1</strong> to start simple.
+            </div>
+          ) : null}
+
+          {/* Progress bar */}
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.75rem", color: "var(--muted)" }}>
+              <span>Batch Progress</span>
+              <span>{progressPct}%</span>
+            </div>
+            <div
+              className="progress-shell"
+              role="progressbar"
+              aria-label="Current batch progress"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={progressPct}
+              style={{ margin: 0, height: "10px", borderRadius: "999px" }}
+            >
+              <div className="progress-shell__bar" style={{ width: `${progress * 100}%` }} />
+            </div>
+            <div style={{ fontSize: "0.72rem", color: "var(--muted)", marginTop: "0.1rem", textAlign: "center" }}>
+              {running && currentEpisode !== null
+                ? `Episode ${currentEpisode + 1} of ${denominator || "—"}`
+                : `${completedDisplay}/${denominator || "—"} completed`}
+            </div>
+          </div>
+
+          {/* Core Controls Buttons */}
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", marginTop: "0.2rem" }}>
+            <button
+              type="button"
+              className="button-row__primary"
+              onClick={onStartTraining}
+              disabled={busy}
+              style={{
+                width: "100%",
+                padding: "0.8rem",
+                fontWeight: "700",
+                fontSize: "0.9rem",
+                display: "flex",
+                justifyContent: "center",
+                alignItems: "center"
+              }}
+              title="Starts running training episodes on the server"
+            >
+              {running ? "Training..." : `Train ${episodes} more`}
+            </button>
+
+            {running ? (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem" }}>
+                <button
+                  type="button"
+                  onClick={onPauseTraining}
+                  disabled={clearing}
+                  style={{ padding: "0.6rem 0.5rem", fontSize: "0.75rem", whiteSpace: "nowrap" }}
+                  title="Pause after the current checkpoint completes. The remaining batch episodes will be saved so you can resume."
                 >
-                  {Math.round(previousBestEntry.success_rate * 100)}%
-                </span>
-                <span className="best-perf__reward">
-                  {previousBestEntry.average_reward.toFixed(1)} R
-                  {previousBestEntry.average_completion_steps != null
-                    ? ` · ${Math.round(previousBestEntry.average_completion_steps)} steps`
-                    : ""}
-                </span>
-                {formatTimestamp(previousBestEntry.recorded_at) ? (
-                  <span className="best-perf__time">{formatTimestamp(previousBestEntry.recorded_at)}</span>
-                ) : null}
-              </>
+                  Pause after checkpoint
+                </button>
+                <button
+                  type="button"
+                  className="button-row__danger"
+                  onClick={onStopTraining}
+                  disabled={clearing}
+                  style={{ padding: "0.6rem 0.5rem", fontSize: "0.75rem", whiteSpace: "nowrap" }}
+                  title="Stop training after the current checkpoint completes and discard remaining batch episodes."
+                >
+                  Stop after checkpoint
+                </button>
+              </div>
+            ) : canResume ? (
+              <button
+                type="button"
+                onClick={onResumeTraining}
+                disabled={clearing}
+                style={{
+                  width: "100%",
+                  padding: "0.65rem",
+                  background: "rgba(74, 222, 128, 0.15)",
+                  borderColor: "var(--good)"
+                }}
+                title="Resume training where it was paused or interrupted."
+              >
+                Resume {resumeRemainingEpisodes} remaining
+              </button>
             ) : null}
+
+            <button
+              type="button"
+              onClick={onCloseApp}
+              style={{
+                width: "100%",
+                padding: "0.65rem",
+                background: "rgba(251, 113, 133, 0.1)",
+                borderColor: "rgba(251, 113, 133, 0.3)",
+                color: "var(--danger)",
+                marginTop: "0.4rem"
+              }}
+              title="Gracefully pause training, save progress, and shut down the backend server."
+            >
+              🔌 Close Application
+            </button>
+          </div>
+
+          {/* Quick Stats Grid */}
+          <div style={{
+            display: "grid",
+            gridTemplateColumns: "1fr 1fr",
+            gap: "0.5rem",
+            background: "rgba(148, 163, 184, 0.04)",
+            border: "1px solid var(--panel-border)",
+            borderRadius: "0.6rem",
+            padding: "0.7rem",
+            fontSize: "0.75rem",
+            marginTop: "0.4rem"
+          }}>
+            <div style={{ display: "flex", flexDirection: "column" }}>
+              <span style={{ color: "var(--muted)" }}>Status message</span>
+              <strong style={{ textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap" }}>{message}</strong>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column" }}>
+              <span style={{ color: "var(--muted)" }}>Success Rate</span>
+              <strong style={{ color: successGood ? "var(--good)" : undefined }}>
+                {successPct}
+              </strong>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", marginTop: "0.4rem" }}>
+              <span style={{ color: "var(--muted)" }}>Total Trained</span>
+              <strong>{(safeGrand || safeTotal).toLocaleString()}</strong>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", marginTop: "0.4rem" }}>
+              <span style={{ color: "var(--muted)" }}>Auto-promote</span>
+              <strong>{autoPromote ? "Enabled" : "Disabled"}</strong>
+            </div>
+          </div>
+
+          {/* Administrative Actions */}
+          <div style={{
+            marginTop: "0.5rem",
+            border: "1px solid rgba(251, 113, 133, 0.15)",
+            borderRadius: "0.5rem",
+            padding: "0.6rem",
+            display: "flex",
+            flexDirection: "column",
+            gap: "0.5rem",
+            background: "rgba(10, 15, 25, 0.2)"
+          }}>
+            <span style={{ fontSize: "0.72rem", color: "var(--danger)", fontWeight: "600" }}>⚠️ Administrative Tools</span>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.4rem" }}>
+              <button
+                type="button"
+                className="button-row__danger"
+                onClick={onClearTraining}
+                disabled={busy}
+                style={{ padding: "0.45rem 0.25rem", fontSize: "0.7rem" }}
+                title="Deletes current checkpoints, evaluations, and archives permanently."
+              >
+                {clearing ? "Clearing..." : "Clear"}
+              </button>
+              <button
+                type="button"
+                onClick={onResetJourney}
+                disabled={busy}
+                style={{ padding: "0.45rem 0.25rem", fontSize: "0.7rem" }}
+                title="Archives progress and starts a fresh journey from Stage 1."
+              >
+                Reset Journey
+              </button>
+            </div>
           </div>
         </div>
-      ) : null}
 
-      {stageHistoryEntries.length > 0 ? (
-        <div className="stage-history">
-          <span className="stage-history__label">Per-stage history</span>
-          <div className="stage-history__bars">
-            {(() => {
-              const maxEps = Math.max(...stageHistoryEntries.map(([, v]) => v));
-              return stageHistoryEntries.map(([stage, eps]) => (
-                <div key={stage} className="stage-history__bar-row">
-                  <span className="stage-history__bar-key">S{stage}</span>
-                  <span className="stage-history__bar-track">
-                    <span
-                      className="stage-history__bar-fill"
-                      style={{ width: `${maxEps > 0 ? (eps / maxEps) * 100 : 0}%` }}
-                    />
-                  </span>
-                  <span className="stage-history__bar-val">{eps.toLocaleString()}</span>
-                </div>
-              ));
-            })()}
-            {stageHistoryEntries.length > 1 ? (
-              <div className="stage-history__bar-row stage-history__bar-row--total">
-                <span className="stage-history__bar-key">Total</span>
-                <span className="stage-history__bar-track" />
-                <span className="stage-history__bar-val">
-                  {stageHistoryEntries.reduce((s, [, v]) => s + v, 0).toLocaleString()}
+        {/* SUB-TAB: CURRICULUM */}
+        <div style={{
+          height: activeSubTab === "curriculum" ? "auto" : 0,
+          overflow: "hidden",
+          opacity: activeSubTab === "curriculum" ? 1 : 0,
+          pointerEvents: activeSubTab === "curriculum" ? "auto" : "none",
+          display: "flex",
+          flexDirection: "column",
+          gap: "0.75rem",
+          flexShrink: 0
+        }}>
+          {/* Stage Chip */}
+          <div className="stage-row" style={{ display: "flex", flexDirection: "column", gap: "0.4rem", margin: 0 }}>
+            <div className="stage-chip" style={{ width: "100%" }}>
+              <span className="stage-chip__label">Stage {curriculumStage}</span>
+              <span className="stage-chip__desc">{stageDesc}</span>
+            </div>
+            {canPromote ? (
+              <button
+                type="button"
+                className="button-row__promote"
+                onClick={onPromote}
+                disabled={!readyToPromote}
+                style={{ width: "100%", padding: "0.6rem" }}
+              >
+                Promote → Stage {curriculumStage + 1}
+              </button>
+            ) : curriculumStage >= maxCurriculumStage ? (
+              <span className="pill pill--live" style={{ alignSelf: "center" }}>Max stage reached</span>
+            ) : null}
+          </div>
+
+          {/* Promotion lock/success warning status boxes */}
+          {canPromote && !readyToPromote ? (
+            <div className="warning-box" role="status" style={{ margin: 0, padding: "0.5rem 0.75rem", fontSize: "0.72rem" }}>
+              Promotion locked until Stage {curriculumStage} reaches &ge; {Math.round(PROMOTE_THRESHOLD * 100)}% success.
+            </div>
+          ) : null}
+
+          {readyToPromote ? (
+            <div className="warning-box warning-box--success" role="status" style={{ margin: 0, padding: "0.5rem 0.75rem", fontSize: "0.72rem" }}>
+              ✓ {Math.round(successRate! * 100)}% success — ready to promote to Stage {curriculumStage + 1}
+            </div>
+          ) : successRate !== null && successRate < PROMOTE_THRESHOLD && !running && curriculumStage < maxCurriculumStage ? (
+            <div className="warning-box" role="status" style={{ margin: 0, padding: "0.5rem 0.75rem", fontSize: "0.72rem" }}>
+              {Math.round(successRate * 100)}% success — target &ge; {Math.round(PROMOTE_THRESHOLD * 100)}% to promote.
+            </div>
+          ) : null}
+
+          {/* Auto-promotion controls */}
+          <div style={{ background: "rgba(148, 163, 184, 0.04)", border: "1px solid var(--panel-border)", borderRadius: "0.6rem", padding: "0.75rem", display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: "0.45rem", cursor: "pointer", fontSize: "0.78rem" }}>
+                <input
+                  type="checkbox"
+                  checked={autoPromote}
+                  onChange={(event) => onAutoPromoteChange(event.target.checked)}
+                  disabled={busy}
+                />
+                <strong>Auto-promote stages</strong>
+              </label>
+              <button
+                type="button"
+                onClick={() => navigateToHelp("auto-promote")}
+                style={{ background: "transparent", border: "none", color: "var(--accent)", cursor: "pointer", padding: 0, fontSize: "0.78rem" }}
+              >
+                ❓
+              </button>
+            </div>
+
+            {hasAutoPromoteGate ? (
+              <div style={{ borderTop: "1px solid var(--panel-border)", paddingTop: "0.5rem", marginTop: "0.2rem" }}>
+                <span style={{ fontSize: "0.72rem", color: "var(--muted)", fontWeight: "600", display: "block", marginBottom: "0.3rem" }}>
+                  Auto-promotion Checklist
                 </span>
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem", fontSize: "0.7rem" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between" }}>
+                    <span>Verdict</span>
+                    <strong className={decisionToneClass} style={{ padding: "0.05rem 0.35rem", borderRadius: "3px" }}>
+                      {autoPromoteGate.decision.toUpperCase()}
+                    </strong>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between" }}>
+                    <span>Success Gate</span>
+                    <strong className={gateToneClass(autoPromoteGate.success_rate_ok)}>
+                      {autoPromoteGate.success_rate_ok ? "PASS" : "FAIL"}
+                    </strong>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between" }}>
+                    <span>Seed progress</span>
+                    <strong className={gateToneClass(autoPromoteGate.seed_gate_target_met)}>
+                      {autoPromoteGate.seed_gate_hits}/{autoPromoteGate.min_seed_gate_hits}
+                    </strong>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between" }}>
+                    <span>Streak</span>
+                    <strong className={gateToneClass(autoPromoteGate.qualified_streak >= autoPromoteGate.min_qualified_streak)}>
+                      {autoPromoteGate.qualified_streak}/{autoPromoteGate.min_qualified_streak}
+                    </strong>
+                  </div>
+                </div>
               </div>
             ) : null}
           </div>
-        </div>
-      ) : null}
 
-      {hasLatestMetrics ? (
-        <details className="training-advanced">
-          <summary>Latest checkpoint metrics{latestCheckpointEpisode != null ? ` (ep ${latestCheckpointEpisode})` : ""}</summary>
-          <div className="training-summary">
-            <div>
-              <span>Success</span>
-              <strong style={{ color: latestSuccessRate != null && latestSuccessRate >= 0.5 ? "var(--good)" : undefined }}>
-                {fmtPct(latestSuccessRate)}
-              </strong>
+          {/* Per-Stage History charts (scrollable internally) */}
+          {stageHistoryEntries.length > 0 ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem" }}>
+              <span style={{ fontSize: "0.72rem", color: "var(--muted)", fontWeight: "600" }}>Stage History (Episodes Trained)</span>
+              <div style={{
+                maxHeight: "150px",
+                overflowY: "auto",
+                border: "1px solid var(--panel-border)",
+                borderRadius: "0.5rem",
+                padding: "0.5rem",
+                background: "rgba(10, 15, 25, 0.2)"
+              }}>
+                <div className="stage-history" style={{ margin: 0, padding: 0 }}>
+                  <div className="stage-history__bars">
+                    {(() => {
+                      const maxEps = Math.max(...stageHistoryEntries.map(([, v]) => v));
+                      return stageHistoryEntries.map(([stage, eps]) => (
+                        <div key={stage} className="stage-history__bar-row">
+                          <span className="stage-history__bar-key">S{stage}</span>
+                          <span className="stage-history__bar-track">
+                            <span
+                              className="stage-history__bar-fill"
+                              style={{ width: `${maxEps > 0 ? (eps / maxEps) * 100 : 0}%` }}
+                            />
+                          </span>
+                          <span className="stage-history__bar-val">{eps.toLocaleString()}</span>
+                        </div>
+                      ));
+                    })()}
+                  </div>
+                </div>
+              </div>
             </div>
-            <div>
-              <span>Avg penned</span>
-              <strong>{fmtNum(latestAvgSheepPenned)}</strong>
-            </div>
-            <div>
-              <span>Avg reward</span>
-              <strong>{fmtNum(latestAvgReward, 1)}</strong>
-            </div>
-            <div>
-              <span>Timeout</span>
-              <strong>{fmtPct(latestTimeoutRate)}</strong>
-            </div>
-            <div>
-              <span>No-progress stop</span>
-              <strong>{fmtPct(latestStoppedRate)}</strong>
-            </div>
-            <div>
-              <span>Dist-to-pen</span>
-              <strong>{fmtNum(latestAvgDistanceToPen, 1)}</strong>
-            </div>
-            <div>
-              <span>Flock spread</span>
-              <strong>{fmtNum(latestAvgFlockSpread, 1)}</strong>
-            </div>
-            <div>
-              <span>Farthest-to-pen</span>
-              <strong>{fmtNum(latestAvgFarthestDistanceToPen, 1)}</strong>
-            </div>
-            <div>
-              <span>Farthest-to-flock</span>
-              <strong>{fmtNum(latestAvgFarthestDistanceToFlockCenter, 1)}</strong>
-            </div>
-            <div>
-              <span>No-progress steps</span>
-              <strong>{fmtNum(latestAvgNoProgressSteps, 1)}</strong>
+          ) : null}
+
+          {/* Manual Stage Override */}
+          <div style={{
+            background: "rgba(10, 15, 25, 0.3)",
+            border: "1px solid var(--panel-border)",
+            borderRadius: "0.5rem",
+            padding: "0.6rem"
+          }}>
+            <label htmlFor="stage-manual-input" style={{ fontSize: "0.75rem", color: "var(--muted)", display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+              <span style={{ fontWeight: "600", color: "var(--text)" }}>Stage (manual)</span>
+              <input
+                id="stage-manual-input"
+                type="number"
+                min={0}
+                max={maxCurriculumStage}
+                value={curriculumStage}
+                onChange={(event) => onCurriculumStageChange(Number(event.target.value) || 0)}
+                disabled={busy}
+                style={{ padding: "0.45rem", fontSize: "0.85rem" }}
+              />
+            </label>
+            <div style={{ fontSize: "0.65rem", color: "var(--muted)", marginTop: "0.3rem" }}>
+              ⚠️ Changing stage manually overrides curriculum flow.
             </div>
           </div>
+        </div>
+
+        {/* SUB-TAB: METRICS */}
+        <div style={{
+          height: activeSubTab === "metrics" ? "auto" : 0,
+          overflow: "hidden",
+          opacity: activeSubTab === "metrics" ? 1 : 0,
+          pointerEvents: activeSubTab === "metrics" ? "auto" : "none",
+          display: "flex",
+          flexDirection: "column",
+          gap: "0.75rem",
+          flexShrink: 0
+        }}>
+          {/* Best performance cards */}
+          {(currentBestEntry || previousBestEntry) ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+              <span style={{ fontSize: "0.72rem", color: "var(--muted)", fontWeight: "600" }}>Record Checkpoints</span>
+              <div className="best-perf" style={{ display: "grid", gridTemplateColumns: previousBestEntry ? "1fr 1fr" : "1fr", gap: "0.4rem", margin: 0, padding: 0 }}>
+                {currentBestEntry ? (
+                  <div className="best-perf__col best-perf__col--current" style={{ padding: "0.5rem" }}>
+                    <span className="best-perf__label" style={{ fontSize: "0.6rem" }}>★ Best overall</span>
+                    <span className="best-perf__ep" style={{ fontSize: "0.72rem", fontWeight: "700" }}>{bestEntryLabel(currentBestEntry)}</span>
+                    <span className="best-perf__rate" style={{ fontSize: "1.1rem", color: currentBestEntry.success_rate >= 0.5 ? "var(--good)" : undefined }}>
+                      {Math.round(currentBestEntry.success_rate * 100)}%
+                    </span>
+                    <span className="best-perf__reward" style={{ fontSize: "0.65rem" }}>
+                      {currentBestEntry.average_reward.toFixed(1)} R · {currentBestEntry.average_completion_steps != null ? `${Math.round(currentBestEntry.average_completion_steps)} st` : ""}
+                    </span>
+                  </div>
+                ) : null}
+
+                {previousBestEntry ? (
+                  <div className="best-perf__col" style={{ padding: "0.5rem" }}>
+                    <span className="best-perf__label" style={{ fontSize: "0.6rem" }}>Previous best</span>
+                    <span className="best-perf__ep" style={{ fontSize: "0.72rem", fontWeight: "700" }}>{bestEntryLabel(previousBestEntry)}</span>
+                    <span className="best-perf__rate" style={{ fontSize: "1.1rem", color: previousBestEntry.success_rate >= 0.5 ? "var(--good)" : "var(--muted)" }}>
+                      {Math.round(previousBestEntry.success_rate * 100)}%
+                    </span>
+                    <span className="best-perf__reward" style={{ fontSize: "0.65rem" }}>
+                      {previousBestEntry.average_reward.toFixed(1)} R
+                    </span>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+
+          {/* Latest metrics grid */}
+          {hasLatestMetrics ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ fontSize: "0.72rem", color: "var(--muted)", fontWeight: "600" }}>
+                  Latest Checkpoint Stats {latestCheckpointEpisode != null ? `(ep ${latestCheckpointEpisode})` : ""}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => navigateToHelp("success rate")}
+                  style={{ background: "transparent", border: "none", color: "var(--accent)", cursor: "pointer", padding: 0, fontSize: "0.72rem" }}
+                >
+                  ❓
+                </button>
+              </div>
+
+              <div style={{
+                display: "grid",
+                gridTemplateColumns: "1fr 1fr",
+                gap: "0.4rem",
+                background: "rgba(10, 20, 35, 0.3)",
+                border: "1px solid var(--panel-border)",
+                borderRadius: "0.6rem",
+                padding: "0.6rem"
+              }}>
+                {[
+                  { label: "Success Rate", value: fmtPct(latestSuccessRate), ok: latestSuccessRate != null && latestSuccessRate >= 0.5, keyword: "success rate" },
+                  { label: "Avg penned", value: fmtNum(latestAvgSheepPenned), keyword: null },
+                  { label: "Avg reward", value: fmtNum(latestAvgReward, 1), keyword: null },
+                  { label: "Timeout rate", value: fmtPct(latestTimeoutRate), keyword: "timeout" },
+                  { label: "No-progress stop", value: fmtPct(latestStoppedRate), keyword: "no-progress" },
+                  { label: "Dist-to-pen", value: fmtNum(latestAvgDistanceToPen, 1), keyword: null },
+                  { label: "Flock spread", value: fmtNum(latestAvgFlockSpread, 1), keyword: null },
+                  { label: "Farthest-to-pen", value: fmtNum(latestAvgFarthestDistanceToPen, 1), keyword: null },
+                  { label: "Farthest-to-flock", value: fmtNum(latestAvgFarthestDistanceToFlockCenter, 1), keyword: null },
+                  { label: "No-progress steps", value: fmtNum(latestAvgNoProgressSteps, 1), keyword: null },
+                ].map((item, idx) => (
+                  <div
+                    key={idx}
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      borderBottom: "1px solid rgba(148, 163, 184, 0.05)",
+                      paddingBottom: "0.25rem",
+                      fontSize: "0.72rem"
+                    }}
+                  >
+                    <span style={{ color: "var(--muted)", display: "flex", alignItems: "center", gap: "0.2rem" }}>
+                      {item.label}
+                      {item.keyword && (
+                        <button
+                          type="button"
+                          onClick={() => navigateToHelp(item.keyword!)}
+                          style={{ background: "transparent", border: "none", color: "var(--accent)", cursor: "pointer", padding: 0, fontSize: "0.65rem", transform: "none" }}
+                        >
+                          ❓
+                        </button>
+                      )}
+                    </span>
+                    <strong style={{ color: item.ok ? "var(--good)" : "var(--text)" }}>{item.value}</strong>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div style={{ textAlign: "center", padding: "2rem", color: "var(--muted)", fontSize: "0.78rem" }}>
+              No metrics available yet. Start training to collect logs.
+            </div>
+          )}
+
+          {/* Active Network Architecture Configuration banner */}
+          {hasActiveConfig ? (
+            <div style={{
+              background: "rgba(244, 197, 66, 0.08)",
+              border: "1px solid rgba(244, 197, 66, 0.2)",
+              borderRadius: "0.5rem",
+              padding: "0.5rem",
+              fontSize: "0.7rem",
+              display: "flex",
+              flexDirection: "column",
+              gap: "0.2rem"
+            }}>
+              <span style={{ fontWeight: "700", color: "var(--accent)" }}>Runtime Config:</span>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem", color: "var(--muted)" }}>
+                {activeTrainerType ? <span>• {activeTrainerType}</span> : null}
+                {activePolicyType ? <span>• {activePolicyType}</span> : null}
+                {activeStageLabel ? <span>• {activeStageLabel}</span> : null}
+                {activeInstinctsLabel ? (
+                  <span style={{ color: activeInstincts ? "var(--good)" : undefined }}>
+                    • {activeInstinctsLabel}
+                  </span>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+        </div>
+
+        {/* SUB-TAB: HELP & TERMS */}
+        <div style={{
+          height: activeSubTab === "help" ? "auto" : 0,
+          overflow: "hidden",
+          opacity: activeSubTab === "help" ? 1 : 0,
+          pointerEvents: activeSubTab === "help" ? "auto" : "none",
+          display: "flex",
+          flexDirection: "column",
+          gap: "0.75rem",
+          flexShrink: 0
+        }}>
+          {/* Glossary Header & Search */}
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem" }}>
+            <span style={{ fontSize: "0.72rem", color: "var(--muted)", fontWeight: "600" }}>ML Terms Glossary</span>
+            <input
+              type="text"
+              placeholder="Search terms (e.g. instincts, PPO)..."
+              value={glossarySearch}
+              onChange={(e) => setGlossarySearch(e.target.value)}
+              style={{
+                padding: "0.45rem",
+                fontSize: "0.8rem",
+                borderRadius: "0.4rem",
+                border: "1px solid var(--panel-border)",
+                background: "rgba(8, 15, 25, 0.6)",
+                color: "var(--text)"
+              }}
+            />
+          </div>
+
+          {/* Glossary list */}
+          <div style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: "0.5rem",
+            maxHeight: "300px",
+            overflowY: "auto",
+            paddingRight: "0.15rem"
+          }}>
+            {GLOSSARY_ITEMS.filter(item => {
+              const q = glossarySearch.toLowerCase();
+              return item.term.toLowerCase().includes(q) || item.definition.toLowerCase().includes(q) || item.category.toLowerCase().includes(q) || item.keyword.includes(q);
+            }).map((item, idx) => {
+              const isHighlighted = highlightedTerm === item.keyword;
+              return (
+                <div
+                  key={idx}
+                  className={isHighlighted ? "glossary-highlight" : ""}
+                  style={{
+                    background: isHighlighted ? "rgba(244, 197, 66, 0.12)" : "rgba(148, 163, 184, 0.05)",
+                    border: isHighlighted ? "1px solid var(--accent)" : "1px solid var(--panel-border)",
+                    borderRadius: "0.55rem",
+                    padding: "0.6rem",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "0.25rem",
+                    transition: "all 300ms ease"
+                  }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <strong style={{ fontSize: "0.82rem", color: "var(--accent)" }}>{item.term}</strong>
+                    <span style={{
+                      fontSize: "0.62rem",
+                      background: "rgba(148, 163, 184, 0.12)",
+                      padding: "0.1rem 0.35rem",
+                      borderRadius: "4px",
+                      color: "var(--muted)"
+                    }}>
+                      {item.category}
+                    </span>
+                  </div>
+                  <p style={{ fontSize: "0.72rem", color: "var(--text)", margin: 0, lineHeight: "1.35" }}>
+                    {item.definition}
+                  </p>
+                  <div style={{ fontSize: "0.65rem", color: "var(--muted)", fontStyle: "italic", borderTop: "1px solid rgba(148, 163, 184, 0.08)", paddingTop: "0.25rem", marginTop: "0.1rem" }}>
+                    <strong>In Sheepdog:</strong> {item.relevance}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+      </div>
+
+      {/* 4. FIXED STATUS / NOTICES / ERROR DISPLAY AT BOTTOM */}
+      <div style={{ flexShrink: 0, marginTop: "0.5rem" }}>
+        {/* Advanced settings collapsible details box — now in Console tab but accessible globally or under Advanced details */}
+        <details className="training-advanced" style={{ background: "rgba(148, 163, 184, 0.03)", padding: "0.4rem 0.5rem", borderRadius: "0.4rem" }}>
+          <summary style={{ fontSize: "0.72rem" }}>Advanced run settings</summary>
+          <div className="training-grid" style={{ gap: "0.4rem", marginTop: "0.3rem" }}>
+            <label className="training-toggle" style={{ fontSize: "0.72rem" }}>
+              <input
+                type="checkbox"
+                checked={fastMode}
+                onChange={(event) => onFastModeChange(event.target.checked)}
+                disabled={busy}
+              />
+              <span>Fast mode</span>
+            </label>
+
+            <label className="training-toggle" style={{ fontSize: "0.72rem" }}>
+              <input
+                type="checkbox"
+                checked={debugRewardBreakdown}
+                onChange={(event) => onDebugRewardBreakdownChange(event.target.checked)}
+                disabled={busy}
+              />
+              <span>Debug rewards</span>
+            </label>
+          </div>
+          <div className="warning-box" style={{ margin: "0.3rem 0 0", padding: "0.4rem", fontSize: "0.65rem" }}>
+            Old weights trained without instinct rewards may not transfer cleanly. Clear training data before curriculum changes.
+          </div>
         </details>
-      ) : null}
 
-      {hasActiveConfig ? (
-        <div className="active-config-banner" role="status">
-          <span className="active-config-banner__label">Active:</span>
-          {activeTrainerType ? <span>{activeTrainerType}</span> : null}
-          {activePolicyType ? <span>{activePolicyType}</span> : null}
-          {activeStageLabel ? <span>{activeStageLabel}</span> : null}
-          {activeInstinctsLabel ? (
-            <span style={{ color: activeInstincts ? "var(--good)" : "var(--muted)" }}>
-              {activeInstinctsLabel}
-            </span>
-          ) : null}
-        </div>
-      ) : null}
+        {running ? (
+          <div className="warning-box" role="status" aria-live="polite" style={{ margin: "0.4rem 0 0", padding: "0.4rem 0.6rem", fontSize: "0.7rem" }}>
+            Training runs server-side — you can switch tabs and training continues.
+          </div>
+        ) : null}
 
-      {/* Advanced settings — collapsed by default */}
-      <details className="training-advanced">
-        <summary>Advanced settings</summary>
-        <div className="training-grid">
-          <label className="training-toggle">
-            <input
-              type="checkbox"
-              checked={fastMode}
-              onChange={(event) => onFastModeChange(event.target.checked)}
-              disabled={busy}
-            />
-            <span>Fast mode</span>
-          </label>
-
-          <label className="training-toggle">
-            <input
-              type="checkbox"
-              checked={debugRewardBreakdown}
-              onChange={(event) => onDebugRewardBreakdownChange(event.target.checked)}
-              disabled={busy}
-            />
-            <span>Debug rewards</span>
-          </label>
-
-          <label className="training-toggle">
-            <input
-              type="checkbox"
-              checked={autoPromote}
-              onChange={(event) => onAutoPromoteChange(event.target.checked)}
-              disabled={busy}
-            />
-            <span>Auto-promote stages</span>
-          </label>
-
-          <label>
-            <span>Stage (manual)</span>
-            <input
-              type="number"
-              min={0}
-              max={maxCurriculumStage}
-              value={curriculumStage}
-              onChange={(event) => onCurriculumStageChange(Number(event.target.value) || 0)}
-              disabled={busy}
-            />
-          </label>
-        </div>
-
-        <div className="warning-box">
-          Old weights trained without instinct rewards may not transfer cleanly. Clear training data before switching to a new instincts curriculum run.
-        </div>
-      </details>
-
-      {running ? (
-        <div className="warning-box" role="status" aria-live="polite">
-          Training runs server-side — you can switch tabs and the backend keeps going.
-        </div>
-      ) : null}
-
-      {error ? (
-        <div className="warning-box warning-box--error" role="alert">
-          <strong>{errorType ? `${errorType}: ` : ""}</strong>
-          {error}
-          {traceback ? (
-            <details className="training-advanced" style={{ marginTop: "0.5rem" }}>
-              <summary>Technical traceback</summary>
-              <pre style={{ whiteSpace: "pre-wrap", margin: "0.5rem 0 0" }}>{traceback}</pre>
-            </details>
-          ) : null}
-        </div>
-      ) : null}
+        {error ? (
+          <div className="warning-box warning-box--error" role="alert" style={{ margin: "0.4rem 0 0", padding: "0.5rem 0.75rem", fontSize: "0.7rem" }}>
+            <strong>{errorType ? `${errorType}: ` : ""}</strong>
+            {error}
+            {traceback ? (
+              <details className="training-advanced" style={{ marginTop: "0.4rem" }}>
+                <summary>Technical traceback</summary>
+                <pre style={{ whiteSpace: "pre-wrap", margin: "0.4rem 0 0", fontSize: "0.65rem" }}>{traceback}</pre>
+              </details>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
     </section>
   );
 }

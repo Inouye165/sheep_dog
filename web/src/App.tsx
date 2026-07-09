@@ -31,6 +31,7 @@ import {
   saveScenario,
   startTraining,
   stopTraining,
+  shutdownApp,
 } from "./lib/api";
 import type { CheckpointMode } from "./lib/api";
 import type {
@@ -144,6 +145,7 @@ function mergeTrainingStatus(previous: TrainingStatus | null, next: TrainingStat
 }
 
 export function App() {
+  const [isAppClosed, setIsAppClosed] = useState(false);
   const [checkpointIndex, setCheckpointIndex] = useState<CheckpointIndex | null>(null);
   const [replay, setReplay] = useState<ReplayBundle | null>(null);
   const [selectedCheckpointEpisode, setSelectedCheckpointEpisode] = useState<number | null>(null);
@@ -875,6 +877,21 @@ export function App() {
     }
   }
 
+  async function handleCloseApp() {
+    if (!window.confirm("Gracefully stop active training (if running) and shutdown the application server?")) {
+      return;
+    }
+    setTrainingError(null);
+    setError(null);
+    try {
+      await shutdownApp();
+      setIsAppClosed(true);
+    } catch (closeError) {
+      // API call may fail or abort due to server process shutdown, which is expected.
+      setIsAppClosed(true);
+    }
+  }
+
   async function handleResumeTraining() {
     const request = trainingStatus?.resume_request;
     const remainingEpisodes = trainingStatus?.resume_remaining_episodes ?? 0;
@@ -1215,6 +1232,41 @@ export function App() {
             { id: "status" as const, label: "Status" },
           ];
 
+  if (isAppClosed) {
+    return (
+      <div style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        height: "100vh",
+        background: "linear-gradient(135deg, #09101a 0%, #060b13 100%)",
+        color: "var(--text)",
+        textAlign: "center",
+        padding: "2rem"
+      }}>
+        <div style={{
+          background: "rgba(12, 24, 38, 0.8)",
+          border: "1px solid var(--panel-border)",
+          padding: "3rem",
+          borderRadius: "1.5rem",
+          boxShadow: "var(--shadow)",
+          maxWidth: "500px",
+          backdropFilter: "blur(10px)"
+        }}>
+          <div style={{ fontSize: "4rem", marginBottom: "1rem" }}>💤</div>
+          <h2 style={{ color: "var(--accent)", fontSize: "1.8rem", margin: "0 0 1rem" }}>Application Closed</h2>
+          <p style={{ color: "var(--muted)", fontSize: "1rem", lineHeight: "1.6", margin: "0 0 2rem" }}>
+            The training session has been stopped gracefully, and the local backend server has shut down.
+          </p>
+          <div style={{ fontSize: "0.85rem", color: "var(--muted)", borderTop: "1px solid var(--panel-border)", paddingTop: "1.5rem" }}>
+            You may now safely close this browser window or tab.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <main className="app-shell">
       {error ? <div className="warning-box warning-box--error">{error}</div> : null}
@@ -1337,6 +1389,7 @@ export function App() {
                   onClearTraining={handleClearTraining}
                   onResetJourney={handleResetJourney}
                   onPromote={handlePromote}
+                  onCloseApp={handleCloseApp}
                   currentBestEntry={currentBestEntry}
                   previousBestEntry={previousBestEntry}
                   seedEpisode={trainingStatus?.seed_episode ?? null}
