@@ -213,3 +213,9 @@ export async function replayScenario(
 export async function loadTrainingHistory(): Promise<TelemetryRecord[]> {
   return fetchJson<TelemetryRecord[]>("/api/training/history", undefined, API_BASE_URL);
 }
+
+export async function shutdownApp(): Promise<{ status: string }> {
+  return fetchJson<{ status: string }>("/api/shutdown", {
+    method: "POST",
+  }, API_BASE_URL);
+}

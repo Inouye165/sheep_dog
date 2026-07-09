@@ -3207,3 +3207,20 @@ select {
   justify-content: center;
 }
 
+@keyframes glossary-glow {
+  0% {
+    border-color: var(--accent) !important;
+    box-shadow: 0 0 14px rgba(244, 197, 66, 0.45) !important;
+    background: rgba(244, 197, 66, 0.12) !important;
+  }
+  100% {
+    border-color: var(--panel-border) !important;
+    box-shadow: none !important;
+    background: rgba(148, 163, 184, 0.05) !important;
+  }
+}
+
+.glossary-highlight {
+  animation: glossary-glow 2.5s ease-out !important;
+}
+
