@@ -120,6 +120,9 @@ class NeuralPolicy:
             seed=config.training.train_seed,
             policy_kwargs={"net_arch": list(policy_config.hidden_sizes)},
             verbose=0,
+            tensorboard_log=str(Path(config.training.output_dir) / "tb_logs")
+            if config.training.output_dir
+            else None,
         )
         return cls(model=model, model_path=Path(""), config=policy_config)
 

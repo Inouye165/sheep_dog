@@ -92,6 +92,24 @@ class _TrainingProgressCallback(BaseCallback):
         return True
 
 
+import functools
+
+def _wandb_finish_on_exit(func):
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return func(self, *args, **kwargs)
+        finally:
+            try:
+                import wandb
+                if wandb.run is not None:
+                    wandb.finish()
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Failed to finish wandb run: {e}")
+    return wrapper
+
+
 class MaskablePPOTrainer(Trainer):
     """Train the shared role-aware neural policy with MaskablePPO."""
 
@@ -200,6 +218,7 @@ class MaskablePPOTrainer(Trainer):
             "incomplete_batch": payload.get("incomplete_batch"),
         }
 
+    @_wandb_finish_on_exit
     def train(
         self,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
@@ -216,6 +235,33 @@ class MaskablePPOTrainer(Trainer):
         )
         starting_total = self.total_episodes_trained if resuming_policy else 0
         batch_total = max(1, len(train_config.checkpoint_episodes))
+
+        # Initialize Weights & Biases if enabled
+        wandb_enabled = False
+        import os
+        if getattr(train_config, "wandb_enabled", False) or os.getenv("SHEEPDOG_WANDB_ENABLED", "").lower() in ("true", "1"):
+            wandb_enabled = True
+
+        if wandb_enabled:
+            try:
+                import wandb
+                wandb_config = {
+                    "learning_rate": train_config.learning_rate,
+                    "learning_rate_final": train_config.learning_rate_final,
+                    "total_timesteps": train_config.total_timesteps,
+                    "batch_total": batch_total,
+                    "environment": self.config.to_dict().get("environment", {}),
+                    "rewards": self.config.to_dict().get("rewards", {}),
+                }
+                wandb.init(
+                    project="sheepdog-herding",
+                    config=wandb_config,
+                    sync_tensorboard=True,
+                )
+            except (ImportError, Exception) as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Could not initialize wandb: {e}. Running without wandb.")
+                wandb_enabled = False
         n_checkpoints = batch_total
         steps_per_segment = max(1, train_config.total_timesteps // n_checkpoints)
         starting_total_timesteps = (
@@ -349,6 +395,18 @@ class MaskablePPOTrainer(Trainer):
                 completed_segments=completed_checkpoints - 1,
                 segment_index=completed_checkpoints - 1,
             )
+            from stable_baselines3.common.callbacks import CallbackList
+            callbacks_to_use = [progress_reporter]
+            if wandb_enabled:
+                try:
+                    from wandb.integration.sb3 import WandbCallback
+                    callbacks_to_use.append(WandbCallback(verbose=0))
+                except Exception as e:
+                    import logging
+                    logging.getLogger(__name__).warning(f"Failed to create WandbCallback: {e}")
+
+            callback_list = CallbackList(callbacks_to_use)
+
             # Linear LR annealing across the batch: full LR at segment 0,
             # learning_rate_final at the last segment.  This keeps updates
             # aggressive early (fast cliff recovery) and conservative late
@@ -371,7 +429,7 @@ class MaskablePPOTrainer(Trainer):
                 total_timesteps=steps_per_segment,
                 reset_num_timesteps=True,
                 progress_bar=False,
-                callback=progress_reporter,
+                callback=callback_list,
             )
             
             # Extract PPO diagnostics from model logger

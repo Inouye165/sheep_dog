@@ -233,6 +233,7 @@ class RewardComputer:
             + instincts["split_flock_penalty"]
         )
         total += farthest_sheep_progress + stray_ignore_penalty
+        total = max(-15.0, total)
         return RewardBreakdown(
             progress_to_pen=progress_to_pen,
             sheep_penned=sheep_penned,
@@ -322,7 +323,9 @@ class RewardComputer:
         if scatter_delta > instinct_config.chaos_scatter_delta:
             chaos_penalty -= scatter_delta - instinct_config.chaos_scatter_delta
         chaos_penalty *= instinct_config.chaos_penalty_weight
+        chaos_penalty = max(-5.0 * instinct_config.chaos_penalty_weight, chaos_penalty)
         overpressure_penalty *= instinct_config.overpressure_penalty_weight
+        overpressure_penalty = max(-10.0 * instinct_config.overpressure_penalty_weight, overpressure_penalty)
 
         max_offset = _max_sheep_offset(flock, inputs.sheep_positions)
         split_flock_penalty = 0.0
@@ -332,6 +335,7 @@ class RewardComputer:
         ):
             overflow = max_offset - instinct_config.split_flock_ratio * inputs.current_flock_spread
             split_flock_penalty = -overflow * instinct_config.split_flock_penalty_weight
+            split_flock_penalty = max(-5.0 * instinct_config.split_flock_penalty_weight, split_flock_penalty)
 
         return {
             "pressure_zone": pressure_zone,
@@ -367,7 +371,8 @@ class RewardComputer:
         if si_scale != 0.0 and inputs.current_farthest_distance > 0.0:
             # Penalise each step that the farthest unpenned sheep remains far.
             # Scale by the normalised distance so nearer strays cost less.
-            stray_penalty = -inputs.current_farthest_distance * si_scale
+            effective_farthest_dist = min(30.0, inputs.current_farthest_distance)
+            stray_penalty = -effective_farthest_dist * si_scale
 
             # Add dense dog approach penalty and progress reward for isolated strays
             if inputs.flock_centroid is not None and inputs.dog_positions and inputs.sheep_positions:
@@ -385,7 +390,8 @@ class RewardComputer:
                     if dist_to_centroid > 8.0:
                         min_dog_dist = min(_distance(dog, farthest_sheep) for dog in inputs.dog_positions)
                         # Dense approach penalty: 10x the stray ignore scale to provide a clear gradient
-                        stray_penalty -= min_dog_dist * (si_scale * 10.0)
+                        effective_min_dog_dist = min(12.0, min_dog_dist)
+                        stray_penalty -= effective_min_dog_dist * (si_scale * 10.0)
 
                         # Dense approach progress reward: localized distance-based multiplier
                         # when moving toward isolated farther_stray sheep.
@@ -397,6 +403,9 @@ class RewardComputer:
                             # Progress reward is scaled by the stray ignore penalty scale
                             stray_approach_reward = progress * (si_scale * 20.0) * isolation_multiplier
                             stray_penalty += stray_approach_reward
+            
+            # Cap the overall stray penalty to avoid catastrophic policy updates
+            stray_penalty = max(-25.0, stray_penalty)
 
         return farthest_progress, stray_penalty
 
@@ -602,7 +611,7 @@ class HierarchicalRewardComputer:
             sheep_away = 0.0
         else:
             sheep_closer = 0.0
-            sheep_away = -abs(dist_delta) * cfg.sheep_away_from_pen_scale
+            sheep_away = max(-10.0, -abs(dist_delta) * cfg.sheep_away_from_pen_scale)
 
         # --- Sheep penned ---
         sheep_penned = inputs.newly_penned * cfg.sheep_penned_reward
@@ -614,7 +623,7 @@ class HierarchicalRewardComputer:
             scatter = 0.0
         else:
             flock_grouped = 0.0
-            scatter = -abs(spread_delta) * cfg.scatter_penalty_scale
+            scatter = max(-10.0, -abs(spread_delta) * cfg.scatter_penalty_scale)
 
         # --- Dogs behind flock relative to pen ---
         # A dog is "behind" when its vector from flock centroid is roughly
@@ -649,6 +658,7 @@ class HierarchicalRewardComputer:
             # Penalise stacking
             stacked_pairs = sum(1 for d in pairs if d < cfg.dog_stack_distance)
             dog_stack_penalty = -stacked_pairs * cfg.dog_stack_penalty_scale
+            dog_stack_penalty = max(-5.0 * cfg.dog_stack_penalty_scale, dog_stack_penalty)
 
         # --- Dog blocking escape (light positive) ---
         # A dog earns a small bonus when it is positioned between the flock
@@ -674,6 +684,7 @@ class HierarchicalRewardComputer:
             for sheep in inputs.sheep_positions:
                 if _distance(dog, sheep) < cfg.overpressure_distance:
                     overpressure -= cfg.overpressure_penalty_scale
+        overpressure = max(-10.0 * cfg.overpressure_penalty_scale, overpressure)
 
         # --- Gate blocking: dog in front of pen opening ---
         # Exempt any dog that is explicitly assigned the BLOCKER role: those
@@ -689,6 +700,7 @@ class HierarchicalRewardComputer:
                 gate_blocking -= (
                     1.0 - d / cfg.gate_block_distance
                 ) * cfg.gate_blocking_penalty_scale
+        gate_blocking = max(-5.0 * cfg.gate_blocking_penalty_scale, gate_blocking)
 
         # --- Task completion + speed bonus ---
         task_completion = cfg.task_completion_reward if inputs.success else 0.0
@@ -717,6 +729,7 @@ class HierarchicalRewardComputer:
             + wandering
             + timeout
         )
+        total = max(-15.0, total)
         return HierarchicalRewardBreakdown(
             sheep_closer_to_pen=sheep_closer,
             sheep_penned=sheep_penned,

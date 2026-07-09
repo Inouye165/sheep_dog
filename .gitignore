@@ -34,3 +34,11 @@ web/test_full_output.txt
 # Environment variables
 .env
 .env.*
+
+# WandB logs
+wandb/
+
+# Local test outputs
+fresh_test_artifacts/
+
+

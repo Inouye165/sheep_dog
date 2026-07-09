@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
-import { loadTrainingHistory, type TelemetryRecord } from "../lib/api";
+import { loadTrainingHistory } from "../lib/api";
+import type { TelemetryRecord } from "../state/types";
 
 function getStageName(stage: number): string {
   if (stage === 10) return "10A";
