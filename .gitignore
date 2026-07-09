@@ -25,11 +25,9 @@ Thumbs.db
 *.zip
 
 # Test outputs
-pytest_out.txt
-pytest_rest.txt
-pytest_subset.txt
-web/test_output.txt
-web/test_full_output.txt
+pytest_*.txt
+**/test_output.txt
+**/test_full_output.txt
 
 # Environment variables
 .env
