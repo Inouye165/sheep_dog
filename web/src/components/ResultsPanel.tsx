@@ -516,11 +516,17 @@ export function ResultsPanel({ checkpointIndex }: ResultsPanelProps) {
               );
             }
 
+            const cpKey = item.checkpoint.checkpoint_id 
+              ? item.checkpoint.checkpoint_id 
+              : item.checkpoint.run_id 
+                ? `${item.checkpoint.run_id}-ep-${item.checkpoint.checkpoint_episode}`
+                : `ep-${item.checkpoint.checkpoint_episode}`;
+
             const replay = replays.get(item.checkpoint.checkpoint_episode);
             if (!replay) {
               return (
                 <PlaceholderCard
-                  key={`stage-${item.stage}-missing-${item.checkpoint.checkpoint_episode}`}
+                  key={`stage-${item.stage}-missing-${cpKey}`}
                   stage={item.stage}
                   slot={item.slot}
                 />
@@ -531,7 +537,7 @@ export function ResultsPanel({ checkpointIndex }: ResultsPanelProps) {
 
             return (
               <MilestoneCard
-                key={item.checkpoint.checkpoint_episode}
+                key={cpKey}
                 checkpoint={item.checkpoint}
                 snapshot={snapshot}
                 stage={item.stage}

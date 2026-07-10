@@ -53,6 +53,50 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
             config.environment,
         )
 
+        # Training Scenario Coverage & Exposure Trackers
+        self._last_curriculum_stage = config.rewards.instincts.curriculum_stage
+        self._stage_unique_seeds = set()
+        self._stage_unique_configs = set()
+        self._starting_sheep_to_pen_stats = {"min": float("inf"), "max": float("-inf"), "sum": 0.0, "count": 0}
+        self._starting_dog_to_sheep_stats = {"min": float("inf"), "max": float("-inf"), "sum": 0.0, "count": 0}
+        self._similarity_episodes = {11: 0, 23: 0, 37: 0, 41: 0, 53: 0}
+        self._similarity_successes = {11: 0, 23: 0, 37: 0, 41: 0, 53: 0}
+        self._evaluation_layouts = {}
+        self._precompute_evaluation_layouts()
+        self._current_episode_similarity_match = None
+
+    def _precompute_evaluation_layouts(self) -> None:
+        """Pre-generate initial positions for standard evaluation seeds to check training similarity."""
+        from sheepdog.environment import SheepdogEnvironment
+        try:
+            temp_env = SheepdogEnvironment(self.config)
+            for seed in [11, 23, 37, 41, 53]:
+                temp_env.reset(seed=seed)
+                self._evaluation_layouts[seed] = {
+                    "dog_positions": [tuple((d.position.x, d.position.y)) for d in temp_env._dogs],
+                    "sheep_positions": [tuple((s.position.x, s.position.y)) for s in temp_env._sheep],
+                    "pen_position": (temp_env._pen.origin.x, temp_env._pen.origin.y),
+                }
+        except Exception:
+            pass
+
+    def get_coverage_stats(self) -> dict[str, Any]:
+        """Expose training exposure statistics."""
+        return {
+            "seeds_seen_list": list(self._stage_unique_seeds),
+            "configs_seen_list": list(self._stage_unique_configs),
+            "min_sheep_to_pen": float(self._starting_sheep_to_pen_stats["min"]) if self._starting_sheep_to_pen_stats["count"] > 0 else 0.0,
+            "max_sheep_to_pen": float(self._starting_sheep_to_pen_stats["max"]) if self._starting_sheep_to_pen_stats["count"] > 0 else 0.0,
+            "sum_sheep_to_pen": float(self._starting_sheep_to_pen_stats["sum"]),
+            "count_sheep_to_pen": int(self._starting_sheep_to_pen_stats["count"]),
+            "min_dog_to_sheep": float(self._starting_dog_to_sheep_stats["min"]) if self._starting_dog_to_sheep_stats["count"] > 0 else 0.0,
+            "max_dog_to_sheep": float(self._starting_dog_to_sheep_stats["max"]) if self._starting_dog_to_sheep_stats["count"] > 0 else 0.0,
+            "sum_dog_to_sheep": float(self._starting_dog_to_sheep_stats["sum"]),
+            "count_dog_to_sheep": int(self._starting_dog_to_sheep_stats["count"]),
+            "similarity_episodes": self._similarity_episodes,
+            "similarity_successes": self._similarity_successes,
+        }
+
     def reset(
         self,
         *,
@@ -79,6 +123,63 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
             # Scenario training disabled: use normal random reset
             self._environment.reset(seed=self._latest_seed)
 
+        # Stage checks and trackers
+        curr_stage = self.config.rewards.instincts.curriculum_stage
+        if curr_stage != self._last_curriculum_stage:
+            self._last_curriculum_stage = curr_stage
+            self._stage_unique_seeds.clear()
+            self._stage_unique_configs.clear()
+            self._starting_sheep_to_pen_stats = {"min": float("inf"), "max": float("-inf"), "sum": 0.0, "count": 0}
+            self._starting_dog_to_sheep_stats = {"min": float("inf"), "max": float("-inf"), "sum": 0.0, "count": 0}
+            for ev_s in self._similarity_episodes:
+                self._similarity_episodes[ev_s] = 0
+                self._similarity_successes[ev_s] = 0
+
+        self._stage_unique_seeds.add(self._latest_seed)
+        
+        # Hash initial positions configuration
+        dog_positions = tuple(sorted((d.position.x, d.position.y) for d in self._environment._dogs))
+        sheep_positions = tuple(sorted((s.position.x, s.position.y) for s in self._environment._sheep))
+        pen_origin = (self._environment._pen.origin.x, self._environment._pen.origin.y)
+        config_hash = hash((dog_positions, sheep_positions, pen_origin))
+        self._stage_unique_configs.add(config_hash)
+
+        # Distances
+        import math
+        sheep_dists = [math.hypot(s.position.x - self._environment._pen.origin.x, s.position.y - self._environment._pen.origin.y) for s in self._environment._sheep]
+        avg_sheep_to_pen = float(np.mean(sheep_dists)) if sheep_dists else 0.0
+        
+        dog_dists = []
+        for d in self._environment._dogs:
+            for s in self._environment._sheep:
+                dog_dists.append(math.hypot(d.position.x - s.position.x, d.position.y - s.position.y))
+        avg_dog_to_sheep = float(np.mean(dog_dists)) if dog_dists else 0.0
+
+        # Update stats
+        def _update_stat_dict(d, val):
+            if val < d["min"]: d["min"] = val
+            if val > d["max"]: d["max"] = val
+            d["sum"] += val
+            d["count"] += 1
+
+        _update_stat_dict(self._starting_sheep_to_pen_stats, avg_sheep_to_pen)
+        _update_stat_dict(self._starting_dog_to_sheep_stats, avg_dog_to_sheep)
+
+        # Check similarity to evaluation layouts
+        self._current_episode_similarity_match = None
+        for ev_seed, ev_layout in self._evaluation_layouts.items():
+            ev_mean_dog = (np.mean([p[0] for p in ev_layout["dog_positions"]]), np.mean([p[1] for p in ev_layout["dog_positions"]]))
+            ev_mean_sheep = (np.mean([p[0] for p in ev_layout["sheep_positions"]]), np.mean([p[1] for p in ev_layout["sheep_positions"]]))
+            
+            cur_mean_dog = (np.mean([p[0] for p in dog_positions]), np.mean([p[1] for p in dog_positions]))
+            cur_mean_sheep = (np.mean([p[0] for p in sheep_positions]), np.mean([p[1] for p in sheep_positions]))
+            
+            if (pen_origin == ev_layout["pen_position"] and
+                math.hypot(cur_mean_dog[0] - ev_mean_dog[0], cur_mean_dog[1] - ev_mean_dog[1]) < 6.0 and
+                math.hypot(cur_mean_sheep[0] - ev_mean_sheep[0], cur_mean_sheep[1] - ev_mean_sheep[1]) < 6.0):
+                self._current_episode_similarity_match = ev_seed
+                break
+
         observation = self._current_observation()
         return observation, self._info()
 
@@ -102,6 +203,13 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
             info["final_snapshot"] = snapshot.to_dict()
             self._pending_actions = []
             self._current_dog_index = 0
+
+            # Increment similarity counters if episode finished
+            if (terminated or truncated) and self._current_episode_similarity_match is not None:
+                self._similarity_episodes[self._current_episode_similarity_match] += 1
+                if snapshot.success:
+                    self._similarity_successes[self._current_episode_similarity_match] += 1
+                self._current_episode_similarity_match = None
         else:
             self._current_dog_index += 1
             info["team_step_completed"] = False
@@ -154,3 +262,8 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
         if not self.config.training.scenario_training_enabled:
             return {"scenario_training_enabled": False}
         return self._scenario_sampler.get_usage_summary()
+
+    @property
+    def episode_counter(self) -> int:
+        """Return the count of training episodes completed in this environment instance."""
+        return self._episode_counter

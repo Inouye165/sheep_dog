@@ -186,3 +186,15 @@ class EpisodeStats:
     gate_corridor_occupancy_peak: float = 0.0
     gate_corridor_failure_steps: int = 0
     final_reward_breakdown: dict[str, float] = field(default_factory=dict)
+    initial_sheep_distance_to_pen: float = 0.0
+    min_sheep_distance_to_pen: float = 9999.0
+    final_dog_to_sheep_distance: float = 0.0
+    final_dog_positions: list[tuple[float, float]] = field(default_factory=list)
+    final_sheep_positions: list[tuple[float, float]] = field(default_factory=list)
+    pen_position: tuple[float, float] = (0.0, 0.0)
+    num_waits: int = 0
+    num_sprints: int = 0
+    num_invalid_actions: int = 0
+    most_frequent_action: str = ""
+    oscillation_detected: bool = False
+

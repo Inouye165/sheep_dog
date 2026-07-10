@@ -54,7 +54,7 @@ export function ControlBar({
             disabled={disabled || checkpoints.length === 0}
           >
             {checkpoints.length === 0 ? <option value="">No checkpoints exported</option> : null}
-            {checkpoints.map((entry) => {
+            {checkpoints.map((entry, idx) => {
               const episode = entry.checkpoint_episode;
               const isBest = episode === bestCheckpointEpisode;
               const stage = entry.reward_config?.instincts?.curriculum_stage;
@@ -65,10 +65,18 @@ export function ControlBar({
               const steps = Math.round(entry.average_completion_steps);
               const reward = entry.average_reward;
               const rewardStr = (reward >= 0 ? "+" : "") + reward.toFixed(1);
-              let label = `${stageStr}Ep ${episode} · ${successStr} · ${steps} steps avg · ${rewardStr} R avg`;
+              const runDesc = entry.run_id ? ` [Run: ${entry.run_id.substring(0, 8)}]` : "";
+              let label = `${stageStr}Ep ${episode} · ${successStr} · ${steps} steps avg · ${rewardStr} R avg${runDesc}`;
               if (isBest) label += " — ★ Best";
+
+              const optKey = entry.checkpoint_id
+                ? entry.checkpoint_id
+                : entry.run_id
+                  ? `${entry.run_id}-ep-${episode}`
+                  : `ep-${episode}-${entry.recorded_at || ""}-${idx}`;
+
               return (
-                <option key={episode} value={episode}>
+                <option key={optKey} value={episode}>
                   {label}
                 </option>
               );

@@ -198,21 +198,28 @@ export function HistoryTab() {
                   )}
 
                   {/* Dots for checkpoints */}
-                  {chartPoints.map((pt, idx) => (
-                    <g key={idx} className="chart-dot">
-                      <circle 
-                        cx={pt.x} 
-                        cy={pt.y} 
-                        r="4" 
-                        fill="#3b82f6" 
-                        stroke="var(--bg-primary, #1e1e1e)" 
-                        strokeWidth="1.5" 
-                      />
-                      <title>
-                        {`Step: ${pt.record.step.toLocaleString()}\nStage: ${getStageName(pt.record.stage)}\nSuccess: ${(pt.record.success_rate * 100).toFixed(0)}%\nReward: ${pt.record.metrics.average_reward.toFixed(1)}`}
-                      </title>
-                    </g>
-                  ))}
+                  {chartPoints.map((pt, idx) => {
+                    const dotKey = pt.record.checkpoint_id 
+                      ? pt.record.checkpoint_id 
+                      : pt.record.evaluation_id 
+                        ? pt.record.evaluation_id 
+                        : `${pt.record.run_id || "unknown"}-${pt.record.stage}-${pt.record.global_episode || pt.record.step}-${pt.record.episode_in_stage || pt.record.step}-${pt.record.recorded_at || pt.record.timestamp}-${idx}`;
+                    return (
+                      <g key={dotKey} className="chart-dot">
+                        <circle 
+                          cx={pt.x} 
+                          cy={pt.y} 
+                          r="4" 
+                          fill="#3b82f6" 
+                          stroke="var(--bg-primary, #1e1e1e)" 
+                          strokeWidth="1.5" 
+                        />
+                        <title>
+                          {`Step: ${pt.record.step.toLocaleString()}\nStage: ${getStageName(pt.record.stage)}\nSuccess: ${(pt.record.success_rate * 100).toFixed(0)}%\nReward: ${pt.record.metrics.average_reward.toFixed(1)}`}
+                        </title>
+                      </g>
+                    );
+                  })}
 
                   {/* X Axis labels */}
                   {chartPoints.length > 1 && (
@@ -256,9 +263,15 @@ export function HistoryTab() {
                     </tr>
                   </thead>
                   <tbody>
-                    {[...history].reverse().map((record, index) => (
-                      <tr key={index} style={{ borderBottom: "1px solid var(--border-color)" }}>
-                        <td style={{ padding: "0.75rem" }}>{record.step.toLocaleString()}</td>
+                    {[...history].reverse().map((record, index) => {
+                      const rowKey = record.checkpoint_id 
+                        ? record.checkpoint_id 
+                        : record.evaluation_id 
+                          ? record.evaluation_id 
+                          : `${record.run_id || "unknown"}-${record.stage}-${record.global_episode || record.step}-${record.episode_in_stage || record.step}-${record.recorded_at || record.timestamp}-${index}`;
+                      return (
+                        <tr key={rowKey} style={{ borderBottom: "1px solid var(--border-color)" }}>
+                          <td style={{ padding: "0.75rem" }}>{record.step.toLocaleString()}</td>
                         <td style={{ padding: "0.75rem" }}>
                           <span style={{ padding: "0.2rem 0.5rem", borderRadius: "4px", backgroundColor: "var(--theme-bg-accent, #333)", fontWeight: "bold" }}>
                             {getStageName(record.stage)}
@@ -283,8 +296,9 @@ export function HistoryTab() {
                           gae: {record.hyperparameters.gae_lambda}
                         </td>
                       </tr>
-                    ))}
-                  </tbody>
+                    );
+                  })}
+                </tbody>
                 </table>
               </div>
             )}

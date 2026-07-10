@@ -74,6 +74,21 @@ class EvaluationRecord:
     dog_role_occupancy: dict[str, dict[str, int]]
     reward_breakdown: dict[str, float]
     replay_path: str
+    policy_version: int | None = None
+    initial_sheep_distance_to_pen: float | None = None
+    min_sheep_distance_to_pen: float | None = None
+    final_dog_to_sheep_distance: float | None = None
+    final_dog_positions: list[tuple[float, float]] | None = None
+    final_sheep_positions: list[tuple[float, float]] | None = None
+    pen_position: tuple[float, float] | None = None
+    num_waits: int | None = None
+    num_sprints: int | None = None
+    num_invalid_actions: int | None = None
+    most_frequent_action: str | None = None
+    oscillation_detected: bool | None = None
+    observation_diagnostics: dict[str, Any] | None = None
+    failed_trajectory_summary: list[dict[str, Any]] | None = None
+    last_actions_before_failure: list[list[str]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict."""
@@ -130,6 +145,7 @@ class Evaluator:
         policy: Policy,
         seeds: tuple[int, ...],
         checkpoint_episode: int,
+        deterministic: bool = True,
     ) -> tuple[EvaluationSummary, Path, Path]:
         """Run the policy on each seed and collect evaluation records and replays."""
         results: list[EpisodeResult] = []
@@ -137,7 +153,9 @@ class Evaluator:
 
         for seed in seeds:
             environment = SheepdogEnvironment(self.config)
-            result = environment.run_policy(policy, seed, capture_replay=True)
+            result = environment.run_policy(
+                policy, seed, capture_replay=True, deterministic=deterministic
+            )
             results.append(result)
             trainer_type, policy_type, replay_mode = _policy_metadata(
                 result.policy_name,
@@ -168,10 +186,11 @@ class Evaluator:
                     "frames": [frame.to_dict() for frame in result.replay],
                 },
             )
+            p_ver = getattr(policy, "policy_version", None)
             records.append(
                 EvaluationRecord(
                     **{
-                        **self._record_from_result(result).to_dict(),
+                        **self._record_from_result(result, policy_version=p_ver).to_dict(),
                         "replay_path": str(replay_path),
                     }
                 )
@@ -244,8 +263,19 @@ class Evaluator:
 
         return summary, json_path, csv_path
 
-    def _record_from_result(self, result: EpisodeResult) -> EvaluationRecord:
+    def _record_from_result(self, result: EpisodeResult, policy_version: int | None = None) -> EvaluationRecord:
         snapshot = result.final_snapshot
+        
+        obs_diag = None
+        if hasattr(result, "observations") and result.observations:
+            obs_diag = self._compute_observation_diagnostics(result.observations)
+            
+        failed_traj = None
+        last_actions = None
+        if not result.stats.success:
+            failed_traj = self._compute_failed_trajectory_summary(result)
+            last_actions = [list(frame.actions) for frame in result.replay[-20:]]
+
         return EvaluationRecord(
             seed=result.seed,
             success=result.stats.success,
@@ -274,4 +304,164 @@ class Evaluator:
             dog_role_occupancy=result.stats.dog_role_occupancy,
             reward_breakdown=result.stats.final_reward_breakdown,
             replay_path="",
+            policy_version=policy_version,
+            initial_sheep_distance_to_pen=getattr(result.stats, "initial_sheep_distance_to_pen", None),
+            min_sheep_distance_to_pen=getattr(result.stats, "min_sheep_distance_to_pen", None),
+            final_dog_to_sheep_distance=getattr(result.stats, "final_dog_to_sheep_distance", None),
+            final_dog_positions=getattr(result.stats, "final_dog_positions", None),
+            final_sheep_positions=getattr(result.stats, "final_sheep_positions", None),
+            pen_position=getattr(result.stats, "pen_position", None),
+            num_waits=getattr(result.stats, "num_waits", None),
+            num_sprints=getattr(result.stats, "num_sprints", None),
+            num_invalid_actions=getattr(result.stats, "num_invalid_actions", None),
+            most_frequent_action=getattr(result.stats, "most_frequent_action", None),
+            oscillation_detected=getattr(result.stats, "oscillation_detected", None),
+            observation_diagnostics=obs_diag,
+            failed_trajectory_summary=failed_traj,
+            last_actions_before_failure=last_actions,
         )
+
+    def _compute_observation_diagnostics(self, observations: tuple[tuple[Any, ...], ...]) -> dict[str, Any]:
+        if not observations:
+            return {}
+        first_step = observations[0]
+        if not first_step:
+            return {}
+        feature_names = list(first_step[0].feature_names)
+        num_features = len(feature_names)
+        
+        min_vals = []
+        max_vals = []
+        mean_vals = []
+        std_vals = []
+        constant_features = []
+        nan_or_inf_features = []
+        saturated_features = []
+        
+        import math
+        
+        for i, name in enumerate(feature_names):
+            values = []
+            for step_obs in observations:
+                for dog_obs in step_obs:
+                    if i < len(dog_obs.values):
+                        values.append(dog_obs.values[i])
+            
+            if not values:
+                min_vals.append(0.0)
+                max_vals.append(0.0)
+                mean_vals.append(0.0)
+                std_vals.append(0.0)
+                constant_features.append(name)
+                continue
+                
+            has_nan = any(math.isnan(v) or math.isinf(v) for v in values)
+            if has_nan:
+                nan_or_inf_features.append(name)
+                values = [v for v in values if not (math.isnan(v) or math.isinf(v))]
+                
+            if not values:
+                min_vals.append(0.0)
+                max_vals.append(0.0)
+                mean_vals.append(0.0)
+                std_vals.append(0.0)
+                constant_features.append(name)
+                continue
+                
+            min_v = min(values)
+            max_v = max(values)
+            mean_v = sum(values) / len(values)
+            std_v = math.sqrt(sum((v - mean_v)**2 for v in values) / len(values))
+            
+            min_vals.append(min_v)
+            max_vals.append(max_v)
+            mean_vals.append(mean_v)
+            std_vals.append(std_v)
+            
+            if std_v < 1e-6:
+                constant_features.append(name)
+                
+            is_sat = False
+            for bound in (-1.0, 0.0, 1.0):
+                if all(abs(v - bound) < 1e-4 for v in values):
+                    is_sat = True
+                    break
+            if is_sat and name not in constant_features:
+                saturated_features.append(name)
+                
+        return {
+            "feature_names": feature_names,
+            "vector_length": num_features,
+            "min_values": min_vals,
+            "max_values": max_vals,
+            "mean_values": mean_vals,
+            "std_values": std_vals,
+            "constant_features": constant_features,
+            "nan_or_inf_features": nan_or_inf_features,
+            "saturated_features": saturated_features,
+            "bounds_mismatch": False,
+        }
+
+    def _compute_failed_trajectory_summary(self, result: EpisodeResult) -> list[dict[str, Any]]:
+        replay = result.replay
+        if not replay:
+            return []
+        steps_count = len(replay)
+        
+        min_dist_steps = set()
+        running_min_dist = float("inf")
+        for idx, frame in enumerate(replay):
+            dist = frame.snapshot.average_distance_to_pen
+            if dist < running_min_dist:
+                running_min_dist = dist
+                min_dist_steps.add(idx)
+                
+        key_steps = {0, steps_count - 1} | min_dist_steps
+        target_count = 20
+        step_interval = max(1, steps_count // target_count)
+        for idx in range(0, steps_count, step_interval):
+            key_steps.add(idx)
+            
+        sorted_steps = sorted(list(key_steps))
+        
+        summary_rows = []
+        for step_idx in sorted_steps:
+            if step_idx >= steps_count:
+                continue
+            frame = replay[step_idx]
+            snap = frame.snapshot
+            
+            unpenned_sheep = [s for s in snap.sheep if not s.penned]
+            avg_dog_to_sheep = 0.0
+            if unpenned_sheep and snap.dogs:
+                from sheepdog.entities import Point
+                total_d = 0.0
+                for d in snap.dogs:
+                    d_pos = Point(d.x, d.y)
+                    dog_d = sum(d_pos.distance_to(Point(s.x, s.y)) for s in unpenned_sheep) / len(unpenned_sheep)
+                    total_d += dog_d
+                avg_dog_to_sheep = total_d / len(snap.dogs)
+                
+            event = ""
+            if step_idx == 0:
+                event = "initial"
+            elif step_idx == steps_count - 1:
+                event = f"termination: {snap.status or result.stats.stop_reason}"
+            elif step_idx in min_dist_steps:
+                event = "new_min_distance"
+                
+            summary_rows.append({
+                "step": frame.step,
+                "dog_positions": [(d.x, d.y) for d in snap.dogs],
+                "sheep_positions": [(s.x, s.y) for s in snap.sheep],
+                "sheep_distance_to_pen": snap.average_distance_to_pen,
+                "dog_to_sheep_distance": avg_dog_to_sheep,
+                "selected_actions": list(frame.actions),
+                "reward": frame.reward.total if hasattr(frame.reward, "total") else 0.0,
+                "reward_breakdown": asdict(frame.reward) if hasattr(frame.reward, "to_dict") or hasattr(frame.reward, "__dataclass_fields__") else {},
+                "no_progress_counter": snap.no_progress_steps,
+                "event": event
+            })
+            
+        return summary_rows
+

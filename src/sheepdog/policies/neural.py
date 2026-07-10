@@ -95,6 +95,7 @@ class NeuralPolicy:
         self.model = model
         self.model_path = Path(model_path)
         self.config = config
+        self.policy_version: int | None = None
 
     @classmethod
     def initialize(cls, config: LabConfig) -> NeuralPolicy:
@@ -106,6 +107,12 @@ class NeuralPolicy:
             observation_size=observation_size,
             env_workers=env_workers,
         )
+        try:
+            from torch.utils.tensorboard import SummaryWriter
+            has_tensorboard = SummaryWriter is not None
+        except ImportError:
+            has_tensorboard = False
+
         model = MaskablePPO(
             "MlpPolicy",
             vec_env,
@@ -121,7 +128,7 @@ class NeuralPolicy:
             policy_kwargs={"net_arch": list(policy_config.hidden_sizes)},
             verbose=0,
             tensorboard_log=str(Path(config.training.output_dir) / "tb_logs")
-            if config.training.output_dir
+            if config.training.output_dir and has_tensorboard
             else None,
         )
         return cls(model=model, model_path=Path(""), config=policy_config)
@@ -132,17 +139,20 @@ class NeuralPolicy:
         path: str | Path,
         config: LabConfig,
         policy_config: dict[str, Any] | None = None,
+        policy_version: int | None = None,
     ) -> NeuralPolicy:
         """Load a trained neural policy from a checkpoint file."""
         vec_env, _env_workers, _backend = _build_vec_env(config)
         observation_size = int(vec_env.observation_space.shape[0])
         resolved_path = Path(path)
         model = MaskablePPO.load(str(resolved_path), env=vec_env)
-        return cls(
+        policy_obj = cls(
             model=model,
             model_path=resolved_path,
             config=NeuralPolicyConfig.from_dict(policy_config, observation_size),
         )
+        policy_obj.policy_version = policy_version
+        return policy_obj
 
     def save(self, path: str | Path) -> Path:
         """Save the model to *path* and return the resolved path."""
@@ -153,7 +163,7 @@ class NeuralPolicy:
         self.model_path = resolved_target
         return resolved_target
 
-    def select_actions(self, environment: object) -> list[Action]:
+    def select_actions(self, environment: object, deterministic: bool = True) -> list[Action]:
         """Return one action per dog based on the neural model's predictions."""
         actions: list[Action] = []
         reserved_positions: set[object] = set()
@@ -172,7 +182,7 @@ class NeuralPolicy:
             action_index, _state = self.model.predict(
                 observation,
                 action_masks=action_masks,
-                deterministic=True,
+                deterministic=deterministic,
             )
             action = ACTION_ORDER[int(action_index)]
             actions.append(action)

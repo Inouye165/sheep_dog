@@ -1,5 +1,6 @@
 import { useState } from "react";
-import type { AutoPromoteGateDiagnostics, CheckpointEntry } from "../state/types";
+import { CopyAgentDataButton } from "./CopyAgentDataButton";
+import type { AutoPromoteGateDiagnostics, CheckpointEntry, CheckpointIndex, TrainingStatus } from "../state/types";
 
 const STAGE_DESCRIPTIONS: Record<number, string> = {
   0: "Full problem — 3 dogs, 6 sheep, 80×60 grid",
@@ -169,6 +170,11 @@ interface TrainingPanelProps {
   error: string | null;
   errorType?: string | null;
   traceback?: string | null;
+  antiCollapseWarning?: {
+    triggered: boolean;
+    message: string;
+    recommendation?: string;
+  } | null;
   successRate: number | null;
   activeTrainerType?: string | null;
   activePolicyType?: string | null;
@@ -204,7 +210,9 @@ interface TrainingPanelProps {
   startingEpisode?: number | null;
   resumeAvailable?: boolean;
   resumeRemainingEpisodes?: number | null;
-  onCloseApp: () => void;
+  onCloseApp?: () => void;
+  trainingStatus?: TrainingStatus | null;
+  checkpointIndex?: CheckpointIndex | null;
 }
 
 export function TrainingPanel({
@@ -231,6 +239,7 @@ export function TrainingPanel({
   error,
   errorType,
   traceback,
+  antiCollapseWarning = null,
   successRate,
   activeTrainerType,
   activePolicyType,
@@ -266,7 +275,9 @@ export function TrainingPanel({
   startingEpisode,
   resumeAvailable = false,
   resumeRemainingEpisodes = null,
-  onCloseApp,
+  onCloseApp = () => {},
+  trainingStatus = null,
+  checkpointIndex = null,
 }: TrainingPanelProps) {
   const denominator = batchTotalEpisodes || episodes;
   const progress = denominator === 0 ? 0 : Math.min(1, batchCompletedEpisodes / denominator);
@@ -365,7 +376,14 @@ export function TrainingPanel({
           <p className="eyebrow">Curriculum learning</p>
           <h2 style={{ fontSize: "1.3rem", margin: "0.1rem 0" }}>Training</h2>
         </div>
-        <span className={`pill ${running ? "pill--live" : "pill--muted"}`}>{phase}</span>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+          <CopyAgentDataButton
+            trainingStatus={trainingStatus}
+            checkpointIndex={checkpointIndex}
+            curriculumStage={curriculumStage}
+          />
+          <span className={`pill ${running ? "pill--live" : "pill--muted"}`}>{phase}</span>
+        </div>
       </div>
 
       {/* 2. FIXED SUB-TABS */}
@@ -444,6 +462,32 @@ export function TrainingPanel({
             </button>
           </div>
 
+          {antiCollapseWarning?.triggered && (
+            <div style={{
+              background: "rgba(239, 68, 68, 0.12)",
+              border: "1px solid rgba(239, 68, 68, 0.25)",
+              borderLeft: "4px solid #ef4444",
+              padding: "0.6rem 0.8rem",
+              borderRadius: "0 0.5rem 0.5rem 0",
+              fontSize: "0.75rem",
+              color: "#fca5a5",
+              lineHeight: "1.4",
+              display: "flex",
+              flexDirection: "column",
+              gap: "4px"
+            }}>
+              <strong style={{ display: "flex", alignItems: "center", gap: "6px", color: "#f87171" }}>
+                ⚠️ POLICY COLLAPSE DETECTED
+              </strong>
+              <span>{antiCollapseWarning.message}</span>
+              {antiCollapseWarning.recommendation && (
+                <span style={{ fontStyle: "italic", fontSize: "0.7rem", color: "#fca5a5" }}>
+                  Recommendation: {antiCollapseWarning.recommendation}
+                </span>
+              )}
+            </div>
+          )}
+
           {/* Training Control Card */}
           <div style={{ display: "flex", flexDirection: "column", gap: "0.65rem" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -490,6 +534,24 @@ export function TrainingPanel({
                   ) : null}
                 </div>
               </div>
+            </div>
+
+            <div style={{
+              background: "rgba(59, 130, 246, 0.1)",
+              border: "1px solid rgba(59, 130, 246, 0.2)",
+              borderRadius: "0.5rem",
+              padding: "0.6rem",
+              fontSize: "0.75rem",
+              color: "#93c5fd",
+              lineHeight: "1.4",
+              display: "flex",
+              flexDirection: "column",
+              gap: "4px",
+            }}>
+              <span style={{ fontWeight: "700" }}>💡 Tip: Restore / Fork Past Checkpoints</span>
+              <span>
+                To restore or fork training from a previous stage or episode, go to the <strong>W&B Model</strong> tab, select the target checkpoint, and choose <strong>Restore weights</strong> or <strong>Fork Run...</strong>.
+              </span>
             </div>
 
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "rgba(148, 163, 184, 0.05)", padding: "0.5rem", borderRadius: "0.5rem" }}>
@@ -633,9 +695,9 @@ export function TrainingPanel({
             fontSize: "0.75rem",
             marginTop: "0.4rem"
           }}>
-            <div style={{ display: "flex", flexDirection: "column" }}>
+            <div style={{ display: "flex", flexDirection: "column", gridColumn: "span 2" }}>
               <span style={{ color: "var(--muted)" }}>Status message</span>
-              <strong style={{ textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap" }}>{message}</strong>
+              <span style={{ fontSize: "0.75rem", fontWeight: "600", color: "var(--text)", wordBreak: "break-word" }}>{message}</span>
             </div>
             <div style={{ display: "flex", flexDirection: "column" }}>
               <span style={{ color: "var(--muted)" }}>Success Rate</span>

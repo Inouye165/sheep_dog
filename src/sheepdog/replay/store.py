@@ -15,6 +15,7 @@ class ReplayStore:
         self.root.mkdir(parents=True, exist_ok=True)
 
     def write(self, name: str, payload: Any) -> Path:
+        self.root.mkdir(parents=True, exist_ok=True)
         path = self.root / name
         with path.open("w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2)

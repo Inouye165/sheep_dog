@@ -95,12 +95,26 @@ class Trainer:
 
     def _load_state(self) -> dict[str, Any]:
         if not self._state_path.exists():
-            return {"total_episodes_trained": 0, "weights": None, "best_score": None}
+            return {
+                "total_episodes_trained": 0,
+                "weights": None,
+                "best_score": None,
+                "run_id": None,
+                "parent_run_id": None,
+                "parent_checkpoint_id": None,
+            }
         try:
             with self._state_path.open("r", encoding="utf-8") as handle:
                 payload = json.load(handle)
         except (OSError, json.JSONDecodeError):
-            return {"total_episodes_trained": 0, "weights": None, "best_score": None}
+            return {
+                "total_episodes_trained": 0,
+                "weights": None,
+                "best_score": None,
+                "run_id": None,
+                "parent_run_id": None,
+                "parent_checkpoint_id": None,
+            }
         return {
             "total_episodes_trained": int(payload.get("total_episodes_trained", 0)),
             "weights": payload.get("weights"),
@@ -112,6 +126,9 @@ class Trainer:
             "best_formal_avg_steps": payload.get("best_formal_avg_steps"),
             "best_formal_curriculum_stage": payload.get("best_formal_curriculum_stage"),
             "best_formal_weights": payload.get("best_formal_weights"),
+            "run_id": payload.get("run_id"),
+            "parent_run_id": payload.get("parent_run_id"),
+            "parent_checkpoint_id": payload.get("parent_checkpoint_id"),
         }
 
     def _save_state(
@@ -133,6 +150,13 @@ class Trainer:
             "weights": asdict(weights),
             "best_score": best_score,
         }
+        if "run_id" in self._loaded_state:
+            payload["run_id"] = self._loaded_state["run_id"]
+        if "parent_run_id" in self._loaded_state:
+            payload["parent_run_id"] = self._loaded_state["parent_run_id"]
+        if "parent_checkpoint_id" in self._loaded_state:
+            payload["parent_checkpoint_id"] = self._loaded_state["parent_checkpoint_id"]
+
         if hill_climb_curriculum_stage is not None:
             payload["hill_climb_curriculum_stage"] = hill_climb_curriculum_stage
         if best_formal_episode is not None:
@@ -350,6 +374,21 @@ class Trainer:
                     checkpoint_episode=cumulative_episode,
                 )
                 representative_replay_path = Path(summary.records[0].replay_path)
+                from sheepdog.checkpoints.store import (
+                    get_observation_schema_hash,
+                    get_action_space_hash,
+                )
+                from sheepdog.rewards import REWARD_SCHEMA_VERSION
+                from sheepdog.environment import ENV_CONFIG_VERSION
+
+                run_id = self._loaded_state.get("run_id")
+                parent_run_id = self._loaded_state.get("parent_run_id")
+                parent_checkpoint_id = self._loaded_state.get("parent_checkpoint_id")
+                chk_id = f"chk_{run_id or 'unknown'}_ep_{cumulative_episode}"
+                obs_hash = get_observation_schema_hash(self.config)
+                act_hash = get_action_space_hash()
+                recorded_time = datetime.now(UTC).isoformat()
+
                 metadata = CheckpointMetadata(
                     checkpoint_episode=cumulative_episode,
                     total_training_episodes=cumulative_episode,
@@ -366,11 +405,23 @@ class Trainer:
                     reward_config=asdict(self.config.rewards),
                     policy_weights=asdict(best_policy.weights),
                     evaluation_replay_path=str(representative_replay_path),
+                    run_id=run_id,
+                    checkpoint_id=chk_id,
+                    parent_run_id=parent_run_id,
+                    parent_checkpoint_id=parent_checkpoint_id,
+                    global_timestep=None,
+                    observation_schema_hash=obs_hash,
+                    action_space_hash=act_hash,
+                    reward_schema_version=REWARD_SCHEMA_VERSION,
+                    env_config_version=ENV_CONFIG_VERSION,
+                    created_timestamp=recorded_time,
+                    deterministic_evaluation=True,
+                    evaluation_seeds=list(train_config.evaluation_seeds),
                 )
                 checkpoint_path = self.checkpoint_store.write(metadata)
                 checkpoint_payload = {
                     "checkpoint_episode": cumulative_episode,
-                    "recorded_at": datetime.now(UTC).isoformat(),
+                    "recorded_at": recorded_time,
                     "checkpoint": checkpoint_path.name,
                     "evaluation": evaluation_json.name,
                     "replay": str(representative_replay_path),
@@ -391,6 +442,17 @@ class Trainer:
                     "environment_config": asdict(self.config.environment),
                     "reward_config": asdict(self.config.rewards),
                     "records": [record.to_dict() for record in summary.records],
+                    "run_id": run_id,
+                    "checkpoint_id": chk_id,
+                    "parent_run_id": parent_run_id,
+                    "parent_checkpoint_id": parent_checkpoint_id,
+                    "global_timestep": None,
+                    "observation_schema_hash": obs_hash,
+                    "action_space_hash": act_hash,
+                    "reward_schema_version": REWARD_SCHEMA_VERSION,
+                    "env_config_version": ENV_CONFIG_VERSION,
+                    "deterministic_evaluation": True,
+                    "evaluation_seeds": list(train_config.evaluation_seeds),
                 }
                 checkpoint_payloads = self._merge_checkpoint(
                     checkpoint_payloads, checkpoint_payload

@@ -9,6 +9,8 @@ from sheepdog.config import InstinctRewardConfig, RewardConfig
 
 Position = tuple[float, float]
 
+REWARD_SCHEMA_VERSION = "1.0"
+
 
 @dataclass(frozen=True, slots=True)
 class RewardBreakdown:

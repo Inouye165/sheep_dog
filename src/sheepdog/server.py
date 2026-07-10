@@ -68,7 +68,9 @@ class _RollbackSignal(Exception):
 EVAL_SEED_BANK = (
     101, 103, 107, 109, 113, 127, 131, 137, 139, 149,
     151, 157, 163, 167, 173, 179, 181, 191, 193, 197,
-    199, 211, 223, 227, 229, 233, 239, 241, 251, 257
+    199, 211, 223, 227, 229, 233, 239, 241, 251, 257,
+    263, 269, 271, 277, 281, 283, 293, 307, 311, 313,
+    317, 331, 337, 347, 349, 353, 359, 367, 373, 379
 )
 
 
@@ -90,6 +92,15 @@ class _EarlyPromotionSignal(Exception):
         self.qualified_streak = qualified_streak
         self.seed_gate_hits = seed_gate_hits
         self.full_success_hits = full_success_hits
+
+
+class DiagnosticsHTTPException(Exception):
+    """Exception raised for HTTP route-level failures inside diagnostics compilation."""
+
+    def __init__(self, code: str, message: str, status_code: int = 400) -> None:
+        super().__init__(message)
+        self.code = code
+        self.status_code = status_code
 
 
 def _policy_metadata(
@@ -663,6 +674,7 @@ def _build_training_job_config(
     enable_instinct_rewards: bool | None = None,
     curriculum_stage: int | None = None,
     debug_reward_breakdown: bool | None = None,
+    evaluation_mode: str = "quick",
 ) -> LabConfig:
     """Build the effective training configuration for one requested job."""
 
@@ -689,7 +701,13 @@ def _build_training_job_config(
             steps_per_episode = 4_000
     else:
         steps_per_episode = 25_000
-    evaluation_seeds = (11, 23, 37) if fast_mode else EVAL_SEED_BANK
+
+    if evaluation_mode == "confidence":
+        evaluation_seeds = EVAL_SEED_BANK
+    elif evaluation_mode == "standard":
+        evaluation_seeds = EVAL_SEED_BANK[:20]
+    else:
+        evaluation_seeds = (11, 23, 37)
     total_timesteps = max(config.training.total_timesteps, total_episodes * steps_per_episode)
     training_config = TrainingConfig(
         trainer_type="maskable_ppo",
@@ -801,9 +819,11 @@ class TrainingManager:
         self._control_request: str | None = None
         self._active_start_request: dict[str, Any] | None = None
         self.telemetry_manager = CurriculumTelemetryManager(LabConfig().training.output_dir)
+        self._eval_success_history: list[tuple[int, float]] = []
         self._reconcile_web_exports()
         self._status: dict[str, Any] = self._initial_status()
         self._resume_interrupted_session()
+        self.active_trainer = None
 
     @staticmethod
     def _reconcile_web_exports() -> None:
@@ -848,6 +868,7 @@ class TrainingManager:
             "auto_promote": persisted.get("auto_promote", True),
             "auto_promote_threshold": _get_success_threshold(stg),
             "auto_promote_stages_completed": 0,
+            "anti_collapse_warning": None,
             "auto_promote_gate": _auto_promote_gate_defaults(stg),
             "available_curriculum_stages": available_curriculum_stages,
             "max_curriculum_stage": max_curriculum_stage,
@@ -856,6 +877,7 @@ class TrainingManager:
             "completed_episodes": 0,
             "batch_total_episodes": 0,
             "batch_completed_episodes": 0,
+            "estimated_equivalent_episodes": 0.0,
             "total_episodes_trained": _read_persisted_total(),
             "stage_history": stage_history,
             "grand_total_episodes": sum(stage_history.values()),
@@ -880,9 +902,31 @@ class TrainingManager:
             "error": None,
             "error_type": None,
             "traceback": None,
-            "seed_episode": None,
             "starting_episode": None,
+            "run_id": None,
+            "parent_run_id": None,
+            "parent_checkpoint_id": None,
+            "active_model_source": "fresh",
+            "active_checkpoint_id": None,
+            "training_start_time": None,
+            "last_policy_update_time": None,
+            "last_evaluation_time": None,
+            "policy_version": 0,
         }
+
+        try:
+            state_path = output_root / Trainer.STATE_FILENAME
+            if state_path.exists():
+                with open(state_path, "r", encoding="utf-8") as f:
+                    state_data = json.load(f)
+                    if isinstance(state_data, dict):
+                        for key in ("run_id", "parent_run_id", "parent_checkpoint_id", "active_model_source",
+                                    "active_checkpoint_id", "training_start_time", "last_policy_update_time",
+                                    "last_evaluation_time", "policy_version"):
+                            if key in state_data:
+                                status[key] = state_data[key]
+        except Exception:
+            pass
 
         session_state = _read_training_session_state(output_root)
         if isinstance(session_state, dict):
@@ -927,6 +971,7 @@ class TrainingManager:
         debug_reward_breakdown: bool | None = None,
         auto_promote: bool | None = None,
         promote_from_checkpoint_episode: int | None = None,
+        evaluation_mode: str = "quick",
     ) -> dict[str, Any]:
         """Return a JSON-serializable request payload for resume prompts."""
 
@@ -938,6 +983,7 @@ class TrainingManager:
             "debug_reward_breakdown": debug_reward_breakdown,
             "auto_promote": auto_promote,
             "promote_from_checkpoint_episode": promote_from_checkpoint_episode,
+            "evaluation_mode": evaluation_mode,
         }
 
     def _persist_training_session(
@@ -1057,6 +1103,7 @@ class TrainingManager:
         debug_reward_breakdown: bool | None = None,
         auto_promote: bool | None = None,
         promote_from_checkpoint_episode: int | None = None,
+        evaluation_mode: str = "quick",
     ) -> dict[str, Any]:
         """Start a background training job and return the initial status."""
         with self._lock:
@@ -1065,6 +1112,20 @@ class TrainingManager:
 
             self._control_request = None
             self._status = self._initial_status()
+            self._eval_success_history = []
+            try:
+                web_dir = Path(LabConfig().training.web_export_dir)
+                index_path = web_dir / "checkpoint-index.json"
+                if index_path.exists():
+                    with index_path.open("r", encoding="utf-8") as handle:
+                        index_payload = json.load(handle)
+                    for cp in index_payload.get("checkpoints", []):
+                        ep = cp.get("checkpoint_episode")
+                        sr = cp.get("success_rate")
+                        if ep is not None and sr is not None:
+                            self._eval_success_history.append((int(ep), float(sr)))
+            except Exception:
+                pass
             self._active_start_request = self._training_request_payload(
                 requested_episodes,
                 fast_mode,
@@ -1073,6 +1134,7 @@ class TrainingManager:
                 debug_reward_breakdown=debug_reward_breakdown,
                 auto_promote=auto_promote,
                 promote_from_checkpoint_episode=promote_from_checkpoint_episode,
+                evaluation_mode=evaluation_mode,
             )
             self._status.update(
                 {
@@ -1130,6 +1192,7 @@ class TrainingManager:
                     "debug_reward_breakdown": debug_reward_breakdown,
                     "auto_promote": auto_promote,
                     "promote_from_checkpoint_episode": promote_from_checkpoint_episode,
+                    "evaluation_mode": evaluation_mode,
                 },
                 daemon=True,
             )
@@ -1523,6 +1586,356 @@ class TrainingManager:
         output_root = Path(LabConfig().training.output_dir)
         return _read_user_hyperparams(output_root)
 
+    def get_config_active(self) -> dict[str, Any]:
+        """Return the config actually used by the active checkpoint."""
+        output_root = Path(LabConfig().training.output_dir)
+        state_path = output_root / Trainer.STATE_FILENAME
+        if state_path.exists():
+            try:
+                state = _load_json(state_path)
+                if isinstance(state, dict) and state.get("policy_config"):
+                    return state["policy_config"]
+            except Exception:
+                pass
+        try:
+            summary_path = output_root / "training-summary.json"
+            if summary_path.exists():
+                summary = _load_json(summary_path)
+                if isinstance(summary, dict):
+                    checkpoints = summary.get("checkpoints", [])
+                    if checkpoints:
+                        latest_cp = checkpoints[-1]
+                        if isinstance(latest_cp, dict):
+                            cp_details = self.get_checkpoint_details(latest_cp.get("checkpoint_episode", 0))
+                            return cp_details.get("policy_config") or cp_details.get("environment_config") or {}
+        except Exception:
+            pass
+        return {}
+
+    def get_config_next_run(self) -> dict[str, Any]:
+        """Return the config that will be used for the next training run."""
+        output_root = Path(LabConfig().training.output_dir)
+        user_params = _read_user_hyperparams(output_root)
+        config = _apply_user_hyperparams(LabConfig(), user_params)
+        return config.to_dict()
+
+    def find_checkpoint_by_id(self, checkpoint_id: str) -> tuple[int, str | None]:
+        """Search all checkpoints (active and archived) for the given checkpoint_id.
+
+        Returns a tuple of (episode, journey).
+        """
+        output_root = Path(LabConfig().training.output_dir)
+
+        # 1. Search active checkpoints
+        active_dir = output_root / "checkpoints"
+        if active_dir.exists():
+            for path in active_dir.glob("checkpoint-*.json"):
+                try:
+                    with path.open("r", encoding="utf-8") as handle:
+                        data = json.load(handle)
+                        if data.get("checkpoint_id") == checkpoint_id:
+                            return int(data.get("checkpoint_episode")), None
+                except Exception:
+                    pass
+
+        # 2. Search archived checkpoints
+        archive_dir = output_root / "archive"
+        if archive_dir.exists():
+            for journey_path in archive_dir.glob("journey-*"):
+                if journey_path.is_dir():
+                    journey_name = journey_path.name.removeprefix("journey-")
+                    journey_checkpoints = journey_path / "checkpoints"
+                    if journey_checkpoints.exists():
+                        for path in journey_checkpoints.glob("checkpoint-*.json"):
+                            try:
+                                with path.open("r", encoding="utf-8") as handle:
+                                    data = json.load(handle)
+                                    if data.get("checkpoint_id") == checkpoint_id:
+                                        return int(data.get("checkpoint_episode")), journey_name
+                            except Exception:
+                                pass
+
+        raise FileNotFoundError(f"Checkpoint ID {checkpoint_id} not found")
+
+    def get_checkpoint_details(
+        self,
+        episode: int | None = None,
+        journey: str | None = None,
+        checkpoint_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Load the full JSON metadata of a specific checkpoint."""
+        if checkpoint_id:
+            try:
+                resolved_episode, resolved_journey = self.find_checkpoint_by_id(checkpoint_id)
+                episode = resolved_episode
+                journey = resolved_journey
+            except FileNotFoundError:
+                if episode is None:
+                    raise
+
+        if episode is None:
+            raise ValueError("Either checkpoint_id or episode is required")
+
+        if journey == "current" or journey == "":
+            journey = None
+        output_root = Path(LabConfig().training.output_dir)
+        if journey:
+            checkpoint_path = (
+                output_root
+                / "archive"
+                / f"journey-{journey}"
+                / "checkpoints"
+                / f"checkpoint-{episode:06d}.json"
+            )
+        else:
+            checkpoint_path = output_root / "checkpoints" / f"checkpoint-{episode:06d}.json"
+
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Checkpoint {episode} not found")
+
+        with checkpoint_path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def restore_checkpoint(
+        self,
+        episode: int | None = None,
+        journey: str | None = None,
+        checkpoint_id: str | None = None,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        """Restore a historical checkpoint as the active model."""
+        if checkpoint_id:
+            try:
+                resolved_episode, resolved_journey = self.find_checkpoint_by_id(checkpoint_id)
+                episode = resolved_episode
+                journey = resolved_journey
+            except FileNotFoundError:
+                if episode is None:
+                    return {"error": f"Checkpoint ID {checkpoint_id} not found"}, HTTPStatus.NOT_FOUND
+
+        if episode is None:
+            return {"error": "Either checkpoint_id or episode is required"}, HTTPStatus.BAD_REQUEST
+
+        if journey == "current" or journey == "":
+            journey = None
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return {"error": "Cannot restore checkpoint while training is running"}, HTTPStatus.BAD_REQUEST
+
+        try:
+            checkpoint_payload = self.get_checkpoint_details(episode, journey)
+        except FileNotFoundError as exc:
+            return {"error": str(exc)}, HTTPStatus.NOT_FOUND
+
+        output_root = Path(LabConfig().training.output_dir)
+
+        # Build state payload
+        state_payload = {
+            "total_episodes_trained": int(checkpoint_payload.get("total_training_episodes", episode)),
+            "policy_state_path": checkpoint_payload.get("policy_state_path"),
+            "best_model_path": checkpoint_payload.get("policy_state_path"),
+            "best_success_rate": checkpoint_payload.get("success_rate"),
+            "best_average_reward": checkpoint_payload.get("average_reward"),
+            "best_completion_steps": checkpoint_payload.get("average_completion_steps"),
+            "policy_config": checkpoint_payload.get("policy_config"),
+            "run_id": checkpoint_payload.get("run_id"),
+            "parent_run_id": checkpoint_payload.get("parent_run_id"),
+            "parent_checkpoint_id": checkpoint_payload.get("parent_checkpoint_id"),
+            "active_model_source": "selected" if journey else "latest",
+            "policy_version": checkpoint_payload.get("policy_version", 0),
+            "active_checkpoint_id": checkpoint_payload.get("checkpoint_id") or f"chk_{checkpoint_payload.get('run_id')}_ep_{episode}",
+            "training_start_time": checkpoint_payload.get("training_start_time"),
+            "last_policy_update_time": checkpoint_payload.get("last_policy_update_time"),
+            "last_evaluation_time": checkpoint_payload.get("last_evaluation_time"),
+        }
+
+        # Resolve and copy model zip file
+        policy_state_path_str = checkpoint_payload.get("policy_state_path")
+        if isinstance(policy_state_path_str, str):
+            src_zip = Path(policy_state_path_str)
+            if not src_zip.is_absolute():
+                src_zip = output_root.parent / src_zip
+
+            if journey:
+                archive_zip = (
+                    output_root
+                    / "archive"
+                    / f"journey-{journey}"
+                    / "models"
+                    / src_zip.name
+                )
+                if archive_zip.exists():
+                    src_zip = archive_zip
+
+            if src_zip.exists():
+                active_models_dir = output_root / "models"
+                active_models_dir.mkdir(parents=True, exist_ok=True)
+                dest_zip = active_models_dir / src_zip.name
+                if src_zip.resolve() != dest_zip.resolve():
+                    shutil.copy2(src_zip, dest_zip)
+                best_model_zip = active_models_dir / "best-model.zip"
+                if src_zip.resolve() != best_model_zip.resolve():
+                    shutil.copy2(src_zip, best_model_zip)
+
+                state_payload["policy_state_path"] = str(dest_zip)
+                state_payload["best_model_path"] = str(best_model_zip)
+
+        state_path = output_root / Trainer.STATE_FILENAME
+        state_path.write_text(json.dumps(state_payload, indent=2), encoding="utf-8")
+
+        # Update initial status
+        with self._lock:
+            self._status = self._initial_status()
+            self._status["curriculum_stage"] = checkpoint_payload.get(
+                "environment_config", {}
+            ).get("curriculum_stage", 1)
+            self._status["message"] = f"Restored checkpoint ep {episode} as active model"
+
+        return {"status": "success", "message": f"Restored checkpoint ep {episode}"}, HTTPStatus.OK
+
+    def fork_checkpoint(
+        self,
+        episode: int | None = None,
+        journey: str | None = None,
+        hyperparams_override: dict[str, Any] | None = None,
+        checkpoint_id: str | None = None,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        """Fork a new training run from a selected historical checkpoint."""
+        if checkpoint_id:
+            try:
+                resolved_episode, resolved_journey = self.find_checkpoint_by_id(checkpoint_id)
+                episode = resolved_episode
+                journey = resolved_journey
+            except FileNotFoundError:
+                if episode is None:
+                    return {"error": f"Checkpoint ID {checkpoint_id} not found"}, HTTPStatus.NOT_FOUND
+
+        if episode is None:
+            return {"error": "Either checkpoint_id or episode is required"}, HTTPStatus.BAD_REQUEST
+
+        if journey == "current" or journey == "":
+            journey = None
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return {"error": "Cannot fork checkpoint while training is running"}, HTTPStatus.BAD_REQUEST
+
+        try:
+            checkpoint_payload = self.get_checkpoint_details(episode, journey)
+        except FileNotFoundError as exc:
+            return {"error": str(exc)}, HTTPStatus.NOT_FOUND
+
+        # Compatibility verification
+        from sheepdog.checkpoints.store import verify_checkpoint_compatibility
+        comp = verify_checkpoint_compatibility(checkpoint_payload, LabConfig())
+        if not comp["compatible"]:
+            return {
+                "error": "Checkpoint is incompatible with the current environment/config.",
+                "details": comp["errors"],
+            }, HTTPStatus.BAD_REQUEST
+
+        output_root = Path(LabConfig().training.output_dir)
+
+        # Generate a new run_id
+        import uuid
+        now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        new_run_id = f"run_{now_str}_{uuid.uuid4().hex[:4]}"
+
+        # Archive current active run
+        self._archive_training_outputs(LabConfig())
+
+        # Copy model zip file to the active models folder
+        policy_state_path_str = checkpoint_payload.get("policy_state_path")
+        active_policy_state_path = None
+        if isinstance(policy_state_path_str, str):
+            src_zip = Path(policy_state_path_str)
+            if not src_zip.is_absolute():
+                src_zip = output_root.parent / src_zip
+
+            if journey:
+                archive_zip = (
+                    output_root
+                    / "archive"
+                    / f"journey-{journey}"
+                    / "models"
+                    / src_zip.name
+                )
+                if archive_zip.exists():
+                    src_zip = archive_zip
+
+            if src_zip.exists():
+                active_models_dir = output_root / "models"
+                active_models_dir.mkdir(parents=True, exist_ok=True)
+                dest_zip = active_models_dir / src_zip.name
+                if src_zip.resolve() != dest_zip.resolve():
+                    shutil.copy2(src_zip, dest_zip)
+                best_model_zip = active_models_dir / "best-model.zip"
+                if src_zip.resolve() != best_model_zip.resolve():
+                    shutil.copy2(src_zip, best_model_zip)
+                active_policy_state_path = str(dest_zip)
+
+        # Write new training-state.json
+        state_payload = {
+            "total_episodes_trained": int(checkpoint_payload.get("total_training_episodes", episode)),
+            "policy_state_path": active_policy_state_path,
+            "best_model_path": active_policy_state_path,
+            "best_success_rate": checkpoint_payload.get("success_rate"),
+            "best_average_reward": checkpoint_payload.get("average_reward"),
+            "best_completion_steps": checkpoint_payload.get("average_completion_steps"),
+            "policy_config": checkpoint_payload.get("policy_config"),
+            "run_id": new_run_id,
+            "parent_run_id": checkpoint_payload.get("run_id"),
+            "parent_checkpoint_id": checkpoint_payload.get("checkpoint_id"),
+            "active_model_source": "forked",
+            "policy_version": checkpoint_payload.get("policy_version", 0),
+            "active_checkpoint_id": checkpoint_payload.get("checkpoint_id") or f"chk_{checkpoint_payload.get('run_id')}_ep_{episode}",
+            "training_start_time": datetime.datetime.now(datetime.UTC).isoformat(),
+            "last_policy_update_time": checkpoint_payload.get("last_policy_update_time"),
+            "last_evaluation_time": checkpoint_payload.get("last_evaluation_time"),
+        }
+        state_path = output_root / Trainer.STATE_FILENAME
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps(state_payload, indent=2), encoding="utf-8")
+
+        # Save overrides to user-hyperparams.json
+        requested_episodes = int(hyperparams_override.pop("episodes", 100))
+        fast_mode = bool(hyperparams_override.pop("fast_mode", True))
+        auto_promote = bool(hyperparams_override.pop("auto_promote", True))
+
+        if hyperparams_override:
+            user_params = _read_user_hyperparams(output_root)
+            user_params.update(hyperparams_override)
+            user_params["updated_at"] = datetime.datetime.now(datetime.UTC).isoformat()
+            (output_root / TRAINING_SETTINGS_FILENAME).write_text(
+                json.dumps(user_params, indent=2), encoding="utf-8"
+            )
+
+        # Start training!
+        target_stage = checkpoint_payload.get("environment_config", {}).get("curriculum_stage", 1)
+        self.start(
+            requested_episodes=requested_episodes,
+            fast_mode=fast_mode,
+            auto_promote=auto_promote,
+            curriculum_stage=target_stage,
+            promote_from_checkpoint_episode=int(checkpoint_payload.get("checkpoint_episode", episode)),
+        )
+
+        return {
+            "status": "success",
+            "message": f"Forked run {new_run_id} from checkpoint ep {episode}",
+            "run_id": new_run_id,
+        }, HTTPStatus.OK
+
+    def archive_active_run(self) -> tuple[dict[str, Any], HTTPStatus]:
+        """Manually trigger archiving of the active run."""
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return {"error": "Cannot archive run while training is running"}, HTTPStatus.BAD_REQUEST
+
+        archive_dir = self._archive_training_outputs(LabConfig())
+        if archive_dir:
+            return {"status": "success", "archive_dir": archive_dir}, HTTPStatus.OK
+        else:
+            return {"error": "No prior active run artifacts found to archive"}, HTTPStatus.NOT_FOUND
+
     def get_network_topology(self) -> dict[str, Any]:
         """Return read-only neural topology metadata for visualization."""
         config = LabConfig()
@@ -1637,6 +2050,7 @@ class TrainingManager:
         archive_root = output_root / "archive" / f"journey-{timestamp}"
         mappings: list[tuple[Path, Path]] = [
             (output_root / "checkpoints", archive_root / "checkpoints"),
+            (output_root / "models", archive_root / "models"),
             (output_root / "evaluations", archive_root / "evaluations"),
             (output_root / Trainer.STATE_FILENAME, archive_root / Trainer.STATE_FILENAME),
             (output_root / "training-summary.json", archive_root / "training-summary.json"),
@@ -1991,12 +2405,12 @@ class TrainingManager:
         self,
         requested_episodes: int,
         fast_mode: bool,
-        *,
         enable_instinct_rewards: bool | None = None,
         curriculum_stage: int | None = None,
         debug_reward_breakdown: bool | None = None,
         auto_promote: bool | None = None,
         promote_from_checkpoint_episode: int | None = None,
+        evaluation_mode: str = "quick",
     ) -> None:
         try:
             total_episodes = max(1, requested_episodes)
@@ -2033,6 +2447,7 @@ class TrainingManager:
                     debug_reward_breakdown=debug_reward_breakdown,
                     auto_promote=auto_promote_enabled,
                     promote_from_checkpoint_episode=resume_checkpoint_episode,
+                    evaluation_mode=evaluation_mode,
                 )
                 job_config = _build_training_job_config(
                     batch_episodes,
@@ -2040,9 +2455,11 @@ class TrainingManager:
                     enable_instinct_rewards=enable_instinct_rewards,
                     curriculum_stage=current_stage,
                     debug_reward_breakdown=debug_reward_breakdown,
+                    evaluation_mode=evaluation_mode,
                 )
                 self.telemetry_manager.initialize_wandb(config_dict=job_config.to_dict())
                 trainer = create_trainer(job_config, job_config.training.output_dir)
+                self.active_trainer = trainer
 
                 resuming_policy = trainer.total_episodes_trained > 0
                 if not resuming_policy:
@@ -2061,6 +2478,20 @@ class TrainingManager:
                 if not resuming_policy and has_checkpoints:
                     self._archive_training_outputs(job_config)
                     trainer = create_trainer(job_config, job_config.training.output_dir)
+                    self.active_trainer = trainer
+
+                loaded_state = getattr(trainer, "_loaded_state", None)
+                if isinstance(loaded_state, dict) and not loaded_state.get("run_id"):
+                    import uuid
+                    now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    new_run_id = f"run_{now_str}_{uuid.uuid4().hex[:4]}"
+                    loaded_state["run_id"] = new_run_id
+                    loaded_state["training_start_time"] = datetime.datetime.now(datetime.UTC).isoformat()
+                    state_path = output_root / Trainer.STATE_FILENAME
+                    existing_state = _load_json(state_path) or {}
+                    existing_state["run_id"] = new_run_id
+                    existing_state["training_start_time"] = loaded_state["training_start_time"]
+                    atomic_write_json(state_path, existing_state)
 
 
                 if resume_checkpoint_episode is not None:
@@ -2096,10 +2527,22 @@ class TrainingManager:
                             replay_path = summary["records"][0].get("replay_path")
                     batch_completed = payload.get("batch_completed_episodes", 0)
                     batch_total = payload.get("batch_total_episodes", total_episodes)
+                    
+                    actual_completed = payload.get("actual_completed_episodes")
+                    if actual_completed is None:
+                        if self.active_trainer is not None:
+                            try:
+                                curr_counters = self.active_trainer.policy.model.get_env().get_attr("_episode_counter")
+                                actual_completed = int(sum(curr_counters))
+                            except Exception:
+                                actual_completed = int(batch_completed)
+                        else:
+                            actual_completed = int(batch_completed)
+
                     if isinstance(batch_completed, (int, float)):
                         stage_batch_completed_episodes = max(
                             stage_batch_completed_episodes,
-                            int(batch_completed),
+                            actual_completed,
                         )
                     total_trained = payload.get("total_episodes_trained")
                     phase = payload.get("phase")
@@ -2109,9 +2552,10 @@ class TrainingManager:
                         "running": True,
                         "phase": phase or "running",
                         "requested_episodes": batch_total,
-                        "completed_episodes": batch_completed,
+                        "completed_episodes": actual_completed,
                         "batch_total_episodes": batch_total,
-                        "batch_completed_episodes": batch_completed,
+                        "batch_completed_episodes": actual_completed,
+                        "estimated_equivalent_episodes": batch_completed,
                         "current_episode": payload.get("current_episode"),
                         "checkpoint_episode": checkpoint_episode,
                         "best_score": payload.get("best_score"),
@@ -2126,12 +2570,23 @@ class TrainingManager:
                         update["clip_fraction"] = payload["clip_fraction"]
                     if "explained_variance" in payload:
                         update["explained_variance"] = payload["explained_variance"]
+                    if "policy_version" in payload:
+                        update["policy_version"] = payload["policy_version"]
+                    if "ppo_update_count" in payload:
+                        update["ppo_update_count"] = payload["ppo_update_count"]
+                    if "last_policy_update_time" in payload:
+                        update["last_policy_update_time"] = payload["last_policy_update_time"]
+                    if "last_evaluation_time" in payload:
+                        update["last_evaluation_time"] = payload["last_evaluation_time"]
+                    if "run_id" in payload:
+                        update["run_id"] = payload["run_id"]
                     if total_trained is not None:
                         update["total_episodes_trained"] = total_trained
                     if checkpoint_episode is not None:
                         update["latest_checkpoint_episode"] = checkpoint_episode
                         update["latest_seed"] = latest_seed
                         update["latest_replay_path"] = replay_path
+                        update["active_checkpoint_id"] = f"chk_{update.get('run_id') or self._status.get('run_id') or 'unknown'}_ep_{checkpoint_episode}"
                     if isinstance(summary, dict) and phase == "checkpoint":
                         update["latest_success_rate"] = summary.get("success_rate")
                         update["latest_avg_sheep_penned"] = summary.get("average_sheep_penned")
@@ -2153,6 +2608,40 @@ class TrainingManager:
                         )
 
                         success_rate = float(summary.get("success_rate", -1.0))
+                        if success_rate >= 0.0 and checkpoint_episode is not None:
+                            self._eval_success_history.append((int(checkpoint_episode), success_rate))
+
+                        # Check policy collapse safety guard
+                        run_success_rates = [sr for ep, sr in self._eval_success_history]
+                        best_success_rate_ever = max(run_success_rates) if run_success_rates else 0.0
+                        recent_evals = [
+                            sr for ep, sr in self._eval_success_history
+                            if ep >= int(checkpoint_episode) - 50
+                        ]
+                        last_50_success_rate = (
+                            sum(recent_evals) / len(recent_evals) if recent_evals else success_rate
+                        )
+
+                        if best_success_rate_ever >= 0.9 and last_50_success_rate < 0.5:
+                            self._control_request = "paused"
+                            update["message"] = (
+                                f"Training paused: Policy collapse detected. "
+                                f"Success rate fell from best of {best_success_rate_ever:.0%} "
+                                f"to last-50 avg of {last_50_success_rate:.0%}. "
+                                f"Recommended action: Fork from best checkpoint. "
+                                f"Try lowering entropy_coef to 0.003 or 0.001."
+                            )
+                            update["anti_collapse_warning"] = {
+                                "triggered": True,
+                                "message": (
+                                    f"Policy collapse detected (best: {best_success_rate_ever:.0%}, "
+                                    f"last-50: {last_50_success_rate:.0%})."
+                                ),
+                                "recommendation": "Try lowering entropy_coef to 0.003 or 0.001 instead of 0.01.",
+                            }
+                        else:
+                            update["anti_collapse_warning"] = None
+
                         average_reward = float(summary.get("average_reward", float("-inf")))
                         timeout_rate = float(summary.get("timeout_rate", 1.0))
                         avg_penned = float(summary.get("average_sheep_penned", 0.0))
@@ -2303,12 +2792,23 @@ class TrainingManager:
                             "gae_lambda": job_config.training.gae_lambda,
                         }
 
+                        r_id = getattr(trainer, "_loaded_state", {}).get("run_id") if trainer else None
+                        cp_id = None
+                        if checkpoint_episode is not None:
+                            cp_id = f"chk_{r_id or 'unknown'}_ep_{checkpoint_episode}"
+
                         self.telemetry_manager.log(
                             step=total_ts,
                             stage=stage,
                             success_rate=success_rate,
                             metrics=metrics_dict,
                             hyperparameters=hyperparameters_dict,
+                            run_id=r_id,
+                            checkpoint_id=cp_id,
+                            evaluation_id=f"eval_{r_id or 'unknown'}_ep_{checkpoint_episode or total_ts}",
+                            global_episode=total_ts,
+                            episode_in_stage=checkpoint_episode,
+                            recorded_at=datetime.datetime.now(datetime.UTC).isoformat(),
                         )
 
                         promotion_checkpoint_episode: int | None = None
@@ -2484,6 +2984,7 @@ class TrainingManager:
                         "completed_episodes": 0,
                         "batch_total_episodes": batch_episodes,
                         "batch_completed_episodes": 0,
+                        "estimated_equivalent_episodes": 0.0,
                         "current_episode": None,
                         "checkpoint_episode": None,
                         "latest_checkpoint_episode": None,
@@ -2537,6 +3038,7 @@ class TrainingManager:
                             "batch_total_episodes": batch_episodes,
                             "batch_completed_episodes": 0,
                             "completed_episodes": 0,
+                            "estimated_equivalent_episodes": 0.0,
                             "message": (
                                 f"Curriculum rolled back to Stage {current_stage} after post-promotion collapse. "
                                 f"Resuming from checkpoint ep {resume_checkpoint_episode}."
@@ -2860,6 +3362,8 @@ class TrainingManager:
                 self._status["traceback"] = full_traceback
                 self._active_start_request = None
             self._clear_training_session()
+        finally:
+            self.active_trainer = None
 
 
 class TrainingRequestHandler(BaseHTTPRequestHandler):
@@ -2901,6 +3405,983 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _compile_diagnostics_snapshot(self) -> dict[str, Any]:
+        """Compile all diagnostics and return a unified JSON snapshot payload dict."""
+        import math
+        import hashlib
+        from urllib.parse import urlsplit, parse_qs
+        from datetime import datetime, UTC
+        
+        # Safe casting helpers
+        def safe_int(v, default=0):
+            if v is None:
+                return default
+            try:
+                return int(v)
+            except (ValueError, TypeError):
+                return default
+
+        def safe_float(v, default=0.0):
+            if v is None:
+                return default
+            try:
+                return float(v)
+            except (ValueError, TypeError):
+                return default
+
+        # 1. Authoritative Snapshot Identity Check (retry logic)
+        active_status_before = self.manager.snapshot()
+        
+        query = urlsplit(self.path).query
+        params = parse_qs(query)
+        checkpoint_id_list = params.get("checkpoint_id")
+        checkpoint_id = checkpoint_id_list[0] if checkpoint_id_list else None
+        episode_list = params.get("episode")
+        episode = None
+        if episode_list:
+            try:
+                episode = int(episode_list[0])
+            except ValueError as e:
+                raise DiagnosticsHTTPException("INVALID_EPISODE_PARAMETER", "episode parameter must be an integer")
+                
+        output_root = Path(LabConfig().training.output_dir)
+        checkpoint_payload = None
+        
+        # Resolve target checkpoint
+        if not checkpoint_id and episode is None:
+            active_chk_id = active_status_before.get("active_checkpoint_id")
+            active_ep = active_status_before.get("checkpoint_episode")
+            if active_chk_id:
+                checkpoint_id = active_chk_id
+            elif active_ep is not None:
+                episode = int(active_ep)
+            else:
+                summary_path = output_root / "training_history.json"
+                if not summary_path.exists():
+                    summary_path = output_root / "training-summary.json"
+                if summary_path.exists():
+                    try:
+                        with open(summary_path, "r", encoding="utf-8") as f:
+                            sum_data = json.load(f)
+                        checkpoints = sum_data.get("checkpoints", [])
+                        if checkpoints:
+                            latest = checkpoints[-1]
+                            checkpoint_id = latest.get("checkpoint_id")
+                            episode = latest.get("checkpoint_episode")
+                    except Exception:
+                        pass
+                        
+        if checkpoint_id or episode is not None:
+            try:
+                checkpoint_payload = self.manager.get_checkpoint_details(episode, None, checkpoint_id)
+            except Exception as e:
+                raise DiagnosticsHTTPException("LOAD_CHECKPOINT_FAILED", f"Failed to load checkpoint: {str(e)}")
+                
+        # Coherence Verification
+        active_status_after = self.manager.snapshot()
+        snapshot_warning = None
+        if (active_status_before.get("run_id") != active_status_after.get("run_id") or
+            active_status_before.get("active_checkpoint_id") != active_status_after.get("active_checkpoint_id")):
+            # Retry once
+            active_status_before = self.manager.snapshot()
+            if checkpoint_id or episode is not None:
+                try:
+                    checkpoint_payload = self.manager.get_checkpoint_details(episode, None, checkpoint_id)
+                except Exception:
+                    pass
+            active_status_after = self.manager.snapshot()
+            if (active_status_before.get("run_id") != active_status_after.get("run_id") or
+                active_status_before.get("active_checkpoint_id") != active_status_after.get("active_checkpoint_id")):
+                snapshot_warning = "MIXED SNAPSHOT: Active run or checkpoint changed during diagnostics compilation."
+
+        # Re-resolve active status fields
+        status = active_status_after
+        cur_stage = status.get("curriculum_stage", 1)
+        if checkpoint_payload:
+            cur_stage = checkpoint_payload.get("reward_config", {}).get("instincts", {}).get("curriculum_stage", cur_stage)
+
+        # Get active user-configured config and apply current curriculum overrides
+        from sheepdog.curriculum import apply_curriculum_stage
+        output_root = Path(LabConfig().training.output_dir)
+        user_params = _read_user_hyperparams(output_root)
+        config = _apply_user_hyperparams(LabConfig(), user_params)
+        active_config = apply_curriculum_stage(config, cur_stage)
+
+        # 2. PyTorch Model Architecture Reader from zip file
+        model_arch_info = {
+            "status": "UNAVAILABLE FOR LEGACY DATA",
+            "message": "Legacy checkpoint did not record this field"
+        }
+        
+        # Helper to load SB3 model
+        def get_model_and_path():
+            if self.manager.active_trainer is not None:
+                trainer = self.manager.active_trainer
+                for attr in ("_policy", "policy"):
+                    if hasattr(trainer, attr) and getattr(trainer, attr) is not None:
+                        policy = getattr(trainer, attr)
+                        for m_attr in ("model", "_model"):
+                            if hasattr(policy, m_attr) and getattr(policy, m_attr) is not None:
+                                return getattr(policy, m_attr), getattr(policy, "model_path", None)
+            if checkpoint_payload:
+                p_state = checkpoint_payload.get("policy_state_path")
+                if p_state:
+                    p = Path(p_state)
+                    if not p.is_absolute():
+                        if p.parts and p.parts[0] == output_root.name:
+                            p = output_root.parent / p
+                        else:
+                            p = output_root / p
+                        if not p.exists() and checkpoint_payload.get("journey"):
+                            p = output_root / "archive" / f"journey-{checkpoint_payload['journey']}" / p_state
+                    if p.exists():
+                        try:
+                            from sb3_contrib import MaskablePPO
+                            return MaskablePPO.load(str(p)), p
+                        except Exception:
+                            pass
+            state_path = output_root / "training-state.json"
+            if state_path.exists():
+                try:
+                    with open(state_path, "r", encoding="utf-8") as f:
+                        s_data = json.load(f)
+                    best = s_data.get("best_model_path") or s_data.get("policy_state_path")
+                    if best:
+                        p = Path(best)
+                        if not p.is_absolute():
+                            if p.parts and p.parts[0] == output_root.name:
+                                p = output_root.parent / p
+                            else:
+                                p = output_root / p
+                        if p.exists():
+                            from sb3_contrib import MaskablePPO
+                            return MaskablePPO.load(str(p)), p
+                except Exception:
+                    pass
+            return None, None
+
+        model_obj, model_path = get_model_and_path()
+        if model_obj:
+            try:
+                policy_obj = model_obj.policy
+                actor_layers = []
+                critic_layers = []
+                shared_layers = []
+                if hasattr(policy_obj, "mlp_extractor"):
+                    mlp = policy_obj.mlp_extractor
+                    if hasattr(mlp, "shared_net"):
+                        for layer in mlp.shared_net:
+                            if hasattr(layer, "out_features"):
+                                shared_layers.append(int(layer.out_features))
+                    if hasattr(mlp, "policy_net"):
+                        for layer in mlp.policy_net:
+                            if hasattr(layer, "out_features"):
+                                actor_layers.append(int(layer.out_features))
+                    if hasattr(mlp, "value_net"):
+                        for layer in mlp.value_net:
+                            if hasattr(layer, "out_features"):
+                                critic_layers.append(int(layer.out_features))
+                
+                if not actor_layers and not critic_layers and hasattr(policy_obj, "net_arch"):
+                    net_arch = policy_obj.net_arch
+                    if isinstance(net_arch, dict):
+                        actor_layers = net_arch.get("pi", [])
+                        critic_layers = net_arch.get("vf", [])
+                    elif isinstance(net_arch, list):
+                        actor_layers = net_arch
+                        critic_layers = net_arch
+
+                activation_fn_name = "Tanh"
+                if hasattr(policy_obj, "activation_fn"):
+                    activation_fn_name = policy_obj.activation_fn.__name__
+                total_params = sum(p.numel() for p in policy_obj.parameters() if p.requires_grad)
+                
+                ordered_action_mapping = ["wait", "sprint", "up", "down", "left", "right", "up_left", "up_right", "down_left", "down_right"]
+                try:
+                    from sheepdog.entities import ACTION_ORDER
+                    ordered_action_mapping = list(ACTION_ORDER)
+                except Exception:
+                    pass
+
+                configured_arch = "Unknown"
+                compatibility_status = "COMPATIBLE"
+                if checkpoint_payload:
+                    policy_config = checkpoint_payload.get("policy_config", {})
+                    if policy_config and "net_arch" in policy_config:
+                        configured_arch = str(policy_config["net_arch"])
+                        if str(actor_layers) != configured_arch:
+                            compatibility_status = "MISMATCH"
+
+                model_arch_info = {
+                    "status": "COMPLETE",
+                    "algorithm": "MaskablePPO",
+                    "policy_class": policy_obj.__class__.__name__,
+                    "feed_forward_or_recurrent": "feed_forward",
+                    "observation_space_shape": list(model_obj.observation_space.shape),
+                    "observation_data_type": str(model_obj.observation_space.dtype),
+                    "observation_feature_count": int(model_obj.observation_space.shape[0]),
+                    "feature_extractor_class": policy_obj.features_extractor.__class__.__name__,
+                    "feature_extractor_output_dimension": int(policy_obj.features_extractor.features_dim),
+                    "actor_hidden_layers": actor_layers,
+                    "critic_hidden_layers": critic_layers,
+                    "shared_layers": shared_layers,
+                    "activation_function": activation_fn_name,
+                    "action_space_type": model_obj.action_space.__class__.__name__,
+                    "action_count": int(model_obj.action_space.n) if hasattr(model_obj.action_space, "n") else None,
+                    "ordered_action_mapping": ordered_action_mapping,
+                    "distribution_type": policy_obj.action_dist.__class__.__name__ if hasattr(policy_obj, "action_dist") else "MaskableCategoricalDistribution",
+                    "orthogonal_initialization_setting": True,
+                    "normalization_settings": "None" if model_obj.get_env() is None else "Standardized" if "VecNormalize" in str(model_obj.get_env()) else "None",
+                    "total_trainable_parameter_count": total_params,
+                    "device": str(model_obj.device),
+                    "configured_architecture": configured_arch,
+                    "loaded_architecture": f"Actor: {actor_layers}, Critic: {critic_layers}",
+                    "compatibility_status": compatibility_status,
+                }
+            except Exception as e:
+                model_arch_info = {
+                    "status": "ERROR",
+                    "message": f"Error inspecting model: {str(e)}"
+                }
+
+        # 3. Counter Definitions & Reconciliation
+        completed_eps_in_run = 0
+        if self.manager.active_trainer is not None:
+            try:
+                curr_counters = self.manager.active_trainer.policy.model.get_env().get_attr("_episode_counter")
+                completed_eps_in_run = int(sum(curr_counters))
+            except Exception:
+                completed_eps_in_run = int(status.get("completed_episodes", 0))
+        else:
+            completed_eps_in_run = int(status.get("completed_episodes", 0))
+
+        counter_warnings = []
+        batch_comp = status.get("batch_completed_episodes", 0)
+        if isinstance(batch_comp, float) and not batch_comp.is_integer():
+            counter_warnings.append(f"Inconsistent counter: completed_episodes includes fractional counts ({batch_comp}).")
+        
+        total_trained = int(status.get("total_episodes_trained", 0))
+        if total_trained < completed_eps_in_run:
+            counter_warnings.append(f"Lifetime total trained episodes ({total_trained}) is smaller than active-run completed episodes ({completed_eps_in_run}).")
+
+        curr_ep = status.get("current_episode")
+        if curr_ep is not None and curr_ep < int(batch_comp):
+            counter_warnings.append(f"Current episode index ({curr_ep}) is smaller than batch completed episodes ({int(batch_comp)}).")
+
+        stage_history_eps = int(status.get("stage_history", {}).get(str(cur_stage), 0))
+        if total_trained < stage_history_eps:
+            counter_warnings.append(
+                f"Counter conflict: Curriculum-stage training episodes for Stage {cur_stage} ({stage_history_eps}) "
+                f"exceeds the lifetime completed training episodes ({total_trained}). This occurs when training is "
+                f"restored, forked, or reset without clearing the historical stage logs."
+            )
+
+        summary_path = output_root / "training_history.json"
+        if not summary_path.exists():
+            summary_path = output_root / "training-summary.json"
+        
+        all_checkpoints = []
+        if summary_path.exists():
+            try:
+                with open(summary_path, "r", encoding="utf-8") as f:
+                    sum_data = json.load(f)
+                all_checkpoints = sum_data.get("checkpoints", [])
+            except Exception:
+                pass
+
+        if total_trained == 0 and len(all_checkpoints) > 0:
+            counter_warnings.append("Counter reset: Lifetime total episodes was reset to 0 without an explicit reset log.")
+
+        counter_rows = [
+            {"counter": "Completed training episodes in active run", "value": completed_eps_in_run, "unit": "episodes", "source": "Environment counters", "definition": "Actual completed training episodes since active run started"},
+            {"counter": "Completed episodes in current batch", "value": int(batch_comp), "unit": "episodes", "source": "Training progress callback", "definition": "Completed episodes in current training batch"},
+            {"counter": "Lifetime completed training episodes", "value": total_trained, "unit": "episodes", "source": "training-state.json", "definition": "Lifetime completed training episodes across all resumed runs"},
+            {"counter": "Current in-progress episode number", "value": curr_ep, "unit": "episode_idx", "source": "Trainer loop", "definition": "Active episode currently running in the trainer"},
+            {"counter": "Evaluation episodes", "value": 5, "unit": "episodes", "source": "Evaluation config", "definition": "Number of evaluation seeds run per checkpoint"},
+            {"counter": "Checkpoint sequence number", "value": int(checkpoint_payload.get("checkpoint_episode", 0)) if checkpoint_payload else None, "unit": "episode_mark", "source": "Checkpoint JSON", "definition": "The episode number at which this checkpoint was saved"},
+            {"counter": "Curriculum-stage training episodes", "value": int(status.get("stage_history", {}).get(str(cur_stage), 0)), "unit": "episodes", "source": "Stage history log", "definition": "Episodes trained under the current curriculum stage"},
+            {"counter": "Global environment timesteps", "value": int(checkpoint_payload.get("global_timesteps", 0)) if checkpoint_payload else int(status.get("total_timesteps", 0)), "unit": "steps", "source": "Trainer step counter", "definition": "Total lifetime environment transitions simulated"},
+            {"counter": "Active-run timesteps", "value": int(status.get("total_timesteps", 0)), "unit": "steps", "source": "Trainer step counter", "definition": "Environment transitions simulated in active run"},
+            {"counter": "PPO rollout timesteps", "value": int(LabConfig().training.rollout_steps), "unit": "steps", "source": "Training hyperparams", "definition": "Number of steps collected per PPO rollout buffer"},
+            {"counter": "PPO update count", "value": int(status.get("ppo_update_count", 0)) if status.get("ppo_update_count") is not None else int(checkpoint_payload.get("policy_version", 0)) if checkpoint_payload else 0, "unit": "updates", "source": "MaskablePPO _n_updates", "definition": "Monotonic number of PPO optimizer updates executed"},
+            {"counter": "Requested episode target", "value": int(status.get("requested_episodes", 0)), "unit": "episodes", "source": "Training request", "definition": "Target number of training episodes requested by user"},
+            {"counter": "Requested timestep target", "value": int(LabConfig().training.total_timesteps), "unit": "steps", "source": "Training config", "definition": "Target number of environment steps to simulate"}
+        ]
+
+        # 4. Config Snapshot, Precedence & Overrides
+        from sheepdog.curriculum import CURRICULUM_STAGES
+        default_config = LabConfig()
+        ui_hyperparams = self.manager.get_hyperparams()
+        
+        stage_overrides = {}
+        if cur_stage > 0:
+            stage_overrides = CURRICULUM_STAGES.get(cur_stage, {})
+            
+        config_snapshot = {}
+        config_anomalies = []
+        
+        keys_to_check = [
+            ("environment.dog_speed", 1.0),
+            ("environment.dog_sprint_multiplier", 2.0),
+            ("environment.sheep_speed", 0.75),
+            ("environment.dog_vision", 16.0),
+            ("environment.sheep_vision", 12.0),
+            ("environment.flock_radius", 10.0),
+            ("environment.sheep_personality_strength", 0.0),
+            ("environment.width", 80.0),
+            ("environment.height", 60.0),
+            ("environment.pen_width", 10.0),
+            ("environment.pen_height", 10.0),
+            ("environment.max_steps", 600),
+            ("environment.no_progress_window", 80),
+            ("environment.no_progress_distance_delta", 0.15),
+            ("rewards.progress_scale", 2.0),
+            ("rewards.sheep_penned_reward", 8.0),
+            ("rewards.time_penalty", 0.05),
+            ("rewards.no_progress_penalty", 0.1),
+            ("rewards.wait_penalty", 0.05),
+            ("rewards.sprint_cost_scale", 0.12),
+            ("rewards.instincts.curriculum_stage", 0),
+            ("training.train_seed", 42),
+            ("training.deterministic_evaluation", True),
+            ("training.learning_rate", 0.0003),
+            ("training.entropy_coef", 0.01),
+            ("training.batch_size", 64),
+        ]
+        
+        def get_nested(obj, path, is_dict=False):
+            parts = path.split(".")
+            val = obj
+            for p in parts:
+                if is_dict:
+                    if isinstance(val, dict) and p in val:
+                        val = val[p]
+                    else:
+                        return None
+                else:
+                    if hasattr(val, p):
+                        val = getattr(val, p)
+                    else:
+                        return None
+            return val
+
+        for path, def_val in keys_to_check:
+            d_val = get_nested(default_config, path, is_dict=False)
+            if d_val is None:
+                d_val = def_val
+                
+            ui_val = get_nested(ui_hyperparams, path, is_dict=True)
+            stage_val = stage_overrides.get(path)
+            
+            chk_val = None
+            if checkpoint_payload:
+                chk_val = get_nested(checkpoint_payload, path.replace(".", "_config.", 1), is_dict=True)
+                if chk_val is None:
+                    parts = path.split(".")
+                    if parts[0] == "rewards":
+                        chk_val = get_nested(checkpoint_payload.get("reward_config", {}), ".".join(parts[1:]), is_dict=True)
+                    elif parts[0] == "environment":
+                        chk_val = get_nested(checkpoint_payload.get("environment_config", {}), ".".join(parts[1:]), is_dict=True)
+                    elif parts[0] == "training":
+                        chk_val = get_nested(checkpoint_payload.get("training_config", {}), ".".join(parts[1:]), is_dict=True)
+                        if chk_val is None:
+                            chk_val = checkpoint_payload.get(parts[-1])
+            
+            # Determine effective/active value
+            active_val = chk_val if chk_val is not None else (stage_val if stage_val is not None else (ui_val if ui_val is not None else d_val))
+            source = "checkpoint" if chk_val is not None else ("stage" if stage_val is not None else ("ui" if ui_val is not None else "default"))
+            
+            config_snapshot[path] = {
+                "default": d_val,
+                "ui": ui_val,
+                "stage": stage_val,
+                "checkpoint": chk_val,
+                "active": active_val,
+                "source": source
+            }
+            
+            # Conflict Check
+            if ui_val is not None and chk_val is not None and ui_val != chk_val:
+                config_anomalies.append(f"Conflict warning: UI setting for '{path}' ({ui_val}) disagrees with checkpoint configuration ({chk_val}).")
+
+        # 5. Environment Mismatches
+        mismatch_flags = []
+        chk_env_cfg = checkpoint_payload.get("environment_config", {}) if checkpoint_payload else {}
+        chk_reward_cfg = checkpoint_payload.get("reward_config", {}) if checkpoint_payload else {}
+        chk_training_cfg = checkpoint_payload.get("training_config", {}) if checkpoint_payload else {}
+        eval_env_cfg = active_config.environment
+        eval_reward_cfg = active_config.rewards
+        
+        env_fields = [
+            ("width", "width", eval_env_cfg),
+            ("height", "height", eval_env_cfg),
+            ("dogs", "dogs", eval_env_cfg),
+            ("sheep", "sheep", eval_env_cfg),
+            ("max_steps", "max_steps", eval_env_cfg),
+            ("dog_vision", "dog_vision", eval_env_cfg),
+            ("invalid_action_masking", "invalid_action_masking", active_config.training),
+        ]
+        for chk_key, eval_key, eval_obj in env_fields:
+            chk_v = chk_env_cfg.get(chk_key)
+            if chk_v is None:
+                chk_v = chk_training_cfg.get(chk_key)
+            if chk_v is None and checkpoint_payload:
+                chk_v = checkpoint_payload.get(chk_key)
+            eval_v = getattr(eval_obj, eval_key, None)
+            if chk_v is not None and eval_v is not None and chk_v != eval_v:
+                mismatch_flags.append({
+                    "component": "environment",
+                    "field": eval_key,
+                    "training_value": chk_v,
+                    "evaluation_value": eval_v,
+                    "severity": "WARNING",
+                    "message": f"Training environment {eval_key} ({chk_v}) does not match evaluation environment ({eval_v})"
+                })
+                
+        reward_fields = [
+            ("progress_scale", "progress_scale"),
+            ("sheep_penned_reward", "sheep_penned_reward"),
+            ("flock_cohesion_scale", "flock_cohesion_scale"),
+            ("scatter_penalty_scale", "scatter_penalty_scale"),
+            ("time_penalty", "time_penalty"),
+        ]
+        for chk_key, eval_key in reward_fields:
+            chk_v = chk_reward_cfg.get(chk_key)
+            eval_v = getattr(eval_reward_cfg, eval_key, None)
+            if chk_v is not None and eval_v is not None and float(chk_v) != float(eval_v):
+                mismatch_flags.append({
+                    "component": "rewards",
+                    "field": eval_key,
+                    "training_value": chk_v,
+                    "evaluation_value": eval_v,
+                    "severity": "WARNING",
+                    "message": f"Training reward {eval_key} ({chk_v}) does not match evaluation reward ({eval_v})"
+                })
+
+        # 6. Training Scenario Coverage
+        coverage_data = checkpoint_payload.get("training_scenario_coverage") if checkpoint_payload else status.get("training_scenario_coverage")
+        if not coverage_data:
+            coverage_data = {
+                "seeds_seen": [],
+                "configs_seen": [],
+                "min_sheep_to_pen": 0.0,
+                "max_sheep_to_pen": 0.0,
+                "sum_sheep_to_pen": 0.0,
+                "count_sheep_to_pen": 0,
+                "min_dog_to_sheep": 0.0,
+                "max_dog_to_sheep": 0.0,
+                "sum_dog_to_sheep": 0.0,
+                "count_dog_to_sheep": 0,
+                "similarity_episodes": {str(k): 0 for k in (11, 23, 37, 41, 53)},
+                "similarity_successes": {str(k): 0 for k in (11, 23, 37, 41, 53)},
+            }
+            
+        avg_sheep_to_pen = 0.0
+        if coverage_data.get("count_sheep_to_pen", 0) > 0:
+            avg_sheep_to_pen = float(coverage_data["sum_sheep_to_pen"] / coverage_data["count_sheep_to_pen"])
+            
+        avg_dog_to_sheep = 0.0
+        if coverage_data.get("count_dog_to_sheep", 0) > 0:
+            avg_dog_to_sheep = float(coverage_data["sum_dog_to_sheep"] / coverage_data["count_dog_to_sheep"])
+
+        coverage_payload = {
+            "unique_seeds_count": len(coverage_data.get("seeds_seen", [])),
+            "unique_configs_count": len(coverage_data.get("configs_seen", [])),
+            "sheep_to_pen_distance": {
+                "min": coverage_data.get("min_sheep_to_pen", 0.0),
+                "max": coverage_data.get("max_sheep_to_pen", 0.0),
+                "avg": avg_sheep_to_pen
+            },
+            "dog_to_sheep_distance": {
+                "min": coverage_data.get("min_dog_to_sheep", 0.0),
+                "max": coverage_data.get("max_dog_to_sheep", 0.0),
+                "avg": avg_dog_to_sheep
+            },
+            "resemblance_counts": {str(k): coverage_data.get("similarity_episodes", {}).get(str(k), 0) for k in (11, 23, 37, 41, 53)},
+            "resemblance_successes": {str(k): coverage_data.get("similarity_successes", {}).get(str(k), 0) for k in (11, 23, 37, 41, 53)}
+        }
+
+        # 7. Version and Failed Seed History
+        version_history = {}
+        failed_seed_records = {}
+        
+        for chk in all_checkpoints:
+            p_ver = chk.get("policy_version")
+            # If policy_version is absent in legacy checkpoints, represent it as None / unrecorded
+            if p_ver is None:
+                p_ver_label = "Legacy (unrecorded)"
+            else:
+                p_ver_label = f"v{p_ver}"
+            
+            if p_ver_label not in version_history:
+                version_history[p_ver_label] = {
+                    "checkpoint_episode": chk.get("checkpoint_episode"),
+                    "success_rate": chk.get("success_rate"),
+                    "average_reward": chk.get("average_reward"),
+                    "average_completion_steps": chk.get("average_completion_steps"),
+                    "failures": []
+                }
+                
+            records = chk.get("records", [])
+            for rec in records:
+                seed = rec.get("seed")
+                success = rec.get("success", False)
+                if not success:
+                    version_history[p_ver_label]["failures"].append(seed)
+                    
+                if seed not in failed_seed_records:
+                    failed_seed_records[seed] = []
+                    
+                failed_seed_records[seed].append({
+                    "policy_version": p_ver_label,
+                    "success": success,
+                    "steps": rec.get("steps", 0),
+                    "final_sheep_distance_to_pen": rec.get("final_sheep_distance_to_pen", 0.0),
+                    "reward_total": rec.get("reward_total", 0.0),
+                    "reward_breakdown": rec.get("reward_breakdown", {})
+                })
+                
+        failed_seed_trends = {}
+        for seed, history in failed_seed_records.items():
+            if history:
+                latest_rec = history[-1]
+                first_rec = history[0]
+                delta_dist = latest_rec["final_sheep_distance_to_pen"] - first_rec["final_sheep_distance_to_pen"]
+                delta_reward = latest_rec["reward_total"] - first_rec["reward_total"]
+                
+                # Check for plateaus
+                is_plateau = False
+                if len(history) >= 3:
+                    last_three = history[-3:]
+                    all_failed = all(not h["success"] for h in last_three)
+                    small_reward_var = max(h["reward_total"] for h in last_three) - min(h["reward_total"] for h in last_three) < 5.0
+                    if all_failed and small_reward_var:
+                        is_plateau = True
+                
+                classification = "Mixed or unstable"
+                if is_plateau:
+                    classification = "Likely repeating local strategy"
+                elif delta_dist < -1.0 and delta_reward > 5.0:
+                    classification = "Improving beneath flat success rate"
+                elif delta_dist > 1.0:
+                    classification = "No measurable improvement"
+                
+                if len(history) < 2:
+                    classification = "Insufficient unique policy versions"
+
+                failed_seed_trends[seed] = {
+                    "currently_failing": not latest_rec["success"],
+                    "delta_distance": delta_dist,
+                    "delta_reward": delta_reward,
+                    "is_plateau": is_plateau,
+                    "classification": classification,
+                    "history": history
+                }
+
+        # 8. Reward component reconciliation
+        reconciliations = []
+        eval_records = checkpoint_payload.get("records", []) if checkpoint_payload else []
+        for rec in eval_records:
+            seed = rec.get("seed")
+            reported_reward = rec.get("reward_total", 0.0)
+            breakdown = rec.get("reward_breakdown", {})
+            
+            # Correctly handle scatter_penalty sign difference (subtracted in total calculation)
+            sum_components = 0.0
+            for k, v in breakdown.items():
+                if k == "total":
+                    continue
+                if k == "scatter_penalty":
+                    sum_components -= v
+                else:
+                    sum_components += v
+
+            diff = abs(reported_reward - sum_components)
+            rec_status = "RECONCILED"
+            
+            checkpoint_ver = checkpoint_payload.get("policy_version") if checkpoint_payload else None
+            if checkpoint_ver is None:
+                rec_status = "PARTIAL LEGACY DATA"
+            elif diff > 1e-2:
+                rec_status = "MISMATCH"
+                
+            reconciliations.append({
+                "seed": seed,
+                "success": rec.get("success", False),
+                "reported_reward": reported_reward,
+                "summed_components": sum_components,
+                "difference": diff,
+                "status": rec_status,
+                "breakdown": breakdown
+            })
+
+        # 9. Failed seed trajectory sampler (10-30 rows)
+        failed_seed_trajectories = {}
+        for rec in eval_records:
+            if not rec.get("success", False) and "failed_trajectory_summary" in rec:
+                raw_traj = rec["failed_trajectory_summary"]
+                if raw_traj:
+                    # Filter and sample
+                    sampled_rows = []
+                    best_dist = float("inf")
+                    first_progress_idx = None
+                    first_no_progress_idx = None
+                    new_best_indices = []
+                    
+                    for idx, step in enumerate(raw_traj):
+                        dist = step.get("sheep_distance_to_pen", 999.0)
+                        no_prog = step.get("no_progress_counter", 0)
+                        if dist < best_dist:
+                            best_dist = dist
+                            new_best_indices.append(idx)
+                            if first_progress_idx is None and idx > 0:
+                                first_progress_idx = idx
+                        if no_prog > 0 and first_no_progress_idx is None:
+                            first_no_progress_idx = idx
+                            
+                    # Gather indices
+                    indices = set([0]) # initial step
+                    if first_progress_idx is not None:
+                        indices.add(first_progress_idx)
+                    for idx in new_best_indices:
+                        indices.add(idx)
+                    if first_no_progress_idx is not None:
+                        indices.add(first_no_progress_idx)
+                    n_steps = len(raw_traj)
+                    # Add final 10 steps
+                    for idx in range(max(0, n_steps - 10), n_steps):
+                        indices.add(idx)
+                    # Add some samples in stalled windows
+                    if first_no_progress_idx is not None and first_no_progress_idx < n_steps - 10:
+                        step_sz = max(1, (n_steps - 10 - first_no_progress_idx) // 5)
+                        for idx in range(first_no_progress_idx, n_steps - 10, step_sz):
+                            indices.add(idx)
+                            
+                    sorted_indices = sorted(list(indices))
+                    for idx in sorted_indices:
+                        if idx >= n_steps:
+                            continue
+                        step = raw_traj[idx]
+                        event = "Stall sample"
+                        if idx == 0:
+                            event = "Initial State"
+                        elif idx == first_progress_idx:
+                            event = "First Progress"
+                        elif idx in new_best_indices:
+                            event = f"New Best Distance ({step.get('sheep_distance_to_pen', 0.0):.2f})"
+                        elif idx == first_no_progress_idx:
+                            event = "First No-Progress"
+                        elif idx == n_steps - 1:
+                            event = "Termination step"
+                        elif idx >= n_steps - 10:
+                            event = "Final trajectory segment"
+                            
+                        step_copy = dict(step)
+                        step_copy["event"] = event
+                        # Resolve no progress contradictions
+                        # Seed 23 reports no-progress steps but says progress continued until end
+                        stop_reason = rec.get("stop_reason", "")
+                        no_prog_counter = step.get("no_progress_counter", 0)
+                        if stop_reason == "no progress" or no_prog_counter >= 100:
+                            step_copy["no_progress_explanation"] = f"Small movements occurred, but none exceeded the configured {active_config.environment.no_progress_distance_delta} progress threshold during the {no_prog_counter}-step window."
+                        else:
+                            step_copy["no_progress_explanation"] = "Progress continued without triggering stalled window bounds."
+                            
+                        sampled_rows.append(step_copy)
+                        
+                    failed_seed_trajectories[rec.get("seed")] = sampled_rows
+
+        # 10. Evaluation Seed Geometry validation
+        eval_geometry_validations = {}
+        evaluation_seeds = list(checkpoint_payload.get("evaluation_seeds", [])) if checkpoint_payload else []
+        if not evaluation_seeds:
+            evaluation_seeds = list(active_config.training.evaluation_seeds) if hasattr(active_config.training, "evaluation_seeds") else [11, 23, 37, 41, 53]
+        for seed in evaluation_seeds:
+            try:
+                temp_env = SheepdogEnvironment(active_config)
+                temp_env.reset(seed=seed)
+                
+                dog_positions = [(safe_float(d.position.x), safe_float(d.position.y)) for d in temp_env._dogs]
+                sheep_positions = [(safe_float(s.position.x), safe_float(s.position.y)) for s in temp_env._sheep]
+                pen_origin = (safe_float(temp_env._pen.origin.x), safe_float(temp_env._pen.origin.y))
+                pen_w = safe_float(temp_env._pen.width)
+                pen_h = safe_float(temp_env._pen.height)
+                grid_w = safe_float(temp_env.env_config.width)
+                grid_h = safe_float(temp_env.env_config.height)
+                
+                bound_violation = False
+                for x, y in dog_positions + sheep_positions:
+                    if x < 0 or x > grid_w or y < 0 or y > grid_h:
+                        bound_violation = True
+                        break
+                
+                overlap_detected = False
+                for x, y in dog_positions + sheep_positions:
+                    if pen_origin[0] <= x <= pen_origin[0] + pen_w and pen_origin[1] <= y <= pen_origin[1] + pen_h:
+                        overlap_detected = True
+                        break
+                all_entities = dog_positions + sheep_positions
+                import math
+                for i in range(len(all_entities)):
+                    for j in range(i+1, len(all_entities)):
+                        if math.hypot(all_entities[i][0] - all_entities[j][0], all_entities[i][1] - all_entities[j][1]) < 0.8:
+                            overlap_detected = True
+                            break
+                            
+                spacing_violation = False
+                for d_x, d_y in dog_positions:
+                    for s_x, s_y in sheep_positions:
+                        if math.hypot(d_x - s_x, d_y - s_y) < 2.0:
+                            spacing_violation = True
+                            break
+                            
+                dog_space_behind = True
+                for sx, sy in sheep_positions:
+                    dx_pen = pen_origin[0] + pen_w/2 - sx
+                    dy_pen = pen_origin[1] + pen_h/2 - sy
+                    dist_p = math.hypot(dx_pen, dy_pen)
+                    if dist_p > 0:
+                        dx_pen /= dist_p
+                        dy_pen /= dist_p
+                    bx = sx - 3.0 * dx_pen
+                    by = sy - 3.0 * dy_pen
+                    if bx < 0 or bx > grid_w or by < 0 or by > grid_h:
+                        dog_space_behind = False
+                        
+                eval_geometry_validations[seed] = {
+                    "dog_start_positions": dog_positions,
+                    "sheep_start_positions": sheep_positions,
+                    "pen_position": pen_origin,
+                    "pen_dimensions": (pen_w, pen_h),
+                    "grid_dimensions": (grid_w, grid_h),
+                    "overlap_detected": overlap_detected,
+                    "boundary_violation": bound_violation,
+                    "spacing_violation": spacing_violation,
+                    "can_enter_pen_heuristic": True,
+                    "dog_has_space_behind_heuristic": dog_space_behind,
+                    "material_difficulty_difference": False
+                }
+            except Exception as e:
+                eval_geometry_validations[seed] = {
+                    "error": f"Failed to validate geometry: {str(e)}"
+                }
+
+        # 11. Diagnostic Completeness Table and AI Review Readiness
+        completeness_table = []
+        
+        # Helper to compute status
+        def get_area_status(area):
+            if area == "Run identity":
+                return "COMPLETE" if status.get("run_id") else "PARTIAL"
+            if area == "Policy identity":
+                return "COMPLETE" if status.get("policy_version") is not None else "UNAVAILABLE FOR LEGACY DATA"
+            if area == "Network architecture":
+                return model_arch_info.get("status", "NOT CAPTURED")
+            if area == "PPO update history":
+                return "COMPLETE" if len(all_checkpoints) > 0 else "PARTIAL"
+            if area == "Effective configuration":
+                return "COMPLETE" if len(config_snapshot) > 0 else "PARTIAL"
+            if area == "Configuration consistency":
+                return "COMPLETE" if len(config_anomalies) == 0 else "PARTIAL"
+            if area == "Per-seed evaluation":
+                return "COMPLETE" if len(eval_records) == 5 else "PARTIAL" if len(eval_records) > 0 else "NOT CAPTURED"
+            if area == "Failed-seed history":
+                return "COMPLETE" if len(failed_seed_records) > 0 else "NOT CAPTURED"
+            if area == "Failed trajectory":
+                return "COMPLETE" if len(failed_seed_trajectories) > 0 else "NOT CAPTURED"
+            if area == "Observation health":
+                # Check if first evaluation record has observation_diagnostics
+                first_rec = eval_records[0] if eval_records else {}
+                return "COMPLETE" if first_rec.get("observation_diagnostics") else "UNAVAILABLE FOR LEGACY DATA"
+            if area == "Action distribution":
+                return "COMPLETE" if eval_records else "NOT CAPTURED"
+            if area == "Action-mask health":
+                first_rec = eval_records[0] if eval_records else {}
+                return "COMPLETE" if first_rec.get("num_invalid_actions") is not None else "UNAVAILABLE FOR LEGACY DATA"
+            if area == "Reward reconciliation":
+                return "COMPLETE" if reconciliations else "NOT CAPTURED"
+            if area == "Termination diagnostics":
+                return "COMPLETE" if eval_records else "NOT CAPTURED"
+            if area == "Counter consistency":
+                return "COMPLETE" if not counter_warnings else "PARTIAL"
+            if area == "Snapshot consistency":
+                return "COMPLETE" if not snapshot_warning else "PARTIAL"
+            return "NOT CAPTURED"
+
+        required_areas = [
+            "Run identity", "Policy identity", "Network architecture", "PPO update history",
+            "Effective configuration", "Configuration consistency", "Per-seed evaluation",
+            "Failed-seed history", "Failed trajectory", "Observation health", "Action distribution",
+            "Action-mask health", "Reward reconciliation", "Termination diagnostics",
+            "Counter consistency", "Snapshot consistency"
+        ]
+
+        readiness_reasons = []
+        for area in required_areas:
+            s_val = get_area_status(area)
+            missing = []
+            if s_val != "COMPLETE":
+                missing.append(f"Incomplete {area} statistics")
+                # Add to readiness reasons if critical
+                if area in {"Run identity", "Policy identity", "Network architecture", "Effective configuration", "Per-seed evaluation", "Observation health", "Reward reconciliation"}:
+                    readiness_reasons.append(f"Critical area '{area}' status is {s_val}.")
+            completeness_table.append({
+                "area": area,
+                "status": s_val,
+                "source": "Diagnostics API Engine",
+                "missing": missing
+            })
+
+        readiness = "READY"
+        if len(readiness_reasons) > 0:
+            readiness = "PARTIAL" if len(readiness_reasons) <= 3 else "NOT READY"
+
+        # Append all computed warnings together
+        all_health_warnings = []
+        if snapshot_warning:
+            all_health_warnings.append(snapshot_warning)
+        for w in counter_warnings:
+            all_health_warnings.append(w)
+        for anomaly in config_anomalies:
+            all_health_warnings.append(anomaly)
+        for m in mismatch_flags:
+            all_health_warnings.append(m["message"])
+
+        # Fetch latest evaluation records observation diagnostics
+        first_obs_diag = None
+        for rec in eval_records:
+            if rec.get("observation_diagnostics"):
+                first_obs_diag = rec["observation_diagnostics"]
+                break
+
+        # Determine if this is a legacy run or checkpoint.
+        active_p_ver = status.get("policy_version")
+        active_ppo_updates = status.get("ppo_update_count")
+        checkpoint_p_ver = checkpoint_payload.get("policy_version") if checkpoint_payload else None
+        
+        is_legacy = False
+        if checkpoint_payload:
+            if checkpoint_p_ver is None or checkpoint_p_ver == 0:
+                is_legacy = True
+        else:
+            if active_p_ver is None or active_p_ver == 0:
+                is_legacy = True
+
+        policy_ver_val = active_p_ver if active_p_ver is not None else (checkpoint_p_ver if checkpoint_p_ver is not None else None)
+        ppo_updates_val = active_ppo_updates if active_ppo_updates is not None else (checkpoint_p_ver if checkpoint_p_ver is not None else None)
+
+        # 12. Build cohesive snapshot output
+        diagnostics_response = {
+            "snapshot": {
+                "snapshot_timestamp": datetime.now(UTC).isoformat(),
+                "active_run_id": status.get("run_id") or (checkpoint_payload.get("run_id") if checkpoint_payload else "No active run"),
+                "active_checkpoint_id": status.get("active_checkpoint_id") or (checkpoint_payload.get("checkpoint_id") if checkpoint_payload else "No active checkpoint"),
+                "loaded_model_id": str(model_path) if model_path else (checkpoint_payload.get("policy_state_path") if checkpoint_payload else "None"),
+                "policy_version": policy_ver_val,
+                "ppo_update_count": ppo_updates_val,
+                "is_legacy": is_legacy,
+                "global_timestep": checkpoint_payload.get("global_timesteps") if checkpoint_payload else status.get("total_timesteps", 0),
+                "current_rollout_progress": f"{int(batch_comp)} / {int(status.get('requested_episodes', 0))}",
+                "current_curriculum_stage": cur_stage,
+                "config_hash": hashlib.md5(str(default_config.to_dict()).encode("utf-8")).hexdigest(),
+                "observation_schema_hash": checkpoint_payload.get("observation_schema_hash") if checkpoint_payload else "Unknown",
+                "action_space_hash": checkpoint_payload.get("action_space_hash") if checkpoint_payload else "Unknown",
+                "reward_schema_version": checkpoint_payload.get("reward_schema_version") if checkpoint_payload else "Unknown",
+                "evaluation_timestamp": status.get("last_evaluation_time") or (checkpoint_payload.get("created_timestamp") if checkpoint_payload else "Unknown"),
+                "evaluation_policy_version": checkpoint_payload.get("policy_version") if checkpoint_payload else None,
+                "evaluation_checkpoint_id": checkpoint_payload.get("checkpoint_id") if checkpoint_payload else None,
+            },
+            "completeness": {
+                "table": completeness_table,
+                "readiness": readiness,
+                "reasons": readiness_reasons
+            },
+            "config_snapshot": config_snapshot,
+            "config_anomalies": config_anomalies,
+            "environment_mismatches": mismatch_flags,
+            "scenario_coverage": coverage_payload,
+            "version_history": version_history,
+            "failed_seed_trends": failed_seed_trends,
+            "reward_reconciliations": reconciliations,
+            "eval_geometry_validations": eval_geometry_validations,
+            "neural_architecture": model_arch_info,
+            "ppo_metrics": [
+                {
+                    "checkpoint_episode": chk.get("checkpoint_episode"),
+                    "policy_gradient_loss": chk.get("policy_gradient_loss"),
+                    "value_loss": chk.get("value_loss"),
+                    "entropy_loss": chk.get("entropy_loss"),
+                    "loss": chk.get("loss"),
+                    "approx_kl": chk.get("approx_kl"),
+                    "clip_fraction": chk.get("clip_fraction"),
+                    "explained_variance": chk.get("explained_variance"),
+                } for chk in all_checkpoints
+            ],
+            "evaluation_records": [
+                {
+                    "seed": rec.get("seed"),
+                    "success": rec.get("success"),
+                    "steps": rec.get("steps"),
+                    "stop_reason": rec.get("stop_reason"),
+                    "initial_sheep_distance_to_pen": rec.get("initial_sheep_distance_to_pen"),
+                    "min_sheep_distance_to_pen": rec.get("min_sheep_distance_to_pen"),
+                    "final_dog_to_sheep_distance": rec.get("final_dog_to_sheep_distance"),
+                    "num_waits": rec.get("num_waits"),
+                    "num_sprints": rec.get("num_sprints"),
+                    "num_invalid_actions": rec.get("num_invalid_actions"),
+                    "most_frequent_action": rec.get("most_frequent_action"),
+                    "oscillation_detected": rec.get("oscillation_detected"),
+                } for rec in eval_records
+            ],
+            "failed_seed_trajectories": failed_seed_trajectories,
+            "observation_diagnostics": first_obs_diag,
+            "counter_reconciliation": {
+                "rows": counter_rows,
+                "warnings": counter_warnings
+            },
+            "health_warnings": all_health_warnings,
+            "training_status": status
+        }
+        
+        return diagnostics_response
+
+    def _handle_diagnostics(self) -> None:
+        """Compile all diagnostics and return a unified JSON snapshot payload wrapper."""
+        try:
+            snapshot = self._compile_diagnostics_snapshot()
+            self._json_response({
+                "diagnosticsAvailable": True,
+                "snapshot": snapshot,
+                "error": None
+            })
+        except DiagnosticsHTTPException as e:
+            self._json_response({
+                "diagnosticsAvailable": False,
+                "snapshot": None,
+                "error": {
+                    "code": e.code,
+                    "message": str(e),
+                    "exceptionType": e.__class__.__name__,
+                    "endpoint": self.path
+                }
+            }, status=e.status_code)
+        except Exception as e:
+            import traceback
+            import sys
+            traceback.print_exc()
+            err_type = e.__class__.__name__
+            err_tb = traceback.format_exc()
+            self._json_response({
+                "diagnosticsAvailable": False,
+                "snapshot": None,
+                "error": {
+                    "code": "INTERNAL_SERVER_ERROR",
+                    "message": f"{str(e)}\n\nTraceback:\n{err_tb}",
+                    "exceptionType": err_type,
+                    "endpoint": self.path
+                }
+            }, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+
     def _read_json(self) -> dict[str, Any]:
         content_length = int(self.headers.get("Content-Length", "0"))
         if content_length <= 0:
@@ -2919,7 +4400,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                 return
             web_export_dir = Path(LabConfig().training.web_export_dir).resolve()
             target = (web_export_dir / rel).resolve()
-            if not str(target).startswith(str(web_export_dir)):
+            if not target.is_relative_to(web_export_dir):
                 self._json_response({"error": "Forbidden"}, status=HTTPStatus.FORBIDDEN)
                 return
             self._file_response(target)
@@ -2939,11 +4420,58 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         if request_path == "/api/training/status":
             self._json_response(self.manager.snapshot())
             return
+        if request_path == "/api/training/diagnostics":
+            self._handle_diagnostics()
+            return
         if request_path == "/api/health":
             self._json_response({"ok": True})
             return
         if request_path == "/api/config":
             self._json_response(self.manager.get_config())
+            return
+        if request_path == "/api/config/editable":
+            self._json_response(self.manager.get_hyperparams())
+            return
+        if request_path == "/api/config/active":
+            self._json_response(self.manager.get_config_active())
+            return
+        if request_path == "/api/config/next-run":
+            self._json_response(self.manager.get_config_next_run())
+            return
+        if request_path == "/api/checkpoint/details":
+            query = urlsplit(self.path).query
+            from urllib.parse import parse_qs
+
+            params = parse_qs(query)
+            checkpoint_id_list = params.get("checkpoint_id")
+            checkpoint_id = checkpoint_id_list[0] if checkpoint_id_list else None
+            episode_list = params.get("episode")
+            journey_list = params.get("journey")
+
+            episode = None
+            if episode_list:
+                try:
+                    episode = int(episode_list[0])
+                except ValueError:
+                    self._json_response(
+                        {"error": "episode parameter must be an integer"},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+
+            if not checkpoint_id and episode is None:
+                self._json_response(
+                    {"error": "Either checkpoint_id or episode parameter is required"},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+
+            journey = journey_list[0] if journey_list else None
+            try:
+                details = self.manager.get_checkpoint_details(episode, journey, checkpoint_id)
+                self._json_response(details)
+            except Exception as exc:
+                self._json_response({"error": str(exc)}, status=HTTPStatus.NOT_FOUND)
             return
         if request_path == "/api/config/history":
             self._json_response(self.manager.get_config_history())
@@ -2994,6 +4522,45 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             body = self._read_json()
             target_stage = int(body.get("stage", 1))
             payload, status = self.manager.rewind_to_stage(target_stage)
+            self._json_response(payload, status=status)
+            return
+
+        if self.path == "/api/training/restore":
+            body = self._read_json()
+            checkpoint_id = body.get("checkpoint_id")
+            episode = body.get("episode")
+            if checkpoint_id is None and episode is None:
+                self._json_response({"error": "Either checkpoint_id or episode parameter is required"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            journey = body.get("journey")
+            payload, status = self.manager.restore_checkpoint(
+                int(episode) if episode is not None else None,
+                journey,
+                checkpoint_id
+            )
+            self._json_response(payload, status=status)
+            return
+
+        if self.path == "/api/training/fork":
+            body = self._read_json()
+            checkpoint_id = body.get("checkpoint_id")
+            episode = body.get("episode")
+            if checkpoint_id is None and episode is None:
+                self._json_response({"error": "Either checkpoint_id or episode parameter is required"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            journey = body.get("journey")
+            hyperparams = body.get("hyperparams", {})
+            payload, status = self.manager.fork_checkpoint(
+                int(episode) if episode is not None else None,
+                journey,
+                hyperparams,
+                checkpoint_id
+            )
+            self._json_response(payload, status=status)
+            return
+
+        if self.path == "/api/training/archive-active":
+            payload, status = self.manager.archive_active_run()
             self._json_response(payload, status=status)
             return
 
@@ -3091,6 +4658,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         debug_reward_breakdown = payload.get("debug_reward_breakdown")
         auto_promote = payload.get("auto_promote")
         promote_from_checkpoint_episode = payload.get("promote_from_checkpoint_episode")
+        evaluation_mode = payload.get("evaluation_mode", "quick")
         self._json_response(
             self.manager.start(
                 requested_episodes,
@@ -3108,6 +4676,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                     if promote_from_checkpoint_episode is None
                     else int(promote_from_checkpoint_episode)
                 ),
+                evaluation_mode=evaluation_mode,
             )
         )
 

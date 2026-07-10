@@ -3224,3 +3224,59 @@ select {
   animation: glossary-glow 2.5s ease-out !important;
 }
 
+/* ── Agent Copy Button ── */
+.agent-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(96, 165, 250, 0.12);
+  border: 1px solid rgba(96, 165, 250, 0.35);
+  color: #60a5fa;
+  padding: 0.35rem 0.8rem;
+  border-radius: 0.5rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease-in-out;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.agent-copy-btn:hover {
+  background: rgba(96, 165, 250, 0.22);
+  border-color: #60a5fa;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(96, 165, 250, 0.2);
+}
+
+.agent-copy-btn:active {
+  transform: translateY(0);
+}
+
+.agent-copy-btn--success {
+  background: rgba(52, 211, 153, 0.15) !important;
+  border-color: rgba(52, 211, 153, 0.5) !important;
+  color: #34d399 !important;
+}
+
+.agent-copy-btn--success:hover {
+  background: rgba(52, 211, 153, 0.22) !important;
+  box-shadow: 0 4px 12px rgba(52, 211, 153, 0.2) !important;
+}
+
+.agent-copy-btn--failed {
+  background: rgba(248, 113, 113, 0.15) !important;
+  border-color: rgba(248, 113, 113, 0.5) !important;
+  color: #f87171 !important;
+}
+
+.agent-copy-btn--failed:hover {
+  background: rgba(248, 113, 113, 0.22) !important;
+  box-shadow: 0 4px 12px rgba(248, 113, 113, 0.2) !important;
+}
+
+.agent-copy-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+

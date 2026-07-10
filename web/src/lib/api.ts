@@ -12,6 +12,7 @@ import type {
   TrainingStatus,
   UserHyperparams,
   TelemetryRecord,
+  DiagnosticsResponse,
 } from "../state/types";
 
 const API_BASE_URL = "http://127.0.0.1:8000";
@@ -145,6 +146,21 @@ export async function loadHyperparams(): Promise<UserHyperparams> {
   return fetchJson<UserHyperparams>("/api/config/hyperparams", undefined, API_BASE_URL);
 }
 
+export async function loadTrainingDiagnostics(checkpointId?: string, episode?: number): Promise<DiagnosticsResponse> {
+  let url = "/api/training/diagnostics";
+  const params: string[] = [];
+  if (checkpointId) {
+    params.push(`checkpoint_id=${encodeURIComponent(checkpointId)}`);
+  }
+  if (episode !== undefined) {
+    params.push(`episode=${episode}`);
+  }
+  if (params.length > 0) {
+    url += "?" + params.join("&");
+  }
+  return fetchJson<DiagnosticsResponse>(url, undefined, API_BASE_URL);
+}
+
 export async function loadNetworkTopology(): Promise<NetworkTopologyInfo> {
   return fetchJson<NetworkTopologyInfo>("/api/network/topology", undefined, API_BASE_URL);
 }
@@ -218,4 +234,67 @@ export async function shutdownApp(): Promise<{ status: string }> {
   return fetchJson<{ status: string }>("/api/shutdown", {
     method: "POST",
   }, API_BASE_URL);
+}
+
+export async function loadCheckpointDetails(
+  episode: number | null,
+  journey?: string,
+  checkpointId?: string,
+): Promise<Record<string, unknown>> {
+  let url = "/api/checkpoint/details?";
+  const params: string[] = [];
+  if (checkpointId) {
+    params.push(`checkpoint_id=${encodeURIComponent(checkpointId)}`);
+  }
+  if (episode !== null && episode !== undefined) {
+    params.push(`episode=${episode}`);
+  }
+  if (journey) {
+    params.push(`journey=${encodeURIComponent(journey)}`);
+  }
+  url += params.join("&");
+  return fetchJson<Record<string, unknown>>(url, undefined, API_BASE_URL);
+}
+
+export async function restoreCheckpoint(
+  episode: number | null,
+  journey?: string,
+  checkpointId?: string,
+): Promise<{ status: string; message: string }> {
+  return fetchJson<{ status: string; message: string }>("/api/training/restore", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ episode, journey, checkpoint_id: checkpointId }),
+  }, API_BASE_URL);
+}
+
+export async function forkCheckpoint(
+  episode: number | null,
+  journey?: string,
+  hyperparams?: Record<string, unknown>,
+  checkpointId?: string,
+): Promise<{ status: string; message: string; run_id: string }> {
+  return fetchJson<{ status: string; message: string; run_id: string }>("/api/training/fork", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ episode, journey, hyperparams, checkpoint_id: checkpointId }),
+  }, API_BASE_URL);
+}
+
+export async function archiveActiveRun(): Promise<{ status: string; archive_dir: string }> {
+  return fetchJson<{ status: string; archive_dir: string }>("/api/training/archive-active", {
+    method: "POST",
+  }, API_BASE_URL);
+}
+
+export async function loadConfigEditable(): Promise<Record<string, unknown>> {
+  return fetchJson<Record<string, unknown>>("/api/config/editable", undefined, API_BASE_URL);
+}
+
+export async function loadConfigActive(): Promise<Record<string, unknown>> {
+  return fetchJson<Record<string, unknown>>("/api/config/active", undefined, API_BASE_URL);
+}
+
+export async function loadConfigNextRun(): Promise<Record<string, unknown>> {
+  return fetchJson<Record<string, unknown>>("/api/config/next-run", undefined, API_BASE_URL);
 }

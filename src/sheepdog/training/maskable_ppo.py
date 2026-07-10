@@ -12,9 +12,14 @@ from typing import Any
 from stable_baselines3.common.callbacks import BaseCallback
 
 from sheepdog.atomic_io import atomic_write_json
-from sheepdog.checkpoints.store import CheckpointMetadata
-from sheepdog.environment import ACTION_ORDER
+from sheepdog.checkpoints.store import (
+    CheckpointMetadata,
+    get_action_space_hash,
+    get_observation_schema_hash,
+)
+from sheepdog.environment import ACTION_ORDER, ENV_CONFIG_VERSION
 from sheepdog.policies.neural import NeuralPolicy
+from sheepdog.rewards import REWARD_SCHEMA_VERSION
 from sheepdog.training.trainer import Trainer
 
 
@@ -49,6 +54,7 @@ class _TrainingProgressCallback(BaseCallback):
         batch_total_episodes: int,
         completed_segments: int,
         segment_index: int,
+        policy_version: int,
     ) -> None:
         super().__init__()
         self._emit = emit
@@ -59,6 +65,7 @@ class _TrainingProgressCallback(BaseCallback):
         self._batch_total_episodes = batch_total_episodes
         self._completed_segments = completed_segments
         self._segment_index = segment_index
+        self.policy_version = policy_version
         self._last_reported_steps = 0
 
     def _on_step(self) -> bool:
@@ -73,10 +80,21 @@ class _TrainingProgressCallback(BaseCallback):
         self._last_reported_steps = num_timesteps
         completion = min(1.0, num_timesteps / self._total_timesteps)
         fractional_completed = self._completed_segments + completion
+        ppo_update_count = getattr(self.model, "_n_updates", 0)
+        
+        actual_completed_episodes = 0
+        try:
+            if self.model is not None and self.model.get_env() is not None:
+                curr_counters = self.model.get_env().get_attr("_episode_counter")
+                actual_completed_episodes = int(sum(curr_counters))
+        except Exception:
+            pass
+
         self._emit(
             {
                 "phase": "learning",
                 "batch_completed_episodes": fractional_completed,
+                "actual_completed_episodes": actual_completed_episodes,
                 "current_episode": self._segment_index,
                 "total_episodes_trained": self._starting_total_episodes,
                 "checkpoint_episode": None,
@@ -87,6 +105,8 @@ class _TrainingProgressCallback(BaseCallback):
                     f"timesteps ({completion:.0%})"
                 ),
                 "batch_total_episodes": self._batch_total_episodes,
+                "policy_version": self.policy_version,
+                "ppo_update_count": ppo_update_count,
             }
         )
         return True
@@ -193,6 +213,9 @@ class MaskablePPOTrainer(Trainer):
                 "policy_state_path": None,
                 "policy_config": None,
                 "incomplete_batch": None,
+                "run_id": None,
+                "parent_run_id": None,
+                "parent_checkpoint_id": None,
             }
         try:
             payload = json.loads(self._state_path.read_text(encoding="utf-8"))
@@ -203,6 +226,9 @@ class MaskablePPOTrainer(Trainer):
                 "policy_state_path": None,
                 "policy_config": None,
                 "incomplete_batch": None,
+                "run_id": None,
+                "parent_run_id": None,
+                "parent_checkpoint_id": None,
             }
         return {
             "total_episodes_trained": int(payload.get("total_episodes_trained", 0)),
@@ -216,6 +242,11 @@ class MaskablePPOTrainer(Trainer):
             "best_average_reward": payload.get("best_average_reward"),
             "best_completion_steps": payload.get("best_completion_steps"),
             "incomplete_batch": payload.get("incomplete_batch"),
+            "run_id": payload.get("run_id"),
+            "parent_run_id": payload.get("parent_run_id"),
+            "parent_checkpoint_id": payload.get("parent_checkpoint_id"),
+            "policy_version": payload.get("policy_version"),
+            "training_scenario_coverage": payload.get("training_scenario_coverage"),
         }
 
     @_wandb_finish_on_exit
@@ -234,6 +265,8 @@ class MaskablePPOTrainer(Trainer):
             and self._has_compatible_policy_state()
         )
         starting_total = self.total_episodes_trained if resuming_policy else 0
+        loaded_p_ver = self._loaded_state.get("policy_version")
+        policy_version = int(loaded_p_ver) if (resuming_policy and loaded_p_ver is not None) else 0
         batch_total = max(1, len(train_config.checkpoint_episodes))
 
         # Initialize Weights & Biases if enabled
@@ -394,6 +427,7 @@ class MaskablePPOTrainer(Trainer):
                 batch_total_episodes=batch_total,
                 completed_segments=completed_checkpoints - 1,
                 segment_index=completed_checkpoints - 1,
+                policy_version=policy_version,
             )
             from stable_baselines3.common.callbacks import CallbackList
             callbacks_to_use = [progress_reporter]
@@ -432,16 +466,86 @@ class MaskablePPOTrainer(Trainer):
                 callback=callback_list,
             )
             
+            # Increment policy update version
+            policy_version += 1
+            policy.policy_version = policy_version
+
+            # Retrieve training scenario coverage stats from env
+            curr_coverage = self._loaded_state.get("training_scenario_coverage")
+            if not isinstance(curr_coverage, dict):
+                curr_coverage = {
+                    "seeds_seen": [],
+                    "configs_seen": [],
+                    "min_sheep_to_pen": float("inf"),
+                    "max_sheep_to_pen": float("-inf"),
+                    "sum_sheep_to_pen": 0.0,
+                    "count_sheep_to_pen": 0,
+                    "min_dog_to_sheep": float("inf"),
+                    "max_dog_to_sheep": float("-inf"),
+                    "sum_dog_to_sheep": 0.0,
+                    "count_dog_to_sheep": 0,
+                    "similarity_episodes": {str(k): 0 for k in (11, 23, 37, 41, 53)},
+                    "similarity_successes": {str(k): 0 for k in (11, 23, 37, 41, 53)},
+                }
+            curr_coverage["similarity_episodes"] = {str(k): v for k, v in curr_coverage.get("similarity_episodes", {}).items()}
+            curr_coverage["similarity_successes"] = {str(k): v for k, v in curr_coverage.get("similarity_successes", {}).items()}
+
+            if hasattr(policy.model, "get_env") and policy.model.get_env() is not None:
+                venv = policy.model.get_env()
+                try:
+                    if hasattr(venv, "env_method"):
+                        workers_stats = venv.env_method("get_coverage_stats")
+                        for ws in workers_stats:
+                            if not isinstance(ws, dict):
+                                continue
+                            seeds_list = set(curr_coverage.get("seeds_seen", []))
+                            seeds_list.update(ws.get("seeds_seen_list", []))
+                            curr_coverage["seeds_seen"] = list(seeds_list)
+
+                            configs_list = set(curr_coverage.get("configs_seen", []))
+                            configs_list.update(ws.get("configs_seen_list", []))
+                            curr_coverage["configs_seen"] = list(configs_list)
+
+                            if ws.get("count_sheep_to_pen", 0) > 0:
+                                curr_coverage["min_sheep_to_pen"] = min(curr_coverage["min_sheep_to_pen"], ws["min_sheep_to_pen"])
+                                curr_coverage["max_sheep_to_pen"] = max(curr_coverage["max_sheep_to_pen"], ws["max_sheep_to_pen"])
+                                curr_coverage["sum_sheep_to_pen"] += ws["sum_sheep_to_pen"]
+                                curr_coverage["count_sheep_to_pen"] += ws["count_sheep_to_pen"]
+
+                            if ws.get("count_dog_to_sheep", 0) > 0:
+                                curr_coverage["min_dog_to_sheep"] = min(curr_coverage["min_dog_to_sheep"], ws["min_dog_to_sheep"])
+                                curr_coverage["max_dog_to_sheep"] = max(curr_coverage["max_dog_to_sheep"], ws["max_dog_to_sheep"])
+                                curr_coverage["sum_dog_to_sheep"] += ws["sum_dog_to_sheep"]
+                                curr_coverage["count_dog_to_sheep"] += ws["count_dog_to_sheep"]
+
+                            for k in (11, 23, 37, 41, 53):
+                                k_str = str(k)
+                                curr_coverage["similarity_episodes"][k_str] = curr_coverage["similarity_episodes"].get(k_str, 0) + ws.get("similarity_episodes", {}).get(k, 0)
+                                curr_coverage["similarity_successes"][k_str] = curr_coverage["similarity_successes"].get(k_str, 0) + ws.get("similarity_successes", {}).get(k, 0)
+                except Exception:
+                    pass
+
+            self._loaded_state["training_scenario_coverage"] = curr_coverage
+            
             # Extract PPO diagnostics from model logger
             logger_obj = getattr(policy.model, "logger", None)
             approx_kl = 0.0
             clip_fraction = 0.0
             explained_variance = 0.0
+            policy_gradient_loss = 0.0
+            value_loss = 0.0
+            entropy_loss = 0.0
+            loss = 0.0
             if logger_obj is not None:
                 name_to_value = getattr(logger_obj, "name_to_value", {})
                 approx_kl = float(name_to_value.get("train/approx_kl", 0.0))
                 clip_fraction = float(name_to_value.get("train/clip_fraction", 0.0))
                 explained_variance = float(name_to_value.get("train/explained_variance", 0.0))
+                policy_gradient_loss = float(name_to_value.get("train/policy_gradient_loss", 0.0))
+                value_loss = float(name_to_value.get("train/value_loss", 0.0))
+                entropy_loss = float(name_to_value.get("train/entropy_loss", 0.0))
+                loss = float(name_to_value.get("train/loss", 0.0))
+                
             if should_stop is not None and should_stop():
                 interrupted = True
                 break
@@ -470,6 +574,27 @@ class MaskablePPOTrainer(Trainer):
                 policy_state_path=str(saved_model_path),
                 policy_config=policy.config.to_dict(),
                 evaluation_replay_path=str(representative_replay_path),
+                run_id=self._loaded_state.get("run_id"),
+                checkpoint_id=f"chk_{self._loaded_state.get('run_id')}_ep_{total_eps_this_checkpoint}",
+                parent_run_id=self._loaded_state.get("parent_run_id"),
+                parent_checkpoint_id=self._loaded_state.get("parent_checkpoint_id"),
+                global_timestep=cumulative_ts,
+                observation_schema_hash=get_observation_schema_hash(self.config),
+                action_space_hash=get_action_space_hash(),
+                reward_schema_version=REWARD_SCHEMA_VERSION,
+                env_config_version=ENV_CONFIG_VERSION,
+                created_timestamp=datetime.now(UTC).isoformat(),
+                deterministic_evaluation=True,
+                evaluation_seeds=list(train_config.evaluation_seeds),
+                policy_version=policy_version,
+                policy_gradient_loss=policy_gradient_loss,
+                value_loss=value_loss,
+                entropy_loss=entropy_loss,
+                loss=loss,
+                approx_kl=approx_kl,
+                clip_fraction=clip_fraction,
+                explained_variance=explained_variance,
+                training_scenario_coverage=curr_coverage,
             )
             current_stage = self.config.rewards.instincts.curriculum_stage
             is_new_best = (
@@ -522,6 +647,27 @@ class MaskablePPOTrainer(Trainer):
                 "environment_config": self.config.to_dict()["environment"],
                 "reward_config": self.config.to_dict()["rewards"],
                 "records": [record.to_dict() for record in summary.records],
+                "run_id": self._loaded_state.get("run_id"),
+                "checkpoint_id": f"chk_{self._loaded_state.get('run_id')}_ep_{total_eps_this_checkpoint}",
+                "parent_run_id": self._loaded_state.get("parent_run_id"),
+                "parent_checkpoint_id": self._loaded_state.get("parent_checkpoint_id"),
+                "global_timestep": cumulative_ts,
+                "observation_schema_hash": get_observation_schema_hash(self.config),
+                "action_space_hash": get_action_space_hash(),
+                "reward_schema_version": REWARD_SCHEMA_VERSION,
+                "env_config_version": ENV_CONFIG_VERSION,
+                "created_timestamp": datetime.now(UTC).isoformat(),
+                "deterministic_evaluation": True,
+                "evaluation_seeds": list(train_config.evaluation_seeds),
+                "policy_version": policy_version,
+                "policy_gradient_loss": policy_gradient_loss,
+                "value_loss": value_loss,
+                "entropy_loss": entropy_loss,
+                "loss": loss,
+                "approx_kl": approx_kl,
+                "clip_fraction": clip_fraction,
+                "explained_variance": explained_variance,
+                "training_scenario_coverage": curr_coverage,
             }
             checkpoint_payloads = self._merge_checkpoint(checkpoint_payloads, checkpoint_payload)
             # Persist state after every checkpoint so progress survives a
@@ -545,6 +691,11 @@ class MaskablePPOTrainer(Trainer):
                     "batch_total_segments": n_checkpoints,
                     "batch_steps_per_segment": steps_per_segment,
                 },
+                "run_id": self._loaded_state.get("run_id"),
+                "parent_run_id": self._loaded_state.get("parent_run_id"),
+                "parent_checkpoint_id": self._loaded_state.get("parent_checkpoint_id"),
+                "policy_version": policy_version,
+                "training_scenario_coverage": curr_coverage,
             }
             atomic_write_json(self._state_path, intermediate_state)
             self._loaded_state = intermediate_state
@@ -580,6 +731,10 @@ class MaskablePPOTrainer(Trainer):
                     "clip_fraction": clip_fraction,
                     "explained_variance": explained_variance,
                     "total_timesteps": cumulative_ts,
+                    "policy_version": policy_version,
+                    "last_policy_update_time": datetime.now(UTC).isoformat(),
+                    "last_evaluation_time": datetime.now(UTC).isoformat(),
+                    "run_id": self._loaded_state.get("run_id"),
                 }
             )
 
@@ -605,6 +760,10 @@ class MaskablePPOTrainer(Trainer):
             "policy_config": policy.config.to_dict(),
             "training_signature": self._training_signature(),
             "incomplete_batch": None,
+            "run_id": self._loaded_state.get("run_id"),
+            "parent_run_id": self._loaded_state.get("parent_run_id"),
+            "parent_checkpoint_id": self._loaded_state.get("parent_checkpoint_id"),
+            "policy_version": policy_version,
         }
         atomic_write_json(self._state_path, state_payload)
         self._loaded_state = state_payload
