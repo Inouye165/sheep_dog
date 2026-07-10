@@ -39,6 +39,8 @@ from sheepdog.policies.base import Action, Policy, PolicyMode
 from sheepdog.rewards import RewardBreakdown, RewardComputer, RewardInputs
 from sheepdog.team_strategy import RoleAssignment, StrategySnapshot, TeamStrategy
 
+ENV_CONFIG_VERSION = "1.0"
+
 ACTION_DELTAS: dict[Action, tuple[int, int]] = {
     "up": (0, -1),
     "down": (0, 1),
@@ -138,6 +140,7 @@ class EpisodeResult:
     final_snapshot: EnvironmentSnapshot
     stats: EpisodeStats
     replay: tuple[StepRecord, ...] = field(default_factory=tuple)
+    observations: tuple[Any, ...] = field(default_factory=tuple)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict."""
@@ -204,6 +207,7 @@ class SheepdogEnvironment:
         self._gate_corridor_occupancy_peak = 0.0
         self._gate_corridor_failure_steps = 0
         self._spawn_mode = ""
+        self._episode_reward_breakdown: dict[str, float] = {}
 
     @property
     def dog_count(self) -> int:
@@ -286,6 +290,14 @@ class SheepdogEnvironment:
             self._record_position_history(dog.recent_positions, dog.position)
         for sheep in self._sheep:
             self._record_position_history(sheep.recent_positions, sheep.position)
+        self._initial_sheep_distance_to_pen = self._average_distance_to_pen()
+        self._min_sheep_distance_to_pen = self._initial_sheep_distance_to_pen
+        self._num_waits = 0
+        self._num_sprints = 0
+        self._num_invalid_actions = 0
+        self._action_counts = {a: 0 for a in ACTION_ORDER}
+        self._observations_history = []
+        self._episode_reward_breakdown = {}
         self._previous_average_distance = self._average_distance_to_pen()
         self._previous_flock_spread = self._flock_spread()
         self._previous_farthest_distance = self._farthest_distance_to_pen()
@@ -299,6 +311,7 @@ class SheepdogEnvironment:
         )
         return self.get_state_snapshot()
 
+
     def reset_from_scenario(self, scenario: object) -> EnvironmentSnapshot:
         """Reset using a fixed layout from a :class:`SavedScenario`."""
         if not isinstance(scenario, SavedScenario):
@@ -309,6 +322,7 @@ class SheepdogEnvironment:
         self._simulated_seconds = 0.0
         self._no_progress_steps = 0
         self._reward_total = 0.0
+        self._episode_reward_breakdown = {}
         self._terminated = False
         self._timeout = False
         self._stopped = False
@@ -365,6 +379,13 @@ class SheepdogEnvironment:
             self._record_position_history(dog.recent_positions, dog.position)
         for sheep in self._sheep:
             self._record_position_history(sheep.recent_positions, sheep.position)
+        self._initial_sheep_distance_to_pen = self._average_distance_to_pen()
+        self._min_sheep_distance_to_pen = self._initial_sheep_distance_to_pen
+        self._num_waits = 0
+        self._num_sprints = 0
+        self._num_invalid_actions = 0
+        self._action_counts = {a: 0 for a in ACTION_ORDER}
+        self._observations_history = []
         self._previous_average_distance = self._average_distance_to_pen()
         self._previous_flock_spread = self._flock_spread()
         self._previous_farthest_distance = self._farthest_distance_to_pen()
@@ -377,6 +398,7 @@ class SheepdogEnvironment:
             if not sheep.penned
         )
         return self.get_state_snapshot()
+
 
     def _sample_pen_origin_and_opening(self) -> tuple[Point, str]:
         placement = (self.env_config.pen_placement or "corner").lower()
@@ -697,24 +719,41 @@ class SheepdogEnvironment:
             weights=weights,
         )
 
-    def run_policy(self, policy: Policy, seed: int, capture_replay: bool = False) -> EpisodeResult:
+    def run_policy(
+        self, policy: Policy, seed: int, capture_replay: bool = False, deterministic: bool = True
+    ) -> EpisodeResult:
         """Run *policy* from *seed* until termination and return the episode result."""
         self.reset(seed)
-        return self._run_policy_loop(policy, seed=seed, capture_replay=capture_replay)
+        return self._run_policy_loop(
+            policy, seed=seed, capture_replay=capture_replay, deterministic=deterministic
+        )
 
     def run_policy_on_scenario(
-        self, policy: Policy, scenario: object, capture_replay: bool = False
+        self, policy: Policy, scenario: object, capture_replay: bool = False, deterministic: bool = True
     ) -> EpisodeResult:
         """Run *policy* on a fixed :class:`SavedScenario` layout."""
         self.reset_from_scenario(scenario)
         assert isinstance(scenario, SavedScenario)
-        return self._run_policy_loop(policy, seed=scenario.seed, capture_replay=capture_replay)
+        return self._run_policy_loop(
+            policy, seed=scenario.seed, capture_replay=capture_replay, deterministic=deterministic
+        )
 
     def _run_policy_loop(
-        self, policy: Policy, *, seed: int, capture_replay: bool
+        self, policy: Policy, *, seed: int, capture_replay: bool, deterministic: bool = True
     ) -> EpisodeResult:
+        import inspect
+
         while not self._terminated:
-            actions = policy.select_actions(self)
+            step_obs = []
+            for dog_index in range(self.dog_count):
+                step_obs.append(self.build_observation_for_dog(dog_index))
+            self._observations_history.append(tuple(step_obs))
+
+            sig = inspect.signature(policy.select_actions)
+            if "deterministic" in sig.parameters:
+                actions = policy.select_actions(self, deterministic=deterministic)
+            else:
+                actions = policy.select_actions(self)
             self.step(actions, capture_replay=capture_replay)
         final_snapshot = self.get_state_snapshot()
         return EpisodeResult(
@@ -723,7 +762,19 @@ class SheepdogEnvironment:
             final_snapshot=final_snapshot,
             stats=self._stats,
             replay=tuple(self._history),
+            observations=tuple(self._observations_history),
         )
+
+
+    def _average_dog_to_sheep_distance(self) -> float:
+        unpenned_sheep = [s for s in self._sheep if not s.penned]
+        if not unpenned_sheep or not self._dogs:
+            return 0.0
+        total_dist = 0.0
+        for dog in self._dogs:
+            dog_d = sum(dog.position.distance_to(s.position) for s in unpenned_sheep) / len(unpenned_sheep)
+            total_dist += dog_d
+        return total_dist / len(self._dogs)
 
     def step(
         self, actions: Sequence[str], capture_replay: bool = False
@@ -885,6 +936,8 @@ class SheepdogEnvironment:
             )
         )
         self._reward_total += breakdown.total
+        for k, v in breakdown.to_dict().items():
+            self._episode_reward_breakdown[k] = self._episode_reward_breakdown.get(k, 0.0) + v
         self._previous_average_distance = current_snapshot.average_distance_to_pen
         self._previous_flock_spread = current_snapshot.flock_spread
         self._previous_farthest_distance = current_farthest_to_pen
@@ -894,6 +947,25 @@ class SheepdogEnvironment:
         self._previous_sheep_positions = unpenned_sheep_positions
 
         final_snapshot = self.get_state_snapshot()
+
+        # Update metrics counters
+        for dog_index, action in enumerate(validated_actions):
+            if action == "wait":
+                self._num_waits += 1
+            elif action.startswith("sprint"):
+                self._num_sprints += 1
+            
+            # Check if chosen action was masked (invalid action attempt)
+            mask = self.action_mask_for_dog(dog_index)
+            if not mask.get(action, True):
+                self._num_invalid_actions += 1
+                
+            self._action_counts[action] = self._action_counts.get(action, 0) + 1
+
+        # Track min_sheep_distance_to_pen
+        current_dist = final_snapshot.average_distance_to_pen
+        if current_dist < self._min_sheep_distance_to_pen:
+            self._min_sheep_distance_to_pen = current_dist
 
         self._stats = EpisodeStats(
             steps=self._step_count,
@@ -925,7 +997,18 @@ class SheepdogEnvironment:
             right_flank_occupancy_steps=self._right_flank_occupancy_steps,
             gate_corridor_occupancy_peak=self._gate_corridor_occupancy_peak,
             gate_corridor_failure_steps=self._gate_corridor_failure_steps,
-            final_reward_breakdown=breakdown.to_dict(),
+            final_reward_breakdown=dict(self._episode_reward_breakdown),
+            initial_sheep_distance_to_pen=self._initial_sheep_distance_to_pen,
+            min_sheep_distance_to_pen=self._min_sheep_distance_to_pen,
+            final_dog_to_sheep_distance=self._average_dog_to_sheep_distance(),
+            final_dog_positions=[(float(d.position.x), float(d.position.y)) for d in self._dogs],
+            final_sheep_positions=[(float(s.position.x), float(s.position.y)) for s in self._sheep],
+            pen_position=(float(self._pen.origin.x), float(self._pen.origin.y)),
+            num_waits=self._num_waits,
+            num_sprints=self._num_sprints,
+            num_invalid_actions=self._num_invalid_actions,
+            most_frequent_action=max(self._action_counts, key=self._action_counts.get) if self._action_counts else "",
+            oscillation_detected=any(self._in_two_position_loop(d.recent_positions) for d in self._dogs),
         )
 
         if capture_replay:

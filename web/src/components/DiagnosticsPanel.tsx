@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import type { CheckpointEntry, CheckpointIndex, TrainingStatus } from "../state/types";
+import { CopyAgentDataButton } from "./CopyAgentDataButton";
 
 /** Number of most-recent checkpoints to watch for a plateau. */
 const PLATEAU_WINDOW = 5;
@@ -365,9 +366,9 @@ function LineChart({
                 opacity={0.75}
               />
             ) : null}
-            {secDataPoints.map((d) => (
+            {secDataPoints.map((d, i) => (
               <circle
-                key={`sec-${d.x}`}
+                key={`sec-${d.x}-${i}`}
                 cx={toSvgX(d.x)}
                 cy={toSvgY2(d.secondaryY!)}
                 r={3}
@@ -381,7 +382,7 @@ function LineChart({
         ) : null}
 
         {/* Dots — colored by stage; prev-bests get a diamond + label; best gets a ring */}
-        {data.map((d) => {
+        {data.map((d, i) => {
           const cx = toSvgX(d.x);
           const cy = toSvgY(d.y);
           const fill = stageColor(d.stage);
@@ -389,7 +390,7 @@ function LineChart({
           const r = isBest ? 6 : d.isPrevBest ? 5 : 4;
           const diamond = `${cx},${cy - r} ${cx + r},${cy} ${cx},${cy + r} ${cx - r},${cy}`;
           return (
-            <g key={d.x}>
+            <g key={`${d.x}-${i}`}>
               {isBest ? (
                 <circle cx={cx} cy={cy} r={9} fill="none" stroke={fill} strokeWidth={2} opacity={0.6} />
               ) : null}
@@ -712,6 +713,7 @@ interface LearningPoint {
   sheepPenned: number;
   noProgressGuard: number;
   stage: number;
+  checkpoint_id?: string;
 }
 
 interface FlatZone {
@@ -726,6 +728,7 @@ interface BreakthroughEvent {
   flatEpisodesBefore: number;
   fromSuccessRate: number;
   toSuccessRate: number;
+  checkpoint_id?: string;
 }
 
 interface LearningSignalAnalysis {
@@ -784,6 +787,7 @@ function analyzeLearningSignal(points: LearningPoint[], smoothingWindow: number)
         flatEpisodesBefore: flatBefore,
         fromSuccessRate: personalBest,
         toSuccessRate: point.successRate,
+        checkpoint_id: point.checkpoint_id,
       });
     }
 
@@ -959,12 +963,12 @@ function LearningSignalChart({
           </g>
         ))}
 
-        {flatZones.map((zone) => {
+        {flatZones.map((zone, idx) => {
           const x1 = toX(zone.startCheckpoint);
           const x2 = toX(zone.endCheckpoint);
           return (
             <rect
-              key={`${zone.startCheckpoint}-${zone.endCheckpoint}`}
+              key={`${zone.startCheckpoint}-${zone.endCheckpoint}-${idx}`}
               x={Math.min(x1, x2)}
               y={PAD.top}
               width={Math.max(2, Math.abs(x2 - x1))}
@@ -999,12 +1003,15 @@ function LearningSignalChart({
         <polyline points={baseLine} fill="none" stroke="rgba(96,165,250,0.9)" strokeWidth={2.2} strokeLinejoin="round" strokeLinecap="round" />
         <polyline points={smoothLine} fill="none" stroke="rgba(244,197,66,0.95)" strokeWidth={2.4} strokeLinejoin="round" strokeLinecap="round" />
 
-        {breakthroughs.map((event) => {
+        {breakthroughs.map((event, idx) => {
           const x = toX(event.checkpoint);
           const y = toY(event.toSuccessRate);
           const focused = focusedCheckpoint === event.checkpoint;
+          const breakthroughKey = event.checkpoint_id 
+            ? event.checkpoint_id 
+            : `${event.checkpoint}-${idx}`;
           return (
-            <g key={event.checkpoint}>
+            <g key={breakthroughKey}>
               {focused ? <circle cx={x} cy={y} r={10} fill="none" stroke="rgba(244,197,66,0.6)" strokeWidth={2} /> : null}
               <circle
                 cx={x}
@@ -1335,6 +1342,7 @@ export function DiagnosticsPanel({
         sheepPenned: entry.average_sheep_penned,
         noProgressGuard: averageNoProgress(entry),
         stage: entry.reward_config?.instincts?.curriculum_stage ?? 0,
+        checkpoint_id: entry.checkpoint_id,
       })),
     [learningSignalSource],
   );
@@ -1461,6 +1469,11 @@ export function DiagnosticsPanel({
         <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
           {isLiveTraining ? <span className="pill pill--live">live</span> : null}
           <span className="pill pill--muted">{checkpoints.length} pts</span>
+          <CopyAgentDataButton
+            trainingStatus={trainingStatus}
+            checkpointIndex={checkpointIndex}
+            curriculumStage={effectiveCurriculumStage}
+          />
           <button
             onClick={() => setIsHelpOpen(true)}
             className="insights-help-btn"

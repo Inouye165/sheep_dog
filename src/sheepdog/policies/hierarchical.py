@@ -100,6 +100,7 @@ class ShepherdNeuralDogPolicy:
         self.policy_config = policy_config
         self._shepherd = shepherd if shepherd is not None else ScriptedShepherd()
         self._obs_builder = HierarchicalObservationBuilder()
+        self.policy_version: int | None = None
 
     # ------------------------------------------------------------------
     # Factory constructors
@@ -150,6 +151,7 @@ class ShepherdNeuralDogPolicy:
         config: LabConfig,
         policy_config_dict: dict[str, Any] | None = None,
         shepherd: ScriptedShepherd | None = None,
+        policy_version: int | None = None,
     ) -> ShepherdNeuralDogPolicy:
         """Load a trained hierarchical checkpoint."""
         # pylint: disable-next=import-outside-toplevel
@@ -159,7 +161,7 @@ class ShepherdNeuralDogPolicy:
         observation_size = int(adapter.observation_space.shape[0])
         resolved_path = Path(path)
         model = MaskablePPO.load(str(resolved_path), env=adapter)
-        return cls(
+        policy_obj = cls(
             model=model,
             model_path=resolved_path,
             policy_config=HierarchicalNeuralPolicyConfig.from_dict(
@@ -167,6 +169,8 @@ class ShepherdNeuralDogPolicy:
             ),
             shepherd=shepherd,
         )
+        policy_obj.policy_version = policy_version
+        return policy_obj
 
     def save(self, path: str | Path) -> Path:
         """Save the underlying model to *path* and return the resolved path."""
@@ -179,7 +183,7 @@ class ShepherdNeuralDogPolicy:
     # Policy interface
     # ------------------------------------------------------------------
 
-    def select_actions(self, environment: object) -> list[Action]:
+    def select_actions(self, environment: object, deterministic: bool = True) -> list[Action]:
         """Return one action per dog, conditioned on the shepherd's command."""
         # pylint: disable-next=import-outside-toplevel
         from sheepdog.environment import SheepdogEnvironment
@@ -198,7 +202,7 @@ class ShepherdNeuralDogPolicy:
             reserved = {env.project_dog_action(i, actions[i]) for i in range(len(actions))}
             mask_map = env.action_mask_for_dog(dog_index, reserved_positions=reserved)
             mask = np.asarray([mask_map[a] for a in ACTION_ORDER], dtype=bool)[np.newaxis]
-            action_idx, _ = self._model.predict(obs, action_masks=mask, deterministic=True)
+            action_idx, _ = self._model.predict(obs, action_masks=mask, deterministic=deterministic)
             action_name: Action = ACTION_ORDER[int(action_idx[0])]
             if not bool(mask[0][int(action_idx[0])]):
                 action_name = "wait"

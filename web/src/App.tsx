@@ -914,6 +914,17 @@ export function App() {
     }
   }
 
+  async function handleRefreshAllData() {
+    try {
+      const status = await loadTrainingStatus();
+      setTrainingStatus(status);
+      const index = await loadCheckpointIndex();
+      applyCheckpointIndex(index);
+    } catch (err) {
+      console.error("Failed to refresh training data:", err);
+    }
+  }
+
   async function handleClearTraining() {
     if (!window.confirm("Permanently delete all checkpoints, evaluations, training state, AND ALL ARCHIVED JOURNEY HISTORY? This action is destructive and cannot be undone.")) {
       return;
@@ -976,6 +987,13 @@ export function App() {
       setClearingTraining(false);
     }
   }
+
+  const handleWatchReplay = useCallback((episode: number) => {
+    setSelectedCheckpointEpisode(episode);
+    const checkpoint = checkpointIndex?.checkpoints.find((entry) => entry.checkpoint_episode === episode);
+    setSelectedSeed(checkpoint?.records?.[0]?.seed ?? null);
+    setActiveTab("watch");
+  }, [checkpointIndex]);
 
   function policySelectionForCheckpoint(episode: number | null) {
     const entry =
@@ -1309,6 +1327,8 @@ export function App() {
               checkpointIndex={checkpointIndex}
               trainingStatus={trainingStatus}
               effectiveConfig={effectiveConfig}
+              onRefreshData={handleRefreshAllData}
+              onWatchReplay={handleWatchReplay}
             />
           ) : (
             <ConfigPanel />
@@ -1336,6 +1356,8 @@ export function App() {
             <div className="side-panel-body">
               {activeTab !== "test" && rightRailTab === "training" ? (
                 <TrainingPanel
+                  trainingStatus={trainingStatus}
+                  checkpointIndex={checkpointIndex}
                   episodes={trainingEpisodes}
                   fastMode={trainingFastMode}
                   enableInstincts={effectiveEnableInstincts}
@@ -1360,6 +1382,7 @@ export function App() {
                   error={trainingStatus?.error ?? null}
                   errorType={trainingStatus?.error_type ?? null}
                   traceback={trainingStatus?.traceback ?? null}
+                  antiCollapseWarning={trainingStatus?.anti_collapse_warning ?? null}
                   successRate={bestStageFormalEntry?.success_rate ?? null}
                   activeTrainerType={trainingStatus?.trainer_type ?? null}
                   activePolicyType={trainingStatus?.policy_type ?? null}

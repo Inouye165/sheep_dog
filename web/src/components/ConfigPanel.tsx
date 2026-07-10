@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { loadConfigHistory, loadEffectiveConfig, loadHyperparams, saveConfigRevision, saveHyperparams } from "../lib/api";
+import {
+  loadConfigHistory,
+  loadConfigActive,
+  loadConfigNextRun,
+  loadHyperparams,
+  saveConfigRevision,
+  saveHyperparams,
+} from "../lib/api";
 import type { ConfigHistory, ConfigRevision, UserHyperparams } from "../state/types";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -23,9 +30,10 @@ interface ParamRowProps {
   label: string;
   value: unknown;
   note?: string;
+  highlighted?: boolean;
 }
 
-function ParamRow({ label, value, note }: ParamRowProps) {
+function ParamRow({ label, value, note, highlighted }: ParamRowProps) {
   const display =
     value === null || value === undefined
       ? "—"
@@ -33,7 +41,7 @@ function ParamRow({ label, value, note }: ParamRowProps) {
         ? value ? "ON" : "OFF"
         : String(value);
   return (
-    <tr className="config-param-row">
+    <tr className="config-param-row" style={highlighted ? { backgroundColor: "rgba(245, 158, 11, 0.08)" } : undefined}>
       <td className="config-param-row__label">{label}</td>
       <td className="config-param-row__value">
         <code>{display}</code>
@@ -169,7 +177,6 @@ interface HyperparamsEditorProps {
 }
 
 function HyperparamsEditor({ hyperparams, onSaved }: HyperparamsEditorProps) {
-  type SectionKey = keyof UserHyperparams;
   type Draft = { environment: Record<string, number>; training: Record<string, number>; rewards: Record<string, number> };
   const toDraft = (hp: UserHyperparams): Draft => ({
     environment: { ...hp.environment as unknown as Record<string, number> },
@@ -183,17 +190,14 @@ function HyperparamsEditor({ hyperparams, onSaved }: HyperparamsEditorProps) {
   const [savedOk, setSavedOk] = useState(false);
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // True only when the user has typed a change that hasn't been saved yet.
   const userEditedRef = useRef(false);
 
-  // Sync draft when hyperparams prop changes (e.g. after external load).
-  // Reset the dirty flag so the sync itself doesn't trigger an auto-save.
   useEffect(() => {
     setDraft(toDraft(hyperparams));
     userEditedRef.current = false;
   }, [hyperparams]);
 
-  const handleChange = (section: SectionKey, key: string, raw: string) => {
+  const handleChange = (section: keyof UserHyperparams, key: string, raw: string) => {
     const num = parseFloat(raw);
     if (!Number.isNaN(num)) {
       userEditedRef.current = true;
@@ -225,7 +229,6 @@ function HyperparamsEditor({ hyperparams, onSaved }: HyperparamsEditorProps) {
     }
   };
 
-  // Auto-save 800 ms after the last user-initiated change.
   useEffect(() => {
     if (!userEditedRef.current) return;
     if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
@@ -233,16 +236,14 @@ function HyperparamsEditor({ hyperparams, onSaved }: HyperparamsEditorProps) {
     return () => {
       if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
     };
-  // handleSave is stable within this render; draft dep ensures we re-schedule on each keystroke.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft]);
 
-  const isModified = (section: SectionKey, key: string): boolean => {
+  const isModified = (section: keyof UserHyperparams, key: string): boolean => {
     const def = (HYPERPARAM_DEFAULTS[section] as unknown as Record<string, number>)[key];
     return draft[section][key] !== def;
   };
 
-  const renderField = (section: SectionKey, field: HParamFieldDef) => {
+  const renderField = (section: keyof UserHyperparams, field: HParamFieldDef) => {
     const modified = isModified(section, field.key);
     return (
       <tr key={field.key} className="hyperparam-row">
@@ -318,9 +319,6 @@ function HyperparamsEditor({ hyperparams, onSaved }: HyperparamsEditorProps) {
 }
 
 // ── catalogs ──────────────────────────────────────────────────────────────────
-// Mirrors backend definitions in src/sheepdog/entities.py and ACTION_DELTAS in
-// src/sheepdog/environment.py. Kept in sync manually; if you add a new
-// personality or dog action server-side, update the list here too.
 
 const DOG_ACTIONS: Array<{ name: string; description: string }> = [
   { name: "up / down / left / right", description: "single-cell move in cardinal direction" },
@@ -388,7 +386,9 @@ function RevisionCard({ revision, isExpanded, onToggle }: RevisionCardProps) {
 // ── main component ────────────────────────────────────────────────────────────
 
 export function ConfigPanel() {
-  const [config, setConfig] = useState<Record<string, unknown> | null>(null);
+  const [configSource, setConfigSource] = useState<"active" | "next">("active");
+  const [activeConfig, setActiveConfig] = useState<Record<string, unknown> | null>(null);
+  const [nextRunConfig, setNextRunConfig] = useState<Record<string, unknown> | null>(null);
   const [history, setHistory] = useState<ConfigHistory | null>(null);
   const [hyperparams, setHyperparams] = useState<UserHyperparams | null>(null);
   const [loading, setLoading] = useState(true);
@@ -398,17 +398,19 @@ export function ConfigPanel() {
 
   const refresh = useCallback(async () => {
     try {
-      const [cfg, hist, hp] = await Promise.all([
-        loadEffectiveConfig(),
+      const [actCfg, nextCfg, hist, hp] = await Promise.all([
+        loadConfigActive(),
+        loadConfigNextRun(),
         loadConfigHistory(),
         loadHyperparams(),
       ]);
-      setConfig(cfg);
+      setActiveConfig(actCfg);
+      setNextRunConfig(nextCfg);
       setHistory(hist);
       setHyperparams(hp);
       setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load config");
+      setError(err instanceof Error ? err.message : "Failed to load configurations");
     } finally {
       setLoading(false);
     }
@@ -417,7 +419,8 @@ export function ConfigPanel() {
   useEffect(() => { void refresh(); }, [refresh]);
 
   const handleSaveSnapshot = useCallback(async () => {
-    if (!config) return;
+    const activeSnapshotConfig = configSource === "active" ? activeConfig : nextRunConfig;
+    if (!activeSnapshotConfig) return;
     setSaving(true);
     try {
       const label = `Manual snapshot · ${new Date().toLocaleString()}`;
@@ -431,7 +434,7 @@ export function ConfigPanel() {
           curriculum_stage: 0,
           debug_reward_breakdown: false,
         },
-        config,
+        config: activeSnapshotConfig,
       });
       setHistory(updated);
     } catch (err) {
@@ -439,7 +442,7 @@ export function ConfigPanel() {
     } finally {
       setSaving(false);
     }
-  }, [config]);
+  }, [configSource, activeConfig, nextRunConfig]);
 
   if (loading) {
     return (
@@ -453,6 +456,7 @@ export function ConfigPanel() {
   }
 
   // ── extract nested config values ──────────────────────────────────────────
+  const config = configSource === "active" ? activeConfig : nextRunConfig;
   const env = config?.environment as Record<string, unknown> | undefined;
   const rewards = config?.rewards as Record<string, unknown> | undefined;
   const instincts = rewards?.instincts as Record<string, unknown> | undefined;
@@ -465,14 +469,16 @@ export function ConfigPanel() {
     <section className="training-card config-panel" aria-label="Config">
       <div className="training-card__header">
         <div><p className="eyebrow">Config</p><h2>Parameters &amp; History</h2></div>
-        <button
-          className="btn-secondary"
-          onClick={() => void handleSaveSnapshot()}
-          disabled={saving || !config}
-          title="Save a manual snapshot of the current config to revision history"
-        >
-          {saving ? "Saving…" : "Save snapshot"}
-        </button>
+        <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+          <button
+            className="btn-secondary"
+            onClick={() => void handleSaveSnapshot()}
+            disabled={saving || !config}
+            title="Save a manual snapshot of the current config to revision history"
+          >
+            {saving ? "Saving…" : "Save snapshot"}
+          </button>
+        </div>
       </div>
 
       {error ? <div className="warning-box warning-box--error" role="alert">{error}</div> : null}
@@ -484,9 +490,45 @@ export function ConfigPanel() {
             <span className="config-section__title" style={{ display: "inline" }}>Edit Hyperparameters</span>
             <span className="pill pill--muted" style={{ marginLeft: "0.5rem", verticalAlign: "middle" }}>persistent</span>
           </summary>
-          <HyperparamsEditor hyperparams={hyperparams} onSaved={setHyperparams} />
+          <HyperparamsEditor hyperparams={hyperparams} onSaved={(updated) => {
+            setHyperparams(updated);
+            refresh(); // Trigger config refresh to update nextRunConfig preview
+          }} />
         </details>
       ) : null}
+
+      <div style={{ display: "flex", gap: "8px", margin: "16px 0", borderBottom: "1px solid var(--border-color)", paddingBottom: "10px" }}>
+        <button
+          className={`tab-btn ${configSource === "active" ? "active" : ""}`}
+          style={{
+            padding: "8px 16px",
+            background: configSource === "active" ? "var(--theme-accent)" : "transparent",
+            color: "#fff",
+            border: "1px solid rgba(255,255,255,0.1)",
+            borderRadius: "4px",
+            cursor: "pointer",
+            fontWeight: "bold",
+          }}
+          onClick={() => setConfigSource("active")}
+        >
+          Active Model Config (Read-only)
+        </button>
+        <button
+          className={`tab-btn ${configSource === "next" ? "active" : ""}`}
+          style={{
+            padding: "8px 16px",
+            background: configSource === "next" ? "var(--theme-accent)" : "transparent",
+            color: "#fff",
+            border: "1px solid rgba(255,255,255,0.1)",
+            borderRadius: "4px",
+            cursor: "pointer",
+            fontWeight: "bold",
+          }}
+          onClick={() => setConfigSource("next")}
+        >
+          Next Run Config (Preview)
+        </button>
+      </div>
 
       {config ? (
         <div className="config-sections">

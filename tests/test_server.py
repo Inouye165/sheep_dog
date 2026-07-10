@@ -713,6 +713,7 @@ def test_stage_25_does_not_plateau_stop_before_max_stage(tmp_path: Path) -> None
     with (
         patch("sheepdog.server.LabConfig", TestConfig),
         patch("sheepdog.server.create_trainer", return_value=FakeTrainer()),
+        patch("sheepdog.server.CurriculumTelemetryManager.initialize_wandb"),
     ):
         manager = TrainingManager()
         manager.start(requested_episodes=21, fast_mode=True, curriculum_stage=25)
@@ -868,6 +869,84 @@ def test_auto_promotion_updates_batch_episodes(tmp_path: Path) -> None:
 
     assert configs_seen[1].rewards.instincts.curriculum_stage == 2
     assert configs_seen[1].training.episodes == 74
+
+
+def test_diagnostics_endpoint_route_integration(tmp_path: Path) -> None:
+    import urllib.request
+    import urllib.error
+    import threading
+    from http.server import ThreadingHTTPServer
+    from sheepdog.server import TrainingRequestHandler
+
+    # Setup directories
+    artifacts = tmp_path / "artifacts"
+    generated = tmp_path / "web" / "public" / "generated"
+    (artifacts / "checkpoints").mkdir(parents=True)
+    (artifacts / "evaluations").mkdir(parents=True)
+    generated.mkdir(parents=True)
+    (generated / "replays").mkdir(parents=True)
+
+    (artifacts / "training-state.json").write_text("{}", encoding="utf-8")
+    (artifacts / "training-summary.json").write_text("{}", encoding="utf-8")
+    (generated / "checkpoint-index.json").write_text('{"checkpoints": [], "latest": null}', encoding="utf-8")
+
+    config = LabConfig(
+        training=TrainingConfig(
+            episodes=1,
+            checkpoint_episodes=(0,),
+            evaluation_seeds=(11,),
+            output_dir=str(artifacts),
+            web_export_dir=str(generated),
+        )
+    )
+
+    class TestConfig:
+        def __new__(cls):
+            return config
+
+    with patch("sheepdog.server.LabConfig", TestConfig):
+        # We start the server in a background thread on a free port, e.g. 51829
+        port = 51829
+        server = ThreadingHTTPServer(("127.0.0.1", port), TrainingRequestHandler)
+        
+        server_thread = threading.Thread(
+            target=server.serve_forever,
+            daemon=True
+        )
+        server_thread.start()
+        
+        try:
+            # Wait a short moment for the server to bind
+            time.sleep(0.5)
+
+            # Query the diagnostics endpoint
+            url = f"http://127.0.0.1:{port}/api/training/diagnostics"
+            req = urllib.request.Request(url)
+            try:
+                with urllib.request.urlopen(req) as response:
+                    assert response.status == 200
+                    data = json.loads(response.read().decode("utf-8"))
+                    assert "diagnosticsAvailable" in data
+                    assert data["diagnosticsAvailable"] is True
+                    assert "snapshot" in data
+                    assert data["snapshot"] is not None
+                    assert "error" in data
+                    assert data["error"] is None
+            except urllib.error.HTTPError as err:
+                # Under test conditions without check points, a 400 bad request error is raised.
+                # The response must still conform to the diagnostics contract.
+                assert err.status in (400, 404, 500)
+                body = err.read().decode("utf-8")
+                data = json.loads(body)
+                assert data["diagnosticsAvailable"] is False
+                assert data["snapshot"] is None
+                assert "error" in data
+                assert data["error"] is not None
+                assert "code" in data["error"]
+                assert "message" in data["error"]
+        finally:
+            server.shutdown()
+            server.server_close()
 
 
 

@@ -153,6 +153,7 @@ export interface TrainingStatus {
   curriculum_stage: number;
   requested_episodes: number;
   completed_episodes: number;
+  estimated_equivalent_episodes?: number;
   batch_total_episodes: number;
   batch_completed_episodes: number;
   total_episodes_trained: number;
@@ -184,6 +185,24 @@ export interface TrainingStatus {
   resume_available?: boolean;
   resume_remaining_episodes?: number | null;
   resume_request?: TrainingStartRequest | null;
+  run_id?: string;
+  parent_run_id?: string;
+  parent_checkpoint_id?: string;
+  active_model_source?: string;
+  active_checkpoint_id?: string;
+  training_start_time?: string;
+  last_policy_update_time?: string;
+  last_evaluation_time?: string;
+  policy_version?: number;
+  ppo_update_count?: number;
+  approx_kl?: number;
+  clip_fraction?: number;
+  explained_variance?: number;
+  anti_collapse_warning?: {
+    triggered: boolean;
+    message: string;
+    recommendation?: string;
+  } | null;
 }
 
 export interface AutoPromoteGateDiagnostics {
@@ -255,6 +274,43 @@ export interface EvaluationRecord {
   reward_total: number;
   reward_breakdown: RewardBreakdown;
   replay_path: string;
+  policy_version?: number;
+  initial_sheep_distance_to_pen?: number;
+  min_sheep_distance_to_pen?: number;
+  final_dog_to_sheep_distance?: number;
+  final_dog_positions?: [number, number][];
+  final_sheep_positions?: [number, number][];
+  pen_position?: [number, number];
+  num_waits?: number;
+  num_sprints?: number;
+  num_invalid_actions?: number;
+  most_frequent_action?: string;
+  oscillation_detected?: boolean;
+  observation_diagnostics?: {
+    feature_names: string[];
+    vector_length: number;
+    min_values: number[];
+    max_values: number[];
+    mean_values: number[];
+    std_values: number[];
+    constant_features: string[];
+    nan_or_inf_features: string[];
+    saturated_features: string[];
+    bounds_mismatch: boolean;
+  };
+  failed_trajectory_summary?: {
+    step: number;
+    dog_positions: [number, number][];
+    sheep_positions: [number, number][];
+    sheep_distance_to_pen: number;
+    dog_to_sheep_distance: number;
+    selected_actions: string[];
+    reward: number;
+    reward_breakdown: Record<string, number>;
+    no_progress_counter: number;
+    event?: string;
+  }[];
+  last_actions_before_failure?: string[][];
 }
 
 export interface CheckpointEntry {
@@ -267,8 +323,28 @@ export interface CheckpointEntry {
   trainer_type?: string;
   policy_type?: string;
   policy_mode?: string;
+  policy_config?: any;
+  run_id?: string;
+  checkpoint_id?: string;
+  parent_run_id?: string;
+  parent_checkpoint_id?: string;
+  global_timesteps?: number;
+  observation_schema_hash?: string;
+  action_space_hash?: string;
+  environment_config_version?: string;
+  reward_schema_version?: string;
+  deterministic_evaluation?: boolean;
+  evaluation_seeds?: number[];
   replay_mode?: string;
   total_training_episodes?: number;
+  policy_version?: number;
+  policy_gradient_loss?: number;
+  value_loss?: number;
+  entropy_loss?: number;
+  loss?: number;
+  approx_kl?: number;
+  clip_fraction?: number;
+  explained_variance?: number;
   environment_config?: {
     dogs: number;
     sheep: number;
@@ -454,4 +530,183 @@ export interface TelemetryRecord {
     entropy_coef: number;
     gae_lambda: number;
   };
+  run_id?: string;
+  checkpoint_id?: string;
+  evaluation_id?: string;
+  global_episode?: number;
+  episode_in_stage?: number;
+  recorded_at?: string;
+}
+
+export interface SnapshotIdentity {
+  snapshot_timestamp: string;
+  active_run_id: string;
+  active_checkpoint_id: string;
+  loaded_model_id: string;
+  policy_version: number | null;
+  ppo_update_count: number;
+  global_timestep: number;
+  current_rollout_progress: string;
+  current_curriculum_stage: number;
+  config_hash: string;
+  observation_schema_hash: string;
+  action_space_hash: string;
+  reward_schema_version: string;
+  evaluation_timestamp: string;
+  evaluation_policy_version: number | null;
+  evaluation_checkpoint_id: string | null;
+}
+
+export interface CompletenessRow {
+  area: string;
+  status: string;
+  source: string;
+  missing: string[];
+}
+
+export interface DiagnosticCompleteness {
+  table: CompletenessRow[];
+  readiness: string;
+  reasons: string[];
+}
+
+export interface NeuralArchitecture {
+  status: string;
+  algorithm?: string;
+  policy_class?: string;
+  feed_forward_or_recurrent?: string;
+  observation_space_shape?: number[];
+  observation_data_type?: string;
+  observation_feature_count?: number;
+  feature_extractor_class?: string;
+  feature_extractor_output_dimension?: number;
+  actor_hidden_layers?: number[];
+  critic_hidden_layers?: number[];
+  shared_layers?: number[];
+  activation_function?: string;
+  action_space_type?: string;
+  action_count?: number;
+  ordered_action_mapping?: string[];
+  distribution_type?: string;
+  orthogonal_initialization_setting?: boolean;
+  normalization_settings?: string;
+  total_trainable_parameter_count?: number;
+  device?: string;
+  configured_architecture?: string;
+  loaded_architecture?: string;
+  compatibility_status?: string;
+  message?: string;
+}
+
+export interface PPOMetric {
+  checkpoint_episode: number;
+  policy_gradient_loss: number | null;
+  value_loss: number | null;
+  entropy_loss: number | null;
+  loss: number | null;
+  approx_kl: number | null;
+  clip_fraction: number | null;
+  explained_variance: number | null;
+}
+
+
+
+export interface CounterRow {
+  counter: string;
+  value: number | null;
+  unit: string;
+  source: string;
+  definition: string;
+}
+
+export interface CounterReconciliation {
+  rows: CounterRow[];
+  warnings: string[];
+}
+
+export interface RewardReconciliation {
+  seed: number;
+  success: boolean;
+  reported_reward: number;
+  summed_components: number;
+  difference: number;
+  status: string;
+  breakdown: Record<string, number>;
+}
+
+export interface ConfigSnapshotValue {
+  default: any;
+  ui: any;
+  stage: any;
+  checkpoint: any;
+  active: any;
+  source: string;
+}
+
+export interface DiagnosticsSnapshot {
+  snapshot: SnapshotIdentity;
+  completeness: DiagnosticCompleteness;
+  config_snapshot: Record<string, ConfigSnapshotValue>;
+  config_anomalies: string[];
+  environment_mismatches: Array<{
+    component: string;
+    field: string;
+    training_value: any;
+    evaluation_value: any;
+    severity: string;
+  }>;
+  scenario_coverage: {
+    unique_seeds_count: number;
+    unique_configs_count: number;
+    sheep_to_pen_distance: { min: number; max: number; avg: number };
+    dog_to_sheep_distance: { min: number; max: number; avg: number };
+    resemblance_counts: Record<string, number>;
+    resemblance_successes: Record<string, number>;
+  };
+  version_history: Record<string, {
+    checkpoint_episode: number;
+    success_rate: number;
+    average_reward: number;
+    average_completion_steps: number;
+    failures: number[];
+  }>;
+  failed_seed_trends: Record<string, {
+    currently_failing: boolean;
+    distance_delta: number;
+    reward_delta: number;
+    status: string;
+    trend_classification: string;
+  }>;
+  reward_reconciliations: RewardReconciliation[];
+  eval_geometry_validations: Record<string, {
+    error?: string;
+    pen_origin?: number[];
+    pen_dimensions?: number[];
+    grid_dimensions?: number[];
+    overlap_detected?: boolean;
+    boundary_violation?: boolean;
+    spacing_violation?: boolean;
+    can_enter_pen_heuristic?: boolean;
+    dog_has_space_behind_heuristic?: boolean;
+    material_difficulty_difference?: boolean;
+  }>;
+  neural_architecture: NeuralArchitecture;
+  ppo_metrics: PPOMetric[];
+  evaluation_records: EvaluationRecord[];
+  failed_seed_trajectories: Record<string, any[]>;
+  observation_diagnostics: any;
+  counter_reconciliation: CounterReconciliation;
+  health_warnings: string[];
+  training_status: TrainingStatus;
+}
+
+export interface DiagnosticsResponse {
+  diagnosticsAvailable: boolean;
+  snapshot: DiagnosticsSnapshot | null;
+  error: {
+    code: string;
+    message: string;
+    exceptionType: string;
+    endpoint: string;
+  } | null;
 }

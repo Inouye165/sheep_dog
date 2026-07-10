@@ -217,17 +217,28 @@ function Start-ServiceWatchdog {
         -PassThru
 }
 
+function Stop-ProcessTree {
+    param(
+        [Parameter(Mandatory = $true)][int]$Id
+    )
+
+    $children = Get-CimInstance Win32_Process -Filter "ParentProcessId = $Id" -ErrorAction SilentlyContinue
+    foreach ($child in $children) {
+        Stop-ProcessTree -Id $child.ProcessId
+    }
+
+    $process = Get-Process -Id $Id -ErrorAction SilentlyContinue
+    if ($null -ne $process) {
+        Stop-Process -Id $Id -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Stop-ProcessIfRunning {
     param(
         [Parameter(Mandatory = $true)][int]$Id
     )
 
-    $process = Get-Process -Id $Id -ErrorAction SilentlyContinue
-    if ($null -eq $process) {
-        return
-    }
-
-    Stop-Process -Id $Id -Force -ErrorAction SilentlyContinue
+    Stop-ProcessTree -Id $Id
 }
 
 function Stop-ListenerOnPort {

@@ -46,15 +46,35 @@ class CurriculumTelemetryManager:
         success_rate: float,
         metrics: dict[str, float],
         hyperparameters: dict[str, Any],
+        run_id: str | None = None,
+        checkpoint_id: str | None = None,
+        evaluation_id: str | None = None,
+        global_episode: int | None = None,
+        episode_in_stage: int | None = None,
+        recorded_at: str | None = None,
     ) -> None:
         """Log a metrics point to both local JSON and wandb."""
+        now_iso = datetime.datetime.now(datetime.UTC).isoformat()
+        r_id = run_id or "run_unknown"
+        cp_id = checkpoint_id or f"chk_{r_id}_ep_{step}"
+        eval_id = evaluation_id or f"eval_{r_id}_ep_{step}"
+        glob_ep = global_episode if global_episode is not None else step
+        ep_in_stage = episode_in_stage if episode_in_stage is not None else step
+        rec_at = recorded_at or now_iso
+
         record = {
-            "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
+            "timestamp": rec_at,
             "step": step,
             "stage": stage,
             "success_rate": success_rate,
             "metrics": metrics,
             "hyperparameters": hyperparameters,
+            "run_id": r_id,
+            "checkpoint_id": cp_id,
+            "evaluation_id": eval_id,
+            "global_episode": glob_ep,
+            "episode_in_stage": ep_in_stage,
+            "recorded_at": rec_at,
         }
 
         # 1. Local logging: append to a flat JSON array in training_history.json

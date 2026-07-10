@@ -113,13 +113,25 @@ export function SavedScenariosPanel({
               }}
               disabled={disabled || running || !checkpoints.length}
             >
-              {checkpoints.map((entry) => (
-                <option key={entry.checkpoint_episode} value={entry.checkpoint_episode}>
-                  ep {entry.checkpoint_episode}
-                  {entry.checkpoint_episode === latestCheckpointEpisode ? " (latest)" : ""}
-                  {entry.checkpoint_episode === bestCheckpointEpisode ? " (global best)" : ""}
-                </option>
-              ))}
+              {checkpoints.map((entry) => {
+                const optKey = entry.checkpoint_id 
+                  ? entry.checkpoint_id 
+                  : entry.run_id 
+                    ? `${entry.run_id}-ep-${entry.checkpoint_episode}`
+                    : `ep-${entry.checkpoint_episode}`;
+                const stageNum = entry.reward_config?.instincts?.curriculum_stage;
+                const runDesc = entry.run_id ? ` [Run: ${entry.run_id.substring(0, 8)}]` : "";
+                const stageDesc = stageNum !== undefined ? ` [Stage ${stageNum}]` : "";
+                return (
+                  <option key={optKey} value={entry.checkpoint_episode}>
+                    ep {entry.checkpoint_episode}
+                    {runDesc}
+                    {stageDesc}
+                    {entry.checkpoint_episode === latestCheckpointEpisode ? " (latest)" : ""}
+                    {entry.checkpoint_episode === bestCheckpointEpisode ? " (global best)" : ""}
+                  </option>
+                );
+              })}
             </select>
           </label>
         ) : null}
