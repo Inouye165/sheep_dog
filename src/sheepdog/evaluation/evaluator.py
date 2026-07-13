@@ -125,6 +125,16 @@ class EvaluationSummary:
     average_right_flank_occupancy_steps: float = 0.0
     average_gate_corridor_occupancy_peak: float = 0.0
     average_gate_corridor_failure_steps: float = 0.0
+    curriculum_stage: int = 1
+    run_id: str | None = None
+    checkpoint_id: str | None = None
+    policy_version: int | None = None
+    evaluation_timestamp: str | None = None
+    evaluation_seed_set_id: str | None = None
+    evaluation_seed_count: int | None = None
+    environment_config_hash: str | None = None
+    observation_schema_hash: str | None = None
+    action_space_hash: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict."""
@@ -146,6 +156,11 @@ class Evaluator:
         seeds: tuple[int, ...],
         checkpoint_episode: int,
         deterministic: bool = True,
+        *,
+        run_id: str | None = None,
+        checkpoint_id: str | None = None,
+        policy_version: int | None = None,
+        curriculum_stage: int | None = None,
     ) -> tuple[EvaluationSummary, Path, Path]:
         """Run the policy on each seed and collect evaluation records and replays."""
         results: list[EpisodeResult] = []
@@ -186,7 +201,7 @@ class Evaluator:
                     "frames": [frame.to_dict() for frame in result.replay],
                 },
             )
-            p_ver = getattr(policy, "policy_version", None)
+            p_ver = policy_version if policy_version is not None else getattr(policy, "policy_version", None)
             records.append(
                 EvaluationRecord(
                     **{
@@ -201,6 +216,39 @@ class Evaluator:
             trainer_type=getattr(policy, "trainer_type", None),
             policy_type=getattr(policy, "policy_type", None),
         )
+
+        import datetime
+        from sheepdog.checkpoints.store import (
+            compute_env_config_hash,
+            compute_seed_set_id,
+            get_observation_schema_hash,
+            get_action_space_hash,
+        )
+
+        active_curriculum_stage = curriculum_stage if curriculum_stage is not None else self.config.rewards.instincts.curriculum_stage
+        active_run_id = run_id
+        active_checkpoint_id = checkpoint_id
+        active_policy_version = policy_version if policy_version is not None else getattr(policy, "policy_version", None)
+
+        evaluation_timestamp = datetime.datetime.now(datetime.UTC).isoformat()
+        evaluation_seed_set_id = compute_seed_set_id(seeds)
+        evaluation_seed_count = len(seeds)
+
+        if hasattr(self.config, "to_dict"):
+            env_dict = self.config.to_dict()["environment"]
+        else:
+            env_dict = asdict(self.config.environment)
+        environment_config_hash = compute_env_config_hash(env_dict)
+
+        try:
+            observation_schema_hash = get_observation_schema_hash(self.config)
+        except Exception:
+            observation_schema_hash = None
+
+        try:
+            action_space_hash = get_action_space_hash()
+        except Exception:
+            action_space_hash = None
 
         summary = EvaluationSummary(
             checkpoint_episode=checkpoint_episode,
@@ -249,6 +297,16 @@ class Evaluator:
             average_gate_corridor_failure_steps=fmean(
                 result.stats.gate_corridor_failure_steps for result in results
             ),
+            curriculum_stage=active_curriculum_stage,
+            run_id=active_run_id,
+            checkpoint_id=active_checkpoint_id,
+            policy_version=active_policy_version,
+            evaluation_timestamp=evaluation_timestamp,
+            evaluation_seed_set_id=evaluation_seed_set_id,
+            evaluation_seed_count=evaluation_seed_count,
+            environment_config_hash=environment_config_hash,
+            observation_schema_hash=observation_schema_hash,
+            action_space_hash=action_space_hash,
         )
 
         json_path = self.output_root / f"evaluation-checkpoint-{checkpoint_episode:06d}.json"

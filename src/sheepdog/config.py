@@ -192,7 +192,7 @@ class TrainingConfig:
     policy_type: PolicyType = "linear"
     episodes: int = 1_000
     checkpoint_episodes: tuple[int, ...] = (0, 5, 10, 25, 50, 100, 500, 1_000)
-    evaluation_seeds: tuple[int, ...] = (11, 23, 37, 41, 53)
+    evaluation_seeds: tuple[int, ...] = (11, 23, 37, 41, 53, 59, 61, 67, 71, 73)
     train_seed: int = 7
     evaluation_seed: int = 91
     candidate_evaluation_seeds: tuple[int, ...] = (91, 92, 93, 94, 95)

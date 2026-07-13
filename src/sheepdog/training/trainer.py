@@ -368,15 +368,11 @@ class Trainer:
             )
 
             if episode in train_config.checkpoint_episodes:
-                summary, evaluation_json, _csv_path = self.evaluator.evaluate(
-                    best_policy,
-                    train_config.evaluation_seeds,
-                    checkpoint_episode=cumulative_episode,
-                )
-                representative_replay_path = Path(summary.records[0].replay_path)
                 from sheepdog.checkpoints.store import (
                     get_observation_schema_hash,
                     get_action_space_hash,
+                    compute_env_config_hash,
+                    compute_seed_set_id,
                 )
                 from sheepdog.rewards import REWARD_SCHEMA_VERSION
                 from sheepdog.environment import ENV_CONFIG_VERSION
@@ -388,6 +384,18 @@ class Trainer:
                 obs_hash = get_observation_schema_hash(self.config)
                 act_hash = get_action_space_hash()
                 recorded_time = datetime.now(UTC).isoformat()
+                active_stage = self.config.rewards.instincts.curriculum_stage
+
+                summary, evaluation_json, _csv_path = self.evaluator.evaluate(
+                    best_policy,
+                    train_config.evaluation_seeds,
+                    checkpoint_episode=cumulative_episode,
+                    run_id=run_id,
+                    checkpoint_id=chk_id,
+                    policy_version=None,
+                    curriculum_stage=active_stage,
+                )
+                representative_replay_path = Path(summary.records[0].replay_path)
 
                 metadata = CheckpointMetadata(
                     checkpoint_episode=cumulative_episode,
@@ -417,6 +425,12 @@ class Trainer:
                     created_timestamp=recorded_time,
                     deterministic_evaluation=True,
                     evaluation_seeds=list(train_config.evaluation_seeds),
+                    curriculum_stage=active_stage,
+                    evaluation_seed_set_id=compute_seed_set_id(train_config.evaluation_seeds),
+                    evaluation_seed_count=len(train_config.evaluation_seeds),
+                    environment_config_hash=compute_env_config_hash(asdict(self.config.environment)),
+                    evaluation_timestamp=recorded_time,
+                    policy_version=None,
                 )
                 checkpoint_path = self.checkpoint_store.write(metadata)
                 checkpoint_payload = {
@@ -453,6 +467,12 @@ class Trainer:
                     "env_config_version": ENV_CONFIG_VERSION,
                     "deterministic_evaluation": True,
                     "evaluation_seeds": list(train_config.evaluation_seeds),
+                    "curriculum_stage": active_stage,
+                    "evaluation_seed_set_id": compute_seed_set_id(train_config.evaluation_seeds),
+                    "evaluation_seed_count": len(train_config.evaluation_seeds),
+                    "environment_config_hash": compute_env_config_hash(asdict(self.config.environment)),
+                    "evaluation_timestamp": recorded_time,
+                    "policy_version": None,
                 }
                 checkpoint_payloads = self._merge_checkpoint(
                     checkpoint_payloads, checkpoint_payload
@@ -719,6 +739,8 @@ class Trainer:
             if source_path.exists():
                 target_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
             exported_record = dict(record)
+            exported_record.pop("failed_trajectory_summary", None)
+            exported_record.pop("observation_diagnostics", None)
             exported_record["replay_path"] = f"/generated/replays/{target_path.name}"
             return exported_record
 
@@ -729,6 +751,8 @@ class Trainer:
         for checkpoint_payload in checkpoint_payloads:
             exported_payload = dict(checkpoint_payload)
             exported_payload["journey"] = "current"
+            exported_payload.pop("policy_weights", None)
+            exported_payload.pop("training_scenario_coverage", None)
             exported_payload["records"] = [
                 _export_record(record) for record in checkpoint_payload["records"]
             ]
@@ -791,6 +815,8 @@ class Trainer:
                 # from the live web server, so carrying hundreds of KB of per-seed
                 # data would bloat the checkpoint-index for no benefit.
                 entry.pop("records", None)
+                entry.pop("policy_weights", None)
+                entry.pop("training_scenario_coverage", None)
             all_archived.extend(loaded)
 
         # Sort by recorded_at for a consistent timeline across journeys.
@@ -858,6 +884,8 @@ class Trainer:
             if source_path.exists() and not target_path.exists():
                 target_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
             exported_record = dict(record)
+            exported_record.pop("failed_trajectory_summary", None)
+            exported_record.pop("observation_diagnostics", None)
             exported_record["replay_path"] = f"/generated/replays/{target_path.name}"
             return exported_record
 
@@ -865,6 +893,8 @@ class Trainer:
         for checkpoint_payload in checkpoints:
             exported_payload = dict(checkpoint_payload)
             exported_payload["journey"] = "current"
+            exported_payload.pop("policy_weights", None)
+            exported_payload.pop("training_scenario_coverage", None)
             exported_payload["records"] = [
                 _export_record(record) for record in checkpoint_payload.get("records", [])
             ]

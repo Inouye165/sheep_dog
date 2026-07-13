@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { CheckpointEntry, CheckpointIndex, TrainingStatus } from "../state/types";
 import { CopyAgentDataButton } from "./CopyAgentDataButton";
 
@@ -21,6 +21,13 @@ const STAGE_COLORS: Record<number, string> = {
 };
 
 const PROMOTE_THRESHOLD = 0.5;
+
+function getSuccessThreshold(stage: number): number {
+  if (stage >= 2) {
+    return 0.90;
+  }
+  return 0.80;
+}
 const RECENT_WINDOW = 5;
 
 function stageColor(stage: number | undefined): string {
@@ -42,6 +49,16 @@ function average(values: number[]): number | null {
 
 type DecisionTone = "good" | "warn" | "danger" | "muted";
 
+function getCheckpointStage(c: CheckpointEntry): number {
+  if (c.reward_config?.instincts?.curriculum_stage !== undefined && c.reward_config?.instincts?.curriculum_stage !== null) {
+    return c.reward_config.instincts.curriculum_stage;
+  }
+  if (c.environment_config?.curriculum_stage !== undefined && c.environment_config?.curriculum_stage !== null) {
+    return c.environment_config.curriculum_stage;
+  }
+  return -1;
+}
+
 interface DecisionSignal {
   title: string;
   body: string;
@@ -54,7 +71,7 @@ function buildDecisionSignal(params: {
   latestSuccessRate: number | null;
   latestReward: number | null;
   latestTimeoutRate: number | null;
-  plateauKind: "plateau" | "cliff" | "spike" | null;
+  plateauKind: "plateau-low" | "plateau-high" | "converged" | "cliff" | "spike" | null;
   stage: number;
   abovePromotionThreshold: boolean;
   improving: boolean;
@@ -109,13 +126,33 @@ function buildDecisionSignal(params: {
     };
   }
 
-  if (plateauKind === "plateau") {
+  if (plateauKind === "converged") {
     return {
-      title: "Continue training, but watch for saturation",
+      title: "Promote to the next stage",
       body:
-        "The curve is flattening. Engineers would usually keep the run going for a small additional window, then compare the best checkpoint against the current one.",
+        "The agent has converged at a high success rate. Training more on this stage yields diminishing returns; consider promoting to advance learning.",
+      tone: "good",
+      badge: `Stage ${stage} ready`,
+    };
+  }
+
+  if (plateauKind === "plateau-high") {
+    return {
+      title: "Continue training or promote",
+      body:
+        "Performance has stabilized. You can promote to the next stage if this success rate is acceptable, or let it train a little longer to see if it makes further gains.",
+      tone: "muted",
+      badge: "Stable",
+    };
+  }
+
+  if (plateauKind === "plateau-low") {
+    return {
+      title: "Struggling to learn",
+      body:
+        "The agent is stuck at a low success rate. Consider adjusting the reward function configuration, reducing entropy_coef, or clearing and restarting.",
       tone: "warn",
-      badge: "Plateau",
+      badge: "Stuck",
     };
   }
 
@@ -701,6 +738,7 @@ function trendSummary(current: number | null, previous: number | null, format: (
 }
 
 function stageLabel(stage: number): string {
+  if (stage === -1) return "Legacy/Unknown";
   return stage === 0 ? "Base difficulty" : `Stage ${stage}`;
 }
 
@@ -1038,8 +1076,8 @@ function LearningSignalChart({
 // ── Plateau / cliff analysis ─────────────────────────────────────────────────
 
 interface PlateauInfo {
-  /** plateau = improved then stalled; cliff = never succeeded; spike = found success but regressed */
-  kind: "plateau" | "cliff" | "spike";
+  /** converged/plateau-high/low = stable; cliff = never succeeded; spike = regressed */
+  kind: "converged" | "plateau-high" | "plateau-low" | "cliff" | "spike";
   window: number;
   bestRate: number;
   /** Highest success rate ever seen across all checkpoints. */
@@ -1047,8 +1085,18 @@ interface PlateauInfo {
   sinceEpisode: number;
 }
 
+/** Minimum checkpoints in the current stage before we can flag a plateau/cliff. */
+const DIAGNOSTIC_MIN_CHECKPOINTS = 8;
+/** Minimum cumulative episodes trained in the current stage before we can flag a plateau/cliff. */
+const DIAGNOSTIC_MIN_EPISODES = 150;
+
 function detectPlateau(checkpoints: CheckpointEntry[]): PlateauInfo | null {
-  if (checkpoints.length < PLATEAU_WINDOW) return null;
+  if (checkpoints.length < DIAGNOSTIC_MIN_CHECKPOINTS) return null;
+
+  const firstEp = checkpoints[0].checkpoint_episode;
+  const latestEp = checkpoints[checkpoints.length - 1].checkpoint_episode;
+  if (latestEp - firstEp < DIAGNOSTIC_MIN_EPISODES) return null;
+
   const recent = checkpoints.slice(-PLATEAU_WINDOW);
   const allPrior = checkpoints.slice(0, -PLATEAU_WINDOW);
   const bestPrior = allPrior.length > 0 ? Math.max(...allPrior.map((c) => c.success_rate)) : -Infinity;
@@ -1056,12 +1104,19 @@ function detectPlateau(checkpoints: CheckpointEntry[]): PlateauInfo | null {
   const allTimeBest = Math.max(...checkpoints.map((c) => c.success_rate));
 
   if (bestRecent <= bestPrior + PLATEAU_MIN_DELTA) {
-    // spike-and-drop: agent HAS succeeded before but regressed in the recent window
-    const everSucceeded = allTimeBest > CLIFF_THRESHOLD;
-    const kind =
-      checkpoints.length >= CLIFF_MIN_CHECKPOINTS && bestRecent < CLIFF_THRESHOLD
-        ? everSucceeded ? "spike" : "cliff"
-        : "plateau";
+    const everSucceeded = allTimeBest >= CLIFF_THRESHOLD;
+    let kind: PlateauInfo["kind"];
+
+    if (bestRecent < CLIFF_THRESHOLD) {
+      kind = everSucceeded ? "spike" : "cliff";
+    } else if (allTimeBest >= 0.90) {
+      kind = "converged";
+    } else if (allTimeBest >= 0.50) {
+      kind = "plateau-high";
+    } else {
+      kind = "plateau-low";
+    }
+
     return {
       kind,
       window: PLATEAU_WINDOW,
@@ -1089,26 +1144,133 @@ export function DiagnosticsPanel({
   trainingStatus,
   effectiveCurriculumStage,
 }: DiagnosticsPanelProps) {
+  const [viewWindow, setViewWindow] = useState<ViewWindow>(() => {
+    const saved = localStorage.getItem("sheepdog_insights_view_window");
+    if (saved === "all") return "all";
+    if (saved === "25" || saved === "50" || saved === "100") {
+      return Number(saved) as ViewWindow;
+    }
+    return "all";
+  });
+  const [selectedStageScope, setSelectedStageScope] = useState<StageScope>(() => {
+    const saved = localStorage.getItem("sheepdog_insights_stage_scope");
+    if (saved === "all" || saved === "current" || saved === "current-journey") {
+      return saved;
+    }
+    if (saved !== null) {
+      const parsed = Number(saved);
+      if (!isNaN(parsed)) return parsed;
+    }
+    return "current-journey";
+  });
+
+  const targetStage = useMemo(() => {
+    if (selectedStageScope === "current") return effectiveCurriculumStage;
+    if (selectedStageScope === "current-journey") return effectiveCurriculumStage;
+    if (selectedStageScope === "all") return effectiveCurriculumStage;
+    return Number(selectedStageScope);
+  }, [selectedStageScope, effectiveCurriculumStage]);
+
+  const minStreak = useMemo(() => {
+    if (trainingStatus?.auto_promote_gate?.min_qualified_streak !== undefined) {
+      return trainingStatus.auto_promote_gate.min_qualified_streak;
+    }
+    return targetStage >= 14 ? 5 : 3;
+  }, [trainingStatus?.auto_promote_gate?.min_qualified_streak, targetStage]);
+
   const checkpoints = useMemo(
     () => checkpointIndex?.checkpoints ?? [],
     [checkpointIndex?.checkpoints],
   );
 
   const stageScopedCheckpoints = useMemo(
-    () =>
-      checkpoints.filter(
-        (c) => (c.reward_config?.instincts?.curriculum_stage ?? 0) === effectiveCurriculumStage,
-      ),
-    [checkpoints, effectiveCurriculumStage],
+    () => checkpoints.filter((c) => getCheckpointStage(c) === targetStage),
+    [checkpoints, targetStage],
   );
+
+  const requiredThreshold = useMemo(() => getSuccessThreshold(targetStage), [targetStage]);
+
+  const { qualifiedStreak, isImproving, stageLatestCheckpoint, stageLatestSuccessRate, stageLatestPolicyVersion, stageLatestCheckpointEpisode, stageLatestCheckpointId, stageEvaluationSeedCount } = useMemo(() => {
+    let currentStreak = 0;
+    stageScopedCheckpoints.forEach((c) => {
+      const isQualified = c.success_rate >= requiredThreshold;
+      if (isQualified) {
+        currentStreak++;
+      } else {
+        currentStreak = 0;
+      }
+    });
+
+    let improving = false;
+    if (stageScopedCheckpoints.length >= 3) {
+      const last3 = stageScopedCheckpoints.slice(-3);
+      if (last3[2].success_rate > last3[0].success_rate + 0.02) {
+        improving = true;
+      }
+    }
+
+    const latest = stageScopedCheckpoints[stageScopedCheckpoints.length - 1];
+    return {
+      qualifiedStreak: currentStreak,
+      isImproving: improving,
+      stageLatestCheckpoint: latest,
+      stageLatestSuccessRate: latest ? latest.success_rate : 0.0,
+      stageLatestPolicyVersion: latest ? (latest.policy_version ?? "N/A") : "N/A",
+      stageLatestCheckpointEpisode: latest ? latest.checkpoint_episode : 0,
+      stageLatestCheckpointId: latest ? (latest.checkpoint_id ?? "N/A") : "N/A",
+      stageEvaluationSeedCount: latest ? (latest.evaluation_seeds ? latest.evaluation_seeds.length : 5) : 5,
+    };
+  }, [stageScopedCheckpoints, requiredThreshold]);
 
   const plateauInfo = useMemo(
     () => detectPlateau(stageScopedCheckpoints),
     [stageScopedCheckpoints],
   );
 
-  const [viewWindow, setViewWindow] = useState<ViewWindow>("all");
-  const [selectedStageScope, setSelectedStageScope] = useState<StageScope>("current-journey");
+  const plateauRenderData = useMemo(() => {
+    if (stageScopedCheckpoints.length === 0) {
+      return {
+        statusText: `STAGE ${targetStage === -1 ? "LEGACY" : targetStage} EVALUATION PENDING`,
+        statusDetail: `Stage ${targetStage === -1 ? "Legacy" : targetStage} evaluation pending — no current-stage performance result is available.`,
+        toneClass: " warning-box--warning"
+      };
+    }
+    let statusText = "LEARNING";
+    let statusDetail = "No stable plateau yet; the agent is exploring the environment and gathering initial experience.";
+    let toneClass = "";
+
+    if (stageLatestSuccessRate >= requiredThreshold && qualifiedStreak >= 5) {
+      statusText = "MASTERED / READY TO PROMOTE";
+      statusDetail = "The agent has converged and met all promotion criteria. Ready to advance to the next stage!";
+      toneClass = " warning-box--success";
+    } else if (stageLatestSuccessRate >= requiredThreshold) {
+      statusText = `QUALIFIED STREAK ${qualifiedStreak}/${minStreak}`;
+      statusDetail = "Performing above threshold; accumulating consecutive successful checkpoints for promotion.";
+      toneClass = " warning-box--success";
+    } else if (plateauInfo && (plateauInfo.kind === "plateau-low" || plateauInfo.kind === "plateau-high" || plateauInfo.kind === "converged")) {
+      statusText = "PLATEAU BELOW GATE";
+      statusDetail = "Performance has stabilized, but it remains below the required success threshold for promotion.";
+      toneClass = " warning-box--warning";
+    } else if (isImproving) {
+      statusText = "IMPROVING";
+      statusDetail = "Success rate is actively trending upward.";
+      toneClass = "";
+    } else if (plateauInfo?.kind === "cliff") {
+      statusText = "CLIFF DETECTED";
+      statusDetail = "The agent has never succeeded after multiple checkpoints. The environment configuration may be too difficult.";
+      toneClass = " warning-box--error";
+    } else if (plateauInfo?.kind === "spike") {
+      statusText = "POLICY INSTABILITY";
+      statusDetail = "The agent reached a high success rate but recently regressed. This is typical of PPO oscillation patterns.";
+      toneClass = " warning-box--warning";
+    }
+
+    return {
+      statusText,
+      statusDetail,
+      toneClass
+    };
+  }, [stageScopedCheckpoints.length, stageLatestSuccessRate, requiredThreshold, qualifiedStreak, plateauInfo, isImproving, minStreak]);
 
   const hasArchivedCheckpoints = useMemo(
     () => checkpoints.some((c) => c.journey != null && c.journey !== "current"),
@@ -1126,17 +1288,17 @@ export function DiagnosticsPanel({
   );
 
   const availableStages = useMemo(
-    () => [...new Set(checkpoints.map((c) => c.reward_config?.instincts?.curriculum_stage ?? 0))].sort((a, b) => a - b),
+    () => [...new Set(checkpoints.map((c) => getCheckpointStage(c)))].sort((a, b) => a - b),
     [checkpoints],
   );
 
   const currentJourneyStages = useMemo(
-    () => [...new Set(currentJourneyCheckpoints.map((c) => c.reward_config?.instincts?.curriculum_stage ?? 0))].sort((a, b) => a - b),
+    () => [...new Set(currentJourneyCheckpoints.map((c) => getCheckpointStage(c)))].sort((a, b) => a - b),
     [currentJourneyCheckpoints],
   );
 
   const archivedStages = useMemo(
-    () => [...new Set(archivedJourneyCheckpoints.map((c) => c.reward_config?.instincts?.curriculum_stage ?? 0))].sort((a, b) => a - b),
+    () => [...new Set(archivedJourneyCheckpoints.map((c) => getCheckpointStage(c)))].sort((a, b) => a - b),
     [archivedJourneyCheckpoints],
   );
 
@@ -1149,7 +1311,7 @@ export function DiagnosticsPanel({
     }
     const targetStage = selectedStageScope === "current" ? effectiveCurriculumStage : selectedStageScope;
     return checkpoints.filter(
-      (c) => (c.reward_config?.instincts?.curriculum_stage ?? 0) === targetStage,
+      (c) => getCheckpointStage(c) === targetStage,
     );
   }, [checkpoints, currentJourneyCheckpoints, selectedStageScope, effectiveCurriculumStage]);
 
@@ -1159,7 +1321,7 @@ export function DiagnosticsPanel({
   }, [stageScopedViewCheckpoints, viewWindow]);
 
   const stages = useMemo(
-    () => filteredCheckpoints.map((c) => c.reward_config?.instincts?.curriculum_stage ?? 0),
+    () => filteredCheckpoints.map((c) => getCheckpointStage(c)),
     [filteredCheckpoints],
   );
 
@@ -1249,9 +1411,49 @@ export function DiagnosticsPanel({
 
   const isLiveTraining = trainingStatus?.running ?? false;
   const uniqueStages = useMemo(() => [...new Set(stages)].sort((a, b) => a - b), [stages]);
-  const [activeChart, setActiveChart] = useState<ChartTab>("success");
-  const [learningSignalWindow, setLearningSignalWindow] = useState<ViewWindow>("all");
-  const [learningSignalSmoothWindow, setLearningSignalSmoothWindow] = useState<SmoothingWindow>(50);
+  const [activeChart, setActiveChart] = useState<ChartTab>(() => {
+    const saved = localStorage.getItem("sheepdog_insights_active_chart") as ChartTab | null;
+    const validCharts: ChartTab[] = ["health", "success", "reward", "sheep", "history", "learningSignal"];
+    if (saved && validCharts.includes(saved)) {
+      return saved;
+    }
+    return "success";
+  });
+  const [learningSignalWindow, setLearningSignalWindow] = useState<ViewWindow>(() => {
+    const saved = localStorage.getItem("sheepdog_insights_learning_signal_window");
+    if (saved === "all") return "all";
+    if (saved === "25" || saved === "50" || saved === "100") {
+      return Number(saved) as ViewWindow;
+    }
+    return "all";
+  });
+  const [learningSignalSmoothWindow, setLearningSignalSmoothWindow] = useState<SmoothingWindow>(() => {
+    const saved = localStorage.getItem("sheepdog_insights_learning_signal_smooth_window");
+    if (saved === "25" || saved === "50" || saved === "100") {
+      return Number(saved) as SmoothingWindow;
+    }
+    return 50;
+  });
+
+  useEffect(() => {
+    localStorage.setItem("sheepdog_insights_view_window", String(viewWindow));
+  }, [viewWindow]);
+
+  useEffect(() => {
+    localStorage.setItem("sheepdog_insights_stage_scope", String(selectedStageScope));
+  }, [selectedStageScope]);
+
+  useEffect(() => {
+    localStorage.setItem("sheepdog_insights_active_chart", activeChart);
+  }, [activeChart]);
+
+  useEffect(() => {
+    localStorage.setItem("sheepdog_insights_learning_signal_window", String(learningSignalWindow));
+  }, [learningSignalWindow]);
+
+  useEffect(() => {
+    localStorage.setItem("sheepdog_insights_learning_signal_smooth_window", String(learningSignalSmoothWindow));
+  }, [learningSignalSmoothWindow]);
   const [focusedBreakthroughCheckpoint, setFocusedBreakthroughCheckpoint] = useState<number | null>(null);
   const [advisorExplainOpen, setAdvisorExplainOpen] = useState(false);
   const [breakthroughNotes, setBreakthroughNotes] = useState<Record<number, string>>({});
@@ -1294,7 +1496,7 @@ export function DiagnosticsPanel({
     ((recentStepsDelta ?? 0) / 500);
 
   const stageCheckpoints = checkpoints.filter(
-    (entry) => (entry.reward_config?.instincts?.curriculum_stage ?? 0) === effectiveCurriculumStage,
+    (entry) => getCheckpointStage(entry) === effectiveCurriculumStage,
   );
   const stageBestSuccessRate = stageCheckpoints.length ? Math.max(...stageCheckpoints.map((entry) => entry.success_rate)) : null;
   const stageBestReward = stageCheckpoints.length ? Math.max(...stageCheckpoints.map((entry) => entry.average_reward)) : null;
@@ -1341,7 +1543,7 @@ export function DiagnosticsPanel({
         completionSteps: entry.average_completion_steps,
         sheepPenned: entry.average_sheep_penned,
         noProgressGuard: averageNoProgress(entry),
-        stage: entry.reward_config?.instincts?.curriculum_stage ?? 0,
+        stage: getCheckpointStage(entry),
         checkpoint_id: entry.checkpoint_id,
       })),
     [learningSignalSource],
@@ -1501,39 +1703,24 @@ export function DiagnosticsPanel({
       </div>
 
       {/* Plateau / cliff / spike alert */}
-      {plateauInfo ? (
+      {plateauRenderData ? (
         <div
-          className={`warning-box${plateauInfo.kind === "cliff" ? " warning-box--error" : plateauInfo.kind === "spike" ? " warning-box--warning" : ""}`}
-          role="alert"
+          className={`warning-box${plateauRenderData.toneClass}`}
+          role="status"
+          style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}
         >
-          {plateauInfo.kind === "cliff" ? (
-            <>
-              <strong>Cliff detected</strong> — the agent has never succeeded after{" "}
-              {checkpoints.length} checkpoints.{" "}
-              {trainingStatus?.enable_instinct_rewards === false ? (
-                <>Try enabling <em>Instinct Rewards</em> and clearing to restart at Stage 1.</>
-              ) : (trainingStatus?.curriculum_stage ?? 1) > 1 ? (
-                <>Try <em>Clear Training</em> and restart at Stage 1 — the current stage may be too hard to learn from scratch.</>
-              ) : (
-                <>The current reward config may not be learnable from scratch. Check <em>time_penalty</em> and <em>entropy_coef</em> in the Config tab.</>
-              )}
-            </>
-          ) : plateauInfo.kind === "spike" ? (
-            <>
-              <strong>Policy instability</strong> — the agent reached{" "}
-              {Math.round(plateauInfo.allTimeBest * 100)}% success but regressed. This is a
-              PPO oscillation pattern, not a dead-end. The best checkpoint is preserved and
-              available. Keep training — or reduce <em>entropy_coef</em> in the Config tab for
-              more stable convergence.
-            </>
-          ) : (
-            <>
-              <strong>Plateau detected</strong> — no improvement in the last {plateauInfo.window}{" "}
-              checkpoints (best {Math.round(plateauInfo.bestRate * 100)}% since ep{" "}
-              {plateauInfo.sinceEpisode}). Training will keep trying, but you may want to promote
-              to the next stage or clear and restart.
-            </>
-          )}
+          <div>
+            <strong>Status: <span style={{ textDecoration: "underline" }}>{plateauRenderData.statusText}</span></strong> — {plateauRenderData.statusDetail}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "0.25rem", fontSize: "0.9em", borderTop: "1px solid rgba(255,255,255,0.1)", paddingTop: "0.5rem", marginTop: "0.25rem" }}>
+            <div>• <strong>Stage:</strong> {targetStage === -1 ? "Legacy/Unknown" : targetStage === 0 ? "Base difficulty" : `Stage ${targetStage}`}</div>
+            <div>• <strong>Latest Checkpoint:</strong> {stageLatestCheckpointEpisode > 0 ? `ep ${stageLatestCheckpointEpisode}` : "None"} ({stageLatestCheckpointId})</div>
+            <div>• <strong>Policy Version:</strong> {stageLatestPolicyVersion}</div>
+            <div>• <strong>Evaluation Seeds:</strong> {stageEvaluationSeedCount} seeds</div>
+            <div>• <strong>Success Rate:</strong> {stageLatestCheckpoint ? `${Math.round(stageLatestSuccessRate * 100)}%` : "N/A"}</div>
+            <div>• <strong>Required Threshold:</strong> {Math.round(requiredThreshold * 100)}%</div>
+            <div>• <strong>Qualified Streak:</strong> {qualifiedStreak} / {minStreak}</div>
+          </div>
         </div>
       ) : null}
 
@@ -2022,7 +2209,7 @@ export function DiagnosticsPanel({
               <tbody>
                 {tableRows.map((c) => {
                   const isBest = c.checkpoint_episode === bestCheckpointEpisode;
-                  const cStage = c.reward_config?.instincts?.curriculum_stage;
+                  const cStage = getCheckpointStage(c);
                   const isArchived = c.journey != null && c.journey !== "current";
                   return (
                     <tr

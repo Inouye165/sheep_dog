@@ -587,6 +587,7 @@ def test_startup_auto_resumes_interrupted_running_session(tmp_path: Path) -> Non
         debug_reward_breakdown=None,
         auto_promote=None,
         promote_from_checkpoint_episode=None,
+        resume=False,
     ):
         start_calls.append(
             {
@@ -597,6 +598,7 @@ def test_startup_auto_resumes_interrupted_running_session(tmp_path: Path) -> Non
                 "debug_reward_breakdown": debug_reward_breakdown,
                 "auto_promote": auto_promote,
                 "promote_from_checkpoint_episode": promote_from_checkpoint_episode,
+                "resume": resume,
             }
         )
         return {"running": True}

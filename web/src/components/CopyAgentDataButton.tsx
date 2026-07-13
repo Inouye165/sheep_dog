@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { loadHyperparams, loadTrainingDiagnostics } from "../lib/api";
 import type { TrainingStatus, CheckpointIndex, CheckpointEntry, DiagnosticsResponse } from "../state/types";
 
@@ -90,13 +90,55 @@ export function CopyAgentDataButton({
   const [copied, setCopied] = useState(false);
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [stageOption, setStageOption] = useState<"current" | "single" | "range">("current");
+  const [singleStage, setSingleStage] = useState<number>(curriculumStage);
+  const [startStage, setStartStage] = useState<number>(curriculumStage);
+  const [endStage, setEndStage] = useState<number>(curriculumStage);
+  const [showTooltip, setShowTooltip] = useState(false);
 
-  const handleCopy = async () => {
+  const checkpoints = checkpointIndex?.checkpoints ?? [];
+  const allStages = Array.from(
+    new Set([
+      curriculumStage,
+      ...(trainingStatus?.available_curriculum_stages ?? []),
+      ...checkpoints.map((c) => c.reward_config?.instincts?.curriculum_stage ?? c.environment_config?.curriculum_stage ?? 0)
+    ])
+  ).filter((s) => s !== undefined && s !== null).sort((a, b) => a - b);
+
+  if (allStages.length === 0) {
+    for (let i = 0; i <= 32; i++) {
+      allStages.push(i);
+    }
+  }
+
+  // Synchronize dropdown selections when curriculumStage changes
+  useEffect(() => {
+    setSingleStage(curriculumStage);
+    setStartStage(curriculumStage);
+    setEndStage(curriculumStage);
+  }, [curriculumStage]);
+
+  const confirmAndCopy = async () => {
     if (loading) return;
     setLoading(true);
     setFailed(false);
+    setIsModalOpen(false);
 
-    try {
+    let selectedStages: number[] = [];
+    if (stageOption === "current") {
+      selectedStages = [curriculumStage];
+    } else if (stageOption === "single") {
+      selectedStages = [singleStage];
+    } else if (stageOption === "range") {
+      const start = Math.min(startStage, endStage);
+      const end = Math.max(startStage, endStage);
+      for (let s = start; s <= end; s++) {
+        selectedStages.push(s);
+      }
+    }
+
+    const fetchAndFormatReport = async (): Promise<string> => {
       // 1. Fetch live hyperparameters from API
       let hyperparams = null;
       try {
@@ -154,25 +196,42 @@ export function CopyAgentDataButton({
       }
 
       // 2. Extract checkpoints
-      const checkpoints = checkpointIndex?.checkpoints ?? [];
+      const checkpointsList = checkpointIndex?.checkpoints ?? [];
 
       // 3. Format the markdown report
       const report = formatAgentReport(
         trainingStatus,
-        checkpoints,
+        checkpointsList,
         hyperparams,
         curriculumStage,
         diagnostics,
-        apiErrorDetails
+        apiErrorDetails,
+        selectedStages
       );
 
-      // 4. Write to clipboard
-      await navigator.clipboard.writeText(report);
       if (!apiErrorDetails) {
         setCopied(true);
         setTimeout(() => {
           setCopied(false);
         }, 2000);
+      }
+
+      return report;
+    };
+
+    try {
+      if (typeof ClipboardItem !== "undefined" && navigator.clipboard && navigator.clipboard.write) {
+        const textBlobPromise = fetchAndFormatReport().then(
+          (reportText) => new Blob([reportText], { type: "text/plain" })
+        );
+        await navigator.clipboard.write([
+          new ClipboardItem({
+            "text/plain": textBlobPromise,
+          }),
+        ]);
+      } else {
+        const report = await fetchAndFormatReport();
+        await navigator.clipboard.writeText(report);
       }
     } catch (err) {
       console.error("Failed to copy agent data to clipboard:", err);
@@ -183,69 +242,225 @@ export function CopyAgentDataButton({
   };
 
   return (
-    <button
-      onClick={handleCopy}
-      className={`agent-copy-btn ${copied ? "agent-copy-btn--success" : ""} ${failed ? "agent-copy-btn--failed" : ""}`}
-      disabled={loading}
-      title="Copy all training metrics, hyperparameters, and checkpoints for an AI agent"
-      aria-label="Copy agent data to clipboard"
-    >
-      {copied ? (
-        <>
-          <svg
-            width="13"
-            height="13"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="3"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            style={{ marginRight: "0.35rem" }}
-          >
-            <polyline points="20 6 9 17 4 12" />
-          </svg>
-          Agent Data Copied!
-        </>
-      ) : failed ? (
-        <>
-          <svg
-            width="13"
-            height="13"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="3"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            style={{ marginRight: "0.35rem" }}
-          >
-            <circle cx="12" cy="12" r="10" />
-            <line x1="12" y1="8" x2="12" y2="12" />
-            <line x1="12" y1="16" x2="12.01" y2="16" />
-          </svg>
-          Diagnostics unavailable
-        </>
-      ) : (
-        <>
-          <svg
-            width="13"
-            height="13"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            style={{ marginRight: "0.35rem" }}
-          >
-            <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
-            <rect x="8" y="2" width="8" height="4" rx="1" ry="1" />
-          </svg>
-          Copy Agent Data
-        </>
+    <>
+      <div className="agent-copy-info-container">
+        <button
+          onClick={() => setIsModalOpen(true)}
+          className={`agent-copy-btn ${copied ? "agent-copy-btn--success" : ""} ${failed ? "agent-copy-btn--failed" : ""}`}
+          disabled={loading}
+          title="Copy all training metrics, hyperparameters, and checkpoints for an AI agent"
+          aria-label="Copy agent data to clipboard"
+        >
+          {copied ? (
+            <>
+              <svg
+                width="13"
+                height="13"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="3"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                style={{ marginRight: "0.35rem" }}
+              >
+                <polyline points="20 6 9 17 4 12" />
+              </svg>
+              Agent Data Copied!
+            </>
+          ) : failed ? (
+            <>
+              <svg
+                width="13"
+                height="13"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="3"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                style={{ marginRight: "0.35rem" }}
+              >
+                <circle cx="12" cy="12" r="10" />
+                <line x1="12" y1="8" x2="12" y2="12" />
+                <line x1="12" y1="16" x2="12.01" y2="16" />
+              </svg>
+              Diagnostics unavailable
+            </>
+          ) : (
+            <>
+              <svg
+                width="13"
+                height="13"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                style={{ marginRight: "0.35rem" }}
+              >
+                <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
+                <rect x="8" y="2" width="8" height="4" rx="1" ry="1" />
+              </svg>
+              Copy Agent Data
+            </>
+          )}
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setShowTooltip(!showTooltip)}
+          onMouseEnter={() => setShowTooltip(true)}
+          onMouseLeave={() => setShowTooltip(false)}
+          className="agent-copy-info-btn"
+          aria-label="Info about copied data"
+        >
+          ?
+        </button>
+        <div className={`agent-copy-info-tooltip ${showTooltip ? "visible" : ""}`}>
+          <div className="agent-copy-info-tooltip-title">Generically Copied Data:</div>
+          <ul>
+            <li>Diagnostic Completeness & AI Readiness</li>
+            <li>System Overview & Active Run ID</li>
+            <li>Latest Evaluation Metrics & Gates</li>
+            <li>Active Hyperparameters & Reward Weights</li>
+            <li>Neural-Network Architecture Details</li>
+            <li>PPO Training Progress & Optimizer Stats</li>
+            <li>Failed Seed Trajectories & Observation limits</li>
+          </ul>
+        </div>
+      </div>
+
+      {isModalOpen && (
+        <div className="stage-select-modal-overlay" onClick={() => setIsModalOpen(false)}>
+          <div className="stage-select-modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="stage-select-modal-header">
+              <h3>Copy Agent Data - Select Stage</h3>
+              <button
+                className="stage-select-modal-close"
+                onClick={() => setIsModalOpen(false)}
+                aria-label="Close stage selection modal"
+              >
+                &times;
+              </button>
+            </div>
+
+            <div className="stage-select-modal-body">
+              <label className="instruction">
+                Which curriculum stage(s) would you like to summarize in the report?
+              </label>
+
+              <div className="stage-select-modal-option-list">
+                <label className="stage-select-modal-option">
+                  <input
+                    type="radio"
+                    name="stageOption"
+                    value="current"
+                    checked={stageOption === "current"}
+                    onChange={() => setStageOption("current")}
+                  />
+                  <span>Current Stage (Stage {curriculumStage})</span>
+                </label>
+
+                <label className="stage-select-modal-option" style={{ display: "flex", flexDirection: "column", alignItems: "flex-start" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
+                    <input
+                      type="radio"
+                      name="stageOption"
+                      value="single"
+                      checked={stageOption === "single"}
+                      onChange={() => setStageOption("single")}
+                    />
+                    <span>Single Stage</span>
+                  </div>
+                  {stageOption === "single" && (
+                    <div className="stage-select-modal-select-container">
+                      <select
+                        value={singleStage}
+                        onChange={(e) => setSingleStage(Number(e.target.value))}
+                        className="stage-select-modal-select"
+                        aria-label="Select single stage"
+                      >
+                        {allStages.map((s) => (
+                          <option key={s} value={s}>
+                            Stage {s} - {STAGE_DESCRIPTIONS[s] || "Unknown Stage"}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                </label>
+
+                <label className="stage-select-modal-option" style={{ display: "flex", flexDirection: "column", alignItems: "flex-start" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
+                    <input
+                      type="radio"
+                      name="stageOption"
+                      value="range"
+                      checked={stageOption === "range"}
+                      onChange={() => setStageOption("range")}
+                    />
+                    <span>Range of Stages</span>
+                  </div>
+                  {stageOption === "range" && (
+                    <div className="stage-select-modal-select-container">
+                      <select
+                        value={startStage}
+                        onChange={(e) => setStartStage(Number(e.target.value))}
+                        className="stage-select-modal-select"
+                        aria-label="Select start stage"
+                      >
+                        {allStages.map((s) => (
+                          <option key={s} value={s}>
+                            Stage {s}
+                          </option>
+                        ))}
+                      </select>
+                      <span style={{ color: "#94a3b8", fontSize: "0.85rem" }}>to</span>
+                      <select
+                        value={endStage}
+                        onChange={(e) => setEndStage(Number(e.target.value))}
+                        className="stage-select-modal-select"
+                        aria-label="Select end stage"
+                      >
+                        {allStages.map((s) => (
+                          <option key={s} value={s}>
+                            Stage {s}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                </label>
+              </div>
+
+              {stageOption === "range" && startStage > endStage && (
+                <div style={{ color: "#f87171", fontSize: "0.8rem", marginTop: "0.85rem", paddingLeft: "1.8rem" }}>
+                  * Start stage must be less than or equal to end stage.
+                </div>
+              )}
+            </div>
+
+            <div className="stage-select-modal-footer">
+              <button
+                className="stage-select-modal-cancel"
+                onClick={() => setIsModalOpen(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className="stage-select-modal-confirm"
+                onClick={confirmAndCopy}
+                disabled={loading || (stageOption === "range" && startStage > endStage)}
+              >
+                {loading ? "Generating..." : "Copy to Clipboard"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
-    </button>
+    </>
   );
 }
 
@@ -282,7 +497,8 @@ function formatAgentReport(
     message: string;
     responseIsNull: boolean;
     jsonParsingFailed: boolean;
-  } | null
+  } | null,
+  selectedStages: number[] = []
 ): string {
   const timestamp = new Date().toISOString();
   const stageDesc = STAGE_DESCRIPTIONS[currentStage] ?? "Unknown Stage";
@@ -384,12 +600,12 @@ function formatAgentReport(
     }
 
     // Missing PPO stats warning
-    const ppoMetrics = snapshotData.ppo_metrics || [];
+    const ppoMetrics = snapshotData?.ppo_metrics || [];
     if (!ppoMetrics || ppoMetrics.length === 0) {
       healthWarnings.push("Missing PPO training progress metrics.");
     }
     // Missing observation diagnostics warning
-    if (!snapshotData.observation_diagnostics) {
+    if (!snapshotData?.observation_diagnostics) {
       healthWarnings.push("Missing observation diagnostics.");
     }
     // Missing action diagnostics warning
@@ -432,6 +648,204 @@ function formatAgentReport(
   let md = `# SHEEPDOG AGENT DIAGNOSTICS REPORT\n`;
   md += `Generated: ${timestamp}\n\n`;
 
+  // Prepend selected stages summaries if requested
+  if (selectedStages && selectedStages.length > 0) {
+    for (const S of selectedStages) {
+      const stageCheckpoints = checkpoints.filter(
+        (c) => (c.reward_config?.instincts?.curriculum_stage ?? c.environment_config?.curriculum_stage ?? 0) === S
+      );
+
+      let latestCpEpisode: string | number = "N/A";
+      let polVersion: string | number = "N/A";
+      let successesText = "N/A";
+      let timeoutsText = "N/A";
+      let earlyStopsText = "N/A";
+      let avgRewardText = "N/A";
+      let avgSheepText = "N/A";
+      let avgDistText = "N/A";
+      let avgStepsText = "N/A";
+      let perSeedRecords: any[] = [];
+      let isCurrentStage = (S === currentStage);
+
+      let hasLiveEval = false;
+      if (isCurrentStage && diagnostics?.snapshot) {
+        const evalRecords = diagnostics.snapshot.evaluation_records || [];
+        const latestEval = diagnostics.snapshot.latest_current_stage_evaluation || diagnostics.snapshot.latest_any_stage_evaluation || null;
+        if (evalRecords.length > 0 || latestEval !== null) {
+          hasLiveEval = true;
+        }
+      }
+
+      if (hasLiveEval && diagnostics?.snapshot) {
+        const latestEval = diagnostics.snapshot.latest_current_stage_evaluation || diagnostics.snapshot.latest_any_stage_evaluation || null;
+        latestCpEpisode = latestEval?.checkpoint_episode ?? status?.checkpoint_episode ?? "N/A";
+        polVersion = latestEval?.policy_version ?? status?.policy_version ?? "N/A";
+
+        const evalRecords = diagnostics.snapshot.evaluation_records || [];
+        if (evalRecords.length > 0) {
+          const successCount = evalRecords.filter((r: any) => r.success).length;
+          const timeoutCount = evalRecords.filter((r: any) => r.timeout).length;
+          const stoppedCount = evalRecords.filter((r: any) => r.stop_reason === "stopped" || r.stopped).length;
+          const totalCount = evalRecords.length;
+
+          successesText = `${successCount}/${totalCount}`;
+          timeoutsText = `${timeoutCount}/${totalCount}`;
+          earlyStopsText = `${stoppedCount}/${totalCount}`;
+
+          const totalReward = evalRecords.reduce((sum: number, r: any) => sum + (r.reward_total ?? 0), 0);
+          avgRewardText = (totalReward / totalCount).toFixed(1);
+
+          const totalSheep = evalRecords.reduce((sum: number, r: any) => sum + (r.sheep_penned ?? 0), 0);
+          const maxSheep = latestEval?.environment_config?.sheep ?? 4;
+          avgSheepText = `${(totalSheep / totalCount).toFixed(1)}/${maxSheep}`;
+
+          const totalDist = evalRecords.reduce((sum: number, r: any) => sum + (r.final_sheep_distance_to_pen ?? 0), 0);
+          avgDistText = (totalDist / totalCount).toFixed(1);
+
+          const totalSteps = evalRecords.reduce((sum: number, r: any) => sum + (r.steps ?? 0), 0);
+          const totalNoProg = evalRecords.reduce((sum: number, r: any) => sum + (r.no_progress_steps ?? 0), 0);
+          avgStepsText = `${(totalSteps / totalCount).toFixed(1)} / ${(totalNoProg / totalCount).toFixed(1)}`;
+
+          perSeedRecords = evalRecords;
+        } else if (latestEval) {
+          const total = 10;
+          const successCount = Math.round((latestEval.success_rate ?? 0) * total);
+          const timeoutCount = Math.round((latestEval.timeout_rate ?? 0) * total);
+          const stoppedCount = Math.round((latestEval.stopped_rate ?? 0) * total);
+          successesText = `${successCount}/${total}`;
+          timeoutsText = `${timeoutCount}/${total}`;
+          earlyStopsText = `${stoppedCount}/${total}`;
+          avgRewardText = latestEval.average_reward !== undefined ? latestEval.average_reward.toFixed(1) : "N/A";
+          const maxSheep = latestEval.environment_config?.sheep ?? 4;
+          avgSheepText = latestEval.average_sheep_penned !== undefined ? `${latestEval.average_sheep_penned.toFixed(1)}/${maxSheep}` : "N/A";
+          avgDistText = (latestEval.average_distance_to_pen ?? latestEval.average_sheep_distance_to_pen) !== undefined ? (latestEval.average_distance_to_pen ?? latestEval.average_sheep_distance_to_pen).toFixed(1) : "N/A";
+          avgStepsText = latestEval.average_completion_steps !== undefined ? latestEval.average_completion_steps.toFixed(1) : "N/A";
+        }
+      } else if (stageCheckpoints.length > 0) {
+        const lc = stageCheckpoints[stageCheckpoints.length - 1];
+        latestCpEpisode = lc.checkpoint_episode;
+        polVersion = lc.policy_version ?? "N/A";
+
+        if (lc.records && lc.records.length > 0) {
+          const successCount = lc.records.filter((r: any) => r.success).length;
+          const timeoutCount = lc.records.filter((r: any) => r.timeout).length;
+          const stoppedCount = lc.records.filter((r: any) => r.stop_reason === "stopped" || r.stopped).length;
+          const totalCount = lc.records.length;
+
+          successesText = `${successCount}/${totalCount}`;
+          timeoutsText = `${timeoutCount}/${totalCount}`;
+          earlyStopsText = `${stoppedCount}/${totalCount}`;
+
+          const totalReward = lc.records.reduce((sum: number, r: any) => sum + (r.reward_total ?? 0), 0);
+          avgRewardText = (totalReward / totalCount).toFixed(1);
+
+          const totalSheep = lc.records.reduce((sum: number, r: any) => sum + (r.sheep_penned ?? 0), 0);
+          const maxSheep = lc.environment_config?.sheep ?? 4;
+          avgSheepText = `${(totalSheep / totalCount).toFixed(1)}/${maxSheep}`;
+
+          const totalDist = lc.records.reduce((sum: number, r: any) => sum + (r.final_sheep_distance_to_pen ?? 0), 0);
+          avgDistText = (totalDist / totalCount).toFixed(1);
+
+          const totalSteps = lc.records.reduce((sum: number, r: any) => sum + (r.steps ?? 0), 0);
+          const totalNoProg = lc.records.reduce((sum: number, r: any) => sum + (r.no_progress_steps ?? 0), 0);
+          avgStepsText = `${(totalSteps / totalCount).toFixed(1)} / ${(totalNoProg / totalCount).toFixed(1)}`;
+
+          perSeedRecords = lc.records;
+        } else {
+          successesText = `${Math.round(lc.success_rate * 10)}/10`;
+          timeoutsText = `${Math.round(lc.timeout_rate * 10)}/10`;
+          earlyStopsText = `${Math.round((lc.records?.filter(r => r.stop_reason === "stopped" || r.stopped).length ?? 0) * 10)}/10`;
+          avgRewardText = lc.average_reward.toFixed(1);
+          const maxSheep = lc.environment_config?.sheep ?? 4;
+          avgSheepText = `${lc.average_sheep_penned.toFixed(1)}/${maxSheep}`;
+          avgStepsText = lc.average_completion_steps.toFixed(1);
+        }
+      }
+
+      let gateSectionText = "";
+      if (isCurrentStage) {
+        const gate = diagnostics?.snapshot?.current_stage_promotion_gate || status?.auto_promote_gate;
+        if (gate) {
+          gateSectionText = `- Required success: ${Math.round(gate.success_threshold * gate.seed_count)}/${gate.seed_count}\n` +
+                            `- Current streak: ${gate.qualified_streak}/${gate.min_qualified_streak}\n` +
+                            `- Best success observed: ${gate.best_success}/${gate.seed_count}\n` +
+                            `- Perfect batches observed: ${gate.full_success_hits ?? 0}\n`;
+        } else {
+          gateSectionText = "- No active promotion gate configured or available for this stage.\n";
+        }
+      } else {
+        gateSectionText = "- N/A (Stage already promoted)\n";
+      }
+
+      const trendSuccess3 = computeDerivative(stageCheckpoints, 3, "success_rate");
+      const trendSuccess5 = computeDerivative(stageCheckpoints, 5, "success_rate");
+      const trendSteps = computeDerivative(stageCheckpoints, 3, "average_completion_steps");
+      const trendTimeout = computeDerivative(stageCheckpoints, 3, "timeout_rate");
+
+      let klVal = "N/A";
+      let clipVal = "N/A";
+      let evVal = "N/A";
+
+      const lcForStage = stageCheckpoints[stageCheckpoints.length - 1];
+      const activeKL = isCurrentStage ? (status?.approx_kl ?? lcForStage?.approx_kl) : lcForStage?.approx_kl;
+      const activeClip = isCurrentStage ? (status?.clip_fraction ?? lcForStage?.clip_fraction) : lcForStage?.clip_fraction;
+      const activeEV = isCurrentStage ? (status?.explained_variance ?? lcForStage?.explained_variance) : lcForStage?.explained_variance;
+
+      if (activeKL !== undefined && activeKL !== null) klVal = activeKL.toFixed(4);
+      if (activeClip !== undefined && activeClip !== null) clipVal = `${(activeClip * 100).toFixed(1)}%`;
+      if (activeEV !== undefined && activeEV !== null) evVal = activeEV.toFixed(3);
+
+      let seedTableText = "";
+      if (perSeedRecords.length > 0) {
+        seedTableText = "| Seed | Success/Failure | Reward | Steps | Termination Reason |\n" +
+                        "|---|---|---|---|---|\n";
+        for (const r of perSeedRecords) {
+          const succText = r.success ? "SUCCESS" : "FAILED";
+          const rewardVal = r.reward_total !== undefined && r.reward_total !== null ? r.reward_total.toFixed(1) : "N/A";
+          const stepsVal = r.steps !== undefined && r.steps !== null ? r.steps : "N/A";
+          const termReason = r.stop_reason || (r.timeout ? "timeout" : r.stopped ? "stopped" : "success");
+          seedTableText += `| ${r.seed} | ${succText} | ${rewardVal} | ${stepsVal} | ${termReason} |\n`;
+        }
+      } else {
+        seedTableText = "No per-seed evaluation records available.\n";
+      }
+
+      md += `CURRENT STAGE SUMMARY\n\n`;
+      md += `Stage: ${S}\n`;
+      md += `Description: ${STAGE_DESCRIPTIONS[S] ?? "Unknown Stage"}\n\n`;
+      md += `Latest checkpoint: ${latestCpEpisode}\n`;
+      md += `Policy version: ${polVersion}\n`;
+      md += `Stage episodes trained: ${status?.stage_history?.[S.toString()] ?? 0}\n\n`;
+      
+      md += `Latest ${perSeedRecords.length || 10}-seed evaluation:\n`;
+      md += `- Successes: ${successesText}\n`;
+      md += `- Timeouts: ${timeoutsText}\n`;
+      md += `- Early stops: ${earlyStopsText}\n`;
+      md += `- Average reward: ${avgRewardText}\n`;
+      md += `- Average sheep penned: ${avgSheepText}\n`;
+      md += `- Average distance remaining: ${avgDistText}\n`;
+      md += `- Average completion/no-progress steps: ${avgStepsText}\n\n`;
+
+      md += `Promotion gate:\n`;
+      md += gateSectionText + `\n`;
+
+      md += `Recent current-stage trend:\n`;
+      md += `- Success trend over 3 checkpoints: ${trendSuccess3}\n`;
+      md += `- Success trend over 5 checkpoints: ${trendSuccess5}\n`;
+      md += `- Average steps trend: ${trendSteps}\n`;
+      md += `- Timeout trend: ${trendTimeout}\n\n`;
+
+      md += `PPO health:\n`;
+      md += `- KL: ${klVal}\n`;
+      md += `- Clip fraction: ${clipVal}\n`;
+      md += `- Explained variance: ${evVal}\n\n`;
+
+      md += `Per-seed results:\n`;
+      md += seedTableText + `\n`;
+      md += `---\n\n`;
+    }
+  }
+
   if (apiErrorDetails) {
     md += `> [!CAUTION]\n`;
     md += `> **DIAGNOSTICS API FAILURE**\n`;
@@ -465,24 +879,29 @@ function formatAgentReport(
   md += `\n`;
 
   // 2. System Overview and Report Identity
+  const authoritativeStage = snap.active_curriculum_stage !== undefined && snap.active_curriculum_stage !== null ? snap.active_curriculum_stage : currentStage;
+  const authoritativeStageName = snap.active_stage_name || STAGE_DESCRIPTIONS[authoritativeStage] || "Unknown Stage";
+  const authoritativePolicyVersion = snap.active_policy_version !== undefined && snap.active_policy_version !== null ? snap.active_policy_version : (snap.policy_version ?? "N/A");
+  const authoritativeCheckpointId = snap.active_checkpoint_id || snap.evaluation_checkpoint_id || "N/A";
+
   md += `## 2. System Overview and Report Identity\n`;
   md += `- **Report Generation Time**: ${timestamp}\n`;
   md += `- **Snapshot Timestamp**: ${fVal(snap.snapshot_timestamp)}\n`;
   md += `- **Active Run ID**: ${fVal(snap.active_run_id)}\n`;
   md += `- **Loaded Model ID**: ${fVal(snap.loaded_model_id)}\n`;
-  md += `- **Active Checkpoint ID**: ${fVal(snap.active_checkpoint_id)}\n`;
+  md += `- **Active Checkpoint ID**: ${fVal(authoritativeCheckpointId)}\n`;
   if (snap.is_legacy) {
     md += `- **Legacy Policy Version**: unknown\n`;
     md += `- **Legacy PPO Update Count**: unknown\n`;
     md += `- **Diagnostic Baseline Version**: 0\n`;
     md += `- **Updates since Instrumentation**: 0\n`;
   } else {
-    md += `- **Policy Version / Update Number**: ${fVal(snap.policy_version)}\n`;
+    md += `- **Policy Version / Update Number**: ${fVal(authoritativePolicyVersion)}\n`;
     md += `- **PPO Update Count**: ${fVal(snap.ppo_update_count)}\n`;
     md += `- **Diagnostic Baseline Version**: 0\n`;
     md += `- **Updates since Instrumentation**: ${snap.ppo_update_count !== null && snap.ppo_update_count !== undefined ? snap.ppo_update_count : 0}\n`;
   }
-  md += `- **Current Curriculum Stage**: Stage ${currentStage} (${stageDesc})\n`;
+  md += `- **Current Curriculum Stage**: Stage ${authoritativeStage} (${authoritativeStageName})\n`;
   md += `- **Training Phase**: ${fVal(status?.phase)} (${fVal(status?.message)})\n`;
   md += `- **Learning Curve Status**: **${learningCurveStatus}**\n`;
   md += `  - *Explanation*: ${analysisExplanation}\n`;
@@ -527,37 +946,40 @@ function formatAgentReport(
   md += `\n## 3. Evaluation Metrics\n`;
 
   md += `\n### Latest Completed Evaluation\n`;
-  const evalVersion = snap.evaluation_policy_version;
-  const currentPolicyVersion = status?.policy_version;
-  const isStaleEvaluation = evalVersion !== null && currentPolicyVersion !== undefined && evalVersion < currentPolicyVersion;
-  if (isStaleEvaluation) {
-    md += `> [!WARNING]\n`;
-    md += `> **Latest completed evaluation is stale relative to the active policy.**\n`;
-    md += `> - Evaluated Policy Version: \`v${evalVersion}\` (Checkpoint: ${snap.evaluation_checkpoint_id || "N/A"})\n`;
-    md += `> - Active Policy Version: \`v${currentPolicyVersion}\` (Currently training/queued)\n\n`;
-  }
+  const latestEval = snap.latest_current_stage_evaluation || snap.latest_any_stage_evaluation || null;
+  const evalEpisode = latestEval ? latestEval.checkpoint_episode : null;
+  const evalSuccess = latestEval ? latestEval.success_rate : null;
+  const evalReward = latestEval ? latestEval.average_reward : null;
+  const evalTimeout = latestEval ? latestEval.timeout_rate : null;
+  const evalStopped = latestEval ? latestEval.stopped_rate : null;
+  const evalNoProgress = latestEval ? latestEval.average_no_progress_steps : null;
+  const evalPenned = latestEval ? latestEval.average_sheep_penned : null;
+  const evalDist = latestEval ? (latestEval.average_distance_to_pen ?? latestEval.average_sheep_distance_to_pen) : null;
+  const evalSpread = latestEval ? latestEval.average_flock_spread : null;
+  const evalFarthestPen = latestEval ? latestEval.average_farthest_distance_to_pen : null;
+  const evalFarthestFlock = latestEval ? latestEval.average_farthest_distance_to_flock_center : null;
 
-  if (snap.evaluation_timestamp && snap.evaluation_timestamp !== "Unknown") {
-    md += `- **Checkpoint Evaluated**: ${fVal(snap.evaluation_checkpoint_id || (snap.evaluation_checkpoint_episode !== undefined ? `ep ${snap.evaluation_checkpoint_episode}` : null))}\n`;
-    md += `- **Policy Version Evaluated**: v${fVal(evalVersion)}\n`;
-    md += `- **Evaluation Timestamp**: ${fVal(snap.evaluation_timestamp)}\n`;
-    if (status) {
-      md += `- **Success Rate**: ${status.latest_success_rate !== null && status.latest_success_rate !== undefined ? `${Math.round(status.latest_success_rate * 100)}%` : "N/A"}\n`;
-      md += `- **Avg Reward**: ${status.latest_avg_reward ?? "N/A"}\n`;
-      md += `- **Timeout Rate**: ${status.latest_timeout_rate !== null && status.latest_timeout_rate !== undefined ? `${Math.round(status.latest_timeout_rate * 100)}%` : "N/A"}\n`;
-      md += `- **Stopped Rate**: ${status.latest_stopped_rate !== null && status.latest_stopped_rate !== undefined ? `${Math.round(status.latest_stopped_rate * 100)}%` : "N/A"}\n`;
-      md += `- **Avg No-Progress Steps**: ${status.latest_avg_no_progress_steps ?? "N/A"}\n`;
-      md += `- **Avg Sheep Penned**: ${status.latest_avg_sheep_penned ?? "N/A"}\n`;
-      md += `- **Avg Distance to Pen**: ${status.latest_avg_distance_to_pen ?? "N/A"}\n`;
-      md += `- **Avg Flock Spread**: ${status.latest_avg_flock_spread ?? "N/A"}\n`;
-      md += `- **Avg Farthest Distance to Pen**: ${status.latest_avg_farthest_distance_to_pen ?? "N/A"}\n`;
-      md += `- **Avg Farthest Distance to Flock Center**: ${status.latest_avg_farthest_distance_to_flock_center ?? "N/A"}\n`;
-    }
+  if (latestEval) {
+    md += `- **Checkpoint Evaluated**: ${fVal(latestEval.checkpoint_id || (evalEpisode !== null ? `ep ${evalEpisode}` : null))}\n`;
+    md += `- **Policy Version Evaluated**: v${fVal(latestEval.policy_version)}\n`;
+    md += `- **Evaluation Timestamp**: ${fVal(latestEval.evaluation_timestamp || latestEval.created_timestamp)}\n`;
+    md += `- **Success Rate**: ${evalSuccess !== null ? `${Math.round(evalSuccess * 100)}%` : "N/A"}\n`;
+    md += `- **Avg Reward**: ${evalReward ?? "N/A"}\n`;
+    md += `- **Timeout Rate**: ${evalTimeout !== null ? `${Math.round(evalTimeout * 100)}%` : "N/A"}\n`;
+    md += `- **Stopped Rate**: ${evalStopped !== null ? `${Math.round(evalStopped * 100)}%` : "N/A"}\n`;
+    md += `- **Avg No-Progress Steps**: ${evalNoProgress ?? "N/A"}\n`;
+    md += `- **Avg Sheep Penned**: ${evalPenned ?? "N/A"}\n`;
+    md += `- **Avg Distance to Pen**: ${evalDist ?? "N/A"}\n`;
+    md += `- **Avg Flock Spread**: ${evalSpread ?? "N/A"}\n`;
+    md += `- **Avg Farthest Distance to Pen**: ${evalFarthestPen ?? "N/A"}\n`;
+    md += `- **Avg Farthest Distance to Flock Center**: ${evalFarthestFlock ?? "N/A"}\n`;
   } else {
     md += `- **Status**: No completed evaluations found.\n`;
   }
 
   md += `\n### Current Active Policy\n`;
+  const currentPolicyVersion = status?.policy_version;
+  const evalVersion = snap.evaluation_policy_version;
   if (currentPolicyVersion !== undefined && currentPolicyVersion !== null) {
     md += `- **Active Policy Version**: v${currentPolicyVersion}\n`;
     const hasEvaluatedCurrent = evalVersion !== null && evalVersion === currentPolicyVersion;
@@ -581,14 +1003,32 @@ function formatAgentReport(
     md += `No training status details available.\n`;
   }
 
-  if (status?.auto_promote_gate) {
-    const gate = status.auto_promote_gate;
+  const gate = snap.current_stage_promotion_gate;
+  if (gate) {
     md += `\n### Auto-Promote Gate Diagnostics\n`;
     md += `- **Gate Decision**: \`${gate.decision.toUpperCase()}\` (Reason: ${gate.reason})\n`;
     md += `- **Streak Count**: ${gate.qualified_streak} / ${gate.min_qualified_streak} qualified batches\n`;
     md += `- **Seed Check**: ${gate.seed_count} seeds evaluated (Gate target: ${gate.seed_gate_target_met ? "MET" : "NOT MET"})\n`;
     md += `- **Success Rate Check**: ${gate.success_count} fully success seeds (Gate target: ${gate.success_threshold * 100}% threshold, current average is ${gate.success_rate_ok ? "OK" : "BELOW TARGET"})\n`;
     md += `- **Timeout Rate Check**: ${gate.timeout_ok ? "OK" : "TOO HIGH"}\n`;
+  }
+
+  const prevPromotion = snap.previous_stage_promotion_result;
+  if (prevPromotion) {
+    const isLegacy = prevPromotion.checkpoint_id === undefined || prevPromotion.policy_version === undefined || prevPromotion.seed_set_id === undefined;
+    
+    md += `\n### Previous Stage Promotion Result\n`;
+    md += `- **Promoted At**: ${prevPromotion.promoted_at || prevPromotion.timestamp || "null"}\n`;
+    md += `- **From Stage**: ${prevPromotion.from_stage !== undefined && prevPromotion.from_stage !== null ? `Stage ${prevPromotion.from_stage}` : "null"}\n`;
+    md += `- **To Stage**: ${prevPromotion.to_stage !== undefined && prevPromotion.to_stage !== null ? `Stage ${prevPromotion.to_stage}` : "null"}\n`;
+    md += `- **Trigger Checkpoint**: ${prevPromotion.trigger_checkpoint_id || prevPromotion.checkpoint_id || "null"} (episode ${prevPromotion.trigger_checkpoint_episode !== undefined ? prevPromotion.trigger_checkpoint_episode : "null"})\n`;
+    md += `- **Policy Version**: ${prevPromotion.trigger_policy_version !== undefined ? `v${prevPromotion.trigger_policy_version}` : prevPromotion.policy_version !== undefined ? `v${prevPromotion.policy_version}` : "null"}\n`;
+    md += `- **Seed Set ID**: ${prevPromotion.evaluation_seed_set_id || prevPromotion.seed_set_id || "null"}\n`;
+    md += `- **Streak**: ${prevPromotion.qualified_streak !== undefined && prevPromotion.qualified_streak !== null ? `${prevPromotion.qualified_streak} qualified batches` : "null"}\n`;
+    
+    if (isLegacy) {
+      md += `\n> ⚠️ **Warning**: This is a legacy promotion record. Some stage identity contract fields are missing.\n`;
+    }
   }
 
   if (snapshotData?.scenario_coverage) {
@@ -916,7 +1356,7 @@ function formatAgentReport(
   return md;
 }
 
-function computeDerivative(checkpoints: CheckpointEntry[], window: number, field: "success_rate" | "average_completion_steps"): string {
+function computeDerivative(checkpoints: CheckpointEntry[], window: number, field: "success_rate" | "average_completion_steps" | "timeout_rate"): string {
   if (checkpoints.length <= window) return "Unavailable (Insufficient checkpoints)";
   const latest = checkpoints[checkpoints.length - 1];
   const prior = checkpoints[checkpoints.length - 1 - window];

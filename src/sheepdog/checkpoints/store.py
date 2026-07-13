@@ -51,9 +51,29 @@ class CheckpointMetadata:
     clip_fraction: float | None = None
     explained_variance: float | None = None
     training_scenario_coverage: dict[str, Any] | None = None
+    curriculum_stage: int = 1
+    evaluation_seed_set_id: str | None = None
+    evaluation_seed_count: int | None = None
+    environment_config_hash: str | None = None
+    evaluation_timestamp: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def compute_env_config_hash(env_config: dict[str, Any]) -> str:
+    import hashlib
+    import json
+    serialized = json.dumps(env_config, sort_keys=True)
+    return hashlib.md5(serialized.encode("utf-8")).hexdigest()
+
+
+def compute_seed_set_id(seeds: list[int] | tuple[int, ...]) -> str:
+    import hashlib
+    import json
+    serialized = json.dumps(sorted(list(seeds)))
+    return hashlib.md5(serialized.encode("utf-8")).hexdigest()
+
 
 
 class CheckpointStore:

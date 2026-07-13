@@ -991,4 +991,55 @@ describe("App", () => {
     expect(within(statusPanel).getByText("3")).toBeInTheDocument();
     expect(within(statusPanel).getAllByText("timeout")).toHaveLength(2);
   });
+
+  it("persists insights view filters in localStorage", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.mocked(fetch);
+
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.includes("/api/training/status")) {
+        return jsonResponse({
+          ...idleTrainingStatus,
+          curriculum_stage: 3,
+          latest_checkpoint_episode: 90,
+          total_episodes_trained: 90,
+        });
+      }
+      if (path.includes("checkpoint-index.json")) {
+        return jsonResponse(multiStageCheckpointIndex);
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    // Populate localStorage
+    window.localStorage.setItem("sheepdog_insights_view_window", "25");
+    window.localStorage.setItem("sheepdog_insights_stage_scope", "current");
+    window.localStorage.setItem("sheepdog_insights_active_chart", "history");
+
+    render(<App />);
+
+    // Go to Insights tab
+    await user.click(screen.getByRole("tab", { name: "Insights" }));
+
+    // Verify localStorage values are loaded
+    const stageSelect = screen.getByLabelText("Stage scope") as HTMLSelectElement;
+    expect(stageSelect.value).toBe("current");
+
+    const activeChartTab = screen.getByRole("tab", { name: "History", selected: true });
+    expect(activeChartTab).toBeInTheDocument();
+
+    const last25Button = screen.getByRole("button", { name: "Last 25" });
+    expect(last25Button.className).toContain("chart-tab--active");
+
+    // Change filters
+    await user.selectOptions(stageSelect, "all");
+    await user.click(screen.getByRole("button", { name: "Last 50" }));
+    await user.click(screen.getByRole("tab", { name: "Avg Reward" }));
+
+    // Verify changes are persisted in localStorage
+    expect(window.localStorage.getItem("sheepdog_insights_stage_scope")).toBe("all");
+    expect(window.localStorage.getItem("sheepdog_insights_view_window")).toBe("50");
+    expect(window.localStorage.getItem("sheepdog_insights_active_chart")).toBe("reward");
+  });
 });

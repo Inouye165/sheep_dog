@@ -329,3 +329,82 @@ def test_legacy_checkpoint_compatibility() -> None:
     assert len(res_bad["errors"]) > 0
 
 
+def test_identity_metadata_and_hard_guard() -> None:
+    from sheepdog.checkpoints.store import compute_env_config_hash, compute_seed_set_id, CheckpointMetadata
+    from sheepdog.evaluation.evaluator import EvaluationSummary
+    from sheepdog.config import LabConfig
+
+    # 1. Hashing utilities
+    from dataclasses import asdict
+    config = LabConfig()
+    env_hash = compute_env_config_hash(asdict(config.environment))
+    assert isinstance(env_hash, str)
+    assert len(env_hash) == 32  # md5 hex
+
+    seed_hash = compute_seed_set_id([11, 23, 37])
+    assert isinstance(seed_hash, str)
+    assert len(seed_hash) == 32  # md5 hex
+
+    # 2. CheckpointMetadata identity
+    cp_meta = CheckpointMetadata(
+        checkpoint_episode=50,
+        total_training_episodes=50,
+        policy_name="instinct_only",
+        seed=11,
+        success_rate=0.8,
+        average_completion_steps=100.0,
+        timeout_rate=0.1,
+        average_sheep_penned=3.0,
+        average_reward=15.0,
+        environment_config={},
+        reward_config={},
+        checkpoint_id="chk_test_123",
+        policy_version=42,
+        curriculum_stage=2,
+        evaluation_seed_set_id="seeds_123",
+        evaluation_seed_count=5,
+        environment_config_hash=env_hash,
+        evaluation_timestamp="2026-07-11T12:00:00Z"
+    )
+    assert cp_meta.checkpoint_id == "chk_test_123"
+    assert cp_meta.policy_version == 42
+    assert cp_meta.curriculum_stage == 2
+    assert cp_meta.evaluation_seed_set_id == "seeds_123"
+    assert cp_meta.evaluation_seed_count == 5
+    assert cp_meta.environment_config_hash == env_hash
+    assert cp_meta.evaluation_timestamp == "2026-07-11T12:00:00Z"
+
+    # 3. EvaluationSummary identity
+    eval_sum = EvaluationSummary(
+        checkpoint_episode=50,
+        policy_name="instinct_only",
+        records=(),
+        success_rate=0.8,
+        average_reward=15.0,
+        timeout_rate=0.1,
+        average_completion_steps=100.0,
+        average_completion_seconds=30.0,
+        average_sheep_penned=3.0,
+        average_distance_to_pen=5.0,
+        average_flock_spread=2.0,
+        average_farthest_distance_to_pen=10.0,
+        average_farthest_distance_to_flock_center=4.0,
+        stopped_rate=0.0,
+        average_no_progress_steps=0.0,
+        curriculum_stage=2,
+        evaluation_seed_set_id="seeds_123",
+        evaluation_seed_count=5,
+        environment_config_hash=env_hash,
+        evaluation_timestamp="2026-07-11T12:00:00Z",
+        checkpoint_id="chk_test_123",
+        policy_version=42
+    )
+    assert eval_sum.curriculum_stage == 2
+    assert eval_sum.evaluation_seed_set_id == "seeds_123"
+    assert eval_sum.evaluation_seed_count == 5
+    assert eval_sum.environment_config_hash == env_hash
+    assert eval_sum.evaluation_timestamp == "2026-07-11T12:00:00Z"
+    assert eval_sum.checkpoint_id == "chk_test_123"
+    assert eval_sum.policy_version == 42
+
+

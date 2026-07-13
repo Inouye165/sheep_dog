@@ -55,9 +55,11 @@ class _TrainingProgressCallback(BaseCallback):
         completed_segments: int,
         segment_index: int,
         policy_version: int,
+        starting_total: int,
     ) -> None:
         super().__init__()
         self._emit = emit
+        self._starting_total = starting_total
         self._should_stop = should_stop
         self._report_interval = max(1, report_interval)
         self._total_timesteps = max(1, total_timesteps)
@@ -95,8 +97,8 @@ class _TrainingProgressCallback(BaseCallback):
                 "phase": "learning",
                 "batch_completed_episodes": fractional_completed,
                 "actual_completed_episodes": actual_completed_episodes,
-                "current_episode": self._segment_index,
-                "total_episodes_trained": self._starting_total_episodes,
+                "current_episode": self._starting_total + actual_completed_episodes,
+                "total_episodes_trained": self._starting_total + actual_completed_episodes,
                 "checkpoint_episode": None,
                 "best_score": None,
                 "message": (
@@ -428,6 +430,7 @@ class MaskablePPOTrainer(Trainer):
                 completed_segments=completed_checkpoints - 1,
                 segment_index=completed_checkpoints - 1,
                 policy_version=policy_version,
+                starting_total=starting_total,
             )
             from stable_baselines3.common.callbacks import CallbackList
             callbacks_to_use = [progress_reporter]
@@ -551,10 +554,24 @@ class MaskablePPOTrainer(Trainer):
                 break
             saved_model_path = policy.save(model_root / f"maskable-ppo-{cumulative_ts:08d}")
             total_eps_this_checkpoint = starting_total + _checkpoint_slot
+            run_id = self._loaded_state.get("run_id")
+            chk_id = f"chk_{run_id}_ep_{total_eps_this_checkpoint}"
+            recorded_time = datetime.now(UTC).isoformat()
+            active_stage = self.config.rewards.instincts.curriculum_stage
+
+            from sheepdog.checkpoints.store import (
+                compute_env_config_hash,
+                compute_seed_set_id,
+            )
+
             summary, evaluation_json, _csv_path = self.evaluator.evaluate(
                 policy,
                 train_config.evaluation_seeds,
                 checkpoint_episode=total_eps_this_checkpoint,
+                run_id=run_id,
+                checkpoint_id=chk_id,
+                policy_version=policy_version,
+                curriculum_stage=active_stage,
             )
             representative_replay_path = Path(summary.records[0].replay_path)
             metadata = CheckpointMetadata(
@@ -574,8 +591,8 @@ class MaskablePPOTrainer(Trainer):
                 policy_state_path=str(saved_model_path),
                 policy_config=policy.config.to_dict(),
                 evaluation_replay_path=str(representative_replay_path),
-                run_id=self._loaded_state.get("run_id"),
-                checkpoint_id=f"chk_{self._loaded_state.get('run_id')}_ep_{total_eps_this_checkpoint}",
+                run_id=run_id,
+                checkpoint_id=chk_id,
                 parent_run_id=self._loaded_state.get("parent_run_id"),
                 parent_checkpoint_id=self._loaded_state.get("parent_checkpoint_id"),
                 global_timestep=cumulative_ts,
@@ -583,7 +600,7 @@ class MaskablePPOTrainer(Trainer):
                 action_space_hash=get_action_space_hash(),
                 reward_schema_version=REWARD_SCHEMA_VERSION,
                 env_config_version=ENV_CONFIG_VERSION,
-                created_timestamp=datetime.now(UTC).isoformat(),
+                created_timestamp=recorded_time,
                 deterministic_evaluation=True,
                 evaluation_seeds=list(train_config.evaluation_seeds),
                 policy_version=policy_version,
@@ -595,6 +612,11 @@ class MaskablePPOTrainer(Trainer):
                 clip_fraction=clip_fraction,
                 explained_variance=explained_variance,
                 training_scenario_coverage=curr_coverage,
+                curriculum_stage=active_stage,
+                evaluation_seed_set_id=compute_seed_set_id(train_config.evaluation_seeds),
+                evaluation_seed_count=len(train_config.evaluation_seeds),
+                environment_config_hash=compute_env_config_hash(self.config.to_dict()["environment"]),
+                evaluation_timestamp=recorded_time,
             )
             current_stage = self.config.rewards.instincts.curriculum_stage
             is_new_best = (
@@ -625,7 +647,7 @@ class MaskablePPOTrainer(Trainer):
             checkpoint_path = self.checkpoint_store.write(metadata)
             checkpoint_payload = {
                 "checkpoint_episode": total_eps_this_checkpoint,
-                "recorded_at": datetime.now(UTC).isoformat(),
+                "recorded_at": recorded_time,
                 "checkpoint": checkpoint_path.name,
                 "evaluation": evaluation_json.name,
                 "replay": str(representative_replay_path),
@@ -647,8 +669,8 @@ class MaskablePPOTrainer(Trainer):
                 "environment_config": self.config.to_dict()["environment"],
                 "reward_config": self.config.to_dict()["rewards"],
                 "records": [record.to_dict() for record in summary.records],
-                "run_id": self._loaded_state.get("run_id"),
-                "checkpoint_id": f"chk_{self._loaded_state.get('run_id')}_ep_{total_eps_this_checkpoint}",
+                "run_id": run_id,
+                "checkpoint_id": chk_id,
                 "parent_run_id": self._loaded_state.get("parent_run_id"),
                 "parent_checkpoint_id": self._loaded_state.get("parent_checkpoint_id"),
                 "global_timestep": cumulative_ts,
@@ -656,7 +678,7 @@ class MaskablePPOTrainer(Trainer):
                 "action_space_hash": get_action_space_hash(),
                 "reward_schema_version": REWARD_SCHEMA_VERSION,
                 "env_config_version": ENV_CONFIG_VERSION,
-                "created_timestamp": datetime.now(UTC).isoformat(),
+                "created_timestamp": recorded_time,
                 "deterministic_evaluation": True,
                 "evaluation_seeds": list(train_config.evaluation_seeds),
                 "policy_version": policy_version,
@@ -668,6 +690,11 @@ class MaskablePPOTrainer(Trainer):
                 "clip_fraction": clip_fraction,
                 "explained_variance": explained_variance,
                 "training_scenario_coverage": curr_coverage,
+                "curriculum_stage": active_stage,
+                "evaluation_seed_set_id": compute_seed_set_id(train_config.evaluation_seeds),
+                "evaluation_seed_count": len(train_config.evaluation_seeds),
+                "environment_config_hash": compute_env_config_hash(self.config.to_dict()["environment"]),
+                "evaluation_timestamp": recorded_time,
             }
             checkpoint_payloads = self._merge_checkpoint(checkpoint_payloads, checkpoint_payload)
             # Persist state after every checkpoint so progress survives a
