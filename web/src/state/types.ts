@@ -237,6 +237,7 @@ export interface TrainingStartRequest {
   debug_reward_breakdown: boolean;
   auto_promote?: boolean;
   promote_from_checkpoint_episode?: number | null;
+  resume?: boolean;
 }
 
 export interface ReplayRunRequest {
@@ -350,6 +351,7 @@ export interface CheckpointEntry {
     sheep: number;
     width: number;
     height: number;
+    curriculum_stage?: number;
   };
   reward_config?: {
     instincts?: {

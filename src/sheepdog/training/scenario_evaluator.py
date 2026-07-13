@@ -47,7 +47,7 @@ def evaluate_policy_on_scenario_types(
     policy: Policy,
     config: LabConfig,
     *,
-    evaluation_seeds: tuple[int, ...] = (11, 23, 37, 41, 53),
+    evaluation_seeds: tuple[int, ...] = (11, 23, 37, 41, 53, 59, 61, 67, 71, 73),
     scenario_types: tuple[str, ...] | None = None,
 ) -> dict[str, ScenarioTypeEvaluationResult]:
     """Evaluate a policy against each scenario type separately.

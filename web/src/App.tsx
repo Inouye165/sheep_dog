@@ -105,6 +105,16 @@ const RECOMMENDED_EPISODES_BY_STAGE: Record<number, number> = {
 function recommendedEpisodesForStage(stage: number): number {
   return RECOMMENDED_EPISODES_BY_STAGE[stage] ?? 100;
 }
+
+function getCheckpointStage(c: CheckpointEntry): number {
+  if (c.reward_config?.instincts?.curriculum_stage !== undefined && c.reward_config?.instincts?.curriculum_stage !== null) {
+    return c.reward_config.instincts.curriculum_stage;
+  }
+  if (c.environment_config?.curriculum_stage !== undefined && c.environment_config?.curriculum_stage !== null) {
+    return c.environment_config.curriculum_stage;
+  }
+  return -1;
+}
 function resolveRunState(snapshot: ReplaySnapshot | null, currentState: RunState): RunState {
   if (!snapshot) {
     return currentState;
@@ -204,7 +214,11 @@ export function App() {
     manualStageOverrideRef.current = false;
     setTrainingCurriculumStage(reportedStage);
     localStorage.setItem("sheepdog_curriculum_stage", String(reportedStage));
-    setTrainingEpisodes(recommendedEpisodesForStage(reportedStage));
+    if (status?.running) {
+      setTrainingEpisodes(status.requested_episodes ?? recommendedEpisodesForStage(reportedStage));
+    } else {
+      setTrainingEpisodes(recommendedEpisodesForStage(reportedStage));
+    }
   }, []);
 
   async function handleCurriculumStageChange(nextStage: number) {
@@ -297,7 +311,7 @@ export function App() {
     // promoting immediately after a 100% run doesn't falsely show "ready to promote"
     // for the new stage before any training has been done.
     const stageCheckpoints = checkpoints.filter(
-      (c) => c.reward_config?.instincts?.curriculum_stage === effectiveCurriculumStage,
+      (c) => getCheckpointStage(c) === effectiveCurriculumStage,
     );
     if (!stageCheckpoints.length) return null;
     return stageCheckpoints[stageCheckpoints.length - 1]?.success_rate ?? null;
@@ -309,7 +323,7 @@ export function App() {
   // the user sees the peak performance, not just the most recent run.
   const bestStageFormalEntry = useMemo(() => {
     const stageCheckpoints = checkpointIndex?.checkpoints.filter(
-      (c) => c.reward_config?.instincts?.curriculum_stage === effectiveCurriculumStage,
+      (c) => getCheckpointStage(c) === effectiveCurriculumStage,
     ) ?? [];
     if (!stageCheckpoints.length) return null;
     return stageCheckpoints.reduce((best, entry) => {
@@ -362,8 +376,8 @@ export function App() {
   // stage-aware ordering the trainer uses: stage > success_rate > average_reward.
   // Returns true only when candidate is STRICTLY better than current (ties keep current).
   function isStrictlyBetterCheckpoint(candidate: CheckpointEntry, current: CheckpointEntry): boolean {
-    const cStage = candidate.reward_config?.instincts?.curriculum_stage ?? 0;
-    const curStage = current.reward_config?.instincts?.curriculum_stage ?? 0;
+    const cStage = getCheckpointStage(candidate);
+    const curStage = getCheckpointStage(current);
     if (cStage > curStage) return true;
     if (cStage < curStage) return false;
     if (candidate.success_rate > current.success_rate) return true;
@@ -528,6 +542,29 @@ export function App() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!trainingStatus || checkpointIndex !== null) {
+      return;
+    }
+    let active = true;
+    void (async () => {
+      try {
+        const index = await loadCheckpointIndex();
+        if (!active || !index) {
+          return;
+        }
+        applyCheckpointIndex(index);
+        await refreshScenarioIndex();
+        setError(null);
+      } catch {
+        // Silent retry on connection refused / vite 500
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [trainingStatus, checkpointIndex, applyCheckpointIndex]);
 
   useEffect(() => {
     if (activeTab !== "network") {

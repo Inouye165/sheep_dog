@@ -83,12 +83,21 @@ class _HierarchicalProgressCallback(BaseCallback):
             return True
         self._last_reported = n
         completion = min(1.0, n / self._total_timesteps)
+        
+        actual_completed_episodes = 0
+        try:
+            if self.model is not None and self.model.get_env() is not None:
+                curr_counters = self.model.get_env().get_attr("_episode_counter")
+                actual_completed_episodes = int(sum(curr_counters))
+        except Exception:
+            pass
+
         self._emit(
             {
                 "phase": "learning",
                 "batch_completed_episodes": self._completed_segments + completion,
-                "current_episode": self._segment_index,
-                "total_episodes_trained": self._starting_total,
+                "current_episode": self._starting_total + actual_completed_episodes,
+                "total_episodes_trained": self._starting_total + actual_completed_episodes,
                 "checkpoint_episode": None,
                 "best_score": None,
                 "message": (

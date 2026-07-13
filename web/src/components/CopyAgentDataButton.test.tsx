@@ -61,7 +61,23 @@ describe("CopyAgentDataButton", () => {
           reward_schema_version: "v1",
           evaluation_timestamp: "2026-07-10T12:05:00Z",
           evaluation_policy_version: 3,
-          evaluation_checkpoint_id: "chk_test_ep_50"
+          evaluation_checkpoint_id: "chk_test_ep_50",
+          latest_current_stage_evaluation: {
+            checkpoint_id: "chk_test_ep_50",
+            checkpoint_episode: 50,
+            policy_version: 3,
+            evaluation_timestamp: "2026-07-10T12:05:00Z",
+            success_rate: 0.6,
+            average_reward: 12.0,
+            timeout_rate: 0.2,
+            stopped_rate: 0.0,
+            average_no_progress_steps: 0.0,
+            average_sheep_penned: 3.0,
+            average_distance_to_pen: 5.0,
+            average_flock_spread: 2.0,
+            average_farthest_distance_to_pen: 10.0,
+            average_farthest_distance_to_flock_center: 4.0
+          }
         },
         completeness: {
           table: [],
@@ -190,6 +206,10 @@ describe("CopyAgentDataButton", () => {
     const button = screen.getByRole("button", { name: "Copy agent data to clipboard" });
     fireEvent.click(button);
 
+    // Click confirm copy in modal
+    const confirmBtn = screen.getByRole("button", { name: "Copy to Clipboard" });
+    fireEvent.click(confirmBtn);
+
     await waitFor(() => {
       expect(loadHyperparams).toHaveBeenCalled();
       expect(loadTrainingDiagnostics).toHaveBeenCalled();
@@ -232,6 +252,10 @@ describe("CopyAgentDataButton", () => {
     const button = screen.getByRole("button", { name: "Copy agent data to clipboard" });
     fireEvent.click(button);
 
+    // Click confirm copy in modal
+    const confirmBtn = screen.getByRole("button", { name: "Copy to Clipboard" });
+    fireEvent.click(confirmBtn);
+
     await waitFor(() => {
       expect(loadTrainingDiagnostics).toHaveBeenCalled();
     });
@@ -248,5 +272,69 @@ describe("CopyAgentDataButton", () => {
 
     // Button text changes to "Diagnostics unavailable"
     expect(screen.getByText("Diagnostics unavailable")).toBeInTheDocument();
+  });
+
+  it("allows selecting a single stage and formats the stage summary", async () => {
+    const mockHyperparams = {
+      training: { learning_rate: 0.0003 },
+      rewards: { terminal_success_reward: 10 },
+      environment: { sheep_speed: 1.0 },
+    };
+    vi.mocked(loadHyperparams).mockResolvedValue(mockHyperparams as any);
+    vi.mocked(loadTrainingDiagnostics).mockResolvedValue({
+      diagnosticsAvailable: true,
+      snapshot: {
+        snapshot: {
+          active_curriculum_stage: 1,
+          ppo_update_count: 5
+        },
+        completeness: { table: [], readiness: "READY", reasons: [] }
+      }
+    } as any);
+
+    render(
+      <CopyAgentDataButton
+        trainingStatus={null}
+        checkpointIndex={{
+          checkpoints: [
+            {
+              checkpoint_episode: 50,
+              success_rate: 0.8,
+              timeout_rate: 0.0,
+              average_completion_steps: 100,
+              average_completion_seconds: 10,
+              average_sheep_penned: 4.0,
+              average_reward: 15.0,
+              records: [
+                { seed: 42, success: true, steps: 10, simulated_seconds: 5, sheep_penned: 4, final_sheep_distance_to_pen: 0, no_progress_steps: 0, reward_total: 15, reward_breakdown: {} as any, replay_path: "" }
+              ],
+              reward_config: { instincts: { curriculum_stage: 1 } }
+            }
+          ],
+          latest: null
+        }}
+        curriculumStage={1}
+      />
+    );
+
+    const button = screen.getByRole("button", { name: "Copy agent data to clipboard" });
+    fireEvent.click(button);
+
+    // Verify modal is open
+    expect(screen.getByText("Copy Agent Data - Select Stage")).toBeInTheDocument();
+
+    // Select "Current Stage" and click "Copy to Clipboard"
+    const confirmBtn = screen.getByRole("button", { name: "Copy to Clipboard" });
+    fireEvent.click(confirmBtn);
+
+    await waitFor(() => {
+      expect(mockWriteText).toHaveBeenCalled();
+    });
+
+    const copiedText = mockWriteText.mock.calls[0][0];
+    expect(copiedText).toContain("CURRENT STAGE SUMMARY");
+    expect(copiedText).toContain("Stage: 1");
+    expect(copiedText).toContain("- Successes: 1/1");
+    expect(copiedText).toContain("- Average reward: 15.0");
   });
 });

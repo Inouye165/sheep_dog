@@ -283,12 +283,17 @@ export function TrainingPanel({
   const progress = denominator === 0 ? 0 : Math.min(1, batchCompletedEpisodes / denominator);
   const progressPct = Math.round(progress * 100);
   const completedDisplay = Math.floor(batchCompletedEpisodes);
+  const activeEpisode = Math.min(denominator, Math.floor(batchCompletedEpisodes) + 1);
+  const displayEpisodeIndex =
+    currentEpisode !== null && startingEpisode != null && currentEpisode >= startingEpisode
+      ? currentEpisode - startingEpisode
+      : (currentEpisode ?? 0);
   const safeTotal = Number.isFinite(totalEpisodesTrained) ? totalEpisodesTrained : 0;
   const safeGrand = Number.isFinite(grandTotalEpisodes) ? grandTotalEpisodes : 0;
   const stageHistoryEntries = Object.entries(stageHistory)
     .filter(([, v]) => v > 0)
     .sort(([a], [b]) => Number(a) - Number(b));
-  const busy = running || clearing;
+  const busy = running || clearing || phase === "restoring" || phase === "restore_failed";
   const stageDesc = STAGE_DESCRIPTIONS[curriculumStage] ?? `Stage ${curriculumStage}`;
   const successPct = successRate !== null ? `${Math.round(successRate * 100)}%` : "—";
   const successGood = successRate !== null && successRate >= 0.5;
@@ -599,10 +604,17 @@ export function TrainingPanel({
             >
               <div className="progress-shell__bar" style={{ width: `${progress * 100}%` }} />
             </div>
-            <div style={{ fontSize: "0.72rem", color: "var(--muted)", marginTop: "0.1rem", textAlign: "center" }}>
-              {running && currentEpisode !== null
-                ? `Episode ${currentEpisode + 1} of ${denominator || "—"}`
-                : `${completedDisplay}/${denominator || "—"} completed`}
+            <div style={{ fontSize: "0.72rem", color: "var(--muted)", marginTop: "0.1rem", display: "flex", justifyContent: "space-between", padding: "0 0.2rem" }}>
+              {running && currentEpisode !== null ? (
+                <>
+                  <span>Episode {activeEpisode} of {denominator || "—"}</span>
+                  <span>{displayEpisodeIndex} env episodes herded</span>
+                </>
+              ) : (
+                <div style={{ width: "100%", textAlign: "center" }}>
+                  {completedDisplay}/{denominator || "—"} completed
+                </div>
+              )}
             </div>
           </div>
 

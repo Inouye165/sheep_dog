@@ -537,7 +537,7 @@ export function ResultsPanel({ checkpointIndex }: ResultsPanelProps) {
 
             return (
               <MilestoneCard
-                key={cpKey}
+                key={`stage-${item.stage}-slot-${item.slot}-${cpKey}`}
                 checkpoint={item.checkpoint}
                 snapshot={snapshot}
                 stage={item.stage}

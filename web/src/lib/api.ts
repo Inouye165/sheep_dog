@@ -26,7 +26,18 @@ async function fetchJson<T>(path: string, init?: RequestInit, baseUrl?: string):
   const requestUrl = baseUrl ? new URL(path, baseUrl) : path;
   const response = await fetch(requestUrl, { cache: "no-store", ...init });
   if (!response.ok) {
-    const error = new Error(`Failed to fetch ${path}: ${response.status}`) as Error & { status?: number };
+    let errMsg = `Failed to fetch ${path}: ${response.status}`;
+    try {
+      if (isJsonResponse(response)) {
+        const errJson = await response.clone().json();
+        if (errJson && typeof errJson === "object" && "error" in errJson) {
+          errMsg = String(errJson.error);
+        }
+      }
+    } catch {
+      // ignore
+    }
+    const error = new Error(errMsg) as Error & { status?: number };
     error.status = response.status;
     throw error;
   }

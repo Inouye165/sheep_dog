@@ -170,7 +170,7 @@ def test_build_training_job_config_applies_fast_mode_and_curriculum() -> None:
     assert config.training.trainer_type == "maskable_ppo"
     assert config.training.policy_type == "neural"
     assert config.policy.policy_mode == "neural_policy"
-    assert config.training.evaluation_seeds == (11, 23, 37)
+    assert config.training.evaluation_seeds == (11, 23, 37, 41, 53, 59, 61, 67, 71, 73)
     assert config.training.candidate_evaluation_seeds == TrainingConfig().candidate_evaluation_seeds
     assert config.training.candidate_pool_size == TrainingConfig().candidate_pool_size
     assert config.rewards.instincts.enable_instinct_rewards is True
@@ -300,9 +300,9 @@ def test_training_evaluation_keeps_fixed_checkpoint_seeds(tmp_path: Path) -> Non
     captured: list[tuple[int, ...]] = []
     original_evaluate = trainer.evaluator.evaluate
 
-    def wrapped_evaluate(policy: object, seeds: tuple[int, ...], checkpoint_episode: int):
+    def wrapped_evaluate(policy: object, seeds: tuple[int, ...], checkpoint_episode: int, *args, **kwargs):
         captured.append(seeds)
-        return original_evaluate(policy, seeds, checkpoint_episode)
+        return original_evaluate(policy, seeds, checkpoint_episode, *args, **kwargs)
 
     trainer.evaluator.evaluate = wrapped_evaluate  # type: ignore[method-assign]
 
