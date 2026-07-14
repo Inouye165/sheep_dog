@@ -464,6 +464,362 @@ def _seed_success_gate(success_count: int, seed_count: int) -> bool:
     return success_count >= seed_count
 
 
+def _load_all_persisted_evaluations(output_root: Path, journey: str | None = None) -> list[dict[str, Any]]:
+    eval_dir = output_root / "evaluations"
+    if journey:
+        eval_dir = output_root / "archive" / f"journey-{journey}" / "evaluations"
+    
+    evaluations = []
+    if eval_dir.exists() and eval_dir.is_dir():
+        for p in eval_dir.glob("evaluation-checkpoint-*.json"):
+            try:
+                with p.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        evaluations.append(data)
+            except Exception:
+                pass
+    return evaluations
+
+
+def compute_promotion_gate_snapshot(
+    output_root: Path,
+    target_ep: int,
+    journey: str | None = None,
+    checkpoint_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    # Resolve checkpoint payload if not provided
+    if checkpoint_payload is None:
+        try:
+            if journey:
+                checkpoint_path = (
+                    output_root
+                    / "archive"
+                    / f"journey-{journey}"
+                    / "checkpoints"
+                    / f"checkpoint-{target_ep:06d}.json"
+                )
+            else:
+                checkpoint_path = output_root / "checkpoints" / f"checkpoint-{target_ep:06d}.json"
+            
+            if checkpoint_path.exists():
+                with checkpoint_path.open("r", encoding="utf-8") as handle:
+                    checkpoint_payload = json.load(handle)
+        except Exception:
+            checkpoint_payload = None
+
+    default_stage = 1
+    if checkpoint_payload:
+        default_stage = checkpoint_payload.get("curriculum_stage", 1)
+
+    defaults = _auto_promote_gate_defaults(default_stage)
+
+    if not checkpoint_payload:
+        return {
+            **defaults,
+            "decision": "pending",
+            "reason": "Evaluation record not persisted",
+        }
+
+    target_stage = checkpoint_payload.get("curriculum_stage", 1)
+    target_policy_version = checkpoint_payload.get("policy_version")
+    target_checkpoint_id = checkpoint_payload.get("checkpoint_id")
+    target_seed_set_id = checkpoint_payload.get("evaluation_seed_set_id")
+    target_seeds = checkpoint_payload.get("evaluation_seeds") or []
+    target_seed_count = checkpoint_payload.get("evaluation_seed_count") or len(target_seeds)
+    target_obs_hash = checkpoint_payload.get("observation_schema_hash")
+    target_act_hash = checkpoint_payload.get("action_space_hash")
+    target_env_hash = checkpoint_payload.get("environment_config_hash")
+
+    if journey:
+        evaluation_path = (
+            output_root
+            / "archive"
+            / f"journey-{journey}"
+            / "evaluations"
+            / f"evaluation-checkpoint-{target_ep:06d}.json"
+        )
+    else:
+        evaluation_path = output_root / "evaluations" / f"evaluation-checkpoint-{target_ep:06d}.json"
+
+    if not evaluation_path.exists():
+        return {
+            **defaults,
+            "decision": "pending",
+            "reason": "Evaluation record not persisted",
+            "seed_count": 0,
+            "success_count": 0,
+            "required_seeds_count": target_seed_count,
+            "evaluated_seeds_count": 0,
+            "seed_set_id": target_seed_set_id,
+        }
+
+    try:
+        with evaluation_path.open("r", encoding="utf-8") as handle:
+            eval_summary = json.load(handle)
+    except Exception:
+        return {
+            **defaults,
+            "decision": "pending",
+            "reason": "Evaluation record not persisted",
+            "seed_count": 0,
+            "success_count": 0,
+            "required_seeds_count": target_seed_count,
+            "evaluated_seeds_count": 0,
+            "seed_set_id": target_seed_set_id,
+        }
+
+    eval_ep = eval_summary.get("checkpoint_episode")
+    eval_chk_id = eval_summary.get("checkpoint_id")
+    if eval_ep != target_ep or (eval_chk_id is not None and target_checkpoint_id is not None and eval_chk_id != target_checkpoint_id):
+        return {
+            **defaults,
+            "decision": "pending",
+            "reason": "Checkpoint mismatch",
+            "seed_count": len(eval_summary.get("records", [])),
+            "success_count": sum(1 for r in eval_summary.get("records", []) if r.get("success")),
+            "required_seeds_count": target_seed_count,
+            "evaluated_seeds_count": len(eval_summary.get("records", [])),
+            "seed_set_id": target_seed_set_id,
+        }
+
+    eval_policy_version = eval_summary.get("policy_version")
+    if eval_policy_version != target_policy_version:
+        return {
+            **defaults,
+            "decision": "pending",
+            "reason": "Policy-version mismatch",
+            "seed_count": len(eval_summary.get("records", [])),
+            "success_count": sum(1 for r in eval_summary.get("records", []) if r.get("success")),
+            "required_seeds_count": target_seed_count,
+            "evaluated_seeds_count": len(eval_summary.get("records", [])),
+            "seed_set_id": target_seed_set_id,
+        }
+
+    eval_stage = eval_summary.get("curriculum_stage")
+    if eval_stage != target_stage:
+        return {
+            **defaults,
+            "decision": "pending",
+            "reason": "Stage mismatch",
+            "seed_count": len(eval_summary.get("records", [])),
+            "success_count": sum(1 for r in eval_summary.get("records", []) if r.get("success")),
+            "required_seeds_count": target_seed_count,
+            "evaluated_seeds_count": len(eval_summary.get("records", [])),
+            "seed_set_id": target_seed_set_id,
+        }
+
+    eval_seed_set_id = eval_summary.get("evaluation_seed_set_id")
+    if eval_seed_set_id != target_seed_set_id:
+        return {
+            **defaults,
+            "decision": "pending",
+            "reason": "Seed-set mismatch",
+            "seed_count": len(eval_summary.get("records", [])),
+            "success_count": sum(1 for r in eval_summary.get("records", []) if r.get("success")),
+            "required_seeds_count": target_seed_count,
+            "evaluated_seeds_count": len(eval_summary.get("records", [])),
+            "seed_set_id": target_seed_set_id,
+        }
+
+    eval_records = eval_summary.get("records", [])
+    eval_seeds = sorted([r.get("seed") for r in eval_records])
+    sorted_target_seeds = sorted(target_seeds)
+    if len(eval_records) < target_seed_count or (sorted_target_seeds and eval_seeds != sorted_target_seeds):
+        return {
+            **defaults,
+            "decision": "pending",
+            "reason": "Incomplete seed results",
+            "seed_count": len(eval_records),
+            "success_count": sum(1 for r in eval_records if r.get("success")),
+            "required_seeds_count": target_seed_count,
+            "evaluated_seeds_count": len(eval_records),
+            "seed_set_id": target_seed_set_id,
+        }
+
+    success_count = sum(1 for r in eval_records if r.get("success", False))
+    success_rate = eval_summary.get("success_rate", 0.0)
+    timeout_rate = eval_summary.get("timeout_rate", 0.0)
+    timeout_count = sum(1 for r in eval_records if r.get("timeout", False))
+    average_reward = eval_summary.get("average_reward", 0.0)
+
+    all_evals = _load_all_persisted_evaluations(output_root, journey)
+    
+    compatible_evals = []
+    for ev in all_evals:
+        ev_ep = ev.get("checkpoint_episode")
+        if ev_ep is None or ev_ep > target_ep:
+            continue
+        if ev.get("curriculum_stage") != target_stage:
+            continue
+        if ev.get("evaluation_seed_set_id") != target_seed_set_id:
+            continue
+        if ev.get("observation_schema_hash") != target_obs_hash:
+            continue
+        if ev.get("action_space_hash") != target_act_hash:
+            continue
+        if ev.get("environment_config_hash") != target_env_hash:
+            continue
+            
+        ev_recs = ev.get("records", [])
+        ev_seeds_sorted = sorted([r.get("seed") for r in ev_recs])
+        if ev_seeds_sorted != sorted_target_seeds:
+            continue
+        if len(ev_recs) < target_seed_count:
+            continue
+            
+        compatible_evals.append(ev)
+
+    compatible_evals.sort(key=lambda x: x.get("checkpoint_episode", 0), reverse=True)
+    rolling_history = compatible_evals[:3]
+    display_history = list(reversed(rolling_history))
+
+    blocking_seeds = []
+    rolling_history_results = {seed: [] for seed in sorted_target_seeds}
+    per_seed_results = {r.get("seed"): r.get("success", False) for r in eval_records}
+
+    for seed in sorted_target_seeds:
+        seed_results = []
+        for ev in display_history:
+            seed_rec = next((r for r in ev.get("records", []) if r.get("seed") == seed), None)
+            success = seed_rec.get("success", False) if seed_rec else False
+            seed_results.append(success)
+        rolling_history_results[seed] = seed_results
+        
+        failures = sum(1 for p in seed_results if not p)
+        if len(rolling_history) - (len(rolling_history) - failures) >= 2:
+            blocking_seeds.append(seed)
+
+    chronological_evals = sorted(compatible_evals, key=lambda x: x.get("checkpoint_episode", 0))
+    streak = 0
+    best_reward_so_far = float("-inf")
+    stage_seed_gate_hits = 0
+    stage_full_success_hits = 0
+    success_threshold = _get_success_threshold(target_stage)
+
+    for ev in chronological_evals:
+        ev_ep = ev.get("checkpoint_episode", 0)
+        ev_recs = ev.get("records", [])
+        ev_success_c = sum(1 for r in ev_recs if r.get("success"))
+        ev_seed_c = len(ev_recs)
+        ev_succ_rate = ev.get("success_rate", 0.0)
+        ev_time_rate = ev.get("timeout_rate", 0.0)
+        ev_avg_rew = ev.get("average_reward", float("-inf"))
+        
+        best_reward_so_far = max(best_reward_so_far, ev_avg_rew)
+        
+        ev_success_ok = ev_succ_rate >= success_threshold
+        ev_timeout_ok = ev_time_rate <= AUTO_PROMOTE_MAX_TIMEOUT_RATE
+        ev_reward_ok = _reward_within_tolerance(ev_avg_rew, best_reward_so_far)
+        ev_overall_gate_ok = _seed_success_gate(ev_success_c, ev_seed_c)
+        
+        hist_for_ev = [x for x in chronological_evals if x.get("checkpoint_episode", 0) <= ev_ep][-3:]
+        ev_seed_gate_ok = ev_overall_gate_ok
+        
+        ev_blocking = []
+        for seed in sorted_target_seeds:
+            seed_failures = 0
+            for h_ev in hist_for_ev:
+                h_rec = next((r for r in h_ev.get("records", []) if r.get("seed") == seed), None)
+                if h_rec and not h_rec.get("success", False):
+                    seed_failures += 1
+            if len(hist_for_ev) - (len(hist_for_ev) - seed_failures) >= 2:
+                ev_blocking.append(seed)
+                
+        if ev_blocking:
+            ev_seed_gate_ok = False
+            
+        ev_qualified = ev_success_ok and ev_timeout_ok and ev_reward_ok and ev_seed_gate_ok
+        
+        if ev_qualified:
+            streak += 1
+        else:
+            streak = 0
+            
+        if ev_seed_gate_ok:
+            stage_seed_gate_hits += 1
+            
+        ev_full_success = (
+            ev_succ_rate >= AUTO_PROMOTE_FULL_SUCCESS_RATE_THRESHOLD
+            and ev_time_rate <= AUTO_PROMOTE_MAX_TIMEOUT_RATE
+            and ev_seed_gate_ok
+        )
+        if ev_full_success:
+            stage_full_success_hits += 1
+
+    success_rate_ok = success_rate >= success_threshold
+    timeout_ok = timeout_rate <= AUTO_PROMOTE_MAX_TIMEOUT_RATE
+    reward_close_ok = _reward_within_tolerance(average_reward, best_reward_so_far)
+    seed_gate_ok = len(blocking_seeds) == 0
+
+    seed_gate_target_met = stage_seed_gate_hits >= AUTO_PROMOTE_MIN_SEED_GATE_HITS
+    full_success_target_met = stage_full_success_hits >= AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS
+    streak_ok = streak >= AUTO_PROMOTE_MIN_QUALIFIED_STREAK
+
+    if len(blocking_seeds) > 0:
+        blocked_seed = blocking_seeds[0]
+        seed_results = rolling_history_results[blocked_seed]
+        passes = sum(1 for p in seed_results if p)
+        decision = "blocked"
+        reason = f"Seed {blocked_seed} passed only {passes} of the last {len(rolling_history)} required evaluations."
+    elif not success_rate_ok:
+        decision = "blocked"
+        reason = f"Success rate {success_rate:.0%} below threshold {success_threshold:.0%}"
+    elif not timeout_ok:
+        decision = "blocked"
+        reason = f"Timeout rate {timeout_rate:.0%} exceeds limit {AUTO_PROMOTE_MAX_TIMEOUT_RATE:.0%}"
+    elif not reward_close_ok:
+        decision = "blocked"
+        reason = f"Average reward {average_reward:.2f} is not close enough to best reward {best_reward_so_far:.2f}"
+    elif not seed_gate_target_met:
+        decision = "pending"
+        reason = f"Seed gate hits ({stage_seed_gate_hits}) below target ({AUTO_PROMOTE_MIN_SEED_GATE_HITS})"
+    elif not full_success_target_met:
+        decision = "pending"
+        reason = f"Full success hits ({stage_full_success_hits}) below target ({AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS})"
+    elif not streak_ok:
+        decision = "pending"
+        reason = f"Qualified streak ({streak}) below required consecutive batches ({AUTO_PROMOTE_MIN_QUALIFIED_STREAK})"
+    else:
+        decision = "promote_ready"
+        reason = "Promotion criteria met"
+
+    best_success_rate = max((ev.get("success_rate", 0.0) for ev in compatible_evals), default=0.0)
+
+    return {
+        "decision": decision,
+        "reason": reason,
+        "seed_count": target_seed_count,
+        "success_count": success_count,
+        "best_success": max(0.0, best_success_rate),
+        "best_reward": None if best_reward_so_far == float("-inf") else best_reward_so_far,
+        "seed_gate_ok": seed_gate_ok,
+        "success_rate_ok": success_rate_ok,
+        "timeout_ok": timeout_ok,
+        "reward_close_ok": reward_close_ok,
+        "qualified_streak": streak,
+        "min_qualified_streak": AUTO_PROMOTE_MIN_QUALIFIED_STREAK,
+        "seed_gate_hits": stage_seed_gate_hits,
+        "min_seed_gate_hits": AUTO_PROMOTE_MIN_SEED_GATE_HITS,
+        "seed_gate_target_met": seed_gate_target_met,
+        "full_success_hits": stage_full_success_hits,
+        "min_full_success_hits": AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS,
+        "full_success_target_met": full_success_target_met,
+        "full_success_rate_threshold": AUTO_PROMOTE_FULL_SUCCESS_RATE_THRESHOLD,
+        "success_threshold": success_threshold,
+        "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
+        "reward_tolerance_ratio": AUTO_PROMOTE_REWARD_TOLERANCE_RATIO,
+        "required_seeds_count": target_seed_count,
+        "evaluated_seeds_count": len(eval_records),
+        "timeout_count": timeout_count,
+        "timeout_rate": timeout_rate,
+        "seed_set_id": target_seed_set_id,
+        "per_seed_results": per_seed_results,
+        "rolling_history_results": rolling_history_results,
+        "blocking_seeds": blocking_seeds,
+    }
+
+
 def _reward_within_tolerance(reward: float, best_reward: float) -> bool:
     """Return whether *reward* is within the accepted gap from *best_reward*."""
 
@@ -3299,27 +3655,7 @@ class TrainingManager:
                         average_reward = float(summary.get("average_reward", float("-inf")))
                         timeout_rate = float(summary.get("timeout_rate", 1.0))
                         avg_penned = float(summary.get("average_sheep_penned", 0.0))
-                        records_raw = summary.get("records", [])
-                        success_count = 0
-                        if isinstance(records_raw, (list, tuple)):
-                            records = [record for record in records_raw if isinstance(record, dict)]
-                            success_count = sum(
-                                1 for record in records if bool(record.get("success"))
-                            )
-                            stage_seed_count = len(records)
-                        seed_gate_ok = _seed_success_gate(success_count, stage_seed_count)
-                        if stage_seed_count <= 0:
-                            # Some checkpoints may not include per-seed records in the
-                            # callback payload; fall back to aggregate quality signals so
-                            # promotion does not get permanently blocked.
-                            seed_gate_ok = (
-                                success_rate >= _get_success_threshold(stage)
-                                and timeout_rate <= AUTO_PROMOTE_MAX_TIMEOUT_RATE
-                            )
-                        reward_close_to_best = _reward_within_tolerance(
-                            average_reward,
-                            stage_best_reward,
-                        )
+                        
                         agreement_ok = True
                         agreement_warnings = []
                         if checkpoint_episode is not None:
@@ -3377,6 +3713,12 @@ class TrainingManager:
                                 agreement_ok = False
                                 agreement_warnings.append(f"Evaluation checkpoint ID ({eval_checkpoint_id}) does not match active checkpoint ID ({active_cp_id})")
 
+                        gate_snapshot = compute_promotion_gate_snapshot(
+                            output_root,
+                            checkpoint_episode,
+                            checkpoint_payload=summary
+                        )
+
                         if not agreement_ok:
                             qualified_for_promotion = False
                             stage_qualified_streak = 0
@@ -3384,28 +3726,28 @@ class TrainingManager:
                             import logging
                             logging.getLogger(__name__).warning(warning_msg)
                             update["message"] = warning_msg
+                            
+                            gate_snapshot = {
+                                **gate_snapshot,
+                                "decision": "pending",
+                                "reason": f"Auto-promotion blocked due to data inconsistency: {', '.join(agreement_warnings)}"
+                            }
+                            seed_gate_ok = False
                         else:
+                            seed_gate_ok = gate_snapshot["seed_gate_ok"]
+                            success_rate_ok = gate_snapshot["success_rate_ok"]
+                            timeout_ok = gate_snapshot["timeout_ok"]
+                            reward_close_to_best = gate_snapshot["reward_close_ok"]
+                            
                             qualified_for_promotion = (
                                 seed_gate_ok
-                                and success_rate >= _get_success_threshold(stage)
-                                and timeout_rate <= AUTO_PROMOTE_MAX_TIMEOUT_RATE
+                                and success_rate_ok
+                                and timeout_ok
                                 and reward_close_to_best
                             )
-                            stage_qualified_streak = (
-                                stage_qualified_streak + 1 if qualified_for_promotion else 0
-                            )
-                        if seed_gate_ok:
-                            stage_seed_gate_hits += 1
-                        full_success_checkpoint = (
-                            success_rate >= AUTO_PROMOTE_FULL_SUCCESS_RATE_THRESHOLD
-                            and timeout_rate <= AUTO_PROMOTE_MAX_TIMEOUT_RATE
-                            and (
-                                seed_gate_ok
-                                or stage_seed_count <= 0
-                            )
-                        )
-                        if full_success_checkpoint:
-                            stage_full_success_hits += 1
+                            stage_qualified_streak = gate_snapshot["qualified_streak"]
+                            stage_seed_gate_hits = gate_snapshot["seed_gate_hits"]
+                            stage_full_success_hits = gate_snapshot["full_success_hits"]
 
                         candidate_rank = (
                             success_rate,
@@ -3421,44 +3763,8 @@ class TrainingManager:
                             stage_no_improvement_streak += 1
                         stage_checkpoints_seen += 1
                         stage_best_reward = max(stage_best_reward, average_reward)
-                        update["auto_promote_gate"] = {
-                            "decision": "pending",
-                            "reason": (
-                                "Checkpoint meets gate"
-                                if qualified_for_promotion
-                                                                else "Checkpoint below gate"
-                            ),
-                            "seed_count": stage_seed_count,
-                            "success_count": success_count,
-                            "best_success": max(0.0, stage_best_rank[0]),
-                            "best_reward": (
-                                None
-                                if stage_best_reward == float("-inf")
-                                else stage_best_reward
-                            ),
-                            "seed_gate_ok": seed_gate_ok,
-                            "success_rate_ok": success_rate >= _get_success_threshold(stage),
-                            "timeout_ok": timeout_rate <= AUTO_PROMOTE_MAX_TIMEOUT_RATE,
-                            "reward_close_ok": reward_close_to_best,
-                            "qualified_streak": stage_qualified_streak,
-                            "min_qualified_streak": AUTO_PROMOTE_MIN_QUALIFIED_STREAK,
-                            "seed_gate_hits": stage_seed_gate_hits,
-                            "min_seed_gate_hits": AUTO_PROMOTE_MIN_SEED_GATE_HITS,
-                            "seed_gate_target_met": (
-                                stage_seed_gate_hits >= AUTO_PROMOTE_MIN_SEED_GATE_HITS
-                            ),
-                            "full_success_hits": stage_full_success_hits,
-                            "min_full_success_hits": AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS,
-                            "full_success_target_met": (
-                                stage_full_success_hits >= AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS
-                            ),
-                            "full_success_rate_threshold": (
-                                AUTO_PROMOTE_FULL_SUCCESS_RATE_THRESHOLD
-                            ),
-                            "success_threshold": _get_success_threshold(stage),
-                            "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
-                            "reward_tolerance_ratio": AUTO_PROMOTE_REWARD_TOLERANCE_RATIO,
-                        }
+                        
+                        update["auto_promote_gate"] = gate_snapshot
                     if phase == "starting" and payload.get("seed_episode") is not None:
                         update["seed_episode"] = payload.get("seed_episode")
                     if phase == "starting" and total_trained is not None:
@@ -4320,6 +4626,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                 
         output_root = Path(LabConfig().training.output_dir)
         checkpoint_payload = None
+        journey = None
         
         # Resolve target checkpoint
         if not checkpoint_id and episode is None:
@@ -4330,14 +4637,17 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             elif active_ep is not None:
                 episode = int(active_ep)
             else:
-                summary_path = output_root / "training_history.json"
+                summary_path = output_root / "training-summary.json"
                 if not summary_path.exists():
-                    summary_path = output_root / "training-summary.json"
+                    summary_path = output_root / "training_history.json"
                 if summary_path.exists():
                     try:
                         with open(summary_path, "r", encoding="utf-8") as f:
                             sum_data = json.load(f)
-                        checkpoints = sum_data.get("checkpoints", [])
+                        if isinstance(sum_data, dict):
+                            checkpoints = sum_data.get("checkpoints", [])
+                        else:
+                            checkpoints = sum_data
                         if checkpoints:
                             latest = checkpoints[-1]
                             checkpoint_id = latest.get("checkpoint_id")
@@ -4345,9 +4655,16 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                     except Exception:
                         pass
                         
+        if checkpoint_id:
+            try:
+                _ep, resolved_journey = self.manager.find_checkpoint_by_id(checkpoint_id)
+                journey = resolved_journey
+            except Exception:
+                pass
+
         if checkpoint_id or episode is not None:
             try:
-                checkpoint_payload = self.manager.get_checkpoint_details(episode, None, checkpoint_id)
+                checkpoint_payload = self.manager.get_checkpoint_details(episode, journey, checkpoint_id)
             except Exception as e:
                 raise DiagnosticsHTTPException("LOAD_CHECKPOINT_FAILED", f"Failed to load checkpoint: {str(e)}")
                 
@@ -4360,14 +4677,14 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             active_status_before = self.manager.snapshot()
             if checkpoint_id or episode is not None:
                 try:
-                    checkpoint_payload = self.manager.get_checkpoint_details(episode, None, checkpoint_id)
+                    checkpoint_payload = self.manager.get_checkpoint_details(episode, journey, checkpoint_id)
                 except Exception:
                     pass
             active_status_after = self.manager.snapshot()
             if (active_status_before.get("run_id") != active_status_after.get("run_id") or
                 active_status_before.get("active_checkpoint_id") != active_status_after.get("active_checkpoint_id")):
                 snapshot_warning = "MIXED SNAPSHOT: Active run or checkpoint changed during diagnostics compilation."
-
+ 
         # Re-resolve active status fields
         status = active_status_after
         cur_stage = status.get("curriculum_stage", 1)
@@ -4550,18 +4867,27 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                 f"restored, forked, or reset without clearing the historical stage logs."
             )
 
-        summary_path = output_root / "training_history.json"
-        if not summary_path.exists():
-            summary_path = output_root / "training-summary.json"
-        
         all_checkpoints = []
+        summary_path = output_root / "training-summary.json"
         if summary_path.exists():
             try:
                 with open(summary_path, "r", encoding="utf-8") as f:
                     sum_data = json.load(f)
-                all_checkpoints = sum_data.get("checkpoints", [])
+                if isinstance(sum_data, dict):
+                    all_checkpoints = sum_data.get("checkpoints", [])
             except Exception:
                 pass
+                
+        if not all_checkpoints:
+            history_path = output_root / "training_history.json"
+            if history_path.exists():
+                try:
+                    with open(history_path, "r", encoding="utf-8") as f:
+                        sum_data = json.load(f)
+                    if isinstance(sum_data, list):
+                        all_checkpoints = sum_data
+                except Exception:
+                    pass
 
         if total_trained == 0 and len(all_checkpoints) > 0:
             counter_warnings.append("Counter reset: Lifetime total episodes was reset to 0 without an explicit reset log.")
@@ -4866,7 +5192,21 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
 
         # 8. Reward component reconciliation
         reconciliations = []
-        eval_records = checkpoint_payload.get("records", []) if checkpoint_payload else []
+        eval_records = []
+        if checkpoint_payload:
+            target_ep = checkpoint_payload.get("checkpoint_episode")
+            if target_ep is not None:
+                if journey:
+                    eval_path = output_root / "archive" / f"journey-{journey}" / "evaluations" / f"evaluation-checkpoint-{target_ep:06d}.json"
+                else:
+                    eval_path = output_root / "evaluations" / f"evaluation-checkpoint-{target_ep:06d}.json"
+                if eval_path.exists():
+                    try:
+                        with eval_path.open("r", encoding="utf-8") as handle:
+                            eval_summary = json.load(handle)
+                            eval_records = eval_summary.get("records", [])
+                    except Exception:
+                        pass
         for rec in eval_records:
             seed = rec.get("seed")
             reported_reward = rec.get("reward_total", 0.0)
@@ -5175,7 +5515,16 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                 break
                 
         latest_any_stage_evaluation = all_checkpoints[-1] if all_checkpoints else None
-        current_stage_promotion_gate = status.get("auto_promote_gate")
+        current_stage_promotion_gate = None
+        if checkpoint_payload:
+            current_stage_promotion_gate = compute_promotion_gate_snapshot(
+                output_root,
+                checkpoint_payload.get("checkpoint_episode", 0),
+                journey=journey,
+                checkpoint_payload=checkpoint_payload
+            )
+        else:
+            current_stage_promotion_gate = status.get("auto_promote_gate")
         
         promotion_history = _read_promotion_history(output_root)
         previous_stage_promotion_result = promotion_history[-1] if promotion_history else None
