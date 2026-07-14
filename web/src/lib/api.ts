@@ -56,13 +56,26 @@ export async function loadCheckpointIndex(): Promise<CheckpointIndex | null> {
   try {
     return await fetchJson<CheckpointIndex>("/generated/checkpoint-index.json");
   } catch (error) {
-    const fetchError = error as { status?: number; contentType?: string };
+    const fetchError = error as { status?: number; contentType?: string; message?: string };
     // Treat 404 and 500 (Vite serves 500 when the file doesn't exist yet)
     // as "not available yet" rather than a hard error.
     if (fetchError.status === 404 || fetchError.status === 500) {
+      console.info(
+        `Checkpoint index "/generated/checkpoint-index.json" is not available yet (HTTP ${fetchError.status}). This is expected during startup or if no checkpoints have been saved yet.`
+      );
+      return null;
+    }
+    // Also treat network/connection errors (e.g. TypeError: Failed to fetch) as not available yet.
+    if (error instanceof TypeError || !fetchError.status) {
+      console.warn(
+        `Network or connection error fetching checkpoint index: ${fetchError.message || String(error)}. Treating as not available yet.`
+      );
       return null;
     }
     if (fetchError.status === 200 && fetchError.contentType?.toLowerCase().includes("text/html")) {
+      console.info(
+        `Checkpoint index request returned HTML (status 200). Treating as not available yet.`
+      );
       return null;
     }
     throw error;

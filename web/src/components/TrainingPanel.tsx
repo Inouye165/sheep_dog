@@ -290,6 +290,7 @@ export function TrainingPanel({
       : (currentEpisode ?? 0);
   const safeTotal = Number.isFinite(totalEpisodesTrained) ? totalEpisodesTrained : 0;
   const safeGrand = Number.isFinite(grandTotalEpisodes) ? grandTotalEpisodes : 0;
+  const currentStageEpisodes = stageHistory[curriculumStage] ?? stageHistory[String(curriculumStage)] ?? 0;
   const stageHistoryEntries = Object.entries(stageHistory)
     .filter(([, v]) => v > 0)
     .sort(([a], [b]) => Number(a) - Number(b));
@@ -717,6 +718,10 @@ export function TrainingPanel({
                 {successPct}
               </strong>
             </div>
+            <div style={{ display: "flex", flexDirection: "column" }}>
+              <span style={{ color: "var(--muted)" }}>Stage {curriculumStage} Trained</span>
+              <strong>{currentStageEpisodes.toLocaleString()}</strong>
+            </div>
             <div style={{ display: "flex", flexDirection: "column", marginTop: "0.4rem" }}>
               <span style={{ color: "var(--muted)" }}>Total Trained</span>
               <strong>{(safeGrand || safeTotal).toLocaleString()}</strong>
@@ -793,6 +798,17 @@ export function TrainingPanel({
             ) : curriculumStage >= maxCurriculumStage ? (
               <span className="pill pill--live" style={{ alignSelf: "center" }}>Max stage reached</span>
             ) : null}
+            <div style={{
+              display: "flex",
+              justifyContent: "space-between",
+              fontSize: "0.75rem",
+              color: "var(--muted)",
+              padding: "0.15rem 0.3rem",
+              marginTop: "0.2rem"
+            }}>
+              <span>Stage {curriculumStage} trained:</span>
+              <strong style={{ color: "var(--text)" }}>{currentStageEpisodes.toLocaleString()} episodes</strong>
+            </div>
           </div>
 
           {/* Promotion lock/success warning status boxes */}

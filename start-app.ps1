@@ -444,7 +444,7 @@ Set-Content -Path $watchdogLog -Value ("{0}`tWATCHDOG_READY" -f (Get-Date).ToStr
 Write-Host 'Starting backend API on http://127.0.0.1:8000'
 $backend = Start-ManagedProcess `
     -FilePath $pythonExe `
-    -Arguments @('-m', 'sheepdog.server') `
+    -Arguments @('-u', '-m', 'sheepdog.server') `
     -WorkingDirectory $root `
     -StandardOutput $backendOut `
     -StandardError $backendErr

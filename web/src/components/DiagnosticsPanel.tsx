@@ -241,20 +241,23 @@ function LineChart({
 
   const hasData = data.length >= 2;
 
-  const xMin = hasData ? data[0].x : 0;
-  const xMax = hasData ? data[data.length - 1].x : 1;
-  const xRange = xMax - xMin || 1;
   const yRange = yMax - yMin || 1;
 
   // Secondary scale — fewer steps = better = top of chart (inverted mapping)
   const secYMin = secondaryYMin ?? 0;
   const secYMax = secondaryYMax ?? 1;
   const secRange = secYMax - secYMin || 1;
-  const secDataPoints = hasSecondary ? data.filter((d) => d.secondaryY != null) : [];
+  const secDataPoints = hasSecondary
+    ? data
+        .map((d, idx) => ({ ...d, originalIdx: idx }))
+        .filter((d) => d.secondaryY != null)
+    : [];
   const secTicks = hasSecondary ? [secYMax, (secYMax + secYMin) / 2, secYMin] : [];
 
-  function toSvgX(x: number): number {
-    return PAD.left + ((x - xMin) / xRange) * plotW;
+  function toSvgX(idx: number): number {
+    const totalPoints = data.length || 1;
+    const range = totalPoints > 1 ? totalPoints - 1 : 1;
+    return PAD.left + (idx / range) * plotW;
   }
   function toSvgY(y: number): number {
     return PAD.top + plotH - ((y - yMin) / yRange) * plotH;
@@ -265,7 +268,7 @@ function LineChart({
   }
 
   const polyline = hasData
-    ? data.map((d) => `${toSvgX(d.x).toFixed(1)},${toSvgY(d.y).toFixed(1)}`).join(" ")
+    ? data.map((d, idx) => `${toSvgX(idx).toFixed(1)},${toSvgY(d.y).toFixed(1)}`).join(" ")
     : "";
 
   // Y-axis tick values
@@ -325,7 +328,7 @@ function LineChart({
           return (
             <text
               key={idx}
-              x={toSvgX(d.x)}
+              x={toSvgX(idx)}
               y={H - 3}
               textAnchor="middle"
               fontSize={10}
@@ -392,7 +395,7 @@ function LineChart({
             {secDataPoints.length >= 2 ? (
               <polyline
                 points={secDataPoints
-                  .map((d) => `${toSvgX(d.x).toFixed(1)},${toSvgY2(d.secondaryY!).toFixed(1)}`)
+                  .map((d) => `${toSvgX(d.originalIdx).toFixed(1)},${toSvgY2(d.secondaryY!).toFixed(1)}`)
                   .join(" ")}
                 fill="none"
                 stroke={effectiveSecColor}
@@ -406,7 +409,7 @@ function LineChart({
             {secDataPoints.map((d, i) => (
               <circle
                 key={`sec-${d.x}-${i}`}
-                cx={toSvgX(d.x)}
+                cx={toSvgX(d.originalIdx)}
                 cy={toSvgY2(d.secondaryY!)}
                 r={3}
                 fill={effectiveSecColor}
@@ -419,15 +422,15 @@ function LineChart({
         ) : null}
 
         {/* Dots — colored by stage; prev-bests get a diamond + label; best gets a ring */}
-        {data.map((d, i) => {
-          const cx = toSvgX(d.x);
+        {data.map((d, idx) => {
+          const cx = toSvgX(idx);
           const cy = toSvgY(d.y);
           const fill = stageColor(d.stage);
           const isBest = d.x === bestEpisode;
           const r = isBest ? 6 : d.isPrevBest ? 5 : 4;
           const diamond = `${cx},${cy - r} ${cx + r},${cy} ${cx},${cy + r} ${cx - r},${cy}`;
           return (
-            <g key={`${d.x}-${i}`}>
+            <g key={`${d.x}-${idx}`}>
               {isBest ? (
                 <circle cx={cx} cy={cy} r={9} fill="none" stroke={fill} strokeWidth={2} opacity={0.6} />
               ) : null}
@@ -1645,6 +1648,27 @@ export function DiagnosticsPanel({
             <h2>Learning Curve</h2>
           </div>
         </div>
+        <div style={{
+          display: "flex",
+          flexWrap: "wrap",
+          gap: "1rem",
+          background: "rgba(148, 163, 184, 0.05)",
+          border: "1px solid var(--panel-border)",
+          borderRadius: "0.5rem",
+          padding: "0.5rem 0.8rem",
+          fontSize: "0.8rem",
+          marginBottom: "0.75rem",
+          flexShrink: 0
+        }}>
+          <div>
+            <span style={{ color: "var(--muted)", marginRight: "0.4rem" }}>Total Trained:</span>
+            <strong>{(trainingStatus?.grand_total_episodes ?? trainingStatus?.total_episodes_trained ?? 0).toLocaleString()}</strong>
+          </div>
+          <div>
+            <span style={{ color: "var(--muted)", marginRight: "0.4rem" }}>Stage {effectiveCurriculumStage} Trained:</span>
+            <strong>{(trainingStatus?.stage_history?.[effectiveCurriculumStage] ?? trainingStatus?.stage_history?.[String(effectiveCurriculumStage)] ?? 0).toLocaleString()}</strong>
+          </div>
+        </div>
         <div className="warning-box" role="status">
           No checkpoints yet — run a batch of training to see diagnostics.
         </div>
@@ -1700,6 +1724,35 @@ export function DiagnosticsPanel({
             What this page means?
           </button>
         </div>
+      </div>
+
+      {/* Episodes Trained Summary Row */}
+      <div style={{
+        display: "flex",
+        flexWrap: "wrap",
+        gap: "1rem",
+        background: "rgba(148, 163, 184, 0.05)",
+        border: "1px solid var(--panel-border)",
+        borderRadius: "0.5rem",
+        padding: "0.5rem 0.8rem",
+        fontSize: "0.8rem",
+        marginBottom: "0.75rem",
+        flexShrink: 0
+      }}>
+        <div>
+          <span style={{ color: "var(--muted)", marginRight: "0.4rem" }}>Total Trained:</span>
+          <strong>{(trainingStatus?.grand_total_episodes ?? trainingStatus?.total_episodes_trained ?? 0).toLocaleString()}</strong>
+        </div>
+        <div>
+          <span style={{ color: "var(--muted)", marginRight: "0.4rem" }}>Stage {effectiveCurriculumStage} Trained:</span>
+          <strong>{(trainingStatus?.stage_history?.[effectiveCurriculumStage] ?? trainingStatus?.stage_history?.[String(effectiveCurriculumStage)] ?? 0).toLocaleString()}</strong>
+        </div>
+        {selectedStageScope !== "all" && selectedStageScope !== "current" && selectedStageScope !== "current-journey" && selectedStageScope !== effectiveCurriculumStage && (
+          <div>
+            <span style={{ color: "var(--muted)", marginRight: "0.4rem" }}>Stage {selectedStageScope} Trained:</span>
+            <strong>{(trainingStatus?.stage_history?.[selectedStageScope] ?? trainingStatus?.stage_history?.[String(selectedStageScope)] ?? 0).toLocaleString()}</strong>
+          </div>
+        )}
       </div>
 
       {/* Plateau / cliff / spike alert */}

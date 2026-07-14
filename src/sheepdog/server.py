@@ -4235,12 +4235,37 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
     def _file_response(self, file_path: Path) -> None:
         """Read *file_path* fully then send — avoids Content-Length races."""
         try:
-            body = file_path.read_bytes()
+            body = None
+            for attempt in range(6):
+                try:
+                    body = file_path.read_bytes()
+                    break
+                except PermissionError:
+                    if attempt == 5:
+                        raise
+                    import time
+                    time.sleep(0.05 * (attempt + 1))
         except FileNotFoundError:
             self.send_response(HTTPStatus.NOT_FOUND)
             self.send_header("Content-Length", "0")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
+            return
+        except Exception as exc:
+            import sys
+            import traceback
+            # Log the unexpected error to stderr so it shows in backend logs
+            print(f"Error serving file {file_path}: {exc}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            
+            # Send a graceful 500 JSON response instead of aborting the connection
+            self.send_response(HTTPStatus.INTERNAL_SERVER_ERROR)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            body_payload = json.dumps({"error": f"Error reading file: {exc}"}, indent=2).encode("utf-8")
+            self.send_header("Content-Length", str(len(body_payload)))
+            self.end_headers()
+            self.wfile.write(body_payload)
             return
         suffix = file_path.suffix.lower()
         content_type = (
