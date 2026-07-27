@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import functools
 import json
+import logging
+import os
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -18,7 +21,7 @@ from sheepdog.checkpoints.store import (
     get_observation_schema_hash,
 )
 from sheepdog.environment import ACTION_ORDER, ENV_CONFIG_VERSION
-from sheepdog.policies.neural import NeuralPolicy
+from sheepdog.policies.neural import NeuralPolicy, tensorboard_available
 from sheepdog.rewards import REWARD_SCHEMA_VERSION
 from sheepdog.training.trainer import Trainer
 
@@ -89,8 +92,8 @@ class _TrainingProgressCallback(BaseCallback):
             if self.model is not None and self.model.get_env() is not None:
                 curr_counters = self.model.get_env().get_attr("_episode_counter")
                 actual_completed_episodes = int(sum(curr_counters))
-        except Exception:
-            pass
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            actual_completed_episodes = 0
 
         self._emit(
             {
@@ -114,7 +117,15 @@ class _TrainingProgressCallback(BaseCallback):
         return True
 
 
-import functools
+def finish_wandb_run() -> None:
+    """Finish an active W&B run when the optional SDK is available."""
+    try:
+        import wandb
+    except ImportError:
+        return
+    if getattr(wandb, "run", None) is not None and hasattr(wandb, "finish"):
+        wandb.finish()
+
 
 def _wandb_finish_on_exit(func):
     @functools.wraps(func)
@@ -122,13 +133,7 @@ def _wandb_finish_on_exit(func):
         try:
             return func(self, *args, **kwargs)
         finally:
-            try:
-                import wandb
-                if wandb.run is not None:
-                    wandb.finish()
-            except Exception as e:
-                import logging
-                logging.getLogger(__name__).warning(f"Failed to finish wandb run: {e}")
+            finish_wandb_run()
     return wrapper
 
 
@@ -136,6 +141,10 @@ class MaskablePPOTrainer(Trainer):
     """Train the shared role-aware neural policy with MaskablePPO."""
 
     MODEL_DIRNAME = "models"
+
+    def has_compatible_policy_state(self) -> bool:
+        """Return whether the persisted policy state can resume this trainer."""
+        return self._has_compatible_policy_state()
 
     def _training_signature(self) -> dict[str, Any]:
         # Deliberately excludes ``dogs`` and ``sheep`` counts: the observation
@@ -264,7 +273,7 @@ class MaskablePPOTrainer(Trainer):
         model_root.mkdir(parents=True, exist_ok=True)
         resuming_policy = (
             bool(self._loaded_state.get("policy_state_path"))
-            and self._has_compatible_policy_state()
+            and self.has_compatible_policy_state()
         )
         starting_total = self.total_episodes_trained if resuming_policy else 0
         loaded_p_ver = self._loaded_state.get("policy_version")
@@ -273,7 +282,6 @@ class MaskablePPOTrainer(Trainer):
 
         # Initialize Weights & Biases if enabled
         wandb_enabled = False
-        import os
         if getattr(train_config, "wandb_enabled", False) or os.getenv("SHEEPDOG_WANDB_ENABLED", "").lower() in ("true", "1"):
             wandb_enabled = True
 
@@ -291,11 +299,13 @@ class MaskablePPOTrainer(Trainer):
                 wandb.init(
                     project="sheepdog-herding",
                     config=wandb_config,
-                    sync_tensorboard=True,
+                    sync_tensorboard=tensorboard_available(),
                 )
-            except (ImportError, Exception) as e:
-                import logging
-                logging.getLogger(__name__).warning(f"Could not initialize wandb: {e}. Running without wandb.")
+            # W&B exposes several SDK-specific exception types across versions.
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                logging.getLogger(__name__).warning(
+                    "Could not initialize W&B: %s. Running without W&B.", exc
+                )
                 wandb_enabled = False
         n_checkpoints = batch_total
         steps_per_segment = max(1, train_config.total_timesteps // n_checkpoints)
@@ -438,9 +448,11 @@ class MaskablePPOTrainer(Trainer):
                 try:
                     from wandb.integration.sb3 import WandbCallback
                     callbacks_to_use.append(WandbCallback(verbose=0))
-                except Exception as e:
-                    import logging
-                    logging.getLogger(__name__).warning(f"Failed to create WandbCallback: {e}")
+                # The optional integration may fail with version-specific SDK errors.
+                except Exception as exc:  # pylint: disable=broad-exception-caught
+                    logging.getLogger(__name__).warning(
+                        "Failed to create W&B callback: %s", exc
+                    )
 
             callback_list = CallbackList(callbacks_to_use)
 
@@ -525,8 +537,11 @@ class MaskablePPOTrainer(Trainer):
                                 k_str = str(k)
                                 curr_coverage["similarity_episodes"][k_str] = curr_coverage["similarity_episodes"].get(k_str, 0) + ws.get("similarity_episodes", {}).get(k, 0)
                                 curr_coverage["similarity_successes"][k_str] = curr_coverage["similarity_successes"].get(k_str, 0) + ws.get("similarity_successes", {}).get(k, 0)
-                except Exception:
-                    pass
+                except (AttributeError, RuntimeError, TypeError, ValueError):
+                    logging.getLogger(__name__).debug(
+                        "PPO environment coverage statistics are unavailable",
+                        exc_info=True,
+                    )
 
             self._loaded_state["training_scenario_coverage"] = curr_coverage
             
@@ -741,7 +756,10 @@ class MaskablePPOTrainer(Trainer):
                 representative_replay_path,
                 checkpoint_path,
             )
-            self._evaluate_saved_scenarios(policy, total_eps_this_checkpoint)
+            if self.should_evaluate_saved_scenarios(
+                completed_checkpoints, n_checkpoints
+            ):
+                self._evaluate_saved_scenarios(policy, total_eps_this_checkpoint)
             emit(
                 {
                     "phase": "checkpoint",

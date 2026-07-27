@@ -1,17 +1,25 @@
 """Tests for the interactive training server."""
 
-# pylint: disable=missing-function-docstring,missing-class-docstring
+# pylint: disable=missing-function-docstring,missing-class-docstring,too-many-lines
 from __future__ import annotations
 
+import threading
 import json
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, replace
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import patch
 
+import pytest
+
 from sheepdog.config import LabConfig, TrainingConfig
-from sheepdog.server import TrainingManager
+from sheepdog import server as server_module
+from sheepdog.server import TrainingManager, TrainingRequestHandler
 
 
 def test_clear_training_restores_untrained_baseline(tmp_path: Path) -> None:
@@ -123,7 +131,9 @@ def test_reset_journey_archives_and_resets_to_stage_one(tmp_path: Path) -> None:
     assert (latest_archive / "checkpoints" / "checkpoint-000123.json").exists()
     assert (latest_archive / "training-summary.json").exists()
 
-    settings_payload = json.loads((artifacts / "training-settings.json").read_text(encoding="utf-8"))
+    settings_payload = json.loads(
+        (artifacts / "training-settings.json").read_text(encoding="utf-8")
+    )
     assert settings_payload["curriculum_stage"] == 1
 
 
@@ -475,6 +485,79 @@ def test_initial_status_prefers_saved_stage_over_history_max(tmp_path: Path) -> 
     assert status["stage_history"] == {"2": 50, "5": 300}
 
 
+def test_start_rejects_stage_below_current_journey_history(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    generated = tmp_path / "web" / "public" / "generated"
+    artifacts.mkdir(parents=True)
+    generated.mkdir(parents=True)
+    (artifacts / "training-settings.json").write_text(
+        json.dumps({"curriculum_stage": 2}), encoding="utf-8"
+    )
+    (artifacts / "stage-history.json").write_text(json.dumps({"2": 50, "8": 122}), encoding="utf-8")
+
+    config = LabConfig(
+        training=TrainingConfig(
+            output_dir=str(artifacts),
+            web_export_dir=str(generated),
+        )
+    )
+
+    class TestConfig:
+        def __new__(cls):
+            return config
+
+    with patch("sheepdog.server.LabConfig", TestConfig):
+        manager = TrainingManager()
+        with pytest.raises(ValueError, match="below the current journey's highest stage 8"):
+            manager.start(requested_episodes=2, fast_mode=True, curriculum_stage=2)
+
+
+def test_rewind_rehydrates_active_model_state(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    generated = tmp_path / "web" / "public" / "generated"
+    checkpoints = artifacts / "checkpoints"
+    models = artifacts / "models"
+    checkpoints.mkdir(parents=True)
+    models.mkdir(parents=True)
+    generated.mkdir(parents=True)
+
+    model_path = models / "best-model.zip"
+    model_path.write_text("model", encoding="utf-8")
+    checkpoint = {
+        "checkpoint": "checkpoint-000008.json",
+        "checkpoint_episode": 8,
+        "total_training_episodes": 8,
+        "policy_state_path": str(model_path),
+        "policy_type": "neural",
+        "trainer_type": "maskable_ppo",
+        "reward_config": {"instincts": {"curriculum_stage": 8}},
+    }
+    (artifacts / "training-summary.json").write_text(
+        json.dumps({"checkpoints": [checkpoint]}), encoding="utf-8"
+    )
+    (checkpoints / "checkpoint-000008.json").write_text(json.dumps(checkpoint), encoding="utf-8")
+    (artifacts / "stage-history.json").write_text(json.dumps({"8": 8}), encoding="utf-8")
+
+    config = LabConfig(
+        training=TrainingConfig(
+            output_dir=str(artifacts),
+            web_export_dir=str(generated),
+        )
+    )
+
+    class TestConfig:
+        def __new__(cls):
+            return config
+
+    with patch("sheepdog.server.LabConfig", TestConfig):
+        manager = TrainingManager()
+        payload, status = manager.rewind_to_stage(8)
+
+    assert status == 200
+    assert payload["curriculum_stage"] == 8
+    assert payload["active_model_path"] == str(model_path)
+
+
 def test_initial_status_loads_paused_training_session(tmp_path: Path) -> None:
     artifacts = tmp_path / "artifacts"
     generated = tmp_path / "web" / "public" / "generated"
@@ -513,7 +596,9 @@ def test_initial_status_loads_paused_training_session(tmp_path: Path) -> None:
             "curriculum_stage": 3,
         },
     }
-    (session_dir / "training-session.json").write_text(json.dumps(session_payload), encoding="utf-8")
+    (session_dir / "training-session.json").write_text(
+        json.dumps(session_payload), encoding="utf-8"
+    )
 
     config = LabConfig(
         training=TrainingConfig(
@@ -578,7 +663,7 @@ def test_startup_auto_resumes_interrupted_running_session(tmp_path: Path) -> Non
     start_calls: list[dict[str, object]] = []
 
     def fake_start(
-        self,
+        _self,
         requested_episodes,
         fast_mode,
         *,
@@ -615,10 +700,55 @@ def test_startup_auto_resumes_interrupted_running_session(tmp_path: Path) -> Non
     assert start_calls[0]["curriculum_stage"] == 6
     assert start_calls[0]["enable_instinct_rewards"] is True
     assert start_calls[0]["promote_from_checkpoint_episode"] == 249
+    assert start_calls[0]["resume"] is True
 
 
-def test_training_manager_error_handling_on_setup_failure(tmp_path: Path) -> None:
-    artifacts = tmp_path / "artifacts"
+def test_launcher_resume_request_preserves_resume_semantics() -> None:
+    launcher = Path(__file__).parents[1] / "start-app.ps1"
+    launcher_text = launcher.read_text(encoding="utf-8")
+
+    assert "$resumeRequest['resume'] = $true" in launcher_text
+
+
+def test_start_endpoint_returns_json_conflict_when_start_is_rejected() -> None:
+    manager = cast(
+        TrainingManager,
+        SimpleNamespace(
+            _status={"phase": "idle"},
+            start=lambda *args, **kwargs: (_ for _ in ()).throw(
+                ValueError("Requested stage 8 does not match active stage 2")
+            ),
+        ),
+    )
+    original_manager = TrainingRequestHandler.manager
+    TrainingRequestHandler.manager = manager
+    server = ThreadingHTTPServer(("127.0.0.1", 0), TrainingRequestHandler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    try:
+        body = json.dumps({"episodes": 10, "curriculum_stage": 8}).encode("utf-8")
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{server.server_port}/api/training/start",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with pytest.raises(urllib.error.HTTPError) as error_info:
+            urllib.request.urlopen(request)
+
+        assert error_info.value.code == 409
+        response = json.loads(error_info.value.read().decode("utf-8"))
+        assert response == {
+            "error": "Requested stage 8 does not match active stage 2",
+            "code": "TRAINING_START_REJECTED",
+        }
+    finally:
+        server.shutdown()
+        server.server_close()
+        TrainingRequestHandler.manager = original_manager
+
+
 def test_training_manager_error_handling_on_setup_failure(tmp_path: Path) -> None:
     artifacts = tmp_path / "artifacts"
     generated = tmp_path / "web" / "public" / "generated"
@@ -638,7 +768,10 @@ def test_training_manager_error_handling_on_setup_failure(tmp_path: Path) -> Non
 
     with (
         patch("sheepdog.server.LabConfig", TestConfig),
-        patch("sheepdog.server._build_training_job_config", side_effect=ValueError("Simulated setup error")),
+        patch(
+            "sheepdog.server._build_training_job_config",
+            side_effect=ValueError("Simulated setup error"),
+        ),
     ):
         manager = TrainingManager()
         manager.start(requested_episodes=10, fast_mode=True)
@@ -648,7 +781,7 @@ def test_training_manager_error_handling_on_setup_failure(tmp_path: Path) -> Non
             if not snap["running"]:
                 break
             time.sleep(0.05)
-        
+
         snap = manager.snapshot()
         assert not snap["running"]
         assert snap["phase"] == "error"
@@ -681,6 +814,7 @@ def test_stage_25_does_not_plateau_stop_before_max_stage(tmp_path: Path) -> None
 
         def train(self, progress_callback=None, should_stop=None):
             assert progress_callback is not None
+            assert should_stop is not None
             for checkpoint_episode in range(21):
                 progress_callback(
                     {
@@ -740,17 +874,19 @@ def test_start_training_auto_archives_existing_if_not_resuming(tmp_path: Path) -
 
     (artifacts / "checkpoints" / "checkpoint-000123.json").write_text("{}", encoding="utf-8")
     (artifacts / "training-summary.json").write_text(
-        json.dumps({
-            "checkpoints": [
-                {
-                    "checkpoint_episode": 123,
-                    "checkpoint": "checkpoint-000123.json",
-                    "reward_config": {"instincts": {"curriculum_stage": 2}},
-                    "records": []
-                }
-            ]
-        }),
-        encoding="utf-8"
+        json.dumps(
+            {
+                "checkpoints": [
+                    {
+                        "checkpoint_episode": 123,
+                        "checkpoint": "checkpoint-000123.json",
+                        "reward_config": {"instincts": {"curriculum_stage": 2}},
+                        "records": [],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
     )
 
     config = LabConfig(
@@ -769,15 +905,17 @@ def test_start_training_auto_archives_existing_if_not_resuming(tmp_path: Path) -
 
     class FakeTrainer:
         total_episodes_trained = 0
+
         def train(self, progress_callback=None, should_stop=None):
-            pass
+            assert progress_callback is not None
+            assert should_stop is not None
 
     with (
         patch("sheepdog.server.LabConfig", TestConfig),
         patch("sheepdog.server.create_trainer", return_value=FakeTrainer()),
     ):
         manager = TrainingManager()
-        payload = manager.start(
+        manager.start(
             requested_episodes=1,
             fast_mode=True,
             curriculum_stage=3,
@@ -822,15 +960,18 @@ def test_auto_promotion_updates_batch_episodes(tmp_path: Path) -> None:
 
     class FakeTrainer:
         total_episodes_trained = 0
+
         def __init__(self, cfg, output_dir):
             self.cfg = cfg
+            self.output_dir = output_dir
             configs_seen.append(cfg)
 
         def train(self, progress_callback=None, should_stop=None):
+            assert progress_callback is not None
+            assert should_stop is not None
             # When Stage 1 runs, trigger early promotion
             if self.cfg.rewards.instincts.curriculum_stage == 1:
-                from sheepdog.server import _EarlyPromotionSignal
-                raise _EarlyPromotionSignal(
+                raise server_module._EarlyPromotionSignal(  # pylint: disable=protected-access
                     checkpoint_episode=10,
                     best_success=1.0,
                     qualified_streak=3,
@@ -874,12 +1015,6 @@ def test_auto_promotion_updates_batch_episodes(tmp_path: Path) -> None:
 
 
 def test_diagnostics_endpoint_route_integration(tmp_path: Path) -> None:
-    import urllib.request
-    import urllib.error
-    import threading
-    from http.server import ThreadingHTTPServer
-    from sheepdog.server import TrainingRequestHandler
-
     # Setup directories
     artifacts = tmp_path / "artifacts"
     generated = tmp_path / "web" / "public" / "generated"
@@ -890,7 +1025,9 @@ def test_diagnostics_endpoint_route_integration(tmp_path: Path) -> None:
 
     (artifacts / "training-state.json").write_text("{}", encoding="utf-8")
     (artifacts / "training-summary.json").write_text("{}", encoding="utf-8")
-    (generated / "checkpoint-index.json").write_text('{"checkpoints": [], "latest": null}', encoding="utf-8")
+    (generated / "checkpoint-index.json").write_text(
+        '{"checkpoints": [], "latest": null}', encoding="utf-8"
+    )
 
     config = LabConfig(
         training=TrainingConfig(
@@ -910,13 +1047,10 @@ def test_diagnostics_endpoint_route_integration(tmp_path: Path) -> None:
         # We start the server in a background thread on a free port, e.g. 51829
         port = 51829
         server = ThreadingHTTPServer(("127.0.0.1", port), TrainingRequestHandler)
-        
-        server_thread = threading.Thread(
-            target=server.serve_forever,
-            daemon=True
-        )
+
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
         server_thread.start()
-        
+
         try:
             # Wait a short moment for the server to bind
             time.sleep(0.5)
@@ -949,6 +1083,3 @@ def test_diagnostics_endpoint_route_integration(tmp_path: Path) -> None:
         finally:
             server.shutdown()
             server.server_close()
-
-
-

@@ -40,6 +40,9 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+  "slow: marks longer-running benchmark and integration tests",
+]
 
 [tool.ruff]
 target-version = "py311"

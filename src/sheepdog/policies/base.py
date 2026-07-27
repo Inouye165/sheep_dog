@@ -44,6 +44,8 @@ class Policy(Protocol):
         """Human-readable policy name."""
         raise NotImplementedError
 
-    def select_actions(self, environment: Any) -> list[Action]:
+    def select_actions(
+        self, environment: Any, deterministic: bool = True
+    ) -> list[Action]:
         """Return one action per dog."""
         raise NotImplementedError

@@ -208,6 +208,15 @@ class SheepdogEnvironment:
         self._gate_corridor_failure_steps = 0
         self._spawn_mode = ""
         self._episode_reward_breakdown: dict[str, float] = {}
+        self._initial_sheep_distance_to_pen = 0.0
+        self._min_sheep_distance_to_pen = 0.0
+        self._num_waits = 0
+        self._num_sprints = 0
+        self._num_invalid_actions = 0
+        self._action_counts: dict[Action, int] = {action: 0 for action in ACTION_ORDER}
+        self._observations_history: list[Any] = []
+        self._previous_dog_positions: tuple[tuple[float, float], ...] = ()
+        self._previous_sheep_positions: tuple[tuple[float, float], ...] = ()
 
     @property
     def dog_count(self) -> int:
@@ -570,6 +579,15 @@ class SheepdogEnvironment:
         """Return a legal-action mask for the specified dog."""
         self.prepare_policy_step(weights=weights)
         dog = self._dogs[dog_index]
+        movement_mask: dict[Action, bool] = {
+            action: self.project_dog_action(dog_index, action) != dog.position
+            for action in ACTION_ORDER
+            if action != "wait"
+        }
+        if policy_mode in {None, "neural_policy", "shepherd_neural_dogs"}:
+            movement_mask["wait"] = True
+            return movement_mask
+
         current_score = self._action_score(
             dog_index,
             "wait",
@@ -594,20 +612,8 @@ class SheepdogEnvironment:
             weights=weights,
             reserved_positions=reserved_positions,
         )
-        mask: dict[Action, bool] = {
-            action: self.project_dog_action(dog_index, action) != dog.position
-            for action in ACTION_ORDER
-            if action != "wait"
-        }
-        # Neural / RL training modes must never have wait masked out: the
-        # heuristic scoring threshold creates an artificial exploration ceiling
-        # that prevents MaskablePPO from discovering hold-position strategies.
-        # Heuristic, linear, and hill-climbing modes keep the existing logic.
-        if policy_mode in {None, "neural_policy", "shepherd_neural_dogs"}:
-            mask["wait"] = True
-        else:
-            mask["wait"] = wait_allowed
-        return mask
+        movement_mask["wait"] = wait_allowed
+        return movement_mask
 
     def ranked_actions_for_dog(
         self,
@@ -741,19 +747,13 @@ class SheepdogEnvironment:
     def _run_policy_loop(
         self, policy: Policy, *, seed: int, capture_replay: bool, deterministic: bool = True
     ) -> EpisodeResult:
-        import inspect
-
         while not self._terminated:
             step_obs = []
             for dog_index in range(self.dog_count):
                 step_obs.append(self.build_observation_for_dog(dog_index))
             self._observations_history.append(tuple(step_obs))
 
-            sig = inspect.signature(policy.select_actions)
-            if "deterministic" in sig.parameters:
-                actions = policy.select_actions(self, deterministic=deterministic)
-            else:
-                actions = policy.select_actions(self)
+            actions = policy.select_actions(self, deterministic=deterministic)
             self.step(actions, capture_replay=capture_replay)
         final_snapshot = self.get_state_snapshot()
         return EpisodeResult(
@@ -786,6 +786,11 @@ class SheepdogEnvironment:
             raise ValueError("Action count does not match dog count.")
         validated_actions: list[Action] = [self._validate_action(action) for action in actions]
         self.prepare_policy_step()
+        invalid_action_attempts = tuple(
+            action != "wait"
+            and self.project_dog_action(dog_index, action) == self._dogs[dog_index].position
+            for dog_index, action in enumerate(validated_actions)
+        )
 
         previous_snapshot = self.get_state_snapshot()
         previous_farthest_to_flock_center = self._farthest_distance_to_flock_center()
@@ -949,17 +954,17 @@ class SheepdogEnvironment:
         final_snapshot = self.get_state_snapshot()
 
         # Update metrics counters
-        for dog_index, action in enumerate(validated_actions):
+        for action, invalid_action_attempt in zip(
+            validated_actions, invalid_action_attempts, strict=True
+        ):
             if action == "wait":
                 self._num_waits += 1
             elif action.startswith("sprint"):
                 self._num_sprints += 1
-            
-            # Check if chosen action was masked (invalid action attempt)
-            mask = self.action_mask_for_dog(dog_index)
-            if not mask.get(action, True):
+
+            if invalid_action_attempt:
                 self._num_invalid_actions += 1
-                
+
             self._action_counts[action] = self._action_counts.get(action, 0) + 1
 
         # Track min_sheep_distance_to_pen
@@ -1007,7 +1012,11 @@ class SheepdogEnvironment:
             num_waits=self._num_waits,
             num_sprints=self._num_sprints,
             num_invalid_actions=self._num_invalid_actions,
-            most_frequent_action=max(self._action_counts, key=self._action_counts.get) if self._action_counts else "",
+            most_frequent_action=(
+                max(self._action_counts, key=lambda action: self._action_counts[action])
+                if self._action_counts
+                else ""
+            ),
             oscillation_detected=any(self._in_two_position_loop(d.recent_positions) for d in self._dogs),
         )
 
@@ -1074,9 +1083,10 @@ class SheepdogEnvironment:
                     continue
                 if y >= self.env_config.height - 4:
                     continue
-                if avoid_points:
-                    if any(pt.distance_to(ap) < current_min_distance for ap in avoid_points):
-                        continue
+                if avoid_points and any(
+                    pt.distance_to(point) < current_min_distance for point in avoid_points
+                ):
+                    continue
                 return pt
             current_min_distance *= 0.5
 
@@ -2558,7 +2568,7 @@ class SheepdogEnvironment:
         if target_gain < 1.5:
             penalty += 0.45
         focus_distance = candidate_debug.get("distance_to_focus_sheep")
-        if isinstance(focus_distance, (int, float)) and focus_distance <= 2.5:
+        if isinstance(focus_distance, int | float) and focus_distance <= 2.5:
             penalty += 0.9
         if candidate_debug["holding_pressure_position"]:
             penalty += 0.8

@@ -3,7 +3,10 @@
 # pylint: disable=missing-function-docstring
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 
@@ -16,6 +19,7 @@ from sheepdog.policies.random_policy import RandomPolicy
 from sheepdog.policies.trainable import TrainableLinearPolicy
 from sheepdog.server import _load_playable_policy
 from sheepdog.training.factory import create_trainer
+from sheepdog.training.maskable_ppo import finish_wandb_run
 from sheepdog.training.rl_env import SheepdogRLAdapter
 
 
@@ -62,6 +66,27 @@ def test_neural_policy_initializes_and_acts(tmp_path: Path) -> None:
             "wait",
         }
     )
+
+
+def test_loaded_policy_disables_unavailable_tensorboard(tmp_path: Path) -> None:
+    config = make_experiment_config(tmp_path)
+    model = MagicMock()
+    model.tensorboard_log = str(tmp_path / "stale-tensorboard-path")
+    vec_env = SimpleNamespace(observation_space=SimpleNamespace(shape=(12,)))
+
+    with (
+        patch("sheepdog.policies.neural._build_vec_env", return_value=(vec_env, 1, "dummy")),
+        patch("sheepdog.policies.neural.MaskablePPO.load", return_value=model),
+        patch("sheepdog.policies.neural.tensorboard_available", return_value=False),
+    ):
+        NeuralPolicy.load(tmp_path / "model.zip", config)
+
+    assert model.tensorboard_log is None
+
+
+def test_wandb_cleanup_accepts_partial_module() -> None:
+    with patch.dict(sys.modules, {"wandb": SimpleNamespace()}):
+        finish_wandb_run()
 
 
 def test_rl_adapter_produces_expected_observation_shape_and_masks_invalid_actions(
@@ -234,9 +259,10 @@ def test_evaluator_is_deterministic_for_fixed_seed_neural_policy(tmp_path: Path)
 
 
 def test_maskable_ppo_trainer_compatible_across_curriculum_stages(tmp_path: Path) -> None:
-    from sheepdog.curriculum import apply_training_profile
-    from dataclasses import asdict
     import json
+    from dataclasses import asdict
+
+    from sheepdog.curriculum import apply_training_profile
 
     config_stage_1 = make_experiment_config(tmp_path)
     config_stage_1 = apply_training_profile(
@@ -282,6 +308,6 @@ def test_maskable_ppo_trainer_compatible_across_curriculum_stages(tmp_path: Path
     )
 
     trainer = create_trainer(config_stage_3, config_stage_3.training.output_dir)
-    assert trainer._has_compatible_policy_state() is True
+    assert trainer.has_compatible_policy_state() is True
 
 

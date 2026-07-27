@@ -305,8 +305,11 @@ describe("CopyAgentDataButton", () => {
               average_completion_seconds: 10,
               average_sheep_penned: 4.0,
               average_reward: 15.0,
+              checkpoint: "",
+              evaluation: "",
+              replay: "",
               records: [
-                { seed: 42, success: true, steps: 10, simulated_seconds: 5, sheep_penned: 4, final_sheep_distance_to_pen: 0, no_progress_steps: 0, reward_total: 15, reward_breakdown: {} as any, replay_path: "" }
+                { seed: 42, success: true, timeout: false, stopped: false, steps: 10, simulated_seconds: 5, sheep_penned: 4, final_sheep_distance_to_pen: 0, no_progress_steps: 0, reward_total: 15, reward_breakdown: {} as any, replay_path: "" }
               ],
               reward_config: { instincts: { curriculum_stage: 1 } }
             }

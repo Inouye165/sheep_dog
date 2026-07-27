@@ -19,6 +19,7 @@ from sheepdog.server import (
     _build_training_job_config,
     _load_playable_policy,
     _seed_success_gate,
+    _training_checkpoint_schedule,
 )
 from sheepdog.training.factory import create_trainer
 from sheepdog.training.trainer import CandidateEvaluationSummary, Trainer
@@ -47,6 +48,19 @@ def make_config(output_dir: Path) -> LabConfig:
             web_export_dir=str(output_dir / "web" / "generated"),
         ),
     )
+
+
+def test_training_checkpoint_schedule_is_stage_aware_and_includes_final() -> None:
+    assert _training_checkpoint_schedule(20, 12) == (0, 8, 16, 19)
+    assert _training_checkpoint_schedule(20, 13) == (0, 5, 10, 15, 19)
+    assert _training_checkpoint_schedule(20, 26) == (0, 3, 6, 9, 12, 15, 18, 19)
+    assert _training_checkpoint_schedule(1, 1) == (0,)
+
+
+def test_saved_scenario_evaluation_cadence_includes_twentieth_and_final() -> None:
+    assert Trainer.should_evaluate_saved_scenarios(1, 21) is False
+    assert Trainer.should_evaluate_saved_scenarios(20, 21) is True
+    assert Trainer.should_evaluate_saved_scenarios(21, 21) is True
 
 
 def test_checkpoint_metadata_is_written(tmp_path: Path) -> None:

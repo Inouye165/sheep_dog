@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, replace
+from unittest.mock import patch
 
 from sheepdog.config import EnvironmentConfig, LabConfig, PolicyConfig, RewardConfig, TrainingConfig
 from sheepdog.entities import DogRole, Point
@@ -206,6 +207,16 @@ def test_wait_always_legal_in_neural_policy_mode() -> None:
     assert mask["wait"] is True
 
 
+def test_neural_action_mask_skips_heuristic_action_scoring() -> None:
+    environment = SheepdogEnvironment(make_config())
+    environment.reset(seed=12)
+
+    with patch.object(environment, "_action_score", side_effect=AssertionError):
+        mask = environment.action_mask_for_dog(0, policy_mode="neural_policy")
+
+    assert mask["wait"] is True
+
+
 def test_wait_always_legal_in_shepherd_neural_dogs_mode() -> None:
     config = make_config()
     environment = SheepdogEnvironment(config)
@@ -402,6 +413,17 @@ def test_action_mask_blocks_sprint_into_walls() -> None:
     assert mask["left"] is False
     assert mask["sprint_up"] is False
     assert mask["sprint_left"] is False
+
+
+def test_valid_action_is_not_counted_invalid_after_reaching_wall() -> None:
+    config = make_config(dogs=1, sheep=0)
+    environment = SheepdogEnvironment(config)
+    environment.reset(seed=32)
+    environment.dogs[0].position = Point(config.environment.width - 2, 5)
+
+    environment.step(["right"])
+
+    assert environment._stats.num_invalid_actions == 0
 
 
 def test_default_dog_speed_moves_one_cell() -> None:

@@ -336,6 +336,80 @@ def test_restart_after_repair_remains_on_stage_2(tmp_path: Path, base_config: La
         assert status["run_id"] == "test_run"
 
 
+def test_newer_session_checkpoint_supersedes_stale_manual_stage(
+    tmp_path: Path, base_config: LabConfig
+) -> None:
+    artifacts = Path(base_config.training.output_dir)
+    from sheepdog.checkpoints.store import get_action_space_hash, get_observation_schema_hash
+
+    obs_hash = get_observation_schema_hash(base_config)
+    action_hash = get_action_space_hash()
+    run_id = "active_stage_8_run"
+    (artifacts / "promotion-history.json").write_text(
+        json.dumps(
+            [
+                {
+                    "event_type": "manual_change",
+                    "from_stage": 8,
+                    "to_stage": 2,
+                    "run_id": run_id,
+                    "timestamp": "2026-07-21T17:04:21+00:00",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    model_path = artifacts / "models" / "maskable-ppo-stage-8.zip"
+    model_path.write_text("PK\x03\x04dummyzip", encoding="utf-8")
+    checkpoint = {
+        "checkpoint_episode": 3518,
+        "checkpoint_id": f"chk_{run_id}_ep_3518",
+        "run_id": run_id,
+        "curriculum_stage": 8,
+        "policy_type": "neural",
+        "policy_mode": "neural_policy",
+        "trainer_type": "maskable_ppo",
+        "policy_state_path": str(model_path),
+        "observation_schema_hash": obs_hash,
+        "action_space_hash": action_hash,
+    }
+    (artifacts / "checkpoints" / "checkpoint-003518.json").write_text(
+        json.dumps(checkpoint), encoding="utf-8"
+    )
+    startup_dir = artifacts / "startup"
+    startup_dir.mkdir(parents=True, exist_ok=True)
+    (startup_dir / "training-session.json").write_text(
+        json.dumps(
+            {
+                "state": "paused",
+                "requested_at": "2026-07-21T18:18:07+00:00",
+                "remaining_episodes": 170,
+                "training_request": {"episodes": 225, "curriculum_stage": 8},
+                "status": {
+                    "run_id": run_id,
+                    "curriculum_stage": 8,
+                    "message": "Training paused",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class TestConfig:
+        def __new__(cls):
+            return base_config
+
+    with (
+        patch("sheepdog.server.LabConfig", TestConfig),
+        patch("sb3_contrib.MaskablePPO.load", return_value=DummyModel()),
+    ):
+        status = TrainingManager().snapshot()
+
+    assert status["curriculum_stage"] == 8
+    assert status["active_checkpoint_id"] == checkpoint["checkpoint_id"]
+    assert status["phase"] == "paused"
+
+
 def test_diagnostics_markdown_and_json_agreement(tmp_path: Path, base_config: LabConfig) -> None:
     # 18. Diagnostics Markdown and JSON agree on stage, model source, trainer type, and gate state
     artifacts = Path(base_config.training.output_dir)

@@ -641,7 +641,51 @@ export function App() {
 
     const handleError = () => {
       if (!active) return;
-      setTrainingStatus(null);
+      setTrainingStatus((prev) => {
+        const base = prev ?? {
+          running: false,
+          fast_mode: false,
+          enable_instinct_rewards: false,
+          debug_reward_breakdown: false,
+          curriculum_stage: 0,
+          requested_episodes: 0,
+          completed_episodes: 0,
+          batch_total_episodes: 0,
+          batch_completed_episodes: 0,
+          total_episodes_trained: 0,
+          stage_history: {},
+          grand_total_episodes: 0,
+          current_episode: null,
+          checkpoint_episode: null,
+          latest_checkpoint_episode: null,
+          latest_seed: null,
+          latest_replay_path: null,
+          best_score: null,
+          latest_success_rate: null,
+          latest_avg_sheep_penned: null,
+          latest_avg_reward: null,
+          latest_timeout_rate: null,
+          latest_stopped_rate: null,
+          latest_avg_no_progress_steps: null,
+          latest_avg_distance_to_pen: null,
+          latest_avg_flock_spread: null,
+          latest_avg_farthest_distance_to_pen: null,
+          latest_avg_farthest_distance_to_flock_center: null,
+          phase: "offline",
+          message: "Server unreachable",
+          error: "Training server is unreachable. It may have crashed or stopped.",
+          error_type: "Connection Error",
+          starting_episode: null,
+        };
+        return {
+          ...base,
+          running: false,
+          phase: "offline",
+          message: "Server unreachable",
+          error: "Training server is unreachable. It may have crashed or stopped.",
+          error_type: "Connection Error",
+        };
+      });
       // Back off: double the delay, cap at POLL_MAX
       pollDelay = Math.min(pollDelay * 2, POLL_MAX);
     };
@@ -674,20 +718,22 @@ export function App() {
         if (active) {
           applyStatus(status);
           // Adopt the server's stage on initial load when training is running,
-          // or when the server reports a HIGHER stage than localStorage (the
-          // user trained further on another session).  Never overwrite a local
-          // stage that is >= the server's, so a pending Promote click is not
-          // immediately reverted by polling.
+          // or when the server reports a HIGHER stage than localStorage, or when
+          // localStorage holds a stale stage beyond a valid single-step promotion.
+          // Never overwrite a local stage that is exactly active + 1 so a pending
+          // Promote click is preserved.
           const localStage = parseInt(
             localStorage.getItem("sheepdog_curriculum_stage") ?? "0",
             10,
           );
+          const serverStage = status.curriculum_stage;
+          const maxPromoteStage = (status.max_curriculum_stage ?? serverStage ?? 1) + 1;
           if (
             status.running ||
             (
               !manualStageOverrideRef.current &&
-              status.curriculum_stage != null &&
-              status.curriculum_stage > localStage
+              serverStage != null &&
+              (serverStage > localStage || localStage > maxPromoteStage)
             )
           ) {
             syncTrainingStageFromStatus(status);
@@ -860,6 +906,7 @@ export function App() {
     // the backend seeds Stage N+1 from the peak policy, not the hill-climbing
     // tail which may have lower formal success rate.
     setPromoteFromEpisode(bestStageFormalEntry?.checkpoint_episode ?? null);
+    manualStageOverrideRef.current = true;
     setTrainingCurriculumStage((prev) => {
       const next = Math.min(prev + 1, maxCurriculumStage);
       if (next === prev) {

@@ -164,8 +164,9 @@ class TrainableLinearPolicy:
     def __init__(self, weights: PolicyWeights | None = None) -> None:
         self.weights = weights or PolicyWeights()
 
-    def select_actions(self, environment: object) -> list[Action]:
+    def select_actions(self, environment: object, deterministic: bool = True) -> list[Action]:
         """Return the best-ranked action for every dog in the environment."""
+        del deterministic
         actions: list[Action] = []
         reserved_positions: set[object] = set()
         if hasattr(environment, "prepare_policy_step"):

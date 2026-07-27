@@ -30,14 +30,17 @@ class CurriculumTelemetryManager:
         try:
             import wandb
             # Avoid re-initializing if there is an active run
-            if wandb.run is None:
-                wandb.init(project=project_name, config=config_dict, reinit=True)
+            if getattr(wandb, "run", None) is None:
+                init = getattr(wandb, "init", None)
+                if init is None:
+                    return
+                init(project=project_name, config=config_dict, reinit=True)
             self._wandb_initialized = True
             logger.info("Weights & Biases initialized successfully.")
         except ImportError:
             logger.warning("Weights & Biases (wandb) is not installed. Cloud telemetry is disabled.")
-        except Exception as e:
-            logger.warning(f"Failed to initialize Weights & Biases: {e}")
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning("Failed to initialize Weights & Biases: %s", exc)
 
     def log(
         self,
@@ -84,14 +87,14 @@ class CurriculumTelemetryManager:
                 history = json.loads(self.history_path.read_text(encoding="utf-8"))
                 if not isinstance(history, list):
                     history = []
-            except Exception:
+            except (OSError, TypeError, json.JSONDecodeError):
                 history = []
 
         history.append(record)
         try:
             atomic_write_json(self.history_path, history)
-        except Exception as e:
-            logger.error(f"Failed to write telemetry to local history: {e}")
+        except OSError as exc:
+            logger.error("Failed to write telemetry to local history: %s", exc)
 
         # 2. Cloud logging (Weights & Biases)
         if self._wandb_initialized:
@@ -106,6 +109,8 @@ class CurriculumTelemetryManager:
                 for k, v in hyperparameters.items():
                     if isinstance(v, (int, float, str, bool)):
                         wandb_data[f"hyperparam/{k}"] = v
-                wandb.log(wandb_data, step=step)
-            except Exception as e:
-                logger.error(f"Failed to log to wandb: {e}")
+                log_metrics = getattr(wandb, "log", None)
+                if log_metrics is not None:
+                    log_metrics(wandb_data, step=step)
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                logger.error("Failed to log to W&B: %s", exc)

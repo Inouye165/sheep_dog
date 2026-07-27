@@ -338,6 +338,13 @@ class Trainer:
             }
         )
 
+        checkpoint_ordinals = {
+            checkpoint_episode: ordinal
+            for ordinal, checkpoint_episode in enumerate(
+                train_config.checkpoint_episodes, start=1
+            )
+        }
+        checkpoint_total = len(checkpoint_ordinals)
         for episode in range(batch_total):
             if should_stop is not None and should_stop():
                 break
@@ -369,13 +376,13 @@ class Trainer:
 
             if episode in train_config.checkpoint_episodes:
                 from sheepdog.checkpoints.store import (
-                    get_observation_schema_hash,
-                    get_action_space_hash,
                     compute_env_config_hash,
                     compute_seed_set_id,
+                    get_action_space_hash,
+                    get_observation_schema_hash,
                 )
-                from sheepdog.rewards import REWARD_SCHEMA_VERSION
                 from sheepdog.environment import ENV_CONFIG_VERSION
+                from sheepdog.rewards import REWARD_SCHEMA_VERSION
 
                 run_id = self._loaded_state.get("run_id")
                 parent_run_id = self._loaded_state.get("parent_run_id")
@@ -530,7 +537,11 @@ class Trainer:
                     representative_replay_path,
                     checkpoint_path,
                 )
-                self._evaluate_saved_scenarios(best_policy, cumulative_episode)
+                checkpoint_ordinal = checkpoint_ordinals[episode]
+                if self.should_evaluate_saved_scenarios(
+                    checkpoint_ordinal, checkpoint_total
+                ):
+                    self._evaluate_saved_scenarios(best_policy, cumulative_episode)
                 emit(
                     {
                         "phase": "checkpoint",
@@ -852,7 +863,7 @@ class Trainer:
         def _episode(payload: Any) -> int:
             if isinstance(payload, dict):
                 value = payload.get("checkpoint_episode")
-                if isinstance(value, (int, float)):
+                if isinstance(value, int | float):
                     return int(value)
             return -1
 
@@ -889,15 +900,43 @@ class Trainer:
             exported_record["replay_path"] = f"/generated/replays/{target_path.name}"
             return exported_record
 
+        # Collect promo/rollback episodes to preserve their records
+        promo_episodes = set()
+        try:
+            promo_path = self.output_root / "promotion-history.json"
+            if promo_path.exists():
+                promotion_history = json.loads(promo_path.read_text(encoding="utf-8"))
+                if isinstance(promotion_history, list):
+                    for event in promotion_history:
+                        if not isinstance(event, dict):
+                            continue
+                        episode = event.get("trigger_checkpoint_episode")
+                        if isinstance(episode, int):
+                            promo_episodes.add(episode)
+        except (OSError, json.JSONDecodeError):
+            promo_episodes.clear()
+
         exported_checkpoints: list[dict[str, Any]] = []
-        for checkpoint_payload in checkpoints:
+        latest_episodes_to_keep = 100
+        total_checkpoints = len(checkpoints)
+        for i, checkpoint_payload in enumerate(checkpoints):
             exported_payload = dict(checkpoint_payload)
             exported_payload["journey"] = "current"
             exported_payload.pop("policy_weights", None)
             exported_payload.pop("training_scenario_coverage", None)
-            exported_payload["records"] = [
-                _export_record(record) for record in checkpoint_payload.get("records", [])
-            ]
+
+            ep = _episode(checkpoint_payload)
+            keep_records = (
+                (total_checkpoints - i) <= latest_episodes_to_keep
+                or ep in promo_episodes
+                or (ep % 100 == 0)
+            )
+            if keep_records:
+                exported_payload["records"] = [
+                    _export_record(record) for record in checkpoint_payload.get("records", [])
+                ]
+            else:
+                exported_payload.pop("records", None)
             exported_checkpoints.append(exported_payload)
 
         # Prepend archived journey checkpoints so the full timeline is visible.
@@ -922,6 +961,13 @@ class Trainer:
                     web_dir / "latest-replay.json", replay_src.read_text(encoding="utf-8")
                 )
         return summary_latest
+
+    @staticmethod
+    def should_evaluate_saved_scenarios(
+        checkpoint_ordinal: int, checkpoint_total: int
+    ) -> bool:
+        """Return whether saved scenarios should run for this checkpoint."""
+        return checkpoint_ordinal % 20 == 0 or checkpoint_ordinal == checkpoint_total
 
     def _evaluate_saved_scenarios(
         self, policy: TrainableLinearPolicy, checkpoint_episode: int
