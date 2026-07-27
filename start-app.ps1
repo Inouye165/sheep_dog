@@ -61,16 +61,14 @@ function Wait-ForService {
     )
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $processExited = $false
     while ((Get-Date) -lt $deadline) {
-        $proc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
-        if ($null -eq $proc) {
-            $outTail = Get-LogTail -Path $StdOutLog
-            $errTail = Get-LogTail -Path $StdErrLog
-            throw "$Name exited before becoming ready.`n--- $Name stdout ---`n$outTail`n--- $Name stderr ---`n$errTail"
-        }
-
         if (Test-HttpReady -Url $Url) {
             return
+        }
+
+        if (-not $processExited) {
+            $processExited = $null -eq (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)
         }
 
         Start-Sleep -Milliseconds 250
@@ -78,7 +76,8 @@ function Wait-ForService {
 
     $outTail = Get-LogTail -Path $StdOutLog
     $errTail = Get-LogTail -Path $StdErrLog
-    throw "$Name did not become ready at $Url within $TimeoutSeconds seconds.`n--- $Name stdout ---`n$outTail`n--- $Name stderr ---`n$errTail"
+    $processStatus = if ($processExited) { 'launcher process exited' } else { 'launcher process still running' }
+    throw "$Name did not become ready at $Url within $TimeoutSeconds seconds ($processStatus).`n--- $Name stdout ---`n$outTail`n--- $Name stderr ---`n$errTail"
 }
 
 function Get-ListenerPid {
@@ -276,6 +275,24 @@ function Stop-ExistingServices {
     Stop-ListenerOnPort -Port $webPort
 }
 
+function Wait-ForPortRelease {
+    param(
+        [Parameter(Mandatory = $true)][int]$Port,
+        [int]$TimeoutSeconds = 10
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if ($null -eq (Get-ListenerPid -Port $Port)) {
+            return
+        }
+        Start-Sleep -Milliseconds 100
+    }
+
+    $listenerPid = Get-ListenerPid -Port $Port
+    throw "Port $Port is still held by process $listenerPid after ${TimeoutSeconds}s."
+}
+
 function Get-TrainingSessionState {
     param(
         [Parameter(Mandatory = $true)][string]$Path
@@ -304,6 +321,7 @@ function ConvertTo-ResumeRequest {
         $resumeRequest[$property.Name] = $property.Value
     }
     $resumeRequest['episodes'] = $RemainingEpisodes
+    $resumeRequest['resume'] = $true
     return $resumeRequest
 }
 
@@ -418,6 +436,21 @@ function Start-ManagedProcess {
     return $process
 }
 
+$startupMutex = New-Object System.Threading.Mutex($false, 'Local\SheepdogAppStartup')
+$startupMutexAcquired = $false
+try {
+    try {
+        $startupMutexAcquired = $startupMutex.WaitOne(0)
+    }
+    catch [System.Threading.AbandonedMutexException] {
+        $startupMutexAcquired = $true
+    }
+    if (-not $startupMutexAcquired) {
+        throw 'Another sheepdog startup is already in progress. Wait for it to complete before retrying.'
+    }
+
+$startupTimer = [System.Diagnostics.Stopwatch]::StartNew()
+
 Write-Host 'Checking backend dependencies...'
 try {
     Invoke-CommandChecked -FilePath $pythonExe -Arguments @('-c', 'import sheepdog')
@@ -434,6 +467,8 @@ if (-not (Test-Path (Join-Path $webDir 'node_modules'))) {
 
 Write-Host 'Stopping any existing sheepdog services...'
 Stop-ExistingServices
+Wait-ForPortRelease -Port $backendPort
+Wait-ForPortRelease -Port $webPort
 
 $trainingSessionPath = Join-Path $artifactDir 'training-session.json'
 $resumeTraining = Get-ResumeTrainingRequest -SessionState (Get-TrainingSessionState -Path $trainingSessionPath)
@@ -449,7 +484,13 @@ $backend = Start-ManagedProcess `
     -StandardOutput $backendOut `
     -StandardError $backendErr
 
-$web = $null
+Write-Host 'Starting web viewer on http://127.0.0.1:5173'
+$web = Start-ManagedProcess `
+    -FilePath $npmCmd `
+    -Arguments @('run', 'dev', '--', '--host', '127.0.0.1', '--port', '5173') `
+    -WorkingDirectory $webDir `
+    -StandardOutput $webOut `
+    -StandardError $webErr
 
 try {
     Write-Host "Waiting for backend readiness (timeout ${backendStartupTimeoutSeconds}s)..."
@@ -460,6 +501,7 @@ try {
         -StdOutLog $backendOut `
         -StdErrLog $backendErr `
         -TimeoutSeconds $backendStartupTimeoutSeconds
+    Write-Host ("Backend ready after {0:n1}s." -f $startupTimer.Elapsed.TotalSeconds)
     if ($null -ne $resumeTraining) {
         Write-Host "Resuming training with $($resumeTraining.remainingEpisodes) remaining episodes..."
         $resumeResponse = Invoke-JsonPost -Uri "http://127.0.0.1:$backendPort/api/training/start" -Body $resumeTraining.request
@@ -467,14 +509,6 @@ try {
         if ($null -eq $msg) { $msg = 'Training resume requested.' }
         Write-Host $msg
     }
-
-    Write-Host 'Starting web viewer on http://127.0.0.1:5173'
-    $web = Start-ManagedProcess `
-        -FilePath $npmCmd `
-        -Arguments @('run', 'dev', '--', '--host', '127.0.0.1', '--port', '5173') `
-        -WorkingDirectory $webDir `
-        -StandardOutput $webOut `
-        -StandardError $webErr
 
     Write-Host "Waiting for web readiness (timeout ${webStartupTimeoutSeconds}s)..."
     Wait-ForService `
@@ -484,6 +518,7 @@ try {
         -StdOutLog $webOut `
         -StdErrLog $webErr `
         -TimeoutSeconds $webStartupTimeoutSeconds
+    Write-Host ("Web ready after {0:n1}s total." -f $startupTimer.Elapsed.TotalSeconds)
 }
 catch {
     Write-Host 'Startup failed. Cleaning up launched services...'
@@ -525,3 +560,10 @@ Write-Host "Web logs: $webOut"
 Write-Host "Web errors: $webErr"
 Write-Host "Watchdog log: $watchdogLog"
 Write-Host "Process ids: $pidFile"
+}
+finally {
+    if ($startupMutexAcquired) {
+        $startupMutex.ReleaseMutex()
+    }
+    $startupMutex.Dispose()
+}
