@@ -368,6 +368,9 @@ export interface CheckpointEntry {
   records: EvaluationRecord[];
   /** Journey identifier — "current" for the active journey, "journey-YYYYMMDD-HHMMSS" for archived ones. */
   journey?: string;
+  stopped_rate?: number;
+  average_distance_to_pen?: number;
+  average_sheep_distance_to_pen?: number;
 }
 
 export interface EvaluationSummary {
@@ -557,6 +560,9 @@ export interface SnapshotIdentity {
   evaluation_timestamp: string;
   evaluation_policy_version: number | null;
   evaluation_checkpoint_id: string | null;
+  latest_current_stage_evaluation?: CheckpointEntry | null;
+  latest_any_stage_evaluation?: CheckpointEntry | null;
+  current_stage_promotion_gate?: AutoPromoteGateDiagnostics | null;
 }
 
 export interface CompletenessRow {

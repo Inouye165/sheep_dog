@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { loadHyperparams, loadTrainingDiagnostics } from "../lib/api";
 import type { TrainingStatus, CheckpointIndex, CheckpointEntry, DiagnosticsResponse } from "../state/types";
 
@@ -97,6 +97,18 @@ export function CopyAgentDataButton({
   const [endStage, setEndStage] = useState<number>(curriculumStage);
   const [showTooltip, setShowTooltip] = useState(false);
 
+  const [preFetchedHyperparams, setPreFetchedHyperparams] = useState<any>(null);
+  const [preFetchedDiagnostics, setPreFetchedDiagnostics] = useState<DiagnosticsResponse | null>(null);
+  const [preFetchedApiErrorDetails, setPreFetchedApiErrorDetails] = useState<any>(null);
+  const [preFetchLoaded, setPreFetchLoaded] = useState(false);
+
+  const prefetchPromiseRef = useRef<Promise<{
+    hyperparams: any;
+    diagnostics: DiagnosticsResponse | null;
+    apiErrorDetails: any;
+    failed: boolean;
+  }> | null>(null);
+
   const checkpoints = checkpointIndex?.checkpoints ?? [];
   const allStages = Array.from(
     new Set([
@@ -119,43 +131,28 @@ export function CopyAgentDataButton({
     setEndStage(curriculumStage);
   }, [curriculumStage]);
 
-  const confirmAndCopy = async () => {
-    if (loading) return;
-    setLoading(true);
-    setFailed(false);
-    setIsModalOpen(false);
-
-    let selectedStages: number[] = [];
-    if (stageOption === "current") {
-      selectedStages = [curriculumStage];
-    } else if (stageOption === "single") {
-      selectedStages = [singleStage];
-    } else if (stageOption === "range") {
-      const start = Math.min(startStage, endStage);
-      const end = Math.max(startStage, endStage);
-      for (let s = start; s <= end; s++) {
-        selectedStages.push(s);
-      }
+  // Pre-fetch hyperparameters and diagnostics when the copy modal is opened
+  useEffect(() => {
+    if (!isModalOpen) {
+      setPreFetchedHyperparams(null);
+      setPreFetchedDiagnostics(null);
+      setPreFetchedApiErrorDetails(null);
+      setPreFetchLoaded(false);
+      prefetchPromiseRef.current = null;
+      return;
     }
 
-    const fetchAndFormatReport = async (): Promise<string> => {
-      // 1. Fetch live hyperparameters from API
+    const runPrefetch = async () => {
       let hyperparams = null;
       try {
         hyperparams = await loadHyperparams();
       } catch (err) {
-        console.error("Failed to load hyperparams for copy report:", err);
+        console.error("Failed to load hyperparams for copy report prefetch:", err);
       }
 
-      // Fetch diagnostics from API
       let diagnostics: DiagnosticsResponse | null = null;
-      let apiErrorDetails: {
-        endpoint: string;
-        status: number | string;
-        message: string;
-        responseIsNull: boolean;
-        jsonParsingFailed: boolean;
-      } | null = null;
+      let apiErrorDetails: any = null;
+      let hasFailed = false;
 
       try {
         diagnostics = await loadTrainingDiagnostics(
@@ -170,7 +167,7 @@ export function CopyAgentDataButton({
             responseIsNull: true,
             jsonParsingFailed: false
           };
-          setFailed(true);
+          hasFailed = true;
         } else if (!diagnostics.diagnosticsAvailable || diagnostics.error) {
           apiErrorDetails = {
             endpoint: diagnostics.error?.endpoint || "/api/training/diagnostics",
@@ -179,10 +176,10 @@ export function CopyAgentDataButton({
             responseIsNull: false,
             jsonParsingFailed: false
           };
-          setFailed(true);
+          hasFailed = true;
         }
       } catch (err) {
-        console.error("Failed to load training diagnostics for copy report:", err);
+        console.error("Failed to load training diagnostics for copy report prefetch:", err);
         const fetchError = err as { status?: number; message?: string };
         const isJsonErr = fetchError.message?.includes("JSON") || fetchError.message?.includes("Unexpected token");
         apiErrorDetails = {
@@ -192,47 +189,103 @@ export function CopyAgentDataButton({
           responseIsNull: false,
           jsonParsingFailed: !!isJsonErr
         };
-        setFailed(true);
+        hasFailed = true;
       }
 
-      // 2. Extract checkpoints
-      const checkpointsList = checkpointIndex?.checkpoints ?? [];
+      return {
+        hyperparams,
+        diagnostics,
+        apiErrorDetails,
+        failed: hasFailed
+      };
+    };
 
-      // 3. Format the markdown report
+    const promise = runPrefetch();
+    prefetchPromiseRef.current = promise;
+
+    promise.then((res) => {
+      if (prefetchPromiseRef.current === promise) {
+        setPreFetchedHyperparams(res.hyperparams);
+        setPreFetchedDiagnostics(res.diagnostics);
+        setPreFetchedApiErrorDetails(res.apiErrorDetails);
+        setFailed(res.failed);
+        setPreFetchLoaded(true);
+      }
+    });
+  }, [isModalOpen, trainingStatus?.active_checkpoint_id, trainingStatus?.checkpoint_episode]);
+
+  const confirmAndCopy = async () => {
+    if (loading) return;
+    setLoading(true);
+    setFailed(false);
+
+    let selectedStages: number[] = [];
+    if (stageOption === "current") {
+      selectedStages = [curriculumStage];
+    } else if (stageOption === "single") {
+      selectedStages = [singleStage];
+    } else if (stageOption === "range") {
+      const start = Math.min(startStage, endStage);
+      const end = Math.max(startStage, endStage);
+      for (let s = start; s <= end; s++) {
+        selectedStages.push(s);
+      }
+    }
+
+    const getReportAndWrite = async () => {
+      let hp = preFetchedHyperparams;
+      let diag = preFetchedDiagnostics;
+      let errDetails = preFetchedApiErrorDetails;
+      let hasFailed = failed;
+
+      if (!preFetchLoaded && prefetchPromiseRef.current) {
+        try {
+          const res = await prefetchPromiseRef.current;
+          hp = res.hyperparams;
+          diag = res.diagnostics;
+          errDetails = res.apiErrorDetails;
+          hasFailed = res.failed;
+        } catch (err) {
+          console.error("Prefetch promise error:", err);
+        }
+      }
+
+      setFailed(hasFailed);
+
+      const checkpointsList = checkpointIndex?.checkpoints ?? [];
       const report = formatAgentReport(
         trainingStatus,
         checkpointsList,
-        hyperparams,
+        hp,
         curriculumStage,
-        diagnostics,
-        apiErrorDetails,
+        diag,
+        errDetails,
         selectedStages
       );
 
-      if (!apiErrorDetails) {
+      if (typeof ClipboardItem !== "undefined" && navigator.clipboard && navigator.clipboard.write) {
+        const textBlob = new Blob([report], { type: "text/plain" });
+        await navigator.clipboard.write([
+          new ClipboardItem({
+            "text/plain": textBlob,
+          }),
+        ]);
+      } else {
+        await navigator.clipboard.writeText(report);
+      }
+
+      if (!errDetails) {
         setCopied(true);
         setTimeout(() => {
           setCopied(false);
         }, 2000);
       }
 
-      return report;
+      setIsModalOpen(false);
     };
 
     try {
-      if (typeof ClipboardItem !== "undefined" && navigator.clipboard && navigator.clipboard.write) {
-        const textBlobPromise = fetchAndFormatReport().then(
-          (reportText) => new Blob([reportText], { type: "text/plain" })
-        );
-        await navigator.clipboard.write([
-          new ClipboardItem({
-            "text/plain": textBlobPromise,
-          }),
-        ]);
-      } else {
-        const report = await fetchAndFormatReport();
-        await navigator.clipboard.writeText(report);
-      }
+      await getReportAndWrite();
     } catch (err) {
       console.error("Failed to copy agent data to clipboard:", err);
       alert("Could not copy agent data. Please check browser permissions.");
@@ -670,14 +723,14 @@ function formatAgentReport(
       let hasLiveEval = false;
       if (isCurrentStage && diagnostics?.snapshot) {
         const evalRecords = diagnostics.snapshot.evaluation_records || [];
-        const latestEval = diagnostics.snapshot.latest_current_stage_evaluation || diagnostics.snapshot.latest_any_stage_evaluation || null;
+        const latestEval = diagnostics.snapshot.snapshot.latest_current_stage_evaluation || diagnostics.snapshot.snapshot.latest_any_stage_evaluation || null;
         if (evalRecords.length > 0 || latestEval !== null) {
           hasLiveEval = true;
         }
       }
 
       if (hasLiveEval && diagnostics?.snapshot) {
-        const latestEval = diagnostics.snapshot.latest_current_stage_evaluation || diagnostics.snapshot.latest_any_stage_evaluation || null;
+        const latestEval = diagnostics.snapshot.snapshot.latest_current_stage_evaluation || diagnostics.snapshot.snapshot.latest_any_stage_evaluation || null;
         latestCpEpisode = latestEval?.checkpoint_episode ?? status?.checkpoint_episode ?? "N/A";
         polVersion = latestEval?.policy_version ?? status?.policy_version ?? "N/A";
 
@@ -718,7 +771,7 @@ function formatAgentReport(
           avgRewardText = latestEval.average_reward !== undefined ? latestEval.average_reward.toFixed(1) : "N/A";
           const maxSheep = latestEval.environment_config?.sheep ?? 4;
           avgSheepText = latestEval.average_sheep_penned !== undefined ? `${latestEval.average_sheep_penned.toFixed(1)}/${maxSheep}` : "N/A";
-          avgDistText = (latestEval.average_distance_to_pen ?? latestEval.average_sheep_distance_to_pen) !== undefined ? (latestEval.average_distance_to_pen ?? latestEval.average_sheep_distance_to_pen).toFixed(1) : "N/A";
+          avgDistText = formatNum(latestEval.average_distance_to_pen ?? latestEval.average_sheep_distance_to_pen, 1, "N/A");
           avgStepsText = latestEval.average_completion_steps !== undefined ? latestEval.average_completion_steps.toFixed(1) : "N/A";
         }
       } else if (stageCheckpoints.length > 0) {
@@ -764,7 +817,7 @@ function formatAgentReport(
 
       let gateSectionText = "";
       if (isCurrentStage) {
-        const gate = diagnostics?.snapshot?.current_stage_promotion_gate || status?.auto_promote_gate;
+        const gate = diagnostics?.snapshot?.snapshot?.current_stage_promotion_gate || status?.auto_promote_gate;
         if (gate) {
           gateSectionText = `- Required success: ${Math.round(gate.success_threshold * gate.seed_count)}/${gate.seed_count}\n` +
                             `- Current streak: ${gate.qualified_streak}/${gate.min_qualified_streak}\n` +

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
-from functools import partial
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,17 @@ from sheepdog.config import LabConfig
 from sheepdog.environment import ACTION_ORDER
 from sheepdog.policies.base import Action
 from sheepdog.training.rl_env import SheepdogRLAdapter
+
+LOGGER = logging.getLogger(__name__)
+
+
+def tensorboard_available() -> bool:
+    """Return whether Stable-Baselines TensorBoard logging can be used."""
+    try:
+        from torch.utils.tensorboard import SummaryWriter
+    except ImportError:
+        return False
+    return SummaryWriter is not None
 
 
 def _make_rl_adapter(config_payload: dict[str, Any]) -> SheepdogRLAdapter:
@@ -47,8 +59,10 @@ def _build_vec_env(config: LabConfig) -> tuple[VecEnv, int, str]:
     config_payload = config.to_dict()
     env_fns = [partial(_make_rl_adapter, config_payload) for _ in range(workers)]
     if workers == 1:
+        LOGGER.info("PPO vector environment: workers=%d backend=dummy", workers)
         return DummyVecEnv(env_fns), workers, "dummy"
     # Use spawn to stay Windows-safe when called from threaded server code.
+    LOGGER.info("PPO vector environment: workers=%d backend=subproc", workers)
     return SubprocVecEnv(env_fns, start_method="spawn"), workers, "subproc"
 
 
@@ -107,11 +121,7 @@ class NeuralPolicy:
             observation_size=observation_size,
             env_workers=env_workers,
         )
-        try:
-            from torch.utils.tensorboard import SummaryWriter
-            has_tensorboard = SummaryWriter is not None
-        except ImportError:
-            has_tensorboard = False
+        has_tensorboard = tensorboard_available()
 
         model = MaskablePPO(
             "MlpPolicy",
@@ -146,6 +156,8 @@ class NeuralPolicy:
         observation_size = int(vec_env.observation_space.shape[0])
         resolved_path = Path(path)
         model = MaskablePPO.load(str(resolved_path), env=vec_env)
+        if not tensorboard_available():
+            model.tensorboard_log = None
         policy_obj = cls(
             model=model,
             model_path=resolved_path,

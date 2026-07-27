@@ -282,6 +282,8 @@ export function TrainingPanel({
   const denominator = batchTotalEpisodes || episodes;
   const progress = denominator === 0 ? 0 : Math.min(1, batchCompletedEpisodes / denominator);
   const progressPct = Math.round(progress * 100);
+  const segmentProgress = batchCompletedEpisodes % 1;
+  const segmentPct = Math.round(segmentProgress * 100);
   const completedDisplay = Math.floor(batchCompletedEpisodes);
   const activeEpisode = Math.min(denominator, Math.floor(batchCompletedEpisodes) + 1);
   const displayEpisodeIndex =
@@ -388,7 +390,7 @@ export function TrainingPanel({
             checkpointIndex={checkpointIndex}
             curriculumStage={curriculumStage}
           />
-          <span className={`pill ${running ? "pill--live" : "pill--muted"}`}>{phase}</span>
+          <span className={`pill ${running ? "pill--live" : phase === "offline" ? "pill--danger" : "pill--muted"}`}>{phase}</span>
         </div>
       </div>
 
@@ -591,7 +593,7 @@ export function TrainingPanel({
           {/* Progress bar */}
           <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.75rem", color: "var(--muted)" }}>
-              <span>Batch Progress</span>
+              <span>Batch Progress (Segments)</span>
               <span>{progressPct}%</span>
             </div>
             <div
@@ -605,15 +607,51 @@ export function TrainingPanel({
             >
               <div className="progress-shell__bar" style={{ width: `${progress * 100}%` }} />
             </div>
+
+            {/* Thinner active segment progress bar */}
+            {running && (
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem", marginTop: "0.2rem" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.68rem", color: "var(--muted)" }}>
+                  <span>Segment Timesteps</span>
+                  <span>{segmentPct}%</span>
+                </div>
+                <div
+                  className="progress-shell"
+                  role="progressbar"
+                  aria-label="Current segment progress"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={segmentPct}
+                  style={{ margin: 0, height: "5px", borderRadius: "999px", background: "rgba(148, 163, 184, 0.08)" }}
+                >
+                  <div
+                    className="progress-shell__bar"
+                    style={{
+                      width: `${segmentProgress * 100}%`,
+                      height: "100%",
+                      background: "var(--accent)",
+                      borderRadius: "999px",
+                      transition: "width 0.3s ease"
+                    }}
+                  />
+                </div>
+              </div>
+            )}
+
             <div style={{ fontSize: "0.72rem", color: "var(--muted)", marginTop: "0.1rem", display: "flex", justifyContent: "space-between", padding: "0 0.2rem" }}>
               {running && currentEpisode !== null ? (
                 <>
-                  <span>Episode {activeEpisode} of {denominator || "—"}</span>
+                  <span>
+                    Segment {activeEpisode} of {denominator || "—"}{" "}
+                    <span style={{ opacity: 0.85, fontWeight: "600", color: "var(--accent)", marginLeft: "0.2rem" }}>
+                      (Overall Ep {currentEpisode})
+                    </span>
+                  </span>
                   <span>{displayEpisodeIndex} env episodes herded</span>
                 </>
               ) : (
                 <div style={{ width: "100%", textAlign: "center" }}>
-                  {completedDisplay}/{denominator || "—"} completed
+                  {completedDisplay}/{denominator || "—"} segments completed
                 </div>
               )}
             </div>

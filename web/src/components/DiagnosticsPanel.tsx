@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import type { CheckpointEntry, CheckpointIndex, TrainingStatus } from "../state/types";
 import { CopyAgentDataButton } from "./CopyAgentDataButton";
 
@@ -189,6 +190,7 @@ interface ChartPoint {
   labelText?: string;
   /** Optional secondary value (e.g. avg_completion_steps) for the right-axis overlay line. */
   secondaryY?: number | null;
+  checkpoint?: CheckpointEntry;
 }
 
 interface LineChartProps {
@@ -211,6 +213,23 @@ interface LineChartProps {
   formatSecondaryY?: (v: number) => string;
 }
 
+const formatDate = (dateStr?: string) => {
+  if (!dateStr) return null;
+  try {
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return null;
+    return d.toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  } catch {
+    return null;
+  }
+};
+
 function LineChart({
   data,
   label,
@@ -227,9 +246,79 @@ function LineChart({
   secondaryLineColor,
   formatSecondaryY,
 }: LineChartProps) {
+  const [hoveredPoint, setHoveredPoint] = useState<ChartPoint | null>(null);
+  const [tooltipCoords, setTooltipCoords] = useState<{
+    left: number;
+    top: number;
+    transform: string;
+    shouldFlip: boolean;
+  } | null>(null);
+
   const W = 900;
   const H = 260;
-  const topPad = showPrevBestLabels ? 28 : 18;
+
+  const numPoints = data.length;
+  // Dynamically thin lines and reduce circle sizes as data points grow
+  let strokeWidth = 2.5;
+  let secondaryStrokeWidth = 2.0;
+  let secondaryCircleR = 3;
+  let secondaryCircleStrokeWidth = 1.0;
+  let baseRadius = 4;
+  let prevBestRadius = 5;
+  let bestRadius = 6;
+  let bestOuterRadius = 9;
+  let mainDotStrokeWidth = 1.0;
+  let bestOuterStrokeWidth = 2.0;
+
+  if (numPoints >= 1000) {
+    strokeWidth = 0.8;
+    secondaryStrokeWidth = 0.6;
+    secondaryCircleR = 1.0;
+    secondaryCircleStrokeWidth = 0.5;
+    baseRadius = 0.8;
+    prevBestRadius = 1.2;
+    bestRadius = 1.8;
+    bestOuterRadius = 3.0;
+    mainDotStrokeWidth = 0.5;
+    bestOuterStrokeWidth = 0.7;
+  } else if (numPoints >= 500) {
+    strokeWidth = 1.2;
+    secondaryStrokeWidth = 0.9;
+    secondaryCircleR = 1.5;
+    secondaryCircleStrokeWidth = 0.7;
+    baseRadius = 1.5;
+    prevBestRadius = 2.0;
+    bestRadius = 2.8;
+    bestOuterRadius = 4.5;
+    mainDotStrokeWidth = 0.7;
+    bestOuterStrokeWidth = 1.0;
+  } else if (numPoints >= 200) {
+    strokeWidth = 1.8;
+    secondaryStrokeWidth = 1.4;
+    secondaryCircleR = 2.2;
+    secondaryCircleStrokeWidth = 0.8;
+    baseRadius = 2.5;
+    prevBestRadius = 3.2;
+    bestRadius = 4.2;
+    bestOuterRadius = 6.5;
+    mainDotStrokeWidth = 0.8;
+    bestOuterStrokeWidth = 1.4;
+  } else if (numPoints >= 100) {
+    strokeWidth = 2.2;
+    secondaryStrokeWidth = 1.8;
+    secondaryCircleR = 2.6;
+    secondaryCircleStrokeWidth = 0.9;
+    baseRadius = 3.2;
+    prevBestRadius = 4.2;
+    bestRadius = 5.2;
+    bestOuterRadius = 8.0;
+    mainDotStrokeWidth = 0.9;
+    bestOuterStrokeWidth = 1.8;
+  }
+
+  // Prevent labels overlapping if data points are dense
+  const actualShowLabels = showPrevBestLabels && numPoints < 300;
+  const topPad = actualShowLabels ? 28 : 18;
   const hasSecondary =
     secondaryYMin !== undefined &&
     secondaryYMax !== undefined &&
@@ -287,7 +376,7 @@ function LineChart({
   }
 
   return (
-    <div className="mini-chart">
+    <div className="mini-chart" style={{ position: "relative" }}>
       {label ? <span className="mini-chart__label">{label}</span> : null}
       <svg
         viewBox={`0 0 ${W} ${H}`}
@@ -370,7 +459,7 @@ function LineChart({
             points={polyline}
             fill="none"
             stroke={lineColor}
-            strokeWidth={2.5}
+            strokeWidth={strokeWidth}
             strokeLinejoin="round"
             strokeLinecap="round"
           />
@@ -399,7 +488,7 @@ function LineChart({
                   .join(" ")}
                 fill="none"
                 stroke={effectiveSecColor}
-                strokeWidth={2}
+                strokeWidth={secondaryStrokeWidth}
                 strokeDasharray="5 3"
                 strokeLinejoin="round"
                 strokeLinecap="round"
@@ -411,10 +500,10 @@ function LineChart({
                 key={`sec-${d.x}-${i}`}
                 cx={toSvgX(d.originalIdx)}
                 cy={toSvgY2(d.secondaryY!)}
-                r={3}
+                r={secondaryCircleR}
                 fill={effectiveSecColor}
                 stroke="rgba(8,17,27,0.7)"
-                strokeWidth={1}
+                strokeWidth={secondaryCircleStrokeWidth}
                 opacity={0.8}
               />
             ))}
@@ -427,19 +516,59 @@ function LineChart({
           const cy = toSvgY(d.y);
           const fill = stageColor(d.stage);
           const isBest = d.x === bestEpisode;
-          const r = isBest ? 6 : d.isPrevBest ? 5 : 4;
+          const r = isBest ? bestRadius : d.isPrevBest ? prevBestRadius : baseRadius;
           const diamond = `${cx},${cy - r} ${cx + r},${cy} ${cx},${cy + r} ${cx - r},${cy}`;
           return (
-            <g key={`${d.x}-${idx}`}>
+            <g
+              key={`${d.x}-${idx}`}
+              onMouseEnter={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect();
+                const viewportWidth = window.innerWidth;
+                const tooltipWidth = 240;
+
+                // Determine horizontal alignment
+                let left = rect.left + rect.width / 2 + window.scrollX;
+                let transformX = "-50%";
+
+                if (rect.left + rect.width / 2 < tooltipWidth / 2 + 10) {
+                  left = 10 + window.scrollX;
+                  transformX = "0%";
+                } else if (rect.left + rect.width / 2 > viewportWidth - tooltipWidth / 2 - 10) {
+                  left = viewportWidth - tooltipWidth - 10 + window.scrollX;
+                  transformX = "0%";
+                }
+
+                // Determine vertical alignment (auto-flip if close to top of viewport)
+                const shouldFlip = rect.top < 220; // 220px height estimate for tooltip
+                const top = (shouldFlip ? rect.bottom : rect.top) + window.scrollY;
+                const transformY = shouldFlip ? "translateY(12px)" : "translateY(-12px) translateY(-100%)";
+
+                setHoveredPoint(d);
+                setTooltipCoords({
+                  left,
+                  top,
+                  transform: `translateX(${transformX}) ${transformY}`,
+                  shouldFlip,
+                });
+              }}
+              onMouseLeave={() => {
+                setHoveredPoint(null);
+                setTooltipCoords(null);
+              }}
+              style={{ cursor: "pointer" }}
+            >
+              {/* Large invisible hit target */}
+              <circle cx={cx} cy={cy} r={14} fill="transparent" />
+
               {isBest ? (
-                <circle cx={cx} cy={cy} r={9} fill="none" stroke={fill} strokeWidth={2} opacity={0.6} />
+                <circle cx={cx} cy={cy} r={bestOuterRadius} fill="none" stroke={fill} strokeWidth={bestOuterStrokeWidth} opacity={0.6} style={{ pointerEvents: "none" }} />
               ) : null}
               {d.isPrevBest ? (
-                <polygon points={diamond} fill={fill} stroke="rgba(8,17,27,0.7)" strokeWidth={1} />
+                <polygon points={diamond} fill={fill} stroke="rgba(8,17,27,0.7)" strokeWidth={mainDotStrokeWidth} style={{ pointerEvents: "none" }} />
               ) : (
-                <circle cx={cx} cy={cy} r={r} fill={fill} stroke="rgba(8,17,27,0.7)" strokeWidth={1} />
+                <circle cx={cx} cy={cy} r={r} fill={fill} stroke="rgba(8,17,27,0.7)" strokeWidth={mainDotStrokeWidth} style={{ pointerEvents: "none" }} />
               )}
-              {(d.isPrevBest || isBest) && showPrevBestLabels && d.labelText ? (
+              {(d.isPrevBest || isBest) && actualShowLabels && d.labelText ? (
                 <text
                   x={cx + 4}
                   y={cy - r - 4}
@@ -464,6 +593,105 @@ function LineChart({
           </text>
         ) : null}
       </svg>
+
+      {/* Premium Interactive Hover Tooltip via React Portal */}
+      {hoveredPoint && hoveredPoint.checkpoint && tooltipCoords && createPortal((() => {
+        const checkpoint = hoveredPoint.checkpoint;
+        const cStage = getCheckpointStage(checkpoint);
+        const thresh = getSuccessThreshold(cStage);
+
+        return (
+          <div
+            className="chart-tooltip"
+            style={{
+              position: "absolute",
+              left: `${tooltipCoords.left}px`,
+              top: `${tooltipCoords.top}px`,
+              transform: tooltipCoords.transform,
+              pointerEvents: "none",
+              zIndex: 9999,
+            }}
+          >
+            <div className="chart-tooltip__header">
+              <span className="chart-tooltip__episode">Episode {checkpoint.checkpoint_episode}</span>
+              <span
+                className="chart-tooltip__stage-pill"
+                style={{ background: stageColor(cStage) }}
+              >
+                Stage {cStage === -1 ? "Legacy" : cStage}
+              </span>
+            </div>
+
+            <div className="chart-tooltip__section-title">Performance Metrics</div>
+            <div className="chart-tooltip__grid">
+              <span className="chart-tooltip__metric-label">Success Rate:</span>
+              <span className="chart-tooltip__metric-value">{(checkpoint.success_rate * 100).toFixed(1)}%</span>
+              <span className="chart-tooltip__metric-indicator">
+                {checkpoint.success_rate >= thresh ? (
+                  <span style={{ color: "#4ade80", fontWeight: "bold" }}>✓</span>
+                ) : (
+                  <span style={{ color: "#fb923c", fontWeight: "bold" }}>✗</span>
+                )}
+              </span>
+
+              <span className="chart-tooltip__metric-label">Timeout Rate:</span>
+              <span className="chart-tooltip__metric-value">{(checkpoint.timeout_rate * 100).toFixed(1)}%</span>
+              <span className="chart-tooltip__metric-indicator">
+                {checkpoint.timeout_rate <= 0.1 ? (
+                  <span style={{ color: "#4ade80", fontWeight: "bold" }}>✓</span>
+                ) : (
+                  <span style={{ color: "#fb923c", fontWeight: "bold" }}>✗</span>
+                )}
+              </span>
+
+              <span className="chart-tooltip__metric-label">Avg Time:</span>
+              <span className="chart-tooltip__metric-value">
+                {checkpoint.average_completion_seconds?.toFixed(1)}s
+              </span>
+              <span></span>
+
+              <span className="chart-tooltip__metric-label">Avg Steps:</span>
+              <span className="chart-tooltip__metric-value">
+                {checkpoint.average_completion_steps?.toFixed(0)}
+              </span>
+              <span></span>
+
+              <span className="chart-tooltip__metric-label">Avg Reward:</span>
+              <span className="chart-tooltip__metric-value">{checkpoint.average_reward?.toFixed(1)}</span>
+              <span></span>
+
+              <span className="chart-tooltip__metric-label">Sheep Penned:</span>
+              <span className="chart-tooltip__metric-value">
+                {checkpoint.average_sheep_penned?.toFixed(1)} / {checkpoint.environment_config?.sheep ?? "—"}
+              </span>
+              <span></span>
+            </div>
+
+            <div className="chart-tooltip__promo-section">
+              <div className="chart-tooltip__section-title" style={{ marginTop: 0 }}>Stage Gate Promotion</div>
+              {checkpoint.success_rate >= thresh && checkpoint.timeout_rate <= 0.1 ? (
+                <div className="chart-tooltip__promo-status chart-tooltip__promo-status--qualified">
+                  <span>🟢 Target Met</span>
+                  <span style={{ fontSize: "0.65rem", fontWeight: "normal", color: "rgba(148, 163, 184, 0.8)" }}>
+                    (Req: {(thresh * 100).toFixed(0)}% succ, ≤10% timeout)
+                  </span>
+                </div>
+              ) : (
+                <div className="chart-tooltip__promo-status chart-tooltip__promo-status--unqualified">
+                  <span>🟠 Below Target</span>
+                  <span style={{ fontSize: "0.65rem", fontWeight: "normal", color: "rgba(148, 163, 184, 0.8)" }}>
+                    (Req: {(thresh * 100).toFixed(0)}% succ, ≤10% timeout)
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {formatDate(checkpoint.recorded_at) && (
+              <div className="chart-tooltip__time">{formatDate(checkpoint.recorded_at)}</div>
+            )}
+          </div>
+        );
+      })(), document.body)}
     </div>
   );
 }
@@ -979,6 +1207,40 @@ function LearningSignalChart({
   const xMax = points[points.length - 1]?.checkpoint ?? 1;
   const xRange = xMax - xMin || 1;
 
+  const numPoints = points.length;
+  // Dynamically thin lines and reduce breakthrough marker size as data points grow
+  let baseStrokeWidth = 2.2;
+  let smoothStrokeWidth = 2.4;
+  let breakthroughOuterRadius = 10;
+  let breakthroughInnerRadius = 6;
+  let breakthroughStrokeWidth = 1.4;
+
+  if (numPoints >= 1000) {
+    baseStrokeWidth = 0.8;
+    smoothStrokeWidth = 1.0;
+    breakthroughOuterRadius = 6;
+    breakthroughInnerRadius = 3.5;
+    breakthroughStrokeWidth = 0.8;
+  } else if (numPoints >= 500) {
+    baseStrokeWidth = 1.2;
+    smoothStrokeWidth = 1.4;
+    breakthroughOuterRadius = 7.5;
+    breakthroughInnerRadius = 4.5;
+    breakthroughStrokeWidth = 1.0;
+  } else if (numPoints >= 200) {
+    baseStrokeWidth = 1.6;
+    smoothStrokeWidth = 1.8;
+    breakthroughOuterRadius = 9;
+    breakthroughInnerRadius = 5.2;
+    breakthroughStrokeWidth = 1.2;
+  } else if (numPoints >= 100) {
+    baseStrokeWidth = 2.0;
+    smoothStrokeWidth = 2.2;
+    breakthroughOuterRadius = 9.5;
+    breakthroughInnerRadius = 5.6;
+    breakthroughStrokeWidth = 1.3;
+  }
+
   function toX(checkpoint: number): number {
     return PAD.left + ((checkpoint - xMin) / xRange) * plotW;
   }
@@ -1041,8 +1303,8 @@ function LearningSignalChart({
           />
         ) : null}
 
-        <polyline points={baseLine} fill="none" stroke="rgba(96,165,250,0.9)" strokeWidth={2.2} strokeLinejoin="round" strokeLinecap="round" />
-        <polyline points={smoothLine} fill="none" stroke="rgba(244,197,66,0.95)" strokeWidth={2.4} strokeLinejoin="round" strokeLinecap="round" />
+        <polyline points={baseLine} fill="none" stroke="rgba(96,165,250,0.9)" strokeWidth={baseStrokeWidth} strokeLinejoin="round" strokeLinecap="round" />
+        <polyline points={smoothLine} fill="none" stroke="rgba(244,197,66,0.95)" strokeWidth={smoothStrokeWidth} strokeLinejoin="round" strokeLinecap="round" />
 
         {breakthroughs.map((event, idx) => {
           const x = toX(event.checkpoint);
@@ -1053,14 +1315,14 @@ function LearningSignalChart({
             : `${event.checkpoint}-${idx}`;
           return (
             <g key={breakthroughKey}>
-              {focused ? <circle cx={x} cy={y} r={10} fill="none" stroke="rgba(244,197,66,0.6)" strokeWidth={2} /> : null}
+              {focused ? <circle cx={x} cy={y} r={breakthroughOuterRadius} fill="none" stroke="rgba(244,197,66,0.6)" strokeWidth={2} /> : null}
               <circle
                 cx={x}
                 cy={y}
-                r={6}
+                r={breakthroughInnerRadius}
                 fill="rgba(244,197,66,0.95)"
                 stroke="rgba(8,17,27,0.85)"
-                strokeWidth={1.4}
+                strokeWidth={breakthroughStrokeWidth}
                 style={{ cursor: "pointer" }}
                 onClick={() => onBreakthroughClick(event.checkpoint)}
               />
@@ -1358,6 +1620,7 @@ export function DiagnosticsPanel({
         isPrevBest,
         labelText,
         secondaryY: c.average_completion_steps ?? null,
+        checkpoint: c,
       };
     });
   }, [filteredCheckpoints, stages, bestCheckpointEpisode]);
@@ -1369,6 +1632,7 @@ export function DiagnosticsPanel({
         y: c.average_reward,
         stage: stages[i],
         isBest: c.checkpoint_episode === bestCheckpointEpisode,
+        checkpoint: c,
       })),
     [filteredCheckpoints, stages, bestCheckpointEpisode],
   );
@@ -1380,6 +1644,7 @@ export function DiagnosticsPanel({
         y: c.average_sheep_penned,
         stage: stages[i],
         isBest: c.checkpoint_episode === bestCheckpointEpisode,
+        checkpoint: c,
       })),
     [filteredCheckpoints, stages, bestCheckpointEpisode],
   );

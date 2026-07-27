@@ -124,18 +124,19 @@ class JointActionRLEnv(gym.Env[np.ndarray, int]):
 
     def _precompute_evaluation_layouts(self) -> None:
         """Pre-generate initial positions for standard evaluation seeds to check training similarity."""
-        from sheepdog.environment import SheepdogEnvironment
         try:
             temp_env = SheepdogEnvironment(self.config)
             for seed in [11, 23, 37, 41, 53]:
                 temp_env.reset(seed=seed)
                 self._evaluation_layouts[seed] = {
-                    "dog_positions": [tuple((d.position.x, d.position.y)) for d in temp_env._dogs],
-                    "sheep_positions": [tuple((s.position.x, s.position.y)) for s in temp_env._sheep],
-                    "pen_position": (temp_env._pen.origin.x, temp_env._pen.origin.y),
+                    "dog_positions": [(dog.position.x, dog.position.y) for dog in temp_env.dogs],
+                    "sheep_positions": [
+                        (sheep.position.x, sheep.position.y) for sheep in temp_env.sheep
+                    ],
+                    "pen_position": (temp_env.pen.origin.x, temp_env.pen.origin.y),
                 }
-        except Exception:
-            pass
+        except (RuntimeError, ValueError):
+            self._evaluation_layouts.clear()
 
     def get_coverage_stats(self) -> dict[str, Any]:
         """Expose training exposure statistics."""
@@ -189,21 +190,29 @@ class JointActionRLEnv(gym.Env[np.ndarray, int]):
         self._stage_unique_seeds.add(self._latest_seed)
         
         # Hash initial positions configuration
-        dog_positions = tuple(sorted((d.position.x, d.position.y) for d in self._environment._dogs))
-        sheep_positions = tuple(sorted((s.position.x, s.position.y) for s in self._environment._sheep))
-        pen_origin = (self._environment._pen.origin.x, self._environment._pen.origin.y)
+        dogs = self._environment.dogs
+        sheep = self._environment.sheep
+        pen = self._environment.pen
+        dog_positions = tuple(sorted((dog.position.x, dog.position.y) for dog in dogs))
+        sheep_positions = tuple(sorted((item.position.x, item.position.y) for item in sheep))
+        pen_origin = (pen.origin.x, pen.origin.y)
         config_hash = hash((dog_positions, sheep_positions, pen_origin))
         self._stage_unique_configs.add(config_hash)
 
         # Distances
         import math
-        sheep_dists = [math.hypot(s.position.x - self._environment._pen.origin.x, s.position.y - self._environment._pen.origin.y) for s in self._environment._sheep]
+        sheep_dists = [
+            math.hypot(item.position.x - pen.origin.x, item.position.y - pen.origin.y)
+            for item in sheep
+        ]
         avg_sheep_to_pen = float(np.mean(sheep_dists)) if sheep_dists else 0.0
         
         dog_dists = []
-        for d in self._environment._dogs:
-            for s in self._environment._sheep:
-                dog_dists.append(math.hypot(d.position.x - s.position.x, d.position.y - s.position.y))
+        for dog in dogs:
+            for item in sheep:
+                dog_dists.append(
+                    math.hypot(dog.position.x - item.position.x, dog.position.y - item.position.y)
+                )
         avg_dog_to_sheep = float(np.mean(dog_dists)) if dog_dists else 0.0
 
         # Update stats
@@ -218,13 +227,16 @@ class JointActionRLEnv(gym.Env[np.ndarray, int]):
 
         # Check similarity to evaluation layouts
         self._current_episode_similarity_match = None
+        if not dog_positions or not sheep_positions:
+            return self._current_observation(), self._info()
+        cur_mean_dog = tuple(np.mean(dog_positions, axis=0))
+        cur_mean_sheep = tuple(np.mean(sheep_positions, axis=0))
         for ev_seed, ev_layout in self._evaluation_layouts.items():
-            ev_mean_dog = (np.mean([p[0] for p in ev_layout["dog_positions"]]), np.mean([p[1] for p in ev_layout["dog_positions"]]))
-            ev_mean_sheep = (np.mean([p[0] for p in ev_layout["sheep_positions"]]), np.mean([p[1] for p in ev_layout["sheep_positions"]]))
-            
-            cur_mean_dog = (np.mean([p[0] for p in dog_positions]), np.mean([p[1] for p in dog_positions]))
-            cur_mean_sheep = (np.mean([p[0] for p in sheep_positions]), np.mean([p[1] for p in sheep_positions]))
-            
+            if not ev_layout["dog_positions"] or not ev_layout["sheep_positions"]:
+                continue
+            ev_mean_dog = tuple(np.mean(ev_layout["dog_positions"], axis=0))
+            ev_mean_sheep = tuple(np.mean(ev_layout["sheep_positions"], axis=0))
+
             if (pen_origin == ev_layout["pen_position"] and
                 math.hypot(cur_mean_dog[0] - ev_mean_dog[0], cur_mean_dog[1] - ev_mean_dog[1]) < 6.0 and
                 math.hypot(cur_mean_sheep[0] - ev_mean_sheep[0], cur_mean_sheep[1] - ev_mean_sheep[1]) < 6.0):
@@ -245,7 +257,6 @@ class JointActionRLEnv(gym.Env[np.ndarray, int]):
         terminated = False
         truncated = False
         reward = 0.0
-        info = self._info()
 
         if len(self._pending_actions) >= self._environment.dog_count:
             # All dogs have chosen – advance the world.
@@ -270,6 +281,7 @@ class JointActionRLEnv(gym.Env[np.ndarray, int]):
                     self._similarity_successes[self._current_episode_similarity_match] += 1
                 self._current_episode_similarity_match = None
         else:
+            info = self._info(action_mask=mask)
             self._current_dog_index += 1
             info["team_step_completed"] = False
             info["shepherd_command"] = self._current_command
@@ -307,11 +319,13 @@ class JointActionRLEnv(gym.Env[np.ndarray, int]):
         )
         return np.asarray(obs.values, dtype=np.float32)
 
-    def _info(self) -> dict[str, Any]:
+    def _info(self, action_mask: np.ndarray | None = None) -> dict[str, Any]:
         return {
             "seed": self._latest_seed,
             "current_dog_index": self._current_dog_index,
-            "action_mask": self.action_masks().tolist(),
+            "action_mask": (
+                action_mask if action_mask is not None else self.action_masks()
+            ).tolist(),
             "pending_actions": list(self._pending_actions),
             "shepherd_command": self._current_command,
         }

@@ -39,8 +39,11 @@ class _ScoredPolicy:
     def __init__(self, policy_mode: PolicyMode) -> None:
         self.name = policy_mode
 
-    def select_actions(self, environment: _PolicyEnvironment) -> list[Action]:
+    def select_actions(
+        self, environment: _PolicyEnvironment, deterministic: bool = True
+    ) -> list[Action]:
         """Pick the highest-ranked legal action for each dog."""
+        del deterministic
         actions: list[Action] = []
         reserved_positions: set[object] = set()
         environment.prepare_policy_step()
