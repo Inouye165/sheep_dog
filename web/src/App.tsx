@@ -180,6 +180,7 @@ export function App() {
   const [playbackFastMode, setPlaybackFastMode] = useState(false);
   const [trainingStatus, setTrainingStatus] = useState<TrainingStatus | null>(null);
   const [clearingTraining, setClearingTraining] = useState(false);
+  const [isStartingTraining, setIsStartingTraining] = useState(false);
   const [runningCurrentReplay, setRunningCurrentReplay] = useState(false);
   const [loadingSelectedReplay, setLoadingSelectedReplay] = useState(false);
   const [activeTab, setActiveTab] = useState<ActiveTab>("train");
@@ -803,7 +804,7 @@ export function App() {
           const seed = checkpoint.records?.[0]?.seed ?? null;
           setSelectedSeed(seed);
           const record = checkpoint.records?.find((entry) => entry.seed === seed) ?? checkpoint.records?.[0];
-          if (record) {
+          if (record && record.replay_path) {
             const bundle = await loadReplay(record.replay_path);
             if (cancelled) {
               return;
@@ -833,7 +834,7 @@ export function App() {
       return;
     }
     const record = selectedCheckpoint.records?.find((entry) => entry.seed === seed) ?? selectedCheckpoint.records?.[0];
-    if (!record) {
+    if (!record || !record.replay_path) {
       return;
     }
 
@@ -921,6 +922,7 @@ export function App() {
   async function handleStartTraining() {
     setTrainingError(null);
     setError(null);
+    setIsStartingTraining(true);
     try {
       const status = await startTraining({
         episodes: trainingEpisodes,
@@ -936,6 +938,8 @@ export function App() {
       setTrainingStatus(status);
     } catch (startError) {
       setTrainingError(startError instanceof Error ? startError.message : "Unable to start training.");
+    } finally {
+      setIsStartingTraining(false);
     }
   }
 
@@ -986,6 +990,7 @@ export function App() {
 
     setTrainingError(null);
     setError(null);
+    setIsStartingTraining(true);
     try {
       const status = await startTraining({
         ...request,
@@ -995,6 +1000,8 @@ export function App() {
       setTrainingStatus(status);
     } catch (resumeError) {
       setTrainingError(resumeError instanceof Error ? resumeError.message : "Unable to resume training.");
+    } finally {
+      setIsStartingTraining(false);
     }
   }
 
@@ -1030,7 +1037,7 @@ export function App() {
       const seed = latestCheckpoint?.records?.[0]?.seed ?? null;
       if (latestCheckpoint && seed !== null) {
         const record = latestCheckpoint.records?.find((entry) => entry.seed === seed) ?? latestCheckpoint.records?.[0];
-        if (record) {
+        if (record && record.replay_path) {
           const bundle = await loadReplay(record.replay_path);
           setReplay(bundle);
         }
@@ -1263,6 +1270,10 @@ export function App() {
     setLoadingSelectedReplay(true);
     setError(null);
     try {
+      if (!record.replay_path) {
+        setError("No replay path specified for selected seed.");
+        return;
+      }
       const bundle = await loadReplay(record.replay_path);
       setReplay(bundle);
       setSelectedSeed(record.seed);
@@ -1454,8 +1465,11 @@ export function App() {
                   autoPromoteGate={trainingStatus?.auto_promote_gate ?? null}
                   running={trainingStatus?.running ?? false}
                   clearing={clearingTraining}
+                  isStartingTraining={isStartingTraining}
                   batchCompletedEpisodes={trainingStatus?.batch_completed_episodes ?? trainingStatus?.completed_episodes ?? 0}
-                  batchTotalEpisodes={trainingStatus?.batch_total_episodes ?? trainingStatus?.requested_episodes ?? 0}
+                  batchTotalEpisodes={trainingStatus?.batch_total_episodes ?? trainingStatus?.requested_episodes ?? trainingEpisodes}
+                  batchTotalSegments={trainingStatus?.batch_total_segments}
+                  batchCompletedSegments={trainingStatus?.batch_completed_segments}
                   currentEpisode={trainingStatus?.current_episode ?? null}
                   totalEpisodesTrained={trainingStatus?.total_episodes_trained ?? 0}
                   startingEpisode={trainingStatus?.starting_episode ?? null}

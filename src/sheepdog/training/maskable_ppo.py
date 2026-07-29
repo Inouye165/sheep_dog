@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import functools
+import contextlib
 import json
 import logging
 import os
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -124,7 +125,10 @@ def finish_wandb_run() -> None:
     except ImportError:
         return
     if getattr(wandb, "run", None) is not None and hasattr(wandb, "finish"):
-        wandb.finish()
+        try:
+            wandb.finish()
+        except Exception as exc:
+            print(f"Warning: wandb.finish() raised {exc}", flush=True)
 
 
 def _wandb_finish_on_exit(func):
@@ -474,12 +478,18 @@ class MaskablePPOTrainer(Trainer):
             policy.model.ent_coef = train_config.entropy_coef
             policy.model.gae_lambda = train_config.gae_lambda
             
-            policy.model.learn(
-                total_timesteps=steps_per_segment,
-                reset_num_timesteps=True,
-                progress_bar=False,
-                callback=callback_list,
+            training_phase = (
+                self.runtime_tracker.phase("training")
+                if self.runtime_tracker is not None
+                else contextlib.nullcontext()
             )
+            with training_phase:
+                policy.model.learn(
+                    total_timesteps=steps_per_segment,
+                    reset_num_timesteps=True,
+                    progress_bar=False,
+                    callback=callback_list,
+                )
             
             # Increment policy update version
             policy_version += 1
@@ -567,7 +577,13 @@ class MaskablePPOTrainer(Trainer):
             if should_stop is not None and should_stop():
                 interrupted = True
                 break
-            saved_model_path = policy.save(model_root / f"maskable-ppo-{cumulative_ts:08d}")
+            model_save_phase = (
+                self.runtime_tracker.phase("checkpoint_save")
+                if self.runtime_tracker is not None
+                else contextlib.nullcontext()
+            )
+            with model_save_phase:
+                saved_model_path = policy.save(model_root / f"maskable-ppo-{cumulative_ts:08d}")
             total_eps_this_checkpoint = starting_total + _checkpoint_slot
             run_id = self._loaded_state.get("run_id")
             chk_id = f"chk_{run_id}_ep_{total_eps_this_checkpoint}"
@@ -579,63 +595,48 @@ class MaskablePPOTrainer(Trainer):
                 compute_seed_set_id,
             )
 
-            summary, evaluation_json, _csv_path = self.evaluator.evaluate(
-                policy,
-                train_config.evaluation_seeds,
-                checkpoint_episode=total_eps_this_checkpoint,
-                run_id=run_id,
-                checkpoint_id=chk_id,
-                policy_version=policy_version,
-                curriculum_stage=active_stage,
+            self.evaluator.runtime_tracker = self.runtime_tracker
+            quick_seed_count = max(1, int(train_config.quick_evaluation_seed_count))
+            quick_seeds = tuple(train_config.evaluation_seeds[:quick_seed_count])
+            evaluation_phase = (
+                self.runtime_tracker.phase("evaluation")
+                if self.runtime_tracker is not None
+                else contextlib.nullcontext()
             )
-            representative_replay_path = Path(summary.records[0].replay_path)
-            metadata = CheckpointMetadata(
-                checkpoint_episode=total_eps_this_checkpoint,
-                total_training_episodes=total_eps_this_checkpoint,
-                policy_name=policy.name,
-                trainer_type=policy.trainer_type,
-                policy_type=policy.policy_type,
-                seed=train_config.train_seed,
-                success_rate=summary.success_rate,
-                average_completion_steps=summary.average_completion_steps,
-                timeout_rate=summary.timeout_rate,
-                average_sheep_penned=summary.average_sheep_penned,
-                average_reward=summary.average_reward,
-                environment_config=self.config.to_dict()["environment"],
-                reward_config=self.config.to_dict()["rewards"],
-                policy_state_path=str(saved_model_path),
-                policy_config=policy.config.to_dict(),
-                evaluation_replay_path=str(representative_replay_path),
-                run_id=run_id,
-                checkpoint_id=chk_id,
-                parent_run_id=self._loaded_state.get("parent_run_id"),
-                parent_checkpoint_id=self._loaded_state.get("parent_checkpoint_id"),
-                global_timestep=cumulative_ts,
-                observation_schema_hash=get_observation_schema_hash(self.config),
-                action_space_hash=get_action_space_hash(),
-                reward_schema_version=REWARD_SCHEMA_VERSION,
-                env_config_version=ENV_CONFIG_VERSION,
-                created_timestamp=recorded_time,
-                deterministic_evaluation=True,
-                evaluation_seeds=list(train_config.evaluation_seeds),
-                policy_version=policy_version,
-                policy_gradient_loss=policy_gradient_loss,
-                value_loss=value_loss,
-                entropy_loss=entropy_loss,
-                loss=loss,
-                approx_kl=approx_kl,
-                clip_fraction=clip_fraction,
-                explained_variance=explained_variance,
-                training_scenario_coverage=curr_coverage,
-                curriculum_stage=active_stage,
-                evaluation_seed_set_id=compute_seed_set_id(train_config.evaluation_seeds),
-                evaluation_seed_count=len(train_config.evaluation_seeds),
-                environment_config_hash=compute_env_config_hash(self.config.to_dict()["environment"]),
-                evaluation_timestamp=recorded_time,
-            )
+            with evaluation_phase:
+                quick_summary, evaluation_json, _csv_path = self.evaluator.evaluate(
+                    policy,
+                    quick_seeds,
+                    checkpoint_episode=total_eps_this_checkpoint,
+                    capture_replays=False,
+                    evaluation_mode="quick",
+                    run_id=run_id,
+                    checkpoint_id=chk_id,
+                    policy_version=policy_version,
+                    curriculum_stage=active_stage,
+                )
+                is_final_checkpoint = completed_checkpoints == n_checkpoints
+                confidence_candidate = (
+                    quick_summary.success_rate
+                    >= float(train_config.confidence_candidate_success_rate)
+                )
+                if is_final_checkpoint or confidence_candidate:
+                    summary, evaluation_json, _csv_path = self.evaluator.evaluate(
+                        policy,
+                        tuple(train_config.evaluation_seeds),
+                        checkpoint_episode=total_eps_this_checkpoint,
+                        capture_replays=False,
+                        evaluation_mode="confidence",
+                        run_id=run_id,
+                        checkpoint_id=chk_id,
+                        policy_version=policy_version,
+                        curriculum_stage=active_stage,
+                    )
+                else:
+                    summary = quick_summary
+
             current_stage = self.config.rewards.instincts.curriculum_stage
-            is_new_best = (
-                # A higher curriculum stage always beats a lower one.
+            is_new_best = summary.promotion_eligible and (
                 current_stage > best_model_curriculum_stage
                 or (
                     current_stage == best_model_curriculum_stage
@@ -653,19 +654,110 @@ class MaskablePPOTrainer(Trainer):
                     )
                 )
             )
+            periodic_replay = int(train_config.replay_export_every_n_checkpoints)
+            should_export_replay = summary.promotion_eligible and (
+                (is_new_best and train_config.replay_export_on_new_best)
+                or (is_final_checkpoint and train_config.replay_export_on_final)
+                or (
+                    summary.success_rate == 0
+                    and train_config.replay_export_on_failed_diagnostic
+                )
+                or (periodic_replay > 0 and completed_checkpoints % periodic_replay == 0)
+            )
+            representative_replay_path: Path | None = None
+            if should_export_replay:
+                representative_replay_path = self.evaluator.export_replay(
+                    policy,
+                    int(summary.records[0].seed),
+                    total_eps_this_checkpoint,
+                )
+                records = list(summary.records)
+                records[0] = replace(
+                    records[0], replay_path=str(representative_replay_path)
+                )
+                summary = replace(summary, records=tuple(records))
+
+            runtime_snapshot = (
+                self.runtime_tracker.episode_snapshot()
+                if self.runtime_tracker is not None
+                else {}
+            )
+            metadata = CheckpointMetadata(
+                checkpoint_episode=total_eps_this_checkpoint,
+                total_training_episodes=total_eps_this_checkpoint,
+                policy_name=policy.name,
+                trainer_type=policy.trainer_type,
+                policy_type=policy.policy_type,
+                seed=train_config.train_seed,
+                success_rate=summary.success_rate,
+                average_completion_steps=summary.average_completion_steps,
+                timeout_rate=summary.timeout_rate,
+                average_sheep_penned=summary.average_sheep_penned,
+                average_reward=summary.average_reward,
+                environment_config=self.config.to_dict()["environment"],
+                reward_config=self.config.to_dict()["rewards"],
+                policy_state_path=str(saved_model_path),
+                policy_config=policy.config.to_dict(),
+                evaluation_replay_path=(
+                    str(representative_replay_path)
+                    if representative_replay_path is not None
+                    else None
+                ),
+                run_id=run_id,
+                checkpoint_id=chk_id,
+                parent_run_id=self._loaded_state.get("parent_run_id"),
+                parent_checkpoint_id=self._loaded_state.get("parent_checkpoint_id"),
+                global_timestep=cumulative_ts,
+                observation_schema_hash=get_observation_schema_hash(self.config),
+                action_space_hash=get_action_space_hash(),
+                reward_schema_version=REWARD_SCHEMA_VERSION,
+                env_config_version=ENV_CONFIG_VERSION,
+                created_timestamp=recorded_time,
+                deterministic_evaluation=True,
+                evaluation_seeds=[record.seed for record in summary.records],
+                policy_version=policy_version,
+                policy_gradient_loss=policy_gradient_loss,
+                value_loss=value_loss,
+                entropy_loss=entropy_loss,
+                loss=loss,
+                approx_kl=approx_kl,
+                clip_fraction=clip_fraction,
+                explained_variance=explained_variance,
+                training_scenario_coverage=curr_coverage,
+                curriculum_stage=active_stage,
+                evaluation_seed_set_id=compute_seed_set_id(
+                    [record.seed for record in summary.records]
+                ),
+                evaluation_seed_count=len(summary.records),
+                environment_config_hash=compute_env_config_hash(self.config.to_dict()["environment"]),
+                evaluation_timestamp=recorded_time,
+                evaluation_mode=summary.evaluation_mode,
+                promotion_eligible=summary.promotion_eligible,
+                **runtime_snapshot,
+            )
             if is_new_best:
                 best_success_rate = summary.success_rate
                 best_average_reward = summary.average_reward
                 best_completion_steps = summary.average_completion_steps
                 best_model_curriculum_stage = current_stage
                 tracked_best_model_path = policy.save(model_root / "best-model")
-            checkpoint_path = self.checkpoint_store.write(metadata)
+            checkpoint_write_phase = (
+                self.runtime_tracker.phase("checkpoint_save")
+                if self.runtime_tracker is not None
+                else contextlib.nullcontext()
+            )
+            with checkpoint_write_phase:
+                checkpoint_path = self.checkpoint_store.write(metadata)
             checkpoint_payload = {
                 "checkpoint_episode": total_eps_this_checkpoint,
                 "recorded_at": recorded_time,
                 "checkpoint": checkpoint_path.name,
                 "evaluation": evaluation_json.name,
-                "replay": str(representative_replay_path),
+                "replay": (
+                    str(representative_replay_path)
+                    if representative_replay_path is not None
+                    else None
+                ),
                 "policy_name": policy.name,
                 "trainer_type": policy.trainer_type,
                 "policy_type": policy.policy_type,
@@ -695,7 +787,7 @@ class MaskablePPOTrainer(Trainer):
                 "env_config_version": ENV_CONFIG_VERSION,
                 "created_timestamp": recorded_time,
                 "deterministic_evaluation": True,
-                "evaluation_seeds": list(train_config.evaluation_seeds),
+                "evaluation_seeds": [record.seed for record in summary.records],
                 "policy_version": policy_version,
                 "policy_gradient_loss": policy_gradient_loss,
                 "value_loss": value_loss,
@@ -706,10 +798,15 @@ class MaskablePPOTrainer(Trainer):
                 "explained_variance": explained_variance,
                 "training_scenario_coverage": curr_coverage,
                 "curriculum_stage": active_stage,
-                "evaluation_seed_set_id": compute_seed_set_id(train_config.evaluation_seeds),
-                "evaluation_seed_count": len(train_config.evaluation_seeds),
+                "evaluation_seed_set_id": compute_seed_set_id(
+                    [record.seed for record in summary.records]
+                ),
+                "evaluation_seed_count": len(summary.records),
                 "environment_config_hash": compute_env_config_hash(self.config.to_dict()["environment"]),
                 "evaluation_timestamp": recorded_time,
+                "evaluation_mode": summary.evaluation_mode,
+                "promotion_eligible": summary.promotion_eligible,
+                **runtime_snapshot,
             }
             checkpoint_payloads = self._merge_checkpoint(checkpoint_payloads, checkpoint_payload)
             # Persist state after every checkpoint so progress survives a
@@ -739,23 +836,28 @@ class MaskablePPOTrainer(Trainer):
                 "policy_version": policy_version,
                 "training_scenario_coverage": curr_coverage,
             }
-            atomic_write_json(self._state_path, intermediate_state)
-            self._loaded_state = intermediate_state
-            # Also keep training-summary.json current so that checkpoint
-            # history is complete when a run resumes after a crash/reboot.
-            self._export_neural_training_summary(
-                checkpoint_payloads,
-                str(saved_model_path),
-                total_eps_this_checkpoint,
-                policy.config.to_dict(),
+            state_export_phase = (
+                self.runtime_tracker.phase("checkpoint_save")
+                if self.runtime_tracker is not None
+                else contextlib.nullcontext()
             )
-            self._export_web_assets(
-                web_export_dir,
-                checkpoint_payloads,
-                summary,
-                representative_replay_path,
-                checkpoint_path,
-            )
+            with state_export_phase:
+                atomic_write_json(self._state_path, intermediate_state)
+                self._loaded_state = intermediate_state
+                # Keep history current so a resumed run retains every checkpoint.
+                self._export_neural_training_summary(
+                    checkpoint_payloads,
+                    str(saved_model_path),
+                    total_eps_this_checkpoint,
+                    policy.config.to_dict(),
+                )
+                self._export_web_assets(
+                    web_export_dir,
+                    checkpoint_payloads,
+                    summary,
+                    representative_replay_path,
+                    checkpoint_path,
+                )
             if self.should_evaluate_saved_scenarios(
                 completed_checkpoints, n_checkpoints
             ):
@@ -768,7 +870,11 @@ class MaskablePPOTrainer(Trainer):
                     "total_episodes_trained": total_eps_this_checkpoint,
                     "checkpoint_episode": total_eps_this_checkpoint,
                     "checkpoint_path": str(checkpoint_path),
-                    "replay_path": str(representative_replay_path),
+                    "replay_path": (
+                        str(representative_replay_path)
+                        if representative_replay_path is not None
+                        else None
+                    ),
                     "summary": summary.to_dict(),
                     "best_score": summary.average_reward,
                     "message": f"Checkpoint {total_eps_this_checkpoint} exported",

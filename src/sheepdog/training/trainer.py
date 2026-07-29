@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import random
 from collections.abc import Callable
@@ -12,12 +13,21 @@ from statistics import fmean
 from typing import Any
 
 from sheepdog.atomic_io import atomic_write_json, atomic_write_text
-from sheepdog.checkpoints.store import CheckpointMetadata, CheckpointStore
+from sheepdog.checkpoints.store import (
+    CheckpointMetadata,
+    CheckpointStore,
+    compute_env_config_hash,
+    compute_seed_set_id,
+    get_action_space_hash,
+    get_observation_schema_hash,
+)
 from sheepdog.config import LabConfig, TrainingConfig
-from sheepdog.environment import SheepdogEnvironment
+from sheepdog.environment import ENV_CONFIG_VERSION, SheepdogEnvironment
 from sheepdog.evaluation.evaluator import EvaluationSummary, Evaluator
 from sheepdog.evaluation.scenario_evaluator import evaluate_checkpoint_on_scenarios
 from sheepdog.policies.trainable import PolicyWeights, TrainableLinearPolicy
+from sheepdog.rewards import REWARD_SCHEMA_VERSION
+from sheepdog.training.runtime import TrainingRuntimeTracker
 
 
 def _checkpoint_replay_mode(policy_name: str, total_training_episodes: int) -> str:
@@ -90,6 +100,7 @@ class Trainer:
         self.output_root.mkdir(parents=True, exist_ok=True)
         self.checkpoint_store = CheckpointStore(self.output_root / "checkpoints")
         self.evaluator = Evaluator(config, self.output_root / "evaluations")
+        self.runtime_tracker: TrainingRuntimeTracker | None = None
         self._state_path = self.output_root / self.STATE_FILENAME
         self._loaded_state = self._load_state()
 
@@ -375,15 +386,6 @@ class Trainer:
             )
 
             if episode in train_config.checkpoint_episodes:
-                from sheepdog.checkpoints.store import (
-                    compute_env_config_hash,
-                    compute_seed_set_id,
-                    get_action_space_hash,
-                    get_observation_schema_hash,
-                )
-                from sheepdog.environment import ENV_CONFIG_VERSION
-                from sheepdog.rewards import REWARD_SCHEMA_VERSION
-
                 run_id = self._loaded_state.get("run_id")
                 parent_run_id = self._loaded_state.get("parent_run_id")
                 parent_checkpoint_id = self._loaded_state.get("parent_checkpoint_id")
@@ -435,7 +437,9 @@ class Trainer:
                     curriculum_stage=active_stage,
                     evaluation_seed_set_id=compute_seed_set_id(train_config.evaluation_seeds),
                     evaluation_seed_count=len(train_config.evaluation_seeds),
-                    environment_config_hash=compute_env_config_hash(asdict(self.config.environment)),
+                    environment_config_hash=compute_env_config_hash(
+                        asdict(self.config.environment)
+                    ),
                     evaluation_timestamp=recorded_time,
                     policy_version=None,
                 )
@@ -477,7 +481,9 @@ class Trainer:
                     "curriculum_stage": active_stage,
                     "evaluation_seed_set_id": compute_seed_set_id(train_config.evaluation_seeds),
                     "evaluation_seed_count": len(train_config.evaluation_seeds),
-                    "environment_config_hash": compute_env_config_hash(asdict(self.config.environment)),
+                    "environment_config_hash": compute_env_config_hash(
+                        asdict(self.config.environment)
+                    ),
                     "evaluation_timestamp": recorded_time,
                     "policy_version": None,
                 }
@@ -737,7 +743,7 @@ class Trainer:
         web_export_dir: Path,
         checkpoint_payloads: list[dict[str, Any]],
         summary: EvaluationSummary,
-        replay_path: Path,
+        replay_path: Path | None,
         checkpoint_path: Path,
     ) -> None:
         summary_payload = summary.to_dict()
@@ -745,7 +751,10 @@ class Trainer:
         replay_output_dir.mkdir(parents=True, exist_ok=True)
 
         def _export_record(record: dict[str, Any]) -> dict[str, Any]:
-            source_path = Path(record["replay_path"])
+            replay_value = record.get("replay_path")
+            if not replay_value:
+                return dict(record)
+            source_path = Path(replay_value)
             target_path = replay_output_dir / source_path.name
             if source_path.exists():
                 target_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
@@ -759,14 +768,18 @@ class Trainer:
         summary_payload["records"] = exported_summary_records
 
         exported_checkpoints: list[dict[str, Any]] = []
-        for checkpoint_payload in checkpoint_payloads:
+        records_start = max(0, len(checkpoint_payloads) - 10)
+        for index, checkpoint_payload in enumerate(checkpoint_payloads):
             exported_payload = dict(checkpoint_payload)
             exported_payload["journey"] = "current"
             exported_payload.pop("policy_weights", None)
             exported_payload.pop("training_scenario_coverage", None)
-            exported_payload["records"] = [
-                _export_record(record) for record in checkpoint_payload["records"]
-            ]
+            if index >= records_start:
+                exported_payload["records"] = [
+                    _export_record(record) for record in checkpoint_payload["records"]
+                ]
+            else:
+                exported_payload.pop("records", None)
             exported_checkpoints.append(exported_payload)
 
         # Prepend archived journey checkpoints so the full timeline is visible.
@@ -782,7 +795,8 @@ class Trainer:
             {"checkpoints": all_checkpoints, "latest": summary_payload},
         )
         replay_target = web_export_dir / "latest-replay.json"
-        atomic_write_text(replay_target, replay_path.read_text(encoding="utf-8"))
+        if replay_path is not None and replay_path.exists():
+            atomic_write_text(replay_target, replay_path.read_text(encoding="utf-8"))
 
     def _load_archived_checkpoints(self) -> list[dict[str, Any]]:
         """Load checkpoints from all archived journeys.
@@ -872,18 +886,25 @@ class Trainer:
             return None
 
         web_latest = -1
+        web_record_count = 0
         try:
             index = json.loads(index_path.read_text(encoding="utf-8"))
             web_latest = _episode(index.get("latest"))
+            web_checkpoints = index.get("checkpoints", [])
+            web_record_count = sum(
+                1
+                for item in web_checkpoints
+                if isinstance(item, dict) and item.get("records")
+            )
             if web_latest < 0:
                 web_latest = max(
-                    (_episode(item) for item in index.get("checkpoints", [])),
+                    (_episode(item) for item in web_checkpoints),
                     default=-1,
                 )
         except (OSError, json.JSONDecodeError):
             web_latest = -1
 
-        if web_latest >= summary_latest:
+        if web_latest >= summary_latest and web_record_count <= 10:
             return None
 
         replay_output_dir = web_dir / "replays"
@@ -900,24 +921,8 @@ class Trainer:
             exported_record["replay_path"] = f"/generated/replays/{target_path.name}"
             return exported_record
 
-        # Collect promo/rollback episodes to preserve their records
-        promo_episodes = set()
-        try:
-            promo_path = self.output_root / "promotion-history.json"
-            if promo_path.exists():
-                promotion_history = json.loads(promo_path.read_text(encoding="utf-8"))
-                if isinstance(promotion_history, list):
-                    for event in promotion_history:
-                        if not isinstance(event, dict):
-                            continue
-                        episode = event.get("trigger_checkpoint_episode")
-                        if isinstance(episode, int):
-                            promo_episodes.add(episode)
-        except (OSError, json.JSONDecodeError):
-            promo_episodes.clear()
-
         exported_checkpoints: list[dict[str, Any]] = []
-        latest_episodes_to_keep = 100
+        latest_episodes_to_keep = 10
         total_checkpoints = len(checkpoints)
         for i, checkpoint_payload in enumerate(checkpoints):
             exported_payload = dict(checkpoint_payload)
@@ -925,12 +930,7 @@ class Trainer:
             exported_payload.pop("policy_weights", None)
             exported_payload.pop("training_scenario_coverage", None)
 
-            ep = _episode(checkpoint_payload)
-            keep_records = (
-                (total_checkpoints - i) <= latest_episodes_to_keep
-                or ep in promo_episodes
-                or (ep % 100 == 0)
-            )
+            keep_records = (total_checkpoints - i) <= latest_episodes_to_keep
             if keep_records:
                 exported_payload["records"] = [
                     _export_record(record) for record in checkpoint_payload.get("records", [])
@@ -974,7 +974,6 @@ class Trainer:
     ) -> None:
         """Run saved hard-case scenarios when any exist (does not affect global best)."""
 
-        import contextlib
         with contextlib.suppress(OSError, ValueError, RuntimeError):
             evaluate_checkpoint_on_scenarios(
                 self.config,

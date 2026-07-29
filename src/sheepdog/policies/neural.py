@@ -38,18 +38,18 @@ def _make_rl_adapter(config_payload: dict[str, Any]) -> SheepdogRLAdapter:
 
 def _resolve_env_workers(config: LabConfig) -> int:
     """Resolve PPO worker count from config and optional env override."""
-    # Python 3.13 on Windows can deadlock while worker processes import SB3
-    # modules under spawned subprocess startup. Use a single in-process env
-    # to keep training progress reliable for interactive server runs.
-    if os.name == "nt" and sys.version_info >= (3, 13):
-        return 1
-
     raw_override = os.getenv("SHEEPDOG_PPO_NUM_ENVS")
     if raw_override is not None:
         try:
             return max(1, int(raw_override))
         except ValueError:
             pass
+
+    # Windows process spawning under multithreaded server can fail or pipe-break (WinError 232).
+    # Use a single in-process env (DummyVecEnv) on Windows to keep server runs stable.
+    if os.name == "nt":
+        return 1
+
     return max(1, int(config.training.ppo_env_workers))
 
 

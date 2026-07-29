@@ -56,6 +56,14 @@ class CheckpointMetadata:
     evaluation_seed_count: int | None = None
     environment_config_hash: str | None = None
     evaluation_timestamp: str | None = None
+    evaluation_mode: str | None = None
+    promotion_eligible: bool | None = None
+    active_runtime_seconds_total: float | None = None
+    training_seconds_total: float | None = None
+    evaluation_seconds_total: float | None = None
+    wall_clock_elapsed_seconds: float | None = None
+    session_id: str | None = None
+    promotion_gate: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -54,7 +54,7 @@ async function fetchJson<T>(path: string, init?: RequestInit, baseUrl?: string):
 
 export async function loadCheckpointIndex(): Promise<CheckpointIndex | null> {
   try {
-    return await fetchJson<CheckpointIndex>("/generated/checkpoint-index.json");
+    return await fetchJson<CheckpointIndex>("/generated/checkpoint-index.json", undefined, API_BASE_URL);
   } catch (error) {
     const fetchError = error as { status?: number; contentType?: string; message?: string };
     // Treat 404 and 500 (Vite serves 500 when the file doesn't exist yet)
@@ -83,7 +83,10 @@ export async function loadCheckpointIndex(): Promise<CheckpointIndex | null> {
 }
 
 export async function loadReplay(path: string): Promise<ReplayBundle> {
-  return fetchJson<ReplayBundle>(path);
+  if (!path || !path.trim()) {
+    throw new Error("No replay path specified.");
+  }
+  return fetchJson<ReplayBundle>(path, undefined, API_BASE_URL);
 }
 
 export async function loadTrainingStatus(): Promise<TrainingStatus> {

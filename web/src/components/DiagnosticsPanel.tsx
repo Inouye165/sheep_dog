@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { CheckpointEntry, CheckpointIndex, TrainingStatus } from "../state/types";
 import { CopyAgentDataButton } from "./CopyAgentDataButton";
@@ -211,6 +211,9 @@ interface LineChartProps {
   secondaryYMax?: number;
   secondaryLineColor?: string;
   formatSecondaryY?: (v: number) => string;
+  formatX?: (v: number) => string;
+  /** When true, plot points with uniform sequential index spacing (removes empty gaps when episode numbers jump). Defaults to true. */
+  useSequentialX?: boolean;
 }
 
 const formatDate = (dateStr?: string) => {
@@ -230,6 +233,219 @@ const formatDate = (dateStr?: string) => {
   }
 };
 
+interface ChartHoverPortalProps {
+  hoveredPoint: ChartPoint;
+  targetRect: DOMRect;
+}
+
+export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalProps) {
+  const tooltipRef = useRef<HTMLDivElement>(null);
+  const [style, setStyle] = useState<React.CSSProperties>({
+    position: "fixed",
+    left: "-9999px",
+    top: "-9999px",
+    opacity: 0,
+    zIndex: 9999,
+    pointerEvents: "none",
+  });
+
+  const updatePosition = useCallback(() => {
+    if (!tooltipRef.current) return;
+    const tooltipNode = tooltipRef.current;
+    const tooltipRect = tooltipNode.getBoundingClientRect();
+
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    const padding = 12;
+
+    const tooltipWidth = tooltipRect.width || 300;
+    const tooltipHeight = tooltipRect.height || 280;
+
+    const targetCenterX = targetRect.left + targetRect.width / 2;
+    let left = targetCenterX - tooltipWidth / 2;
+    left = Math.max(padding, Math.min(viewportWidth - tooltipWidth - padding, left));
+
+    const spaceAbove = targetRect.top - padding;
+    let top: number;
+    if (spaceAbove >= tooltipHeight + 8) {
+      top = targetRect.top - tooltipHeight - 8;
+    } else {
+      top = targetRect.bottom + 8;
+    }
+    top = Math.max(padding, Math.min(viewportHeight - tooltipHeight - padding, top));
+
+    setStyle({
+      position: "fixed",
+      left: `${left}px`,
+      top: `${top}px`,
+      maxWidth: `calc(100vw - 16px)`,
+      maxHeight: `calc(100vh - 16px)`,
+      overflowY: "auto",
+      overflowWrap: "anywhere",
+      opacity: 1,
+      zIndex: 9999,
+      pointerEvents: "none",
+    });
+  }, [targetRect]);
+
+  useLayoutEffect(() => {
+    updatePosition();
+  }, [updatePosition]);
+
+  useEffect(() => {
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+    };
+  }, [updatePosition]);
+
+  const checkpoint = hoveredPoint.checkpoint;
+  if (!checkpoint) return null;
+
+  const cStage = getCheckpointStage(checkpoint);
+  const thresh = getSuccessThreshold(cStage);
+  const gate = checkpoint.promotion_gate;
+
+  return createPortal(
+    <div ref={tooltipRef} className="chart-tooltip" style={style} data-testid="chart-tooltip">
+      <div className="chart-tooltip__header">
+        <span className="chart-tooltip__episode">Episode {checkpoint.checkpoint_episode}</span>
+        <span
+          className="chart-tooltip__stage-pill"
+          style={{ background: stageColor(cStage) }}
+        >
+          Stage {cStage === -1 ? "Legacy" : cStage}
+        </span>
+      </div>
+
+      <div className="chart-tooltip__section-title">Runtime</div>
+      <div className="chart-tooltip__grid">
+        <span className="chart-tooltip__metric-label">Active runtime:</span>
+        <span className="chart-tooltip__metric-value">
+          {formatDuration(checkpoint.active_runtime_seconds_total)}
+        </span>
+        <span></span>
+        <span className="chart-tooltip__metric-label">Wall clock:</span>
+        <span className="chart-tooltip__metric-value">
+          {formatDuration(checkpoint.wall_clock_elapsed_seconds)}
+        </span>
+        <span></span>
+        <span className="chart-tooltip__metric-label">Session:</span>
+        <span className="chart-tooltip__metric-value">
+          {checkpoint.session_id ?? "Unavailable for historical data"}
+        </span>
+        <span></span>
+      </div>
+
+      <div className="chart-tooltip__section-title">Performance Metrics</div>
+      <div className="chart-tooltip__grid">
+        <span className="chart-tooltip__metric-label">Current Checkpoint:</span>
+        <span className="chart-tooltip__metric-value">{(checkpoint.success_rate * 100).toFixed(1)}%</span>
+        <span className="chart-tooltip__metric-indicator">
+          {checkpoint.success_rate >= thresh ? (
+            <span style={{ color: "#4ade80", fontWeight: "bold" }}>✓</span>
+          ) : (
+            <span style={{ color: "#fb923c", fontWeight: "bold" }}>✗</span>
+          )}
+        </span>
+
+        <span className="chart-tooltip__metric-label">Timeout Rate:</span>
+        <span className="chart-tooltip__metric-value">{(checkpoint.timeout_rate * 100).toFixed(1)}%</span>
+        <span className="chart-tooltip__metric-indicator">
+          {checkpoint.timeout_rate <= 0.1 ? (
+            <span style={{ color: "#4ade80", fontWeight: "bold" }}>✓</span>
+          ) : (
+            <span style={{ color: "#fb923c", fontWeight: "bold" }}>✗</span>
+          )}
+        </span>
+
+        <span className="chart-tooltip__metric-label">Avg Time:</span>
+        <span className="chart-tooltip__metric-value">
+          {checkpoint.average_completion_seconds?.toFixed(1)}s
+        </span>
+        <span></span>
+
+        <span className="chart-tooltip__metric-label">Avg Steps:</span>
+        <span className="chart-tooltip__metric-value">
+          {checkpoint.average_completion_steps?.toFixed(0)}
+        </span>
+        <span></span>
+
+        <span className="chart-tooltip__metric-label">Avg Reward:</span>
+        <span className="chart-tooltip__metric-value">{checkpoint.average_reward?.toFixed(1)}</span>
+        <span></span>
+
+        <span className="chart-tooltip__metric-label">Sheep Penned:</span>
+        <span className="chart-tooltip__metric-value">
+          {checkpoint.average_sheep_penned?.toFixed(1)} / {checkpoint.environment_config?.sheep ?? "—"}
+        </span>
+        <span></span>
+      </div>
+
+      <div className="chart-tooltip__promo-section">
+        <div className="chart-tooltip__section-title" style={{ marginTop: 0 }}>Stage Gate Promotion</div>
+        {gate ? (
+          <div>
+            <div
+              className={`chart-tooltip__promo-status chart-tooltip__promo-status--${
+                gate.decision === "promote_ready"
+                  ? "qualified"
+                  : gate.decision === "pending"
+                  ? "pending"
+                  : "unqualified"
+              }`}
+            >
+              <span>
+                {gate.decision === "promote_ready"
+                  ? "🟢 Promote Ready"
+                  : gate.decision === "pending"
+                  ? "🟡 Pending Evidence"
+                  : "🔴 Gate Blocked"}
+              </span>
+              <span style={{ fontSize: "0.65rem", fontWeight: "normal", color: "rgba(148, 163, 184, 0.8)" }}>
+                (Req: {(thresh * 100).toFixed(0)}% rolling succ, ≤10% timeout)
+              </span>
+            </div>
+            <div style={{ fontSize: "0.75rem", marginTop: "4px", color: "#cbd5e1" }}>
+              <div><strong>Rolling Success:</strong> {(gate.aggregate_success_rate != null ? gate.aggregate_success_rate * 100 : checkpoint.success_rate * 100).toFixed(1)}% ({gate.total_successes ?? 0}/{gate.total_seed_trials ?? 0} seed trials across {gate.recent_checkpoints_considered ?? 0} CPs)</div>
+              <div><strong>Recent Checkpoint Consistency:</strong> {gate.recent_qualifying_checkpoints ?? 0}/3 qualifying</div>
+              <div><strong>Latest Checkpoint Floor:</strong> {(gate.latest_success_rate != null ? gate.latest_success_rate * 100 : checkpoint.success_rate * 100).toFixed(1)}% ({gate.latest_floor_passed ? "✓ ≥80%" : "✗ <80%"})</div>
+              {gate.blocking_seeds && gate.blocking_seeds.length > 0 && (
+                <div style={{ color: "#ef4444" }}><strong>Blocking Seeds:</strong> {gate.blocking_seeds.join(", ")}</div>
+              )}
+              {gate.blocking_reasons && gate.blocking_reasons.length > 0 && (
+                <div style={{ color: "#f97316", marginTop: "2px" }}>
+                  {gate.blocking_reasons.map((r, i) => (
+                    <div key={i}>• {r}</div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="chart-tooltip__promo-status chart-tooltip__promo-status--unqualified">
+            <span>
+              {checkpoint.success_rate >= thresh && checkpoint.timeout_rate <= 0.1
+                ? "🟢 Checkpoint Qualified"
+                : "🟠 Checkpoint Below Target"}
+            </span>
+            <span style={{ fontSize: "0.65rem", fontWeight: "normal", color: "rgba(148, 163, 184, 0.8)" }}>
+              (Req: {(thresh * 100).toFixed(0)}% succ, ≤10% timeout)
+            </span>
+          </div>
+        )}
+      </div>
+
+      {formatDate(checkpoint.recorded_at) && (
+        <div className="chart-tooltip__time">{formatDate(checkpoint.recorded_at)}</div>
+      )}
+    </div>,
+    document.body
+  );
+}
+
 function LineChart({
   data,
   label,
@@ -245,14 +461,10 @@ function LineChart({
   secondaryYMax,
   secondaryLineColor,
   formatSecondaryY,
+  formatX = (value) => String(Math.round(value)),
+  useSequentialX = true,
 }: LineChartProps) {
-  const [hoveredPoint, setHoveredPoint] = useState<ChartPoint | null>(null);
-  const [tooltipCoords, setTooltipCoords] = useState<{
-    left: number;
-    top: number;
-    transform: string;
-    shouldFlip: boolean;
-  } | null>(null);
+  const [hoveredState, setHoveredState] = useState<{ point: ChartPoint; rect: DOMRect } | null>(null);
 
   const W = 900;
   const H = 260;
@@ -331,6 +543,9 @@ function LineChart({
   const hasData = data.length >= 2;
 
   const yRange = yMax - yMin || 1;
+  const xMin = data.length ? Math.min(...data.map((point) => point.x)) : 0;
+  const xMax = data.length ? Math.max(...data.map((point) => point.x)) : 1;
+  const xRange = xMax - xMin || 1;
 
   // Secondary scale — fewer steps = better = top of chart (inverted mapping)
   const secYMin = secondaryYMin ?? 0;
@@ -343,10 +558,13 @@ function LineChart({
     : [];
   const secTicks = hasSecondary ? [secYMax, (secYMax + secYMin) / 2, secYMin] : [];
 
-  function toSvgX(idx: number): number {
-    const totalPoints = data.length || 1;
-    const range = totalPoints > 1 ? totalPoints - 1 : 1;
-    return PAD.left + (idx / range) * plotW;
+  function toSvgX(x: number, index?: number): number {
+    if (useSequentialX) {
+      if (data.length <= 1) return PAD.left + plotW / 2;
+      const idx = index !== undefined ? index : data.findIndex((d) => d.x === x);
+      return PAD.left + (idx / (data.length - 1)) * plotW;
+    }
+    return PAD.left + ((x - xMin) / xRange) * plotW;
   }
   function toSvgY(y: number): number {
     return PAD.top + plotH - ((y - yMin) / yRange) * plotH;
@@ -357,7 +575,7 @@ function LineChart({
   }
 
   const polyline = hasData
-    ? data.map((d, idx) => `${toSvgX(idx).toFixed(1)},${toSvgY(d.y).toFixed(1)}`).join(" ")
+    ? data.map((d, idx) => `${toSvgX(d.x, idx).toFixed(1)},${toSvgY(d.y).toFixed(1)}`).join(" ")
     : "";
 
   // Y-axis tick values
@@ -417,13 +635,13 @@ function LineChart({
           return (
             <text
               key={idx}
-              x={toSvgX(idx)}
+              x={toSvgX(d.x, idx)}
               y={H - 3}
               textAnchor="middle"
               fontSize={10}
               fill="rgba(148,163,184,0.6)"
             >
-              {d.x}
+              {formatX(d.x)}
             </text>
           );
         })}
@@ -484,7 +702,7 @@ function LineChart({
             {secDataPoints.length >= 2 ? (
               <polyline
                 points={secDataPoints
-                  .map((d) => `${toSvgX(d.originalIdx).toFixed(1)},${toSvgY2(d.secondaryY!).toFixed(1)}`)
+                  .map((d) => `${toSvgX(d.x, d.originalIdx).toFixed(1)},${toSvgY2(d.secondaryY!).toFixed(1)}`)
                   .join(" ")}
                 fill="none"
                 stroke={effectiveSecColor}
@@ -498,7 +716,7 @@ function LineChart({
             {secDataPoints.map((d, i) => (
               <circle
                 key={`sec-${d.x}-${i}`}
-                cx={toSvgX(d.originalIdx)}
+                cx={toSvgX(d.x, d.originalIdx)}
                 cy={toSvgY2(d.secondaryY!)}
                 r={secondaryCircleR}
                 fill={effectiveSecColor}
@@ -512,10 +730,10 @@ function LineChart({
 
         {/* Dots — colored by stage; prev-bests get a diamond + label; best gets a ring */}
         {data.map((d, idx) => {
-          const cx = toSvgX(idx);
+          const cx = toSvgX(d.x, idx);
           const cy = toSvgY(d.y);
           const fill = stageColor(d.stage);
-          const isBest = d.x === bestEpisode;
+          const isBest = d.isBest ?? d.x === bestEpisode;
           const r = isBest ? bestRadius : d.isPrevBest ? prevBestRadius : baseRadius;
           const diamond = `${cx},${cy - r} ${cx + r},${cy} ${cx},${cy + r} ${cx - r},${cy}`;
           return (
@@ -523,37 +741,10 @@ function LineChart({
               key={`${d.x}-${idx}`}
               onMouseEnter={(e) => {
                 const rect = e.currentTarget.getBoundingClientRect();
-                const viewportWidth = window.innerWidth;
-                const tooltipWidth = 240;
-
-                // Determine horizontal alignment
-                let left = rect.left + rect.width / 2 + window.scrollX;
-                let transformX = "-50%";
-
-                if (rect.left + rect.width / 2 < tooltipWidth / 2 + 10) {
-                  left = 10 + window.scrollX;
-                  transformX = "0%";
-                } else if (rect.left + rect.width / 2 > viewportWidth - tooltipWidth / 2 - 10) {
-                  left = viewportWidth - tooltipWidth - 10 + window.scrollX;
-                  transformX = "0%";
-                }
-
-                // Determine vertical alignment (auto-flip if close to top of viewport)
-                const shouldFlip = rect.top < 220; // 220px height estimate for tooltip
-                const top = (shouldFlip ? rect.bottom : rect.top) + window.scrollY;
-                const transformY = shouldFlip ? "translateY(12px)" : "translateY(-12px) translateY(-100%)";
-
-                setHoveredPoint(d);
-                setTooltipCoords({
-                  left,
-                  top,
-                  transform: `translateX(${transformX}) ${transformY}`,
-                  shouldFlip,
-                });
+                setHoveredState({ point: d, rect });
               }}
               onMouseLeave={() => {
-                setHoveredPoint(null);
-                setTooltipCoords(null);
+                setHoveredState(null);
               }}
               style={{ cursor: "pointer" }}
             >
@@ -595,111 +786,27 @@ function LineChart({
       </svg>
 
       {/* Premium Interactive Hover Tooltip via React Portal */}
-      {hoveredPoint && hoveredPoint.checkpoint && tooltipCoords && createPortal((() => {
-        const checkpoint = hoveredPoint.checkpoint;
-        const cStage = getCheckpointStage(checkpoint);
-        const thresh = getSuccessThreshold(cStage);
-
-        return (
-          <div
-            className="chart-tooltip"
-            style={{
-              position: "absolute",
-              left: `${tooltipCoords.left}px`,
-              top: `${tooltipCoords.top}px`,
-              transform: tooltipCoords.transform,
-              pointerEvents: "none",
-              zIndex: 9999,
-            }}
-          >
-            <div className="chart-tooltip__header">
-              <span className="chart-tooltip__episode">Episode {checkpoint.checkpoint_episode}</span>
-              <span
-                className="chart-tooltip__stage-pill"
-                style={{ background: stageColor(cStage) }}
-              >
-                Stage {cStage === -1 ? "Legacy" : cStage}
-              </span>
-            </div>
-
-            <div className="chart-tooltip__section-title">Performance Metrics</div>
-            <div className="chart-tooltip__grid">
-              <span className="chart-tooltip__metric-label">Success Rate:</span>
-              <span className="chart-tooltip__metric-value">{(checkpoint.success_rate * 100).toFixed(1)}%</span>
-              <span className="chart-tooltip__metric-indicator">
-                {checkpoint.success_rate >= thresh ? (
-                  <span style={{ color: "#4ade80", fontWeight: "bold" }}>✓</span>
-                ) : (
-                  <span style={{ color: "#fb923c", fontWeight: "bold" }}>✗</span>
-                )}
-              </span>
-
-              <span className="chart-tooltip__metric-label">Timeout Rate:</span>
-              <span className="chart-tooltip__metric-value">{(checkpoint.timeout_rate * 100).toFixed(1)}%</span>
-              <span className="chart-tooltip__metric-indicator">
-                {checkpoint.timeout_rate <= 0.1 ? (
-                  <span style={{ color: "#4ade80", fontWeight: "bold" }}>✓</span>
-                ) : (
-                  <span style={{ color: "#fb923c", fontWeight: "bold" }}>✗</span>
-                )}
-              </span>
-
-              <span className="chart-tooltip__metric-label">Avg Time:</span>
-              <span className="chart-tooltip__metric-value">
-                {checkpoint.average_completion_seconds?.toFixed(1)}s
-              </span>
-              <span></span>
-
-              <span className="chart-tooltip__metric-label">Avg Steps:</span>
-              <span className="chart-tooltip__metric-value">
-                {checkpoint.average_completion_steps?.toFixed(0)}
-              </span>
-              <span></span>
-
-              <span className="chart-tooltip__metric-label">Avg Reward:</span>
-              <span className="chart-tooltip__metric-value">{checkpoint.average_reward?.toFixed(1)}</span>
-              <span></span>
-
-              <span className="chart-tooltip__metric-label">Sheep Penned:</span>
-              <span className="chart-tooltip__metric-value">
-                {checkpoint.average_sheep_penned?.toFixed(1)} / {checkpoint.environment_config?.sheep ?? "—"}
-              </span>
-              <span></span>
-            </div>
-
-            <div className="chart-tooltip__promo-section">
-              <div className="chart-tooltip__section-title" style={{ marginTop: 0 }}>Stage Gate Promotion</div>
-              {checkpoint.success_rate >= thresh && checkpoint.timeout_rate <= 0.1 ? (
-                <div className="chart-tooltip__promo-status chart-tooltip__promo-status--qualified">
-                  <span>🟢 Target Met</span>
-                  <span style={{ fontSize: "0.65rem", fontWeight: "normal", color: "rgba(148, 163, 184, 0.8)" }}>
-                    (Req: {(thresh * 100).toFixed(0)}% succ, ≤10% timeout)
-                  </span>
-                </div>
-              ) : (
-                <div className="chart-tooltip__promo-status chart-tooltip__promo-status--unqualified">
-                  <span>🟠 Below Target</span>
-                  <span style={{ fontSize: "0.65rem", fontWeight: "normal", color: "rgba(148, 163, 184, 0.8)" }}>
-                    (Req: {(thresh * 100).toFixed(0)}% succ, ≤10% timeout)
-                  </span>
-                </div>
-              )}
-            </div>
-
-            {formatDate(checkpoint.recorded_at) && (
-              <div className="chart-tooltip__time">{formatDate(checkpoint.recorded_at)}</div>
-            )}
-          </div>
-        );
-      })(), document.body)}
+      {hoveredState && hoveredState.point.checkpoint ? (
+        <ChartHoverPortal hoveredPoint={hoveredState.point} targetRect={hoveredState.rect} />
+      ) : null}
     </div>
   );
 }
+
 
 // ── Chart sub-tab types & legend ───────────────────────────────────────────
 
 type ChartTab = "health" | "success" | "reward" | "sheep" | "history" | "learningSignal";
 type ViewWindow = "all" | 25 | 50 | 100;
+type XAxisMode = "episode" | "timesteps" | "runtime" | "calendar";
+
+function formatDuration(seconds: number | null | undefined): string {
+  if (seconds == null || !Number.isFinite(seconds)) return "—";
+  const totalMinutes = Math.max(0, Math.round(seconds / 60));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
 type StageScope = "all" | "current" | "current-journey" | number;
 
 const VIEW_WINDOW_OPTIONS: Array<{ value: ViewWindow; label: string }> = [
@@ -1186,6 +1293,7 @@ interface LearningSignalChartProps {
   stageBestSuccessRate: number;
   onBreakthroughClick: (checkpoint: number) => void;
   focusedCheckpoint: number | null;
+  useSequentialX?: boolean;
 }
 
 function LearningSignalChart({
@@ -1197,6 +1305,7 @@ function LearningSignalChart({
   stageBestSuccessRate,
   onBreakthroughClick,
   focusedCheckpoint,
+  useSequentialX = true,
 }: LearningSignalChartProps) {
   const W = 1100;
   const H = 340;
@@ -1206,6 +1315,12 @@ function LearningSignalChart({
   const xMin = points[0]?.checkpoint ?? 0;
   const xMax = points[points.length - 1]?.checkpoint ?? 1;
   const xRange = xMax - xMin || 1;
+
+  const pointIndexMap = useMemo(() => {
+    const map = new Map<number, number>();
+    points.forEach((p, idx) => map.set(p.checkpoint, idx));
+    return map;
+  }, [points]);
 
   const numPoints = points.length;
   // Dynamically thin lines and reduce breakthrough marker size as data points grow
@@ -1241,7 +1356,12 @@ function LearningSignalChart({
     breakthroughStrokeWidth = 1.3;
   }
 
-  function toX(checkpoint: number): number {
+  function toX(checkpoint: number, index?: number): number {
+    if (useSequentialX) {
+      if (points.length <= 1) return PAD.left + plotW / 2;
+      const idx = index !== undefined ? index : (pointIndexMap.get(checkpoint) ?? 0);
+      return PAD.left + (idx / (points.length - 1)) * plotW;
+    }
     return PAD.left + ((checkpoint - xMin) / xRange) * plotW;
   }
 
@@ -1249,9 +1369,9 @@ function LearningSignalChart({
     return PAD.top + plotH - value * plotH;
   }
 
-  const baseLine = points.map((point) => `${toX(point.checkpoint).toFixed(1)},${toY(point.successRate).toFixed(1)}`).join(" ");
+  const baseLine = points.map((point, idx) => `${toX(point.checkpoint, idx).toFixed(1)},${toY(point.successRate).toFixed(1)}`).join(" ");
   const smoothLine = points
-    .map((point, index) => `${toX(point.checkpoint).toFixed(1)},${toY(smoothedSuccessRate[index] ?? point.successRate).toFixed(1)}`)
+    .map((point, index) => `${toX(point.checkpoint, index).toFixed(1)},${toY(smoothedSuccessRate[index] ?? point.successRate).toFixed(1)}`)
     .join(" ");
 
   const yTicks = [0, 0.25, 0.5, 0.75, 1];
@@ -1428,6 +1548,7 @@ export function DiagnosticsPanel({
     }
     return "current-journey";
   });
+  const [xAxisMode, setXAxisMode] = useState<XAxisMode>("episode");
 
   const targetStage = useMemo(() => {
     if (selectedStageScope === "current") return effectiveCurriculumStage;
@@ -1590,10 +1711,31 @@ export function DiagnosticsPanel({
     [filteredCheckpoints],
   );
 
+  const checkpointX = (checkpoint: CheckpointEntry): number | null => {
+    if (xAxisMode === "episode") return checkpoint.checkpoint_episode;
+    if (xAxisMode === "timesteps") return checkpoint.global_timestep ?? null;
+    if (xAxisMode === "runtime") return checkpoint.active_runtime_seconds_total ?? null;
+    const timestamp = checkpoint.recorded_at ?? checkpoint.created_timestamp;
+    return timestamp ? new Date(timestamp).getTime() : null;
+  };
+
+  const chartCheckpoints = filteredCheckpoints.filter((checkpoint) => {
+    const value = checkpointX(checkpoint);
+    return value != null && Number.isFinite(value);
+  });
+
+  const formatChartX = (value: number): string => {
+    if (xAxisMode === "runtime") return formatDuration(value);
+    if (xAxisMode === "calendar") {
+      return new Date(value).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    }
+    return Math.round(value).toLocaleString();
+  };
+
   const successData: ChartPoint[] = useMemo(() => {
     let runningMaxRate = -Infinity;
     let runningMinSteps = Infinity;
-    return filteredCheckpoints.map((c, i) => {
+    return chartCheckpoints.map((c) => {
       const rate = c.success_rate;
       const steps = c.average_completion_steps ?? Infinity;
       const betterRate = rate > runningMaxRate;
@@ -1613,9 +1755,9 @@ export function DiagnosticsPanel({
           ? String(Math.round(c.average_completion_steps))
           : undefined;
       return {
-        x: c.checkpoint_episode,
+        x: checkpointX(c) ?? c.checkpoint_episode,
         y: rate,
-        stage: stages[i],
+        stage: getCheckpointStage(c),
         isBest: c.checkpoint_episode === bestCheckpointEpisode,
         isPrevBest,
         labelText,
@@ -1623,30 +1765,30 @@ export function DiagnosticsPanel({
         checkpoint: c,
       };
     });
-  }, [filteredCheckpoints, stages, bestCheckpointEpisode]);
+  }, [chartCheckpoints, bestCheckpointEpisode, xAxisMode]);
 
   const rewardData: ChartPoint[] = useMemo(
     () =>
-      filteredCheckpoints.map((c, i) => ({
-        x: c.checkpoint_episode,
+      chartCheckpoints.map((c) => ({
+        x: checkpointX(c) ?? c.checkpoint_episode,
         y: c.average_reward,
-        stage: stages[i],
+        stage: getCheckpointStage(c),
         isBest: c.checkpoint_episode === bestCheckpointEpisode,
         checkpoint: c,
       })),
-    [filteredCheckpoints, stages, bestCheckpointEpisode],
+    [chartCheckpoints, bestCheckpointEpisode, xAxisMode],
   );
 
   const sheepData: ChartPoint[] = useMemo(
     () =>
-      filteredCheckpoints.map((c, i) => ({
-        x: c.checkpoint_episode,
+      chartCheckpoints.map((c) => ({
+        x: checkpointX(c) ?? c.checkpoint_episode,
         y: c.average_sheep_penned,
-        stage: stages[i],
+        stage: getCheckpointStage(c),
         isBest: c.checkpoint_episode === bestCheckpointEpisode,
         checkpoint: c,
       })),
-    [filteredCheckpoints, stages, bestCheckpointEpisode],
+    [chartCheckpoints, bestCheckpointEpisode, xAxisMode],
   );
 
   const rewardRange = useMemo(() => {
@@ -2113,6 +2255,18 @@ export function DiagnosticsPanel({
             </button>
           ))}
         </div>
+        <label className="view-filter__label" htmlFor="insights-x-axis">X-axis</label>
+        <select
+          id="insights-x-axis"
+          className="view-filter__select"
+          value={xAxisMode}
+          onChange={(event) => setXAxisMode(event.target.value as XAxisMode)}
+        >
+          <option value="episode">Episode</option>
+          <option value="timesteps">Training timesteps</option>
+          <option value="runtime">Active runtime</option>
+          <option value="calendar">Calendar timestamp</option>
+        </select>
       </div>
 
       {/* Chart sub-tabs */}
@@ -2381,6 +2535,16 @@ export function DiagnosticsPanel({
             </div>
 
             <div className="health-dashboard__grid">
+              <StatCard label="Total active runtime" value={formatDuration(trainingStatus?.runtime?.active_seconds_total)} detail="Verified by live process heartbeats" />
+              <StatCard label="PPO training time" value={formatDuration(trainingStatus?.runtime?.training_seconds)} detail={`${formatPercent(trainingStatus?.runtime?.training_time_percentage ?? null)} of active time`} />
+              <StatCard label="Evaluation time" value={formatDuration(trainingStatus?.runtime?.evaluation_seconds)} detail="Quick and confidence evaluation" />
+              <StatCard label="Replay processing" value={formatDuration((trainingStatus?.runtime?.replay_capture_seconds ?? 0) + (trainingStatus?.runtime?.replay_serialization_seconds ?? 0))} detail="Capture and JSON serialization" />
+              <StatCard label="Checkpoint saving" value={formatDuration(trainingStatus?.runtime?.checkpoint_save_seconds)} detail="Models, metadata, and web exports" />
+              <StatCard label="Intentional pause" value={formatDuration(trainingStatus?.runtime?.paused_seconds)} detail="Measured while the application remained live" />
+              <StatCard label="Wall-clock elapsed" value={formatDuration(trainingStatus?.runtime?.wall_clock_seconds)} detail="Calendar span from first measured session" />
+              <StatCard label="Offline / unknown" value={formatDuration(trainingStatus?.runtime?.offline_or_unknown_seconds)} detail="Not confirmed by a process heartbeat" />
+              <StatCard label="Episodes per active hour" value={formatNumber(trainingStatus?.runtime?.episodes_per_active_hour ?? null, 1)} detail="Excludes offline time" />
+              <StatCard label="Timesteps per training second" value={formatNumber(trainingStatus?.runtime?.timesteps_per_training_second ?? null, 1)} detail="Measured PPO throughput" />
               <StatCard
                 label="Latest success"
                 value={formatPercent(latestSuccessRate)}
@@ -2419,6 +2583,35 @@ export function DiagnosticsPanel({
               />
             </div>
 
+            {trainingStatus?.runtime && (
+              <div className="health-dashboard__callout health-dashboard__callout--neutral">
+                <div style={{ width: "100%" }}>
+                  <strong>Runtime breakdown</strong>
+                  <p>
+                    Active runtime is verified process time. Offline or unknown is calendar time
+                    not confirmed by heartbeats, including shutdowns and crashes.
+                  </p>
+                  <div
+                    aria-label="Runtime phase breakdown"
+                    style={{ display: "flex", height: "18px", overflow: "hidden", borderRadius: "4px", background: "var(--panel-border)" }}
+                  >
+                    {[
+                      ["Training", trainingStatus.runtime.training_seconds, "var(--good)"],
+                      ["Evaluation", trainingStatus.runtime.evaluation_seconds, "var(--accent)"],
+                      ["Replay", trainingStatus.runtime.replay_capture_seconds + trainingStatus.runtime.replay_serialization_seconds, "#fb923c"],
+                      ["Checkpoint", trainingStatus.runtime.checkpoint_save_seconds, "#facc15"],
+                      ["Paused", trainingStatus.runtime.paused_seconds, "#94a3b8"],
+                      ["Offline / unknown", trainingStatus.runtime.offline_or_unknown_seconds, "#475569"],
+                    ].map(([label, seconds, color]) => {
+                      const total = Math.max(1, trainingStatus.runtime!.wall_clock_seconds);
+                      const width = `${(Number(seconds) / total) * 100}%`;
+                      return <span key={String(label)} title={`${label}: ${formatDuration(Number(seconds))}`} style={{ width, background: String(color) }} />;
+                    })}
+                  </div>
+                </div>
+              </div>
+            )}
+
             <div className="health-dashboard__callout health-dashboard__callout--neutral">
               <div>
                 <strong>Live training diagnostics</strong>
@@ -2443,6 +2636,7 @@ export function DiagnosticsPanel({
         <div className="chart-view">
           <LineChart
             data={successData}
+            formatX={formatChartX}
             lineColor="var(--good)"
             yMin={0}
             yMax={1}
@@ -2473,6 +2667,7 @@ export function DiagnosticsPanel({
         <div className="chart-view">
           <LineChart
             data={rewardData}
+            formatX={formatChartX}
             lineColor="var(--accent)"
             yMin={rewardRange.min}
             yMax={rewardRange.max}
@@ -2493,6 +2688,7 @@ export function DiagnosticsPanel({
         <div className="chart-view">
           <LineChart
             data={sheepData}
+            formatX={formatChartX}
             lineColor="#c084fc"
             yMin={0}
             yMax={maxSheepPenned}

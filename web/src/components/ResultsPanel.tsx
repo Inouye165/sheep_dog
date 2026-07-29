@@ -328,7 +328,7 @@ export function ResultsPanel({ checkpointIndex }: ResultsPanelProps) {
         }
 
         const record = checkpoint.records?.[0];
-        if (!record) {
+        if (!record || !record.replay_path) {
           setReplays((prev) => {
             const next = new Map(prev);
             const existing = next.get(checkpoint.checkpoint_episode);

@@ -3,7 +3,9 @@
 # pylint: disable=missing-function-docstring
 from __future__ import annotations
 
+import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -14,7 +16,7 @@ from sheepdog.config import EnvironmentConfig, LabConfig, RewardConfig, Training
 from sheepdog.evaluation.benchmark import BenchmarkHarness
 from sheepdog.evaluation.evaluator import Evaluator
 from sheepdog.policies.heuristic import HeuristicExpertPolicy, InstinctOnlyPolicy
-from sheepdog.policies.neural import NeuralPolicy
+from sheepdog.policies.neural import NeuralPolicy, _build_vec_env
 from sheepdog.policies.random_policy import RandomPolicy
 from sheepdog.policies.trainable import TrainableLinearPolicy
 from sheepdog.server import _load_playable_policy
@@ -66,6 +68,26 @@ def test_neural_policy_initializes_and_acts(tmp_path: Path) -> None:
             "wait",
         }
     )
+
+
+def test_parallel_ppo_environment_starts_worker_processes(tmp_path: Path) -> None:
+    config = make_experiment_config(tmp_path)
+    config = replace(
+        config,
+        training=replace(config.training, ppo_env_workers=2),
+    )
+
+    vec_env, workers, backend = _build_vec_env(config)
+    try:
+        observations = vec_env.reset()
+    finally:
+        vec_env.close()
+
+    expected_workers = 1 if os.name == "nt" and "SHEEPDOG_PPO_NUM_ENVS" not in os.environ else 2
+    expected_backend = "dummy" if expected_workers == 1 else "subproc"
+    assert workers == expected_workers
+    assert backend == expected_backend
+    assert observations.shape[0] == expected_workers
 
 
 def test_loaded_policy_disables_unavailable_tensorboard(tmp_path: Path) -> None:
@@ -309,5 +331,102 @@ def test_maskable_ppo_trainer_compatible_across_curriculum_stages(tmp_path: Path
 
     trainer = create_trainer(config_stage_3, config_stage_3.training.output_dir)
     assert trainer.has_compatible_policy_state() is True
+
+
+def test_maskable_ppo_phase_contexts_and_runtime_tracking(tmp_path: Path) -> None:
+    from sheepdog.training.runtime import TrainingRuntimeTracker
+
+    config = make_experiment_config(tmp_path)
+    tracker_file = tmp_path / "training-runtime.json"
+    tracker = TrainingRuntimeTracker(tracker_file, start_heartbeat_thread=False)
+    tracker.start_session("test-run", session_id="test-session")
+
+    trainer = create_trainer(config, config.training.output_dir)
+    trainer.runtime_tracker = tracker
+
+    summary = trainer.train()
+    tracker.end_session("completed")
+
+    assert len(summary.checkpoints) >= 1
+    runtime_summary = tracker.snapshot()
+    assert runtime_summary["checkpoint_save_seconds"] >= 0
+    assert runtime_summary["evaluation_seconds"] >= 0
+
+
+def test_quick_vs_confidence_evaluation_mode_selection(tmp_path: Path) -> None:
+    from sheepdog.evaluation.evaluator import EvaluationRecord, EvaluationSummary
+
+    config = make_experiment_config(tmp_path)
+    config = replace(
+        config,
+        training=replace(
+            config.training,
+            total_timesteps=16,
+            rollout_steps=8,
+            confidence_candidate_success_rate=0.75,
+        ),
+    )
+
+    trainer = create_trainer(config, config.training.output_dir)
+
+    evaluate_calls: list[str] = []
+
+    def fake_evaluate(policy, seeds, **kwargs):
+        mode = kwargs.get("evaluation_mode", "unknown")
+        evaluate_calls.append(mode)
+        rec = EvaluationRecord(
+            seed=int(seeds[0]),
+            success=mode == "confidence",
+            timeout=mode != "confidence",
+            stopped=False,
+            steps=10 if mode == "confidence" else 40,
+            simulated_seconds=1.0,
+            sheep_penned=2 if mode == "confidence" else 0,
+            final_sheep_distance_to_pen=1.0,
+            final_flock_spread=1.0,
+            no_progress_steps=0,
+            stop_reason="success" if mode == "confidence" else "timeout",
+            spawn_mode="default",
+            reward_total=100.0 if mode == "confidence" else -10.0,
+            final_farthest_distance_to_pen=1.0,
+            final_farthest_distance_to_flock_center=1.0,
+            role_switches=0,
+            collector_activations=0,
+            blocker_activations=0,
+            cumulative_gate_progress=0.0,
+            controlled_stall_steps=0,
+            left_flank_occupancy_steps=0,
+            right_flank_occupancy_steps=0,
+            gate_corridor_occupancy_peak=0.0,
+            gate_corridor_failure_steps=0,
+            dog_role_occupancy={},
+            reward_breakdown={},
+            replay_path="",
+        )
+        return (
+            EvaluationSummary(
+                checkpoint_episode=0,
+                policy_name="test",
+                records=(rec,),
+                success_rate=0.8 if mode == "confidence" else 0.2,
+                timeout_rate=0.0 if mode == "confidence" else 1.0,
+                average_completion_steps=10.0 if mode == "confidence" else 40.0,
+                average_completion_seconds=1.0,
+                average_sheep_penned=2.0 if mode == "confidence" else 0.0,
+                average_reward=100.0 if mode == "confidence" else -10.0,
+                average_distance_to_pen=1.0,
+                average_flock_spread=1.0,
+                evaluation_mode=mode,
+                promotion_eligible=mode == "confidence",
+            ),
+            SimpleNamespace(name="eval.json"),
+            SimpleNamespace(name="eval.csv"),
+        )
+
+    with patch.object(trainer.evaluator, "evaluate", side_effect=fake_evaluate):
+        trainer.train()
+
+    assert "quick" in evaluate_calls
+
 
 

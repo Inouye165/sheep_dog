@@ -1083,3 +1083,31 @@ def test_diagnostics_endpoint_route_integration(tmp_path: Path) -> None:
         finally:
             server.shutdown()
             server.server_close()
+
+
+def test_log_message_suppresses_routine_polling_noise() -> None:
+    from http.server import BaseHTTPRequestHandler
+    from unittest.mock import MagicMock, patch
+    from sheepdog.server import TrainingRequestHandler
+
+    handler = object.__new__(TrainingRequestHandler)
+
+    logged_messages = []
+    def mock_super_log(format, *args):
+        logged_messages.append(format % args if args else format)
+
+    with patch.object(BaseHTTPRequestHandler, "log_message", side_effect=mock_super_log):
+        # 1. Routine 200 OK polling GET logs should be suppressed
+        handler.log_message('"GET /api/training/status HTTP/1.1" 200 -')
+        handler.log_message('"GET /api/training/history HTTP/1.1" 200 -')
+        handler.log_message('"GET /api/health HTTP/1.1" 200 -')
+        assert len(logged_messages) == 0
+
+        # 2. Error logs or non-polling logs should still be emitted
+        handler.log_message('"GET /api/training/status HTTP/1.1" 500 -')
+        handler.log_message('"POST /api/training/start HTTP/1.1" 200 -')
+        assert len(logged_messages) == 2
+        assert '500' in logged_messages[0]
+        assert 'POST /api/training/start' in logged_messages[1]
+
+

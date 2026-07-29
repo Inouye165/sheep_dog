@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import json
 from dataclasses import asdict, dataclass
@@ -13,6 +14,7 @@ from sheepdog.config import LabConfig
 from sheepdog.environment import EpisodeResult, SheepdogEnvironment
 from sheepdog.policies.base import Policy
 from sheepdog.replay.store import ReplayStore
+from sheepdog.training.runtime import TrainingRuntimeTracker
 
 
 def _policy_metadata(
@@ -135,6 +137,8 @@ class EvaluationSummary:
     environment_config_hash: str | None = None
     observation_schema_hash: str | None = None
     action_space_hash: str | None = None
+    evaluation_mode: str = "confidence"
+    promotion_eligible: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict."""
@@ -149,6 +153,7 @@ class Evaluator:
         self.output_root = Path(output_root)
         self.output_root.mkdir(parents=True, exist_ok=True)
         self.replay_store = ReplayStore(self.output_root / "replays")
+        self.runtime_tracker: TrainingRuntimeTracker | None = None
 
     def evaluate(
         self,
@@ -157,29 +162,48 @@ class Evaluator:
         checkpoint_episode: int,
         deterministic: bool = True,
         *,
+        capture_replays: bool = True,
+        evaluation_mode: str = "confidence",
         run_id: str | None = None,
         checkpoint_id: str | None = None,
         policy_version: int | None = None,
         curriculum_stage: int | None = None,
     ) -> tuple[EvaluationSummary, Path, Path]:
-        """Run the policy on each seed and collect evaluation records and replays."""
+        """Run the policy on each seed and optionally capture full replays."""
         results: list[EpisodeResult] = []
         records: list[EvaluationRecord] = []
 
         for seed in seeds:
             environment = SheepdogEnvironment(self.config)
-            result = environment.run_policy(
-                policy, seed, capture_replay=True, deterministic=deterministic
+            capture_phase = (
+                self.runtime_tracker.phase("replay_capture")
+                if capture_replays and self.runtime_tracker is not None
+                else contextlib.nullcontext()
             )
+            with capture_phase:
+                result = environment.run_policy(
+                    policy,
+                    seed,
+                    capture_replay=capture_replays,
+                    deterministic=deterministic,
+                )
             results.append(result)
             trainer_type, policy_type, replay_mode = _policy_metadata(
                 result.policy_name,
                 trainer_type=getattr(policy, "trainer_type", None),
                 policy_type=getattr(policy, "policy_type", None),
             )
-            replay_path = self.replay_store.write(
-                f"checkpoint-{checkpoint_episode:06d}-seed-{seed:06d}.json",
-                {
+            replay_path: Path | None = None
+            if capture_replays:
+                serialization_phase = (
+                    self.runtime_tracker.phase("replay_serialization")
+                    if self.runtime_tracker is not None
+                    else contextlib.nullcontext()
+                )
+                with serialization_phase:
+                    replay_path = self.replay_store.write(
+                        f"checkpoint-{checkpoint_episode:06d}-seed-{seed:06d}.json",
+                        {
                     "seed": result.seed,
                     "policy_name": result.policy_name,
                     "trainer_type": trainer_type,
@@ -198,15 +222,15 @@ class Evaluator:
                     },
                     "final_snapshot": result.final_snapshot.to_dict(),
                     "stats": asdict(result.stats),
-                    "frames": [frame.to_dict() for frame in result.replay],
-                },
-            )
+                        "frames": [frame.to_dict() for frame in result.replay],
+                        },
+                    )
             p_ver = policy_version if policy_version is not None else getattr(policy, "policy_version", None)
             records.append(
                 EvaluationRecord(
                     **{
                         **self._record_from_result(result, policy_version=p_ver).to_dict(),
-                        "replay_path": str(replay_path),
+                        "replay_path": str(replay_path) if replay_path is not None else "",
                     }
                 )
             )
@@ -307,6 +331,8 @@ class Evaluator:
             environment_config_hash=environment_config_hash,
             observation_schema_hash=observation_schema_hash,
             action_space_hash=action_space_hash,
+            evaluation_mode=evaluation_mode,
+            promotion_eligible=evaluation_mode == "confidence",
         )
 
         json_path = self.output_root / f"evaluation-checkpoint-{checkpoint_episode:06d}.json"
@@ -320,6 +346,53 @@ class Evaluator:
                 writer.writerow(record.to_dict())
 
         return summary, json_path, csv_path
+
+    def export_replay(
+        self,
+        policy: Policy,
+        seed: int,
+        checkpoint_episode: int,
+        deterministic: bool = True,
+    ) -> Path:
+        """Capture and serialize one replay for an important checkpoint."""
+        environment = SheepdogEnvironment(self.config)
+        capture_phase = (
+            self.runtime_tracker.phase("replay_capture")
+            if self.runtime_tracker is not None
+            else contextlib.nullcontext()
+        )
+        with capture_phase:
+            result = environment.run_policy(
+                policy,
+                seed,
+                capture_replay=True,
+                deterministic=deterministic,
+            )
+        trainer_type, policy_type, replay_mode = _policy_metadata(
+            result.policy_name,
+            trainer_type=getattr(policy, "trainer_type", None),
+            policy_type=getattr(policy, "policy_type", None),
+        )
+        serialization_phase = (
+            self.runtime_tracker.phase("replay_serialization")
+            if self.runtime_tracker is not None
+            else contextlib.nullcontext()
+        )
+        with serialization_phase:
+            return self.replay_store.write(
+                f"checkpoint-{checkpoint_episode:06d}-seed-{seed:06d}.json",
+                {
+                    "seed": result.seed,
+                    "policy_name": result.policy_name,
+                    "trainer_type": trainer_type,
+                    "policy_type": policy_type,
+                    "replay_mode": replay_mode,
+                    "environment": self.config.to_dict()["environment"],
+                    "final_snapshot": result.final_snapshot.to_dict(),
+                    "stats": asdict(result.stats),
+                    "frames": [frame.to_dict() for frame in result.replay],
+                },
+            )
 
     def _record_from_result(self, result: EpisodeResult, policy_version: int | None = None) -> EvaluationRecord:
         snapshot = result.final_snapshot

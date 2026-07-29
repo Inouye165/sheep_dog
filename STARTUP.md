@@ -34,6 +34,12 @@ Restart both services in one command:
 .\restart-app.ps1
 ```
 
+Start both services in dedicated, visible PowerShell terminal windows:
+
+```powershell
+.\start-terminals.ps1
+```
+
 `stop-app.ps1` stops tracked PIDs from `artifacts/startup/pids.json` and also
 cleans up any listeners still bound to ports `8000` and `5173`.
 

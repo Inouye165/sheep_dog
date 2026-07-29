@@ -819,9 +819,11 @@ function formatAgentReport(
       if (isCurrentStage) {
         const gate = diagnostics?.snapshot?.snapshot?.current_stage_promotion_gate || status?.auto_promote_gate;
         if (gate) {
-          gateSectionText = `- Required success: ${Math.round(gate.success_threshold * gate.seed_count)}/${gate.seed_count}\n` +
-                            `- Current streak: ${gate.qualified_streak}/${gate.min_qualified_streak}\n` +
-                            `- Best success observed: ${gate.best_success}/${gate.seed_count}\n` +
+          const sc = gate.seed_count ?? gate.total_seed_trials ?? 10;
+          const st = gate.success_threshold ?? 0.9;
+          gateSectionText = `- Required success: ${Math.round(st * sc)}/${sc}\n` +
+                            `- Current streak: ${gate.qualified_streak ?? 0}/${gate.min_qualified_streak ?? 3}\n` +
+                            `- Best success observed: ${gate.best_success ?? 0}/${sc}\n` +
                             `- Perfect batches observed: ${gate.full_success_hits ?? 0}\n`;
         } else {
           gateSectionText = "- No active promotion gate configured or available for this stage.\n";
