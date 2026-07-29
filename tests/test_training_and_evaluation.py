@@ -7,8 +7,10 @@ import json
 from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from sheepdog.config import EnvironmentConfig, LabConfig, RewardConfig, TrainingConfig
+from sheepdog.environment import SheepdogEnvironment
 from sheepdog.evaluation.evaluator import Evaluator
 from sheepdog.policies.factory import create_policy_from_name
 from sheepdog.policies.heuristic import HeuristicExpertPolicy, InstinctOnlyPolicy
@@ -102,6 +104,27 @@ def test_evaluation_summary_includes_success_timeout_and_completion_metrics(tmp_
     assert 0.0 <= summary.timeout_rate <= 1.0
     assert summary.average_completion_steps >= 0
     assert summary.average_completion_seconds >= 0
+
+
+def test_summary_only_evaluation_does_not_capture_or_write_replays(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    evaluator = Evaluator(config, tmp_path / "evaluations")
+
+    with patch(
+        "sheepdog.evaluation.evaluator.SheepdogEnvironment.run_policy",
+        wraps=SheepdogEnvironment.run_policy,
+        autospec=True,
+    ) as run_policy:
+        summary, _, _ = evaluator.evaluate(
+            HeuristicExpertPolicy(),
+            (11, 13),
+            checkpoint_episode=0,
+            capture_replays=False,
+        )
+
+    assert all(call.kwargs["capture_replay"] is False for call in run_policy.call_args_list)
+    assert all(record.replay_path == "" for record in summary.records)
+    assert list((tmp_path / "evaluations" / "replays").glob("*.json")) == []
 
 
 def test_training_state_persists_across_runs(tmp_path: Path) -> None:

@@ -186,6 +186,27 @@ select {
   }
 }
 
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spinner {
+  display: inline-block;
+  width: 0.9em;
+  height: 0.9em;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: spin 0.75s linear infinite;
+  vertical-align: -0.1em;
+}
+
+
 .pill--live {
   color: #dbeafe;
   border-color: rgba(74, 222, 128, 0.35);

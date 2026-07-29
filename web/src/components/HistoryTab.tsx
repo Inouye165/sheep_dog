@@ -56,13 +56,9 @@ export function HistoryTab() {
 
   const chartPoints = React.useMemo(() => {
     if (totalRecords < 2) return [];
-    
-    const minStep = history[0].step;
-    const maxStep = history[totalRecords - 1].step;
-    const stepRange = Math.max(1, maxStep - minStep);
 
     return history.map((record, i) => {
-      const x = paddingLeft + ((record.step - minStep) / stepRange) * (chartWidth - paddingLeft - paddingRight);
+      const x = paddingLeft + (i / (totalRecords - 1)) * (chartWidth - paddingLeft - paddingRight);
       // y goes from top (0) to bottom (chartHeight). Success rate is 0.0 to 1.0.
       const y = chartHeight - paddingBottom - record.success_rate * (chartHeight - paddingTop - paddingBottom);
       return { x, y, record };

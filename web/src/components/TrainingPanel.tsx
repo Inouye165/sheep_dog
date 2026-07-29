@@ -208,11 +208,14 @@ interface TrainingPanelProps {
   previousBestEntry?: CheckpointEntry | null;
   seedEpisode?: number | null;
   startingEpisode?: number | null;
-  resumeAvailable?: boolean;
-  resumeRemainingEpisodes?: number | null;
+  batchTotalSegments?: number;
+  batchCompletedSegments?: number;
+  isStartingTraining?: boolean;
   onCloseApp?: () => void;
   trainingStatus?: TrainingStatus | null;
   checkpointIndex?: CheckpointIndex | null;
+  resumeAvailable?: boolean;
+  resumeRemainingEpisodes?: number | null;
 }
 
 export function TrainingPanel({
@@ -228,8 +231,11 @@ export function TrainingPanel({
   autoPromoteGate,
   running,
   clearing,
+  isStartingTraining = false,
   batchCompletedEpisodes,
   batchTotalEpisodes,
+  batchTotalSegments,
+  batchCompletedSegments,
   currentEpisode,
   totalEpisodesTrained,
   stageHistory,
@@ -279,13 +285,16 @@ export function TrainingPanel({
   trainingStatus = null,
   checkpointIndex = null,
 }: TrainingPanelProps) {
-  const denominator = batchTotalEpisodes || episodes;
-  const progress = denominator === 0 ? 0 : Math.min(1, batchCompletedEpisodes / denominator);
-  const progressPct = Math.round(progress * 100);
-  const segmentProgress = batchCompletedEpisodes % 1;
+  const totalEpisodesInBatch = batchTotalEpisodes || episodes;
+  const completedEpisodesDisplay = Math.min(totalEpisodesInBatch, Math.floor(batchCompletedEpisodes));
+  const progressPct = totalEpisodesInBatch === 0 ? 0 : Math.min(100, Math.round((batchCompletedEpisodes / totalEpisodesInBatch) * 100));
+
+  const totalSegments = batchTotalSegments || trainingStatus?.batch_total_segments || 0;
+  const completedSegmentsDisplay = Math.floor(batchCompletedSegments ?? trainingStatus?.batch_completed_segments ?? 0);
+  const activeSegmentNumber = totalSegments > 0 ? Math.min(totalSegments, completedSegmentsDisplay + 1) : 0;
+
+  const segmentProgress = (batchCompletedSegments ?? 0) % 1;
   const segmentPct = Math.round(segmentProgress * 100);
-  const completedDisplay = Math.floor(batchCompletedEpisodes);
-  const activeEpisode = Math.min(denominator, Math.floor(batchCompletedEpisodes) + 1);
   const displayEpisodeIndex =
     currentEpisode !== null && startingEpisode != null && currentEpisode >= startingEpisode
       ? currentEpisode - startingEpisode
@@ -296,7 +305,7 @@ export function TrainingPanel({
   const stageHistoryEntries = Object.entries(stageHistory)
     .filter(([, v]) => v > 0)
     .sort(([a], [b]) => Number(a) - Number(b));
-  const busy = running || clearing || phase === "restoring" || phase === "restore_failed";
+  const busy = running || clearing || phase === "restoring" || phase === "restore_failed" || isStartingTraining;
   const stageDesc = STAGE_DESCRIPTIONS[curriculumStage] ?? `Stage ${curriculumStage}`;
   const successPct = successRate !== null ? `${Math.round(successRate * 100)}%` : "—";
   const successGood = successRate !== null && successRate >= 0.5;
@@ -516,7 +525,7 @@ export function TrainingPanel({
               <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
                 <div style={{ flex: 1 }}>
                   <label htmlFor="episodes-input" style={{ fontSize: "0.72rem", color: "var(--muted)", display: "block", marginBottom: "0.2rem" }}>
-                    Episodes this batch
+                    Batch Size (Episodes to Train)
                   </label>
                   <input
                     id="episodes-input"
@@ -558,7 +567,7 @@ export function TrainingPanel({
             }}>
               <span style={{ fontWeight: "700" }}>💡 Tip: Restore / Fork Past Checkpoints</span>
               <span>
-                To restore or fork training from a previous stage or episode, go to the <strong>W&B Model</strong> tab, select the target checkpoint, and choose <strong>Restore weights</strong> or <strong>Fork Run...</strong>.
+                To restore or fork training from a previous stage or checkpoint episode, select a checkpoint entry in the <strong>Checkpoints & Results</strong> section below and click <strong>Restore</strong> or <strong>Promote</strong>.
               </span>
             </div>
 
@@ -593,8 +602,8 @@ export function TrainingPanel({
           {/* Progress bar */}
           <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.75rem", color: "var(--muted)" }}>
-              <span>Batch Progress (Segments)</span>
-              <span>{progressPct}%</span>
+              <span>Batch Progress</span>
+              <span>{completedEpisodesDisplay} / {totalEpisodesInBatch} Episodes ({progressPct}%)</span>
             </div>
             <div
               className="progress-shell"
@@ -605,20 +614,20 @@ export function TrainingPanel({
               aria-valuenow={progressPct}
               style={{ margin: 0, height: "10px", borderRadius: "999px" }}
             >
-              <div className="progress-shell__bar" style={{ width: `${progress * 100}%` }} />
+              <div className="progress-shell__bar" style={{ width: `${progressPct}%` }} />
             </div>
 
-            {/* Thinner active segment progress bar */}
+            {/* Active Checkpoint Timesteps sub-progress bar */}
             {running && (
               <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem", marginTop: "0.2rem" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.68rem", color: "var(--muted)" }}>
-                  <span>Segment Timesteps</span>
+                  <span>Active Checkpoint Timesteps</span>
                   <span>{segmentPct}%</span>
                 </div>
                 <div
                   className="progress-shell"
                   role="progressbar"
-                  aria-label="Current segment progress"
+                  aria-label="Current checkpoint progress"
                   aria-valuemin={0}
                   aria-valuemax={100}
                   aria-valuenow={segmentPct}
@@ -627,7 +636,7 @@ export function TrainingPanel({
                   <div
                     className="progress-shell__bar"
                     style={{
-                      width: `${segmentProgress * 100}%`,
+                      width: `${segmentPct}%`,
                       height: "100%",
                       background: "var(--accent)",
                       borderRadius: "999px",
@@ -642,16 +651,20 @@ export function TrainingPanel({
               {running && currentEpisode !== null ? (
                 <>
                   <span>
-                    Segment {activeEpisode} of {denominator || "—"}{" "}
+                    Episode {completedEpisodesDisplay} of {totalEpisodesInBatch}{" "}
                     <span style={{ opacity: 0.85, fontWeight: "600", color: "var(--accent)", marginLeft: "0.2rem" }}>
                       (Overall Ep {currentEpisode})
                     </span>
                   </span>
-                  <span>{displayEpisodeIndex} env episodes herded</span>
+                  <span>
+                    {totalSegments > 0 ? `Checkpoint ${activeSegmentNumber} of ${totalSegments} · ` : ""}
+                    {displayEpisodeIndex} env episodes herded
+                  </span>
                 </>
               ) : (
                 <div style={{ width: "100%", textAlign: "center" }}>
-                  {completedDisplay}/{denominator || "—"} segments completed
+                  {completedEpisodesDisplay} of {totalEpisodesInBatch} episodes completed
+                  {totalSegments > 0 ? ` (${totalSegments} checkpoints saved)` : ""}
                 </div>
               )}
             </div>
@@ -675,7 +688,16 @@ export function TrainingPanel({
               }}
               title="Starts running training episodes on the server"
             >
-              {running ? "Training..." : `Train ${episodes} more`}
+              {isStartingTraining ? (
+                <>
+                  <span className="spinner" aria-hidden="true" style={{ marginRight: "0.5rem" }} />
+                  Starting training...
+                </>
+              ) : running ? (
+                "Training..."
+              ) : (
+                `Train ${episodes} more`
+              )}
             </button>
 
             {running ? (
@@ -704,7 +726,7 @@ export function TrainingPanel({
               <button
                 type="button"
                 onClick={onResumeTraining}
-                disabled={clearing}
+                disabled={busy}
                 style={{
                   width: "100%",
                   padding: "0.65rem",
@@ -713,7 +735,14 @@ export function TrainingPanel({
                 }}
                 title="Resume training where it was paused or interrupted."
               >
-                Resume {resumeRemainingEpisodes} remaining
+                {isStartingTraining ? (
+                  <>
+                    <span className="spinner" aria-hidden="true" style={{ marginRight: "0.5rem" }} />
+                    Starting training...
+                  </>
+                ) : (
+                  `Resume ${resumeRemainingEpisodes} remaining`
+                )}
               </button>
             ) : null}
 
@@ -748,7 +777,9 @@ export function TrainingPanel({
           }}>
             <div style={{ display: "flex", flexDirection: "column", gridColumn: "span 2" }}>
               <span style={{ color: "var(--muted)" }}>Status message</span>
-              <span style={{ fontSize: "0.75rem", fontWeight: "600", color: "var(--text)", wordBreak: "break-word" }}>{message}</span>
+              <span style={{ fontSize: "0.75rem", fontWeight: "600", color: "var(--text)", wordBreak: "break-word" }}>
+                {isStartingTraining ? "Starting training..." : message}
+              </span>
             </div>
             <div style={{ display: "flex", flexDirection: "column" }}>
               <span style={{ color: "var(--muted)" }}>Success Rate</span>
@@ -896,25 +927,25 @@ export function TrainingPanel({
                   <div style={{ display: "flex", justifyContent: "space-between" }}>
                     <span>Verdict</span>
                     <strong className={decisionToneClass} style={{ padding: "0.05rem 0.35rem", borderRadius: "3px" }}>
-                      {autoPromoteGate.decision.toUpperCase()}
+                      {(autoPromoteGate.decision ?? "PENDING").toUpperCase()}
                     </strong>
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between" }}>
                     <span>Success Gate</span>
-                    <strong className={gateToneClass(autoPromoteGate.success_rate_ok)}>
-                      {autoPromoteGate.success_rate_ok ? "PASS" : "FAIL"}
+                    <strong className={gateToneClass(Boolean(autoPromoteGate.aggregate_success_rate != null ? (autoPromoteGate.aggregate_success_rate >= 0.9) : autoPromoteGate.success_rate_ok))}>
+                      {autoPromoteGate.aggregate_success_rate != null ? `${(autoPromoteGate.aggregate_success_rate * 100).toFixed(0)}% (min 90%)` : autoPromoteGate.success_rate_ok ? "PASS" : "FAIL"}
                     </strong>
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between" }}>
                     <span>Seed progress</span>
-                    <strong className={gateToneClass(autoPromoteGate.seed_gate_target_met)}>
-                      {autoPromoteGate.seed_gate_hits}/{autoPromoteGate.min_seed_gate_hits}
+                    <strong className={gateToneClass(Boolean(autoPromoteGate.seed_consistency_passed ?? autoPromoteGate.seed_gate_target_met))}>
+                      {autoPromoteGate.total_seed_trials != null ? `${autoPromoteGate.total_successes}/${autoPromoteGate.total_seed_trials}` : `${autoPromoteGate.seed_gate_hits ?? 0}/${autoPromoteGate.min_seed_gate_hits ?? 0}`}
                     </strong>
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between" }}>
-                    <span>Streak</span>
-                    <strong className={gateToneClass(autoPromoteGate.qualified_streak >= autoPromoteGate.min_qualified_streak)}>
-                      {autoPromoteGate.qualified_streak}/{autoPromoteGate.min_qualified_streak}
+                    <span>Recent CPs</span>
+                    <strong className={gateToneClass(Boolean((autoPromoteGate.recent_qualifying_checkpoints ?? autoPromoteGate.qualified_streak ?? 0) >= 2))}>
+                      {autoPromoteGate.recent_qualifying_checkpoints != null ? `${autoPromoteGate.recent_qualifying_checkpoints}/3 qualifying` : `${autoPromoteGate.qualified_streak ?? 0}/${autoPromoteGate.min_qualified_streak ?? 3}`}
                     </strong>
                   </div>
                 </div>

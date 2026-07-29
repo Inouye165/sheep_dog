@@ -156,6 +156,8 @@ export interface TrainingStatus {
   estimated_equivalent_episodes?: number;
   batch_total_episodes: number;
   batch_completed_episodes: number;
+  batch_total_segments?: number;
+  batch_completed_segments?: number;
   total_episodes_trained: number;
   stage_history: Record<string, number>;
   grand_total_episodes: number;
@@ -203,30 +205,66 @@ export interface TrainingStatus {
     message: string;
     recommendation?: string;
   } | null;
+  runtime?: TrainingRuntimeSummary;
+}
+
+export interface RuntimeSessionRecord {
+  session_id: string;
+  run_id?: string | null;
+  started_at: string;
+  last_heartbeat_at: string;
+  ended_at?: string | null;
+  end_reason?: string | null;
+  status: string;
+  current_phase?: string | null;
+}
+
+export interface TrainingRuntimeSummary {
+  training_seconds: number;
+  evaluation_seconds: number;
+  replay_capture_seconds: number;
+  replay_serialization_seconds: number;
+  checkpoint_save_seconds: number;
+  paused_seconds: number;
+  active_seconds_total: number;
+  wall_clock_seconds: number;
+  offline_or_unknown_seconds: number;
+  session_id?: string | null;
+  current_phase?: string | null;
+  session_count: number;
+  sessions: RuntimeSessionRecord[];
+  episodes_per_active_hour?: number | null;
+  timesteps_per_training_second?: number | null;
+  training_time_percentage?: number | null;
 }
 
 export interface AutoPromoteGateDiagnostics {
-  decision: "pending" | "hold" | "promote";
+  decision: "pending" | "hold" | "promote" | "promote_ready" | "blocked" | string;
   reason: string;
-  seed_count: number;
-  success_count: number;
-  best_success: number;
-  best_reward: number | null;
-  seed_gate_ok: boolean;
-  success_rate_ok: boolean;
-  timeout_ok: boolean;
-  reward_close_ok: boolean;
-  qualified_streak: number;
-  min_qualified_streak: number;
-  seed_gate_hits: number;
-  min_seed_gate_hits: number;
-  seed_gate_target_met: boolean;
-  full_success_hits: number;
-  min_full_success_hits: number;
-  full_success_target_met: boolean;
-  success_threshold: number;
-  max_timeout_rate: number;
-  reward_tolerance_ratio: number;
+  seed_count?: number;
+  success_count?: number;
+  best_success?: number;
+  best_reward?: number | null;
+  seed_gate_ok?: boolean;
+  success_rate_ok?: boolean;
+  timeout_ok?: boolean;
+  reward_close_ok?: boolean;
+  window_size?: number;
+  minimum_required_evaluations?: number;
+  minimum_seed_trials?: number;
+  total_seed_trials?: number;
+  total_successes?: number;
+  aggregate_success_rate?: number;
+  aggregate_timeout_rate?: number;
+  latest_success_rate?: number;
+  recent_qualifying_checkpoints?: number;
+  recent_checkpoints_considered?: number;
+  latest_floor_passed?: boolean;
+  reward_guard_passed?: boolean;
+  seed_consistency_passed?: boolean;
+  blocking_seeds?: number[];
+  blocking_reasons?: string[];
+  [key: string]: any;
 }
 
 export interface TrainingStartRequest {
@@ -371,6 +409,17 @@ export interface CheckpointEntry {
   stopped_rate?: number;
   average_distance_to_pen?: number;
   average_sheep_distance_to_pen?: number;
+  global_timestep?: number | null;
+  created_timestamp?: string | null;
+  active_runtime_seconds_total?: number | null;
+  training_seconds_total?: number | null;
+  evaluation_seconds_total?: number | null;
+  wall_clock_elapsed_seconds?: number | null;
+  session_id?: string | null;
+  evaluation_mode?: "quick" | "confidence" | string;
+  promotion_eligible?: boolean;
+  curriculum_stage?: number;
+  promotion_gate?: AutoPromoteGateDiagnostics | null;
 }
 
 export interface EvaluationSummary {

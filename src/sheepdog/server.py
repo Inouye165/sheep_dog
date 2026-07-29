@@ -39,6 +39,7 @@ from sheepdog.policies.base import Policy, PolicyMode
 from sheepdog.policies.factory import load_playable_policy
 from sheepdog.policies.heuristic import InstinctOnlyPolicy
 from sheepdog.training.factory import create_trainer
+from sheepdog.training.runtime import TrainingRuntimeTracker
 from sheepdog.training.trainer import Trainer
 from sheepdog.training.telemetry import CurriculumTelemetryManager
 
@@ -435,6 +436,21 @@ def _auto_promote_gate_defaults(stage: int = 1) -> dict[str, Any]:
     return {
         "decision": "pending",
         "reason": "Awaiting checkpoint evaluation",
+        "window_size": 5,
+        "minimum_required_evaluations": 3,
+        "minimum_seed_trials": 30,
+        "total_seed_trials": 0,
+        "total_successes": 0,
+        "aggregate_success_rate": 0.0,
+        "aggregate_timeout_rate": 0.0,
+        "latest_success_rate": 0.0,
+        "recent_qualifying_checkpoints": 0,
+        "recent_checkpoints_considered": 0,
+        "latest_floor_passed": False,
+        "reward_guard_passed": False,
+        "seed_consistency_passed": False,
+        "blocking_seeds": [],
+        "blocking_reasons": ["Awaiting checkpoint evaluation"],
         "seed_count": 0,
         "success_count": 0,
         "best_success": 0.0,
@@ -444,13 +460,13 @@ def _auto_promote_gate_defaults(stage: int = 1) -> dict[str, Any]:
         "timeout_ok": False,
         "reward_close_ok": False,
         "qualified_streak": 0,
-        "min_qualified_streak": AUTO_PROMOTE_MIN_QUALIFIED_STREAK,
+        "min_qualified_streak": 2,
         "seed_gate_hits": 0,
-        "min_seed_gate_hits": AUTO_PROMOTE_MIN_SEED_GATE_HITS,
+        "min_seed_gate_hits": 3,
         "seed_gate_target_met": False,
         "full_success_hits": 0,
-        "min_full_success_hits": AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS,
-        "full_success_target_met": False,
+        "min_full_success_hits": 0,
+        "full_success_target_met": True,
         "full_success_rate_threshold": AUTO_PROMOTE_FULL_SUCCESS_RATE_THRESHOLD,
         "success_threshold": threshold,
         "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
@@ -463,7 +479,7 @@ def _seed_success_gate(success_count: int, seed_count: int) -> bool:
 
     if seed_count <= 0:
         return False
-    if seed_count == 10:
+    if seed_count >= 10:
         return success_count >= 9
     if seed_count >= 5:
         return success_count >= 3
@@ -529,6 +545,7 @@ def compute_promotion_gate_snapshot(
             **defaults,
             "decision": "pending",
             "reason": "Evaluation record not persisted",
+            "blocking_reasons": ["Evaluation record not persisted"],
         }
 
     target_stage = checkpoint_payload.get("curriculum_stage", 1)
@@ -557,6 +574,7 @@ def compute_promotion_gate_snapshot(
             **defaults,
             "decision": "pending",
             "reason": "Evaluation record not persisted",
+            "blocking_reasons": ["Evaluation record not persisted"],
             "seed_count": 0,
             "success_count": 0,
             "required_seeds_count": target_seed_count,
@@ -572,6 +590,7 @@ def compute_promotion_gate_snapshot(
             **defaults,
             "decision": "pending",
             "reason": "Evaluation record not persisted",
+            "blocking_reasons": ["Evaluation record not persisted"],
             "seed_count": 0,
             "success_count": 0,
             "required_seeds_count": target_seed_count,
@@ -586,6 +605,7 @@ def compute_promotion_gate_snapshot(
             **defaults,
             "decision": "pending",
             "reason": "Checkpoint mismatch",
+            "blocking_reasons": ["Checkpoint mismatch"],
             "seed_count": len(eval_summary.get("records", [])),
             "success_count": sum(1 for r in eval_summary.get("records", []) if r.get("success")),
             "required_seeds_count": target_seed_count,
@@ -599,6 +619,7 @@ def compute_promotion_gate_snapshot(
             **defaults,
             "decision": "pending",
             "reason": "Policy-version mismatch",
+            "blocking_reasons": ["Policy-version mismatch"],
             "seed_count": len(eval_summary.get("records", [])),
             "success_count": sum(1 for r in eval_summary.get("records", []) if r.get("success")),
             "required_seeds_count": target_seed_count,
@@ -612,6 +633,7 @@ def compute_promotion_gate_snapshot(
             **defaults,
             "decision": "pending",
             "reason": "Stage mismatch",
+            "blocking_reasons": ["Stage mismatch"],
             "seed_count": len(eval_summary.get("records", [])),
             "success_count": sum(1 for r in eval_summary.get("records", []) if r.get("success")),
             "required_seeds_count": target_seed_count,
@@ -625,6 +647,7 @@ def compute_promotion_gate_snapshot(
             **defaults,
             "decision": "pending",
             "reason": "Seed-set mismatch",
+            "blocking_reasons": ["Seed-set mismatch"],
             "seed_count": len(eval_summary.get("records", [])),
             "success_count": sum(1 for r in eval_summary.get("records", []) if r.get("success")),
             "required_seeds_count": target_seed_count,
@@ -640,6 +663,7 @@ def compute_promotion_gate_snapshot(
             **defaults,
             "decision": "pending",
             "reason": "Incomplete seed results",
+            "blocking_reasons": ["Incomplete seed results"],
             "seed_count": len(eval_records),
             "success_count": sum(1 for r in eval_records if r.get("success")),
             "required_seeds_count": target_seed_count,
@@ -647,14 +671,8 @@ def compute_promotion_gate_snapshot(
             "seed_set_id": target_seed_set_id,
         }
 
-    success_count = sum(1 for r in eval_records if r.get("success", False))
-    success_rate = eval_summary.get("success_rate", 0.0)
-    timeout_rate = eval_summary.get("timeout_rate", 0.0)
-    timeout_count = sum(1 for r in eval_records if r.get("timeout", False))
-    average_reward = eval_summary.get("average_reward", 0.0)
-
     all_evals = _load_all_persisted_evaluations(output_root, journey)
-    
+
     compatible_evals = []
     for ev in all_evals:
         ev_ep = ev.get("checkpoint_episode")
@@ -670,24 +688,51 @@ def compute_promotion_gate_snapshot(
             continue
         if ev.get("environment_config_hash") != target_env_hash:
             continue
-            
+
         ev_recs = ev.get("records", [])
         ev_seeds_sorted = sorted([r.get("seed") for r in ev_recs])
         if ev_seeds_sorted != sorted_target_seeds:
             continue
         if len(ev_recs) < target_seed_count:
             continue
-            
+
         compatible_evals.append(ev)
 
     compatible_evals.sort(key=lambda x: x.get("checkpoint_episode", 0), reverse=True)
-    rolling_history = compatible_evals[:3]
-    display_history = list(reversed(rolling_history))
+    rolling_history = compatible_evals[:5]
+    n_evals = len(rolling_history)
+
+    total_seed_trials = sum(len(ev.get("records", [])) for ev in rolling_history)
+    total_successes = sum(sum(1 for r in ev.get("records", []) if r.get("success", False)) for ev in rolling_history)
+    total_timeouts = sum(sum(1 for r in ev.get("records", []) if r.get("timeout", False)) for ev in rolling_history)
+
+    aggregate_success_rate = total_successes / total_seed_trials if total_seed_trials > 0 else 0.0
+    aggregate_timeout_rate = total_timeouts / total_seed_trials if total_seed_trials > 0 else 0.0
+
+    latest_success_rate = rolling_history[0].get("success_rate", 0.0) if n_evals > 0 else 0.0
+
+    recent_3 = rolling_history[:3]
+    recent_checkpoints_considered = len(recent_3)
+    required_success_threshold = _get_success_threshold(target_stage)
+    recent_qualifying_checkpoints = sum(
+        1 for ev in recent_3 if ev.get("success_rate", 0.0) >= required_success_threshold
+    )
+
+    evidence_passed = (n_evals >= 3) and (total_seed_trials >= 30)
+    aggregate_success_passed = (aggregate_success_rate >= required_success_threshold)
+    recent_consistency_passed = (recent_qualifying_checkpoints >= 2) if recent_checkpoints_considered >= 2 else (recent_qualifying_checkpoints >= 1)
+    latest_floor_passed = (latest_success_rate >= 0.80)
+    timeout_guard_passed = (aggregate_timeout_rate <= AUTO_PROMOTE_MAX_TIMEOUT_RATE)
+
+    best_reward_so_far = max((ev.get("average_reward", float("-inf")) for ev in compatible_evals), default=float("-inf"))
+    latest_avg_reward = rolling_history[0].get("average_reward", 0.0) if n_evals > 0 else 0.0
+    reward_guard_passed = _reward_within_tolerance(latest_avg_reward, best_reward_so_far)
 
     blocking_seeds = []
     rolling_history_results = {seed: [] for seed in sorted_target_seeds}
     per_seed_results = {r.get("seed"): r.get("success", False) for r in eval_records}
 
+    display_history = list(reversed(rolling_history))
     for seed in sorted_target_seeds:
         seed_results = []
         for ev in display_history:
@@ -695,139 +740,100 @@ def compute_promotion_gate_snapshot(
             success = seed_rec.get("success", False) if seed_rec else False
             seed_results.append(success)
         rolling_history_results[seed] = seed_results
-        
+
         failures = sum(1 for p in seed_results if not p)
-        if len(rolling_history) - (len(rolling_history) - failures) >= 2:
-            blocking_seeds.append(seed)
+        if n_evals >= 5:
+            if failures >= 3:
+                blocking_seeds.append(seed)
+        elif n_evals in (3, 4):
+            if failures > (n_evals / 2):
+                blocking_seeds.append(seed)
 
-    chronological_evals = sorted(compatible_evals, key=lambda x: x.get("checkpoint_episode", 0))
-    streak = 0
-    best_reward_so_far = float("-inf")
-    stage_seed_gate_hits = 0
-    stage_full_success_hits = 0
-    success_threshold = _get_success_threshold(target_stage)
+    seed_consistency_passed = (len(blocking_seeds) == 0)
 
-    for ev in chronological_evals:
-        ev_ep = ev.get("checkpoint_episode", 0)
-        ev_recs = ev.get("records", [])
-        ev_success_c = sum(1 for r in ev_recs if r.get("success"))
-        ev_seed_c = len(ev_recs)
-        ev_succ_rate = ev.get("success_rate", 0.0)
-        ev_time_rate = ev.get("timeout_rate", 0.0)
-        ev_avg_rew = ev.get("average_reward", float("-inf"))
-        
-        best_reward_so_far = max(best_reward_so_far, ev_avg_rew)
-        
-        ev_success_ok = ev_succ_rate >= success_threshold
-        ev_timeout_ok = ev_time_rate <= AUTO_PROMOTE_MAX_TIMEOUT_RATE
-        ev_reward_ok = _reward_within_tolerance(ev_avg_rew, best_reward_so_far)
-        ev_overall_gate_ok = _seed_success_gate(ev_success_c, ev_seed_c)
-        
-        hist_for_ev = [x for x in chronological_evals if x.get("checkpoint_episode", 0) <= ev_ep][-3:]
-        ev_seed_gate_ok = ev_overall_gate_ok
-        
-        ev_blocking = []
-        for seed in sorted_target_seeds:
-            seed_failures = 0
-            for h_ev in hist_for_ev:
-                h_rec = next((r for r in h_ev.get("records", []) if r.get("seed") == seed), None)
-                if h_rec and not h_rec.get("success", False):
-                    seed_failures += 1
-            if len(hist_for_ev) - (len(hist_for_ev) - seed_failures) >= 2:
-                ev_blocking.append(seed)
-                
-        if ev_blocking:
-            ev_seed_gate_ok = False
-            
-        ev_qualified = ev_success_ok and ev_timeout_ok and ev_reward_ok and ev_seed_gate_ok
-        
-        if ev_qualified:
-            streak += 1
+    blocking_reasons = []
+    if not evidence_passed:
+        if n_evals < 3:
+            blocking_reasons.append(f"Only {n_evals} evaluations exist; at least 3 required.")
         else:
-            streak = 0
-            
-        if ev_seed_gate_ok:
-            stage_seed_gate_hits += 1
-            
-        ev_full_success = (
-            ev_succ_rate >= AUTO_PROMOTE_FULL_SUCCESS_RATE_THRESHOLD
-            and ev_time_rate <= AUTO_PROMOTE_MAX_TIMEOUT_RATE
-            and ev_seed_gate_ok
+            blocking_reasons.append(f"Only {total_seed_trials} seed trials exist; at least 30 are required.")
+    if not aggregate_success_passed:
+        blocking_reasons.append(f"Aggregate success is {aggregate_success_rate * 100:.0f}%; {required_success_threshold * 100:.0f}% required.")
+    if not recent_consistency_passed:
+        blocking_reasons.append(f"Recent consistency failed; {recent_qualifying_checkpoints} of last {recent_checkpoints_considered} checkpoints met target ({required_success_threshold * 100:.0f}%).")
+    if not latest_floor_passed:
+        blocking_reasons.append(f"Latest evaluation is {latest_success_rate * 100:.0f}%; minimum latest result is 80%.")
+    if not timeout_guard_passed:
+        blocking_reasons.append(f"Aggregate timeout rate {aggregate_timeout_rate * 100:.0f}% exceeds limit {AUTO_PROMOTE_MAX_TIMEOUT_RATE * 100:.0f}%.")
+    if not reward_guard_passed:
+        blocking_reasons.append(f"Latest average reward {latest_avg_reward:.2f} is not close enough to best reward {best_reward_so_far:.2f}.")
+    for seed in blocking_seeds:
+        failures = sum(
+            1 for ev in rolling_history
+            if any(r.get("seed") == seed and not r.get("success", False) for r in ev.get("records", []))
         )
-        if ev_full_success:
-            stage_full_success_hits += 1
+        blocking_reasons.append(f"Seed {seed} failed in {failures} of the last {n_evals} evaluations.")
 
-    success_rate_ok = success_rate >= success_threshold
-    timeout_ok = timeout_rate <= AUTO_PROMOTE_MAX_TIMEOUT_RATE
-    reward_close_ok = _reward_within_tolerance(average_reward, best_reward_so_far)
-    seed_gate_ok = len(blocking_seeds) == 0
-
-    seed_gate_target_met = stage_seed_gate_hits >= AUTO_PROMOTE_MIN_SEED_GATE_HITS
-    full_success_target_met = stage_full_success_hits >= AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS
-    streak_ok = streak >= AUTO_PROMOTE_MIN_QUALIFIED_STREAK
-
-    if len(blocking_seeds) > 0:
-        blocked_seed = blocking_seeds[0]
-        seed_results = rolling_history_results[blocked_seed]
-        passes = sum(1 for p in seed_results if p)
-        decision = "blocked"
-        reason = f"Seed {blocked_seed} passed only {passes} of the last {len(rolling_history)} required evaluations."
-    elif not success_rate_ok:
-        decision = "blocked"
-        reason = f"Success rate {success_rate:.0%} below threshold {success_threshold:.0%}"
-    elif not timeout_ok:
-        decision = "blocked"
-        reason = f"Timeout rate {timeout_rate:.0%} exceeds limit {AUTO_PROMOTE_MAX_TIMEOUT_RATE:.0%}"
-    elif not reward_close_ok:
-        decision = "blocked"
-        reason = f"Average reward {average_reward:.2f} is not close enough to best reward {best_reward_so_far:.2f}"
-    elif not seed_gate_target_met:
+    if not evidence_passed:
         decision = "pending"
-        reason = f"Seed gate hits ({stage_seed_gate_hits}) below target ({AUTO_PROMOTE_MIN_SEED_GATE_HITS})"
-    elif not full_success_target_met:
-        decision = "pending"
-        reason = f"Full success hits ({stage_full_success_hits}) below target ({AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS})"
-    elif not streak_ok:
-        decision = "pending"
-        reason = f"Qualified streak ({streak}) below required consecutive batches ({AUTO_PROMOTE_MIN_QUALIFIED_STREAK})"
-    else:
+    elif not blocking_reasons:
         decision = "promote_ready"
-        reason = "Promotion criteria met"
+    else:
+        decision = "blocked"
+
+    reason = blocking_reasons[0] if blocking_reasons else "Promotion criteria met"
+    if not evidence_passed and n_evals < 3:
+        reason = f"Awaiting checkpoint evaluation ({n_evals}/3)"
 
     best_success_rate = max((ev.get("success_rate", 0.0) for ev in compatible_evals), default=0.0)
 
     return {
         "decision": decision,
         "reason": reason,
+        "window_size": 5,
+        "minimum_required_evaluations": 3,
+        "minimum_seed_trials": 30,
+        "total_seed_trials": total_seed_trials,
+        "total_successes": total_successes,
+        "aggregate_success_rate": round(aggregate_success_rate, 4),
+        "aggregate_timeout_rate": round(aggregate_timeout_rate, 4),
+        "latest_success_rate": round(latest_success_rate, 4),
+        "recent_qualifying_checkpoints": recent_qualifying_checkpoints,
+        "recent_checkpoints_considered": recent_checkpoints_considered,
+        "latest_floor_passed": latest_floor_passed,
+        "reward_guard_passed": reward_guard_passed,
+        "seed_consistency_passed": seed_consistency_passed,
+        "blocking_seeds": blocking_seeds,
+        "blocking_reasons": blocking_reasons,
         "seed_count": target_seed_count,
-        "success_count": success_count,
+        "success_count": sum(1 for r in eval_records if r.get("success")),
         "best_success": max(0.0, best_success_rate),
         "best_reward": None if best_reward_so_far == float("-inf") else best_reward_so_far,
-        "seed_gate_ok": seed_gate_ok,
-        "success_rate_ok": success_rate_ok,
-        "timeout_ok": timeout_ok,
-        "reward_close_ok": reward_close_ok,
-        "qualified_streak": streak,
-        "min_qualified_streak": AUTO_PROMOTE_MIN_QUALIFIED_STREAK,
-        "seed_gate_hits": stage_seed_gate_hits,
-        "min_seed_gate_hits": AUTO_PROMOTE_MIN_SEED_GATE_HITS,
-        "seed_gate_target_met": seed_gate_target_met,
-        "full_success_hits": stage_full_success_hits,
-        "min_full_success_hits": AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS,
-        "full_success_target_met": full_success_target_met,
+        "seed_gate_ok": seed_consistency_passed,
+        "success_rate_ok": aggregate_success_passed,
+        "timeout_ok": timeout_guard_passed,
+        "reward_close_ok": reward_guard_passed,
+        "qualified_streak": recent_qualifying_checkpoints,
+        "min_qualified_streak": 2,
+        "seed_gate_hits": n_evals,
+        "min_seed_gate_hits": 3,
+        "seed_gate_target_met": evidence_passed,
+        "full_success_hits": sum(1 for ev in rolling_history if ev.get("success_rate", 0.0) >= 0.999),
+        "min_full_success_hits": 0,
+        "full_success_target_met": True,
         "full_success_rate_threshold": AUTO_PROMOTE_FULL_SUCCESS_RATE_THRESHOLD,
-        "success_threshold": success_threshold,
+        "success_threshold": required_success_threshold,
         "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
         "reward_tolerance_ratio": AUTO_PROMOTE_REWARD_TOLERANCE_RATIO,
         "required_seeds_count": target_seed_count,
         "evaluated_seeds_count": len(eval_records),
-        "timeout_count": timeout_count,
-        "timeout_rate": timeout_rate,
+        "timeout_count": sum(1 for r in eval_records if r.get("timeout")),
+        "timeout_rate": eval_summary.get("timeout_rate", 0.0),
         "seed_set_id": target_seed_set_id,
         "per_seed_results": per_seed_results,
         "rolling_history_results": rolling_history_results,
-        "blocking_seeds": blocking_seeds,
     }
+
 
 
 def _reward_within_tolerance(reward: float, best_reward: float) -> bool:
@@ -1204,6 +1210,11 @@ class TrainingManager:
         self._control_request: str | None = None
         self._active_start_request: dict[str, Any] | None = None
         self.telemetry_manager = CurriculumTelemetryManager(LabConfig().training.output_dir)
+        runtime_config = LabConfig().training
+        self.runtime_tracker = TrainingRuntimeTracker(
+            Path(runtime_config.output_dir) / "training-runtime.json",
+            heartbeat_seconds=runtime_config.runtime_heartbeat_seconds,
+        )
         self._eval_success_history: list[tuple[int, float]] = []
         self._reconcile_web_exports()
         self._status: dict[str, Any] = self._initial_status()
@@ -1856,7 +1867,22 @@ class TrainingManager:
     def snapshot(self) -> dict[str, Any]:
         """Return a thread-safe copy of the current training status."""
         with self._lock:
-            return dict(self._status)
+            status = dict(self._status)
+        runtime = self.runtime_tracker.snapshot()
+        active = float(runtime.get("active_seconds_total", 0.0))
+        training = float(runtime.get("training_seconds", 0.0))
+        total_episodes = int(status.get("grand_total_episodes", 0))
+        state = _load_json(Path(LabConfig().training.output_dir) / Trainer.STATE_FILENAME)
+        total_timesteps = int(state.get("total_timesteps", 0)) if isinstance(state, dict) else 0
+        runtime["episodes_per_active_hour"] = (
+            total_episodes * 3600.0 / active if active > 0 else None
+        )
+        runtime["timesteps_per_training_second"] = (
+            total_timesteps / training if training > 0 else None
+        )
+        runtime["training_time_percentage"] = training / active if active > 0 else None
+        status["runtime"] = runtime
+        return status
 
     def _training_request_payload(
         self,
@@ -2213,9 +2239,13 @@ class TrainingManager:
                 }
             )
             if not resume:
+                target_stage = self._status["curriculum_stage"] if curriculum_stage is None else max(1, int(curriculum_stage))
+                sched = _training_checkpoint_schedule(requested_episodes, target_stage)
                 self._status.update({
                     "batch_completed_episodes": 0,
                     "batch_total_episodes": requested_episodes,
+                    "batch_completed_segments": 0,
+                    "batch_total_segments": len(sched),
                     "completed_episodes": 0,
                 })
                 self._clear_training_session()
@@ -3629,6 +3659,9 @@ class TrainingManager:
                 )
                 self.telemetry_manager.initialize_wandb(config_dict=job_config.to_dict())
                 trainer = create_trainer(job_config, job_config.training.output_dir)
+                trainer.runtime_tracker = self.runtime_tracker
+                if hasattr(trainer, "evaluator") and trainer.evaluator is not None:
+                    trainer.evaluator.runtime_tracker = self.runtime_tracker
                 self.active_trainer = trainer
 
                 resuming_policy = trainer.total_episodes_trained > 0
@@ -3648,6 +3681,9 @@ class TrainingManager:
                 if not resuming_policy and has_checkpoints:
                     self._archive_training_outputs(job_config)
                     trainer = create_trainer(job_config, job_config.training.output_dir)
+                    trainer.runtime_tracker = self.runtime_tracker
+                    if hasattr(trainer, "evaluator") and trainer.evaluator is not None:
+                        trainer.evaluator.runtime_tracker = self.runtime_tracker
                     self.active_trainer = trainer
 
                 initial_completed = 0
@@ -3675,6 +3711,10 @@ class TrainingManager:
                     existing_state["run_id"] = new_run_id
                     existing_state["training_start_time"] = loaded_state["training_start_time"]
                     atomic_write_json(state_path, existing_state)
+
+                runtime_run_id = loaded_state.get("run_id") if isinstance(loaded_state, dict) else None
+                self.runtime_tracker.start_session(runtime_run_id)
+                self.runtime_tracker.transition("training")
 
 
                 if resume_checkpoint_episode is not None:
@@ -3708,30 +3748,42 @@ class TrainingManager:
                         latest_seed = summary["records"][0].get("seed")
                         if replay_path is None:
                             replay_path = summary["records"][0].get("replay_path")
-                    batch_completed = payload.get("batch_completed_episodes", 0)
-                    batch_total = payload.get("batch_total_episodes", total_episodes)
+                    batch_completed_raw = payload.get("batch_completed_episodes", 0)
+                    batch_completed_segments = payload.get("batch_completed_segments", batch_completed_raw)
+                    batch_completed = batch_completed_segments
+                    batch_total_segments = payload.get("batch_total_segments", payload.get("batch_total_episodes", 1))
                     
                     actual_completed = payload.get("actual_completed_episodes")
                     if actual_completed is None:
-                        actual_completed = int(batch_completed)
+                        actual_completed = int(batch_completed_segments)
 
-                    if isinstance(batch_completed, (int, float)):
+                    if isinstance(batch_completed_segments, (int, float)):
                         stage_batch_completed_episodes = max(
                             stage_batch_completed_episodes,
-                            batch_completed,
+                            batch_completed_segments,
                         )
                     total_trained = payload.get("total_episodes_trained")
                     phase = payload.get("phase")
                     success_rate = -1.0
                     success_count = 0
+
+                    if batch_total_segments > 0:
+                        computed_batch_completed_episodes = round(
+                            (float(batch_completed_segments) / float(batch_total_segments)) * total_episodes, 1
+                        )
+                    else:
+                        computed_batch_completed_episodes = 0.0
+
                     update: dict[str, Any] = {
                         "running": True,
                         "phase": phase or "running",
-                        "requested_episodes": batch_total,
+                        "requested_episodes": total_episodes,
                         "completed_episodes": actual_completed,
-                        "batch_total_episodes": batch_total,
-                        "batch_completed_episodes": batch_completed,
-                        "estimated_equivalent_episodes": batch_completed,
+                        "batch_total_episodes": total_episodes,
+                        "batch_completed_episodes": computed_batch_completed_episodes,
+                        "batch_total_segments": batch_total_segments,
+                        "batch_completed_segments": batch_completed_segments,
+                        "estimated_equivalent_episodes": computed_batch_completed_episodes,
                         "current_episode": payload.get("current_episode"),
                         "checkpoint_episode": checkpoint_episode,
                         "best_score": payload.get("best_score"),
@@ -3764,6 +3816,7 @@ class TrainingManager:
                         update["latest_replay_path"] = replay_path
                         update["active_checkpoint_id"] = f"chk_{update.get('run_id') or self._status.get('run_id') or 'unknown'}_ep_{checkpoint_episode}"
                     if isinstance(summary, dict) and phase == "checkpoint":
+                        promotion_eligible = bool(summary.get("promotion_eligible", True))
                         update["latest_success_rate"] = summary.get("success_rate")
                         update["latest_avg_sheep_penned"] = summary.get("average_sheep_penned")
                         update["latest_avg_reward"] = summary.get("average_reward")
@@ -3934,7 +3987,11 @@ class TrainingManager:
                             -timeout_rate,
                             avg_penned,
                         )
-                        if checkpoint_episode is not None and candidate_rank > stage_best_rank:
+                        if (
+                            promotion_eligible
+                            and checkpoint_episode is not None
+                            and candidate_rank > stage_best_rank
+                        ):
                             stage_best_rank = candidate_rank
                             stage_best_checkpoint_episode = int(checkpoint_episode)
                             stage_no_improvement_streak = 0
@@ -4021,56 +4078,19 @@ class TrainingManager:
                         elif checkpoint_episode is not None:
                             promotion_checkpoint_episode = int(checkpoint_episode)
 
-                        best_success_for_gate = max(stage_best_rank[0], success_rate)
-                        seed_gate_target_met = (
-                            stage_seed_gate_hits >= AUTO_PROMOTE_MIN_SEED_GATE_HITS
-                        )
-                        full_success_target_met = (
-                            stage_full_success_hits >= AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS
+                        gate_snap = compute_promotion_gate_snapshot(
+                            output_root,
+                            int(promotion_checkpoint_episode),
                         )
                         should_auto_promote_now = (
                             auto_promote_enabled
                             and stage < max_stage
                             and promotion_checkpoint_episode is not None
-                            and best_success_for_gate >= _get_success_threshold(stage)
-                            and seed_gate_target_met
-                            and full_success_target_met
-                            and stage_qualified_streak >= AUTO_PROMOTE_MIN_QUALIFIED_STREAK
+                            and gate_snap.get("decision") == "promote_ready"
                         )
                         update["auto_promote_gate_ready"] = bool(should_auto_promote_now)
+                        update["auto_promote_gate"] = gate_snap
                         if should_auto_promote_now and promotion_checkpoint_episode is not None:
-                            update["auto_promote_gate"] = {
-                                "decision": "promote_ready",
-                                "reason": "Promotion criteria met mid-batch",
-                                "seed_count": stage_seed_count,
-                                "success_count": success_count,
-                                "best_success": max(0.0, best_success_for_gate),
-                                "best_reward": (
-                                    None
-                                    if stage_best_reward == float("-inf")
-                                    else stage_best_reward
-                                ),
-                                "seed_gate_ok": seed_gate_target_met,
-                                "success_rate_ok": (
-                                    best_success_for_gate >= _get_success_threshold(stage)
-                                ),
-                                "timeout_ok": True,
-                                "reward_close_ok": True,
-                                "qualified_streak": stage_qualified_streak,
-                                "min_qualified_streak": AUTO_PROMOTE_MIN_QUALIFIED_STREAK,
-                                "seed_gate_hits": stage_seed_gate_hits,
-                                "min_seed_gate_hits": AUTO_PROMOTE_MIN_SEED_GATE_HITS,
-                                "seed_gate_target_met": seed_gate_target_met,
-                                "full_success_hits": stage_full_success_hits,
-                                "min_full_success_hits": AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS,
-                                "full_success_target_met": full_success_target_met,
-                                "full_success_rate_threshold": (
-                                    AUTO_PROMOTE_FULL_SUCCESS_RATE_THRESHOLD
-                                ),
-                                "success_threshold": _get_success_threshold(stage),
-                                "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
-                                "reward_tolerance_ratio": AUTO_PROMOTE_REWARD_TOLERANCE_RATIO,
-                            }
                             update["message"] = (
                                 f"Stage {stage} mastered at checkpoint "
                                 f"ep {promotion_checkpoint_episode}; promoting now"
@@ -4367,6 +4387,11 @@ class TrainingManager:
                         status=dict(self._status),
                         request=self._active_start_request,
                     )
+                    if control_request == "paused":
+                        self.runtime_tracker.transition("paused")
+                        self.runtime_tracker.heartbeat()
+                    else:
+                        self.runtime_tracker.end_session("manually_stopped")
                     break
 
                 best_success = stage_best_rank[0]
@@ -4682,6 +4707,7 @@ class TrainingManager:
                 self._control_request = None
             if final_control_request not in {"paused", "stopped"}:
                 self._clear_training_session()
+                self.runtime_tracker.end_session("completed")
         except Exception as exc:  # pragma: no cover  # pylint: disable=broad-exception-caught
             full_traceback = traceback.format_exc()
             # Print the full traceback to the server console so the failure is
@@ -4698,26 +4724,67 @@ class TrainingManager:
                 self._status["traceback"] = full_traceback
                 self._active_start_request = None
             self._clear_training_session()
+            self.runtime_tracker.end_session("unknown")
         finally:
             self.active_trainer = None
+
+
+class _ManagerDescriptor:
+    """Lazy class-attribute descriptor for TrainingRequestHandler.manager.
+
+    Prevents instantiating TrainingManager at module import time, which avoids
+    unwanted side-effects (e.g. state restoration, file lock contention, wandb init)
+    when multiprocessing child processes or unit tests import sheepdog.server.
+    """
+
+    def __get__(self, obj: Any, objtype: type | None = None) -> TrainingManager:
+        cls = objtype if objtype is not None else type(obj)
+        if getattr(cls, "_manager_instance", None) is None:
+            cls._manager_instance = TrainingManager()
+        return cls._manager_instance
+
+    def __set__(self, obj: Any, value: Any) -> None:
+        cls = obj if isinstance(obj, type) else type(obj)
+        cls._manager_instance = value
 
 
 class TrainingRequestHandler(BaseHTTPRequestHandler):
     """HTTP endpoint for interactive training control."""
 
-    manager = TrainingManager()
+    manager = _ManagerDescriptor()
+
+    def log_message(self, format: str, *args: Any) -> None:
+        """Filter out routine GET polling noise (e.g. /api/training/status) from server logs."""
+        message = format % args if args else format
+        if " 200 " in message or " 304 " in message:
+            request_line = message.split('"')[1] if '"' in message else ""
+            if any(
+                path in request_line
+                for path in (
+                    "/api/training/status",
+                    "/api/training/history",
+                    "/api/health",
+                    "/api/config",
+                    "/generated/",
+                )
+            ):
+                return
+        super().log_message(format, *args)
 
     def _json_response(self, payload: Any, status: int = HTTPStatus.OK) -> None:
-        body = json.dumps(payload, indent=2).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            body = json.dumps(payload, indent=2).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            pass
 
     def _file_response(self, file_path: Path) -> None:
         """Read *file_path* fully then send — avoids Content-Length races."""
@@ -4733,10 +4800,13 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                     import time
                     time.sleep(0.05 * (attempt + 1))
         except FileNotFoundError:
-            self.send_response(HTTPStatus.NOT_FOUND)
-            self.send_header("Content-Length", "0")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
+            try:
+                self.send_response(HTTPStatus.NOT_FOUND)
+                self.send_header("Content-Length", "0")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+            except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+                pass
             return
         except Exception as exc:
             import sys
@@ -4746,13 +4816,16 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             traceback.print_exc(file=sys.stderr)
             
             # Send a graceful 500 JSON response instead of aborting the connection
-            self.send_response(HTTPStatus.INTERNAL_SERVER_ERROR)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            body_payload = json.dumps({"error": f"Error reading file: {exc}"}, indent=2).encode("utf-8")
-            self.send_header("Content-Length", str(len(body_payload)))
-            self.end_headers()
-            self.wfile.write(body_payload)
+            try:
+                self.send_response(HTTPStatus.INTERNAL_SERVER_ERROR)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                body_payload = json.dumps({"error": f"Error reading file: {exc}"}, indent=2).encode("utf-8")
+                self.send_header("Content-Length", str(len(body_payload)))
+                self.end_headers()
+                self.wfile.write(body_payload)
+            except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+                pass
             return
         if body is None:
             self._json_response(
@@ -4764,13 +4837,16 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         content_type = (
             "application/json; charset=utf-8" if suffix == ".json" else "application/octet-stream"
         )
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            pass
 
     def _compile_diagnostics_snapshot(self) -> dict[str, Any]:
         """Compile all diagnostics and return a unified JSON snapshot payload dict."""
@@ -5960,6 +6036,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                 time.sleep(0.5)
                 try:
                     self.manager.stop()
+                    self.manager.runtime_tracker.end_session("server_shutdown")
                 except Exception:
                     pass
                 self.server.shutdown()
@@ -6171,6 +6248,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
 def main() -> None:
     """Run the local training API server."""
 
+    _ = TrainingRequestHandler.manager
     server = ThreadingHTTPServer(("127.0.0.1", 8000), TrainingRequestHandler)
     print("Sheepdog training API listening on http://127.0.0.1:8000")
     try:
@@ -6178,6 +6256,7 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        TrainingRequestHandler.manager.runtime_tracker.end_session("server_shutdown")
         server.server_close()
 
 
