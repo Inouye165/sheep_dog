@@ -15,7 +15,23 @@ import type {
   DiagnosticsResponse,
 } from "../state/types";
 
-const API_BASE_URL = "http://127.0.0.1:8000";
+export const API_BASE_URL = "http://127.0.0.1:8000";
+
+export interface ApiError extends Error {
+  status?: number;
+  contentType?: string;
+  isNetworkError?: boolean;
+}
+
+let backendOfflineState = false;
+
+export function getIsBackendOffline(): boolean {
+  return backendOfflineState;
+}
+
+export function setIsBackendOffline(offline: boolean): void {
+  backendOfflineState = offline;
+}
 
 function isJsonResponse(response: Response): boolean {
   const contentType = response.headers.get("content-type") ?? "";
@@ -24,39 +40,67 @@ function isJsonResponse(response: Response): boolean {
 
 async function fetchJson<T>(path: string, init?: RequestInit, baseUrl?: string): Promise<T> {
   const requestUrl = baseUrl ? new URL(path, baseUrl) : path;
-  const response = await fetch(requestUrl, { cache: "no-store", ...init });
-  if (!response.ok) {
-    let errMsg = `Failed to fetch ${path}: ${response.status}`;
-    try {
-      if (isJsonResponse(response)) {
-        const errJson = await response.clone().json();
-        if (errJson && typeof errJson === "object" && "error" in errJson) {
-          errMsg = String(errJson.error);
+  try {
+    const response = await fetch(requestUrl, { cache: "no-store", ...init });
+    if (!response.ok) {
+      let errMsg = `Failed to fetch ${path}: ${response.status}`;
+      try {
+        if (isJsonResponse(response)) {
+          const errJson = await response.clone().json();
+          if (errJson && typeof errJson === "object" && "error" in errJson) {
+            errMsg = String(errJson.error);
+          }
         }
+      } catch {
+        // ignore
       }
-    } catch {
-      // ignore
+      const error = new Error(errMsg) as ApiError;
+      error.status = response.status;
+      throw error;
     }
-    const error = new Error(errMsg) as Error & { status?: number };
-    error.status = response.status;
+
+    if (!isJsonResponse(response)) {
+      const error = new Error(`Expected JSON from ${path}, received ${response.headers.get("content-type") ?? "unknown content type"}`) as ApiError;
+      error.status = response.status;
+      error.contentType = response.headers.get("content-type") ?? undefined;
+      throw error;
+    }
+
+    backendOfflineState = false;
+    return (await response.json()) as T;
+  } catch (error) {
+    if (error instanceof TypeError || (error instanceof Error && error.name === "TypeError")) {
+      backendOfflineState = true;
+      const netErr = new Error(`Network or connection error fetching ${path}: ${error.message}`) as ApiError;
+      netErr.status = 0;
+      netErr.isNetworkError = true;
+      throw netErr;
+    }
     throw error;
   }
+}
 
-  if (!isJsonResponse(response)) {
-    const error = new Error(`Expected JSON from ${path}, received ${response.headers.get("content-type") ?? "unknown content type"}`) as Error & { status?: number; contentType?: string };
-    error.status = response.status;
-    error.contentType = response.headers.get("content-type") ?? undefined;
-    throw error;
+export async function checkBackendHealth(): Promise<{ ok: boolean; service?: string; error?: string }> {
+  try {
+    const res = await fetchJson<{ status: string; service?: string }>("/api/health", undefined, API_BASE_URL);
+    backendOfflineState = false;
+    return { ok: res.status === "ok", service: res.service };
+  } catch (err) {
+    backendOfflineState = true;
+    const fetchErr = err as ApiError;
+    return { ok: false, error: fetchErr.message || String(err) };
   }
-
-  return (await response.json()) as T;
 }
 
 export async function loadCheckpointIndex(): Promise<CheckpointIndex | null> {
+  if (backendOfflineState) {
+    console.debug("[Sheepdog API] Backend server is offline; hard-stopping checkpoint index fetch.");
+    return null;
+  }
   try {
     return await fetchJson<CheckpointIndex>("/generated/checkpoint-index.json", undefined, API_BASE_URL);
   } catch (error) {
-    const fetchError = error as { status?: number; contentType?: string; message?: string };
+    const fetchError = error as ApiError;
     // Treat 404 and 500 (Vite serves 500 when the file doesn't exist yet)
     // as "not available yet" rather than a hard error.
     if (fetchError.status === 404 || fetchError.status === 500) {
@@ -65,10 +109,11 @@ export async function loadCheckpointIndex(): Promise<CheckpointIndex | null> {
       );
       return null;
     }
-    // Also treat network/connection errors (e.g. TypeError: Failed to fetch) as not available yet.
-    if (error instanceof TypeError || !fetchError.status) {
-      console.warn(
-        `Network or connection error fetching checkpoint index: ${fetchError.message || String(error)}. Treating as not available yet.`
+    // Also treat network/connection errors (status 0 / ERR_CONNECTION_REFUSED) as not available yet.
+    if (fetchError.isNetworkError || fetchError.status === 0 || !fetchError.status || error instanceof TypeError) {
+      backendOfflineState = true;
+      console.debug(
+        `Backend server offline or unreachable on port 8000 when fetching checkpoint index (${fetchError.message || String(error)}). Treating as not available yet.`
       );
       return null;
     }
@@ -91,6 +136,19 @@ export async function loadReplay(path: string): Promise<ReplayBundle> {
 
 export async function loadTrainingStatus(): Promise<TrainingStatus> {
   return fetchJson<TrainingStatus>("/api/training/status", undefined, API_BASE_URL);
+}
+
+export async function loadTrainingStatusSafe(): Promise<{ status: TrainingStatus | null; isOffline: boolean }> {
+  try {
+    const status = await loadTrainingStatus();
+    return { status, isOffline: false };
+  } catch (err) {
+    const fetchErr = err as ApiError;
+    if (fetchErr.isNetworkError || fetchErr.status === 0) {
+      return { status: null, isOffline: true };
+    }
+    throw err;
+  }
 }
 
 export async function startTraining(request: TrainingStartRequest): Promise<TrainingStatus> {

@@ -78,6 +78,37 @@ class _HierarchicalProgressCallback(BaseCallback):
     def _on_step(self) -> bool:
         if self._should_stop is not None and self._should_stop():
             return False
+
+        # Emit individual episode completion logs as they finish
+        dones = self.locals.get("dones")
+        infos = self.locals.get("infos")
+        if dones is not None and infos is not None:
+            for idx, done in enumerate(dones):
+                if done and idx < len(infos):
+                    ep_info = infos[idx].get("episode") if isinstance(infos[idx], dict) else None
+                    if isinstance(ep_info, dict):
+                        actual_eps = 0
+                        try:
+                            if self.model is not None and self.model.get_env() is not None:
+                                curr_counters = self.model.get_env().get_attr("_episode_counter")
+                                actual_eps = int(sum(curr_counters))
+                        except Exception:
+                            actual_eps = 0
+                        ep_num = self._starting_total + actual_eps
+                        self._emit(
+                            {
+                                "phase": "episode_complete",
+                                "episode": ep_num,
+                                "reward": float(ep_info.get("r", 0.0)),
+                                "length": int(ep_info.get("l", 0)),
+                                "success": bool(ep_info.get("success", False)),
+                                "penned": int(ep_info.get("penned", 0)),
+                                "total_sheep": int(ep_info.get("total_sheep", 0)),
+                                "status": str(ep_info.get("status", "UNKNOWN")),
+                                "seed": ep_info.get("seed"),
+                            }
+                        )
+
         n = int(self.num_timesteps)
         if n < self._total_timesteps and n - self._last_reported < self._report_interval:
             return True

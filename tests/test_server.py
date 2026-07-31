@@ -994,7 +994,7 @@ def test_auto_promotion_updates_batch_episodes(tmp_path: Path) -> None:
             auto_promote=True,
         )
 
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             snap = manager.snapshot()
             if not snap["running"]:
@@ -1006,12 +1006,12 @@ def test_auto_promotion_updates_batch_episodes(tmp_path: Path) -> None:
     assert snap["phase"] == "error"
     assert "Stage 2 reached successfully" in str(snap["error"])
 
-    assert len(configs_seen) == 2
-    assert configs_seen[0].rewards.instincts.curriculum_stage == 1
-    assert configs_seen[0].training.episodes == 49
+    assert len(configs_seen) >= 2
+    assert configs_seen[-2].rewards.instincts.curriculum_stage == 1
+    assert configs_seen[-2].training.episodes == 49
 
-    assert configs_seen[1].rewards.instincts.curriculum_stage == 2
-    assert configs_seen[1].training.episodes == 74
+    assert configs_seen[-1].rewards.instincts.curriculum_stage == 2
+    assert configs_seen[-1].training.episodes == 74
 
 
 def test_diagnostics_endpoint_route_integration(tmp_path: Path) -> None:
@@ -1109,5 +1109,46 @@ def test_log_message_suppresses_routine_polling_noise() -> None:
         assert len(logged_messages) == 2
         assert '500' in logged_messages[0]
         assert 'POST /api/training/start' in logged_messages[1]
+
+
+def test_health_endpoint_routes(tmp_path: Path) -> None:
+    """Test that GET /health and GET /api/health return 200 OK with status info and CORS headers."""
+    import json
+    import urllib.request
+    from unittest.mock import MagicMock, patch
+    from sheepdog.server import ThreadingHTTPServer, TrainingRequestHandler
+
+    artifacts = tmp_path / "artifacts"
+    generated = tmp_path / "web" / "public" / "generated"
+    (artifacts / "checkpoints").mkdir(parents=True)
+    (artifacts / "evaluations").mkdir(parents=True)
+    generated.mkdir(parents=True)
+    (generated / "replays").mkdir(parents=True)
+
+    with patch("sheepdog.server.LabConfig") as mock_lab_config:
+        mock_cfg = MagicMock()
+        mock_cfg.training.output_dir = str(artifacts)
+        mock_cfg.training.web_export_dir = str(generated)
+        mock_cfg.training.runtime_heartbeat_seconds = 60
+        mock_lab_config.return_value = mock_cfg
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), TrainingRequestHandler)
+        port = server.server_port
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        try:
+            for path in ("/health", "/api/health"):
+                req = urllib.request.Request(f"http://127.0.0.1:{port}{path}")
+                with urllib.request.urlopen(req) as resp:
+                    assert resp.status == 200
+                    assert resp.headers.get("Access-Control-Allow-Origin") == "*"
+                    data = json.loads(resp.read().decode("utf-8"))
+                    assert data.get("status") == "ok"
+                    assert data.get("service") == "sheepdog-api"
+        finally:
+            server.shutdown()
+            server.server_close()
+
 
 

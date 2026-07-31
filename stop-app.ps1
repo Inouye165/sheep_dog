@@ -13,7 +13,7 @@ function Invoke-JsonPost {
         [object]$Body = @{}
     )
 
-    return Invoke-RestMethod -Method Post -Uri $Uri -ContentType 'application/json' -Body (
+    return Invoke-RestMethod -Method Post -Uri $Uri -ContentType 'application/json' -TimeoutSec 2 -Body (
         $Body | ConvertTo-Json -Depth 10 -Compress
     )
 }

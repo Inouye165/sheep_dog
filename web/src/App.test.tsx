@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor, within, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
@@ -374,7 +374,7 @@ describe("App", () => {
   it("renders the simplified controls and run button", async () => {
     render(<App />);
 
-    await userEvent.click(screen.getByRole("tab", { name: "Watch" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Watch" }));
     await waitFor(() => expect(screen.getByText("Live Replay")).toBeInTheDocument());
     expect(screen.getByLabelText("Playback controls")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Run best model (ep 0)" })).toBeInTheDocument();
@@ -446,7 +446,7 @@ describe("App", () => {
   it("shows current live run status from loaded replay data", async () => {
     render(<App />);
 
-    await userEvent.click(screen.getByRole("tab", { name: "Watch" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Watch" }));
     await waitFor(() => expect(screen.getByText("Live Replay")).toBeInTheDocument());
     await waitFor(() => expect(within(screen.getByLabelText("Run status")).getByText("idle")).toBeInTheDocument());
     expect(screen.getByLabelText("Run status")).toBeInTheDocument();
@@ -636,7 +636,7 @@ describe("App", () => {
 
     await waitFor(() => expect(screen.getByLabelText("Training controls")).toBeInTheDocument());
 
-    await userEvent.click(screen.getByRole("button", { name: "Clear" }));
+    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
 
     await waitFor(() => expect(screen.getByText("Training history cleared")).toBeInTheDocument());
     expect(fetchMock).toHaveBeenCalledWith(
@@ -680,9 +680,9 @@ describe("App", () => {
 
     render(<App />);
 
-    await userEvent.click(screen.getByRole("tab", { name: "Watch" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Watch" }));
     await waitFor(() => expect(screen.getByText("Instinct-only dogs do not know the pen. Pen-directed behavior requires training, heuristic expert mode, or a handler target command.")).toBeInTheDocument());
-    await userEvent.click(screen.getByRole("button", { name: "Run best model" }));
+    fireEvent.click(screen.getByRole("button", { name: "Run best model" }));
 
     await waitFor(() => expect(screen.getByText("Instinct only")).toBeInTheDocument());
     expect(screen.getByText("Instinct-only dogs can chase, circle, avoid diving into the flock, and recover nearby sheep, but they do not know where the pen is.")).toBeInTheDocument();
@@ -786,6 +786,7 @@ describe("App", () => {
   });
 
   it("starts training with instincts disabled and curriculum stage one by default", async () => {
+    const user = userEvent.setup();
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
       const path = String(input);
@@ -815,7 +816,7 @@ describe("App", () => {
     render(<App />);
 
     await waitFor(() => expect(screen.getByLabelText("Training controls")).toBeInTheDocument());
-    await userEvent.click(screen.getByRole("button", { name: "Train 50 more" }));
+    fireEvent.click(screen.getByRole("button", { name: "Train 50 more" }));
 
     const trainingStartCall = fetchMock.mock.calls.find(([request]) =>
       String(request).includes("/api/training/start"),
@@ -872,7 +873,7 @@ describe("App", () => {
     render(<App />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Pause after checkpoint" })).toBeInTheDocument());
-    await userEvent.click(screen.getByRole("button", { name: "Pause after checkpoint" }));
+    fireEvent.click(screen.getByRole("button", { name: "Pause after checkpoint" }));
 
     const pauseCall = fetchMock.mock.calls.find(([request]) =>
       String(request).includes("/api/training/pause"),
@@ -931,7 +932,7 @@ describe("App", () => {
     render(<App />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Resume 12 remaining" })).toBeInTheDocument());
-    await userEvent.click(screen.getByRole("button", { name: "Resume 12 remaining" }));
+    fireEvent.click(screen.getByRole("button", { name: "Resume 12 remaining" }));
 
     const resumeCall = fetchMock.mock.calls.find(([request]) =>
       String(request).includes("/api/training/start"),
@@ -982,10 +983,10 @@ describe("App", () => {
 
     render(<App />);
 
-    await userEvent.click(screen.getByRole("tab", { name: "Watch" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Watch" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "End episode" })).toBeEnabled());
 
-    await userEvent.click(screen.getByRole("button", { name: "End episode" }));
+    fireEvent.click(screen.getByRole("button", { name: "End episode" }));
 
     const statusPanel = screen.getByLabelText("Run status");
     expect(within(statusPanel).getByText("3")).toBeInTheDocument();

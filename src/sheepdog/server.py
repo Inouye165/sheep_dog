@@ -23,6 +23,7 @@ from sheepdog.config import (
     LabConfig,
     RewardConfig,
     TrainingConfig,
+    resolve_workspace_path,
 )
 from sheepdog.curriculum import apply_training_profile
 from sheepdog.curriculum import available_stages
@@ -1721,7 +1722,7 @@ class TrainingManager:
 
     def restore_active_run_state(self) -> None:
         """Hydrate TrainingManager state using precedence-based restoration."""
-        output_root = Path(LabConfig().training.output_dir)
+        output_root = resolve_workspace_path(LabConfig().training.output_dir)
         resolved = self._resolve_precedence_state(output_root)
         
         self._status.update({
@@ -1754,7 +1755,7 @@ class TrainingManager:
         instincts = config.rewards.instincts
         available_curriculum_stages, max_curriculum_stage = _curriculum_stage_metadata()
         trainer_type, policy_type, replay_mode = _policy_metadata(config.policy.policy_mode)
-        output_root = Path(config.training.output_dir)
+        output_root = resolve_workspace_path(config.training.output_dir)
         stage_history = _read_stage_history(output_root)
         persisted = _read_persisted_settings(output_root)
         stg = persisted.get("curriculum_stage") or instincts.curriculum_stage or 1
@@ -3764,6 +3765,37 @@ class TrainingManager:
                         )
                     total_trained = payload.get("total_episodes_trained")
                     phase = payload.get("phase")
+
+                    if phase == "episode_complete":
+                        ep_num = payload.get("episode") or payload.get("current_episode") or 0
+                        ep_reward = float(payload.get("reward", 0.0))
+                        ep_penned = int(payload.get("penned", 0))
+                        ep_total_sheep = int(payload.get("total_sheep", 0))
+                        ep_status = str(payload.get("status", "UNKNOWN"))
+                        ep_success = bool(payload.get("success", False))
+                        ep_seed = payload.get("seed")
+                        res_str = "SUCCESS" if ep_success else ep_status
+                        print(
+                            f"[Sheepdog] Ep {int(ep_num):06d} | Stage {stage} | "
+                            f"Reward: {ep_reward:.2f} | Penned: {ep_penned}/{ep_total_sheep} | Result: {res_str}",
+                            flush=True,
+                        )
+                        import sys
+                        sys.stdout.flush()
+                        try:
+                            self.telemetry_manager.log_episode(
+                                episode=int(ep_num),
+                                stage=stage,
+                                reward=ep_reward,
+                                penned=ep_penned,
+                                total_sheep=ep_total_sheep,
+                                success=ep_success,
+                                status=ep_status,
+                                seed=ep_seed,
+                            )
+                        except Exception:
+                            pass
+
                     success_rate = -1.0
                     success_count = 0
 
@@ -4001,6 +4033,14 @@ class TrainingManager:
                         stage_best_reward = max(stage_best_reward, average_reward)
                         
                         update["auto_promote_gate"] = gate_snapshot
+                        if checkpoint_episode is not None:
+                            print(
+                                f"[Sheepdog] Checkpoint ep {int(checkpoint_episode):06d} | "
+                                f"Stage {stage} | Success: {success_rate:.1%} | "
+                                f"Avg Reward: {average_reward:.2f} | Penned: {avg_penned:.1f}",
+                                flush=True,
+                            )
+
                     if phase == "starting" and payload.get("seed_episode") is not None:
                         update["seed_episode"] = payload.get("seed_episode")
                     if phase == "starting" and total_trained is not None:
@@ -4019,6 +4059,11 @@ class TrainingManager:
                             update["message"] = (
                                 f"Success rate ({success_rate:.0%}) plummeted below 35% after promotion; "
                                 f"rolling back to Stage {target_stage} and reloading checkpoint ep {last_healthy_checkpoint_episode}"
+                            )
+                            print(
+                                f"[Sheepdog] ROLLBACK: Stage {current_stage} -> Stage {target_stage} "
+                                f"(reloading checkpoint ep {last_healthy_checkpoint_episode})",
+                                flush=True,
                             )
                             self._update_status(update)
                             self._persist_training_session(
@@ -4044,6 +4089,7 @@ class TrainingManager:
                             "approx_kl": approx_kl,
                             "clip_fraction": clip_fraction,
                             "explained_variance": explained_variance,
+                            "total_timesteps": total_ts,
                         }
 
                         hyperparameters_dict = {
@@ -4058,16 +4104,17 @@ class TrainingManager:
                         if checkpoint_episode is not None:
                             cp_id = f"chk_{r_id or 'unknown'}_ep_{checkpoint_episode}"
 
+                        eval_ep = int(checkpoint_episode) if checkpoint_episode is not None else int(payload.get("current_episode", 0))
                         self.telemetry_manager.log(
-                            step=total_ts,
+                            step=eval_ep,
                             stage=stage,
                             success_rate=success_rate,
                             metrics=metrics_dict,
                             hyperparameters=hyperparameters_dict,
                             run_id=r_id,
                             checkpoint_id=cp_id,
-                            evaluation_id=f"eval_{r_id or 'unknown'}_ep_{checkpoint_episode or total_ts}",
-                            global_episode=total_ts,
+                            evaluation_id=f"eval_{r_id or 'unknown'}_ep_{checkpoint_episode or eval_ep}",
+                            global_episode=eval_ep,
                             episode_in_stage=checkpoint_episode,
                             recorded_at=datetime.datetime.now(datetime.UTC).isoformat(),
                         )
@@ -4078,10 +4125,15 @@ class TrainingManager:
                         elif checkpoint_episode is not None:
                             promotion_checkpoint_episode = int(checkpoint_episode)
 
-                        gate_snap = compute_promotion_gate_snapshot(
-                            output_root,
-                            int(promotion_checkpoint_episode),
-                        )
+                        if phase == "checkpoint" and checkpoint_episode is not None and promotion_checkpoint_episode == checkpoint_episode:
+                            gate_snap = gate_snapshot
+                        elif promotion_checkpoint_episode is not None and int(promotion_checkpoint_episode) > 0:
+                            gate_snap = compute_promotion_gate_snapshot(
+                                output_root,
+                                int(promotion_checkpoint_episode),
+                            )
+                        else:
+                            gate_snap = _auto_promote_gate_defaults(stage)
                         should_auto_promote_now = (
                             auto_promote_enabled
                             and stage < max_stage
@@ -4095,9 +4147,14 @@ class TrainingManager:
                                 f"Stage {stage} mastered at checkpoint "
                                 f"ep {promotion_checkpoint_episode}; promoting now"
                             )
+                            print(
+                                f"[Sheepdog] PROMOTION: Stage {stage} -> Stage {stage + 1} "
+                                f"(mastered at ep {promotion_checkpoint_episode})",
+                                flush=True,
+                            )
                             early_promotion_signal = _EarlyPromotionSignal(
                                 checkpoint_episode=int(promotion_checkpoint_episode),
-                                best_success=max(0.0, best_success_for_gate),
+                                best_success=max(0.0, float(gate_snap.get("best_success", 0.0))),
                                 qualified_streak=stage_qualified_streak,
                                 seed_gate_hits=stage_seed_gate_hits,
                                 full_success_hits=stage_full_success_hits,
@@ -4290,6 +4347,12 @@ class TrainingManager:
                 early_promotion: _EarlyPromotionSignal | None = None
                 rollback_signal: _RollbackSignal | None = None
                 try:
+                    print(
+                        f"[Sheepdog] Training session started | Stage {current_stage} | "
+                        f"Target: {batch_episodes} ep | Mode: {job_config.policy.policy_mode} | "
+                        f"Fast mode: {fast_mode}",
+                        flush=True,
+                    )
                     trainer.train(progress_callback=progress_callback, should_stop=should_stop)
                 except _EarlyPromotionSignal as signal:
                     early_promotion = signal
@@ -4375,6 +4438,7 @@ class TrainingManager:
                     final_message = self._status.get("message") or (
                         "Training paused" if control_request == "paused" else "Training stopped"
                     )
+                    print(f"[Sheepdog] Training {control_request}: {final_message}", flush=True)
                     self._update_status(
                         {
                             "running": False,
@@ -5957,13 +6021,18 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                 self._json_response([])
             return
         if request_path == "/api/training/status":
+            import datetime
+            print(
+                f"[DEBUG] /api/training/status polled at {datetime.datetime.now().strftime('%H:%M:%S.%f')[:-3]}",
+                flush=True,
+            )
             self._json_response(self.manager.snapshot())
             return
         if request_path == "/api/training/diagnostics":
             self._handle_diagnostics()
             return
-        if request_path == "/api/health":
-            self._json_response({"ok": True})
+        if request_path in ("/health", "/api/health"):
+            self._json_response({"status": "ok", "service": "sheepdog-api"})
             return
         if request_path == "/api/config":
             self._json_response(self.manager.get_config())
@@ -6043,10 +6112,12 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             threading.Thread(target=shutdown_server, daemon=True).start()
             return
         if self.path == "/api/training/pause":
+            print("[Sheepdog] Received training pause request", flush=True)
             payload = self.manager.pause()
             self._json_response(payload)
             return
         if self.path == "/api/training/stop":
+            print("[Sheepdog] Received training stop request", flush=True)
             payload = self.manager.stop()
             self._json_response(payload)
             return
@@ -6207,6 +6278,11 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         promote_from_checkpoint_episode = payload.get("promote_from_checkpoint_episode")
         evaluation_mode = payload.get("evaluation_mode", "quick")
         resume = bool(payload.get("resume", False))
+        print(
+            f"[Sheepdog] Received training start request (episodes={requested_episodes}, "
+            f"stage={curriculum_stage or 1}, fast_mode={fast_mode}, resume={resume})",
+            flush=True,
+        )
         try:
             response = self.manager.start(
                 requested_episodes,
@@ -6235,6 +6311,22 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             return
         self._json_response(response)
 
+    def log_message(self, format: str, *args: Any) -> None:
+        """Suppress routine 200 OK polling HTTP request log messages to keep terminal clean."""
+        msg = format % args if args else format
+        if " 200 " in msg or " 204 " in msg or " 304 " in msg:
+            for route in (
+                "/api/training/status",
+                "/api/training/history",
+                "/api/scenarios",
+                "/api/health",
+                "/health",
+                "/generated/",
+            ):
+                if route in msg:
+                    return
+        super().log_message(format, *args)
+
     def do_OPTIONS(self) -> None:  # noqa: N802  # pylint: disable=invalid-name
         """Handle HTTP OPTIONS (CORS preflight) requests."""
         self.send_response(HTTPStatus.NO_CONTENT)
@@ -6250,7 +6342,7 @@ def main() -> None:
 
     _ = TrainingRequestHandler.manager
     server = ThreadingHTTPServer(("127.0.0.1", 8000), TrainingRequestHandler)
-    print("Sheepdog training API listening on http://127.0.0.1:8000")
+    print("Sheepdog training API listening on http://127.0.0.1:8000", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
