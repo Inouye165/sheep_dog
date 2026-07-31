@@ -77,6 +77,40 @@ class _TrainingProgressCallback(BaseCallback):
     def _on_step(self) -> bool:
         if self._should_stop is not None and self._should_stop():
             return False
+
+        # Emit individual episode completion logs as they finish
+        dones = self.locals.get("dones")
+        infos = self.locals.get("infos")
+        if dones is not None and infos is not None:
+            for idx, done in enumerate(dones):
+                if done and idx < len(infos):
+                    ep_info = infos[idx].get("episode") if isinstance(infos[idx], dict) else None
+                    if isinstance(ep_info, dict):
+                        actual_eps = 0
+                        try:
+                            if self.model is not None and self.model.get_env() is not None:
+                                curr_counters = self.model.get_env().get_attr("_episode_counter")
+                                actual_eps = int(sum(curr_counters))
+                        except Exception:
+                            actual_eps = 0
+                        ep_num = self._starting_total + actual_eps
+                        self._emit(
+                            {
+                                "phase": "episode_complete",
+                                "episode": ep_num,
+                                "current_episode": ep_num,
+                                "total_episodes_trained": ep_num,
+                                "actual_completed_episodes": actual_eps,
+                                "reward": float(ep_info.get("r", 0.0)),
+                                "length": int(ep_info.get("l", 0)),
+                                "success": bool(ep_info.get("success", False)),
+                                "penned": int(ep_info.get("penned", 0)),
+                                "total_sheep": int(ep_info.get("total_sheep", 0)),
+                                "status": str(ep_info.get("status", "UNKNOWN")),
+                                "seed": ep_info.get("seed"),
+                            }
+                        )
+
         num_timesteps = int(self.num_timesteps)
         if (
             num_timesteps < self._total_timesteps
@@ -292,19 +326,20 @@ class MaskablePPOTrainer(Trainer):
         if wandb_enabled:
             try:
                 import wandb
-                wandb_config = {
-                    "learning_rate": train_config.learning_rate,
-                    "learning_rate_final": train_config.learning_rate_final,
-                    "total_timesteps": train_config.total_timesteps,
-                    "batch_total": batch_total,
-                    "environment": self.config.to_dict().get("environment", {}),
-                    "rewards": self.config.to_dict().get("rewards", {}),
-                }
-                wandb.init(
-                    project="sheepdog-herding",
-                    config=wandb_config,
-                    sync_tensorboard=tensorboard_available(),
-                )
+                if getattr(wandb, "run", None) is None:
+                    wandb_config = {
+                        "learning_rate": train_config.learning_rate,
+                        "learning_rate_final": train_config.learning_rate_final,
+                        "total_timesteps": train_config.total_timesteps,
+                        "batch_total": batch_total,
+                        "environment": self.config.to_dict().get("environment", {}),
+                        "rewards": self.config.to_dict().get("rewards", {}),
+                    }
+                    wandb.init(
+                        project="sheep_dog_herding",
+                        config=wandb_config,
+                        sync_tensorboard=tensorboard_available(),
+                    )
             # W&B exposes several SDK-specific exception types across versions.
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 logging.getLogger(__name__).warning(
@@ -896,7 +931,27 @@ class MaskablePPOTrainer(Trainer):
                 policy_config=policy.config.to_dict(),
             )
 
-        total_episodes_trained = starting_total + (batch_total - skip_segments)
+        if checkpoint_payloads and checkpoint_payloads[-1].get("total_training_episodes", 0) > 0:
+            total_episodes_trained = int(checkpoint_payloads[-1]["total_training_episodes"])
+        else:
+            last_ep = (
+                train_config.checkpoint_episodes[-1]
+                if train_config.checkpoint_episodes
+                else 0
+            )
+            if last_ep > 0:
+                skipped_ep = (
+                    train_config.checkpoint_episodes[skip_segments - 1]
+                    if (
+                        skip_segments > 0
+                        and skip_segments <= len(train_config.checkpoint_episodes)
+                    )
+                    else 0
+                )
+                total_episodes_trained = starting_total + (last_ep - skipped_ep)
+            else:
+                total_episodes_trained = starting_total + max(1, batch_total - skip_segments)
+
         final_model_path_str = str(saved_model_path) if saved_model_path is not None else ""
         state_payload = {
             "total_episodes_trained": total_episodes_trained,
@@ -927,7 +982,9 @@ class MaskablePPOTrainer(Trainer):
         emit(
             {
                 "phase": "complete",
-                "batch_completed_episodes": batch_total,
+                "batch_completed_episodes": train_config.checkpoint_episodes[-1]
+                if train_config.checkpoint_episodes
+                else batch_total,
                 "current_episode": checkpoint_payloads[-1]["checkpoint_episode"]
                 if checkpoint_payloads
                 else None,

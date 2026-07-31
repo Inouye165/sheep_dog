@@ -20,6 +20,7 @@ class CurriculumTelemetryManager:
         self.output_dir = Path(output_dir)
         self.history_path = self.output_dir / "training_history.json"
         self._wandb_initialized = False
+        self._last_wandb_step: int | None = None
 
     def initialize_wandb(
         self,
@@ -34,7 +35,14 @@ class CurriculumTelemetryManager:
                 init = getattr(wandb, "init", None)
                 if init is None:
                     return
-                init(project=project_name, config=config_dict, reinit=True)
+                init(project=project_name, config=config_dict)
+                define_metric = getattr(wandb, "define_metric", None)
+                if define_metric is not None:
+                    try:
+                        define_metric("episode/*", step_metric="global_episode")
+                        define_metric("eval/*", step_metric="global_episode")
+                    except Exception:  # pylint: disable=broad-exception-caught
+                        pass
             self._wandb_initialized = True
             logger.info("Weights & Biases initialized successfully.")
         except ImportError:
@@ -104,6 +112,8 @@ class CurriculumTelemetryManager:
                 wandb_data = {
                     "stage": stage,
                     "success_rate": success_rate,
+                    "global_episode": int(glob_ep),
+                    "total_timesteps": int(step),
                     **metrics,
                 }
                 for k, v in hyperparameters.items():
@@ -111,6 +121,45 @@ class CurriculumTelemetryManager:
                         wandb_data[f"hyperparam/{k}"] = v
                 log_metrics = getattr(wandb, "log", None)
                 if log_metrics is not None:
-                    log_metrics(wandb_data, step=step)
+                    target_step = int(glob_ep)
+                    if self._last_wandb_step is not None and target_step <= self._last_wandb_step:
+                        target_step = self._last_wandb_step + 1
+                    log_metrics(wandb_data, step=target_step)
+                    self._last_wandb_step = target_step
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 logger.error("Failed to log to W&B: %s", exc)
+
+    def log_episode(
+        self,
+        episode: int,
+        stage: int,
+        reward: float,
+        penned: int,
+        total_sheep: int,
+        success: bool,
+        status: str = "UNKNOWN",
+        seed: int | None = None,
+    ) -> None:
+        """Log per-episode metrics to Weights & Biases and local history."""
+        if self._wandb_initialized:
+            try:
+                import wandb
+                wandb_data = {
+                    "episode/reward": float(reward),
+                    "episode/penned": int(penned),
+                    "episode/total_sheep": int(total_sheep),
+                    "episode/success": 1.0 if success else 0.0,
+                    "episode/stage": int(stage),
+                    "global_episode": int(episode),
+                }
+                if seed is not None:
+                    wandb_data["episode/seed"] = int(seed)
+                log_metrics = getattr(wandb, "log", None)
+                if log_metrics is not None:
+                    target_step = int(episode)
+                    if self._last_wandb_step is not None and target_step <= self._last_wandb_step:
+                        target_step = self._last_wandb_step + 1
+                    log_metrics(wandb_data, step=target_step)
+                    self._last_wandb_step = target_step
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                logger.error("Failed to log episode to W&B: %s", exc)

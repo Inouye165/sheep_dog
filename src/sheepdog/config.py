@@ -9,6 +9,24 @@ from typing import Any
 from sheepdog.policies.base import PolicyMode, PolicyType, TrainerType
 
 
+def resolve_workspace_path(path_str: str | Path) -> Path:
+    """Resolve relative workspace path against repository root if available."""
+    p = Path(path_str)
+    if p.is_absolute():
+        return p
+    cwd = Path.cwd()
+    if (cwd / "pyproject.toml").exists():
+        return (cwd / p).resolve()
+    for parent in cwd.parents:
+        if (parent / "pyproject.toml").exists():
+            return (parent / p).resolve()
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    if (repo_root / "pyproject.toml").exists():
+        return (repo_root / p).resolve()
+    return (cwd / p).resolve()
+
+
+
 @dataclass(frozen=True, slots=True)
 class EnvironmentConfig:
     """Grid, entity, and termination settings."""

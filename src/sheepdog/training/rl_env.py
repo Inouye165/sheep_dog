@@ -47,6 +47,7 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
         self._pending_actions: list[str] = []
         self._current_dog_index = 0
         self._latest_seed = config.training.train_seed
+        self._episode_reward = 0.0
         # Scenario sampler for mixing difficult training scenarios
         self._scenario_sampler = ScenarioSampler(
             config.training,
@@ -110,6 +111,7 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
         self._latest_seed = int(seed)
         self._pending_actions = []
         self._current_dog_index = 0
+        self._episode_reward = 0.0
 
         # Use scenario sampler if scenario training is enabled
         if self.config.training.scenario_training_enabled:
@@ -208,6 +210,7 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
         if len(self._pending_actions) >= self._environment.dog_count:
             snapshot, breakdown = self._environment.step(self._pending_actions)
             reward = float(breakdown.total)
+            self._episode_reward += reward
             terminated = bool(snapshot.success or snapshot.stopped)
             truncated = bool(snapshot.timeout)
             info = self._info()
@@ -217,11 +220,25 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
             self._current_dog_index = 0
 
             # Increment similarity counters if episode finished
-            if (terminated or truncated) and self._current_episode_similarity_match is not None:
-                self._similarity_episodes[self._current_episode_similarity_match] += 1
-                if snapshot.success:
-                    self._similarity_successes[self._current_episode_similarity_match] += 1
-                self._current_episode_similarity_match = None
+            if terminated or truncated:
+                penned = getattr(snapshot, "penned_count", sum(1 for s in snapshot.sheep if getattr(s, "penned", False)))
+                total_sheep = len(snapshot.sheep)
+                status_str = "SUCCESS" if snapshot.success else ("TIMEOUT" if snapshot.timeout else "STOPPED")
+                info["episode"] = {
+                    "r": float(self._episode_reward),
+                    "l": int(getattr(snapshot, "step", 0)),
+                    "success": bool(snapshot.success),
+                    "penned": int(penned),
+                    "total_sheep": int(total_sheep),
+                    "status": status_str,
+                    "seed": int(self._latest_seed),
+                }
+
+                if self._current_episode_similarity_match is not None:
+                    self._similarity_episodes[self._current_episode_similarity_match] += 1
+                    if snapshot.success:
+                        self._similarity_successes[self._current_episode_similarity_match] += 1
+                    self._current_episode_similarity_match = None
         else:
             info = self._info(action_mask=mask)
             self._current_dog_index += 1

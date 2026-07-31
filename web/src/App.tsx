@@ -179,6 +179,8 @@ export function App() {
   const [trainingDebugRewardBreakdown, setTrainingDebugRewardBreakdown] = useState(false);
   const [playbackFastMode, setPlaybackFastMode] = useState(false);
   const [trainingStatus, setTrainingStatus] = useState<TrainingStatus | null>(null);
+  // Ref so the recursive setTimeout always reads the current delay without a stale closure.
+  const pollDelayRef = useRef<number>(500);
   const [clearingTraining, setClearingTraining] = useState(false);
   const [isStartingTraining, setIsStartingTraining] = useState(false);
   const [runningCurrentReplay, setRunningCurrentReplay] = useState(false);
@@ -504,8 +506,18 @@ export function App() {
     };
   }
 
-  function applyCheckpointIndex(index: CheckpointIndex | null) {
-    setCheckpointIndex(index);
+  const applyCheckpointIndex = useCallback((index: CheckpointIndex | null) => {
+    setCheckpointIndex((prev) => {
+      if (!prev && !index) return null;
+      if (prev && index && prev.checkpoints.length === index.checkpoints.length) {
+        const prevLast = prev.checkpoints[prev.checkpoints.length - 1]?.checkpoint_episode;
+        const indexLast = index.checkpoints[index.checkpoints.length - 1]?.checkpoint_episode;
+        if (prevLast === indexLast) {
+          return prev;
+        }
+      }
+      return index;
+    });
     if (!index) {
       setReplay(null);
       setSelectedCheckpointEpisode(null);
@@ -519,53 +531,64 @@ export function App() {
     setSelectedCheckpointEpisode(checkpointEpisode);
     const seed = latestCheckpoint?.records?.[0]?.seed ?? index.latest?.records?.[0]?.seed ?? null;
     setSelectedSeed(seed);
-  }
-
-  useEffect(() => {
-    let active = true;
-    void (async () => {
-      try {
-        const index = await loadCheckpointIndex();
-        if (!active) {
-          return;
-        }
-        applyCheckpointIndex(index);
-        await refreshScenarioIndex();
-      } catch (loadError) {
-        setError(loadError instanceof Error ? loadError.message : "Unable to load exported checkpoint data.");
-      } finally {
-        if (active) {
-          setLoading(false);
-        }
-      }
-    })();
-    return () => {
-      active = false;
-    };
   }, []);
 
   useEffect(() => {
-    if (!trainingStatus || checkpointIndex !== null) {
+    if (trainingStatus !== null && loading) {
+      setLoading(false);
+    }
+  }, [trainingStatus, loading]);
+
+  useEffect(() => {
+    if (!trainingStatus || trainingStatus.phase === "offline" || trainingStatus.error) {
       return;
     }
+    const isRunning = trainingStatus.running;
+    const latestCpEp = trainingStatus.latest_checkpoint_episode;
+    const currentMaxEp = checkpointIndex?.checkpoints?.length
+      ? checkpointIndex.checkpoints[checkpointIndex.checkpoints.length - 1].checkpoint_episode
+      : -1;
+
+    const shouldFetch =
+      checkpointIndex === null ||
+      (latestCpEp !== null && latestCpEp > currentMaxEp);
+
+    if (!shouldFetch && !isRunning) {
+      return;
+    }
+
     let active = true;
-    void (async () => {
+    const fetchIndex = async () => {
       try {
+        console.debug("[Sheepdog API] Server online; updating checkpoint index...");
         const index = await loadCheckpointIndex();
-        if (!active || !index) {
-          return;
-        }
+        if (!active || !index) return;
         applyCheckpointIndex(index);
         await refreshScenarioIndex();
         setError(null);
-      } catch {
-        // Silent retry on connection refused / vite 500
+      } catch (err) {
+        console.debug("[Sheepdog API] Checkpoint index update deferred:", err);
       }
-    })();
+    };
+
+    if (shouldFetch) {
+      void fetchIndex();
+    }
+
+    if (isRunning) {
+      const intervalId = setInterval(() => {
+        void fetchIndex();
+      }, 3000);
+      return () => {
+        active = false;
+        clearInterval(intervalId);
+      };
+    }
+
     return () => {
       active = false;
     };
-  }, [trainingStatus, checkpointIndex, applyCheckpointIndex]);
+  }, [trainingStatus?.running, trainingStatus?.phase, trainingStatus?.error, trainingStatus?.latest_checkpoint_episode, checkpointIndex, applyCheckpointIndex]);
 
   useEffect(() => {
     if (activeTab !== "network") {
@@ -590,24 +613,20 @@ export function App() {
   }, [activeTab]);
 
   useEffect(() => {
+    if (!trainingStatus || trainingStatus.phase === "offline") {
+      return;
+    }
     let active = true;
     void (async () => {
       try {
         const hyperparams = await loadHyperparams();
-        if (active) {
+        if (active && hyperparams?.environment) {
           setScenarioPersonalityStrength(hyperparams.environment.sheep_personality_strength);
         }
       } catch {
         // Keep default when hyperparams are unavailable.
       }
     })();
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    let active = true;
     void (async () => {
       try {
         const config = await loadEffectiveConfig();
@@ -623,166 +642,138 @@ export function App() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [trainingStatus?.phase]);
 
+  // Recursive-setTimeout polling: avoids stale-closure trap of setInterval.
+  // pollDelayRef is a plain ref so every setTimeout callback reads the live delay
+  // at the moment it fires — no re-render cycle required.
   useEffect(() => {
     let active = true;
-    // Exponential-backoff polling: 500 ms when connected, capping at 8 s when
-    // the backend is unreachable.  Resets to fast-poll the moment it reconnects.
-    const POLL_FAST = 500;
-    const POLL_MAX = 8_000;
-    let pollDelay = POLL_FAST;
-    let timerId: number | null = null;
-
-    const applyStatus = (status: TrainingStatus) => {
-      if (!active) return;
-      pollDelay = POLL_FAST; // reconnected — go back to fast poll
-      setTrainingStatus((previous) => mergeTrainingStatus(previous, status));
-    };
-
-    const handleError = () => {
-      if (!active) return;
-      setTrainingStatus((prev) => {
-        const base = prev ?? {
-          running: false,
-          fast_mode: false,
-          enable_instinct_rewards: false,
-          debug_reward_breakdown: false,
-          curriculum_stage: 0,
-          requested_episodes: 0,
-          completed_episodes: 0,
-          batch_total_episodes: 0,
-          batch_completed_episodes: 0,
-          total_episodes_trained: 0,
-          stage_history: {},
-          grand_total_episodes: 0,
-          current_episode: null,
-          checkpoint_episode: null,
-          latest_checkpoint_episode: null,
-          latest_seed: null,
-          latest_replay_path: null,
-          best_score: null,
-          latest_success_rate: null,
-          latest_avg_sheep_penned: null,
-          latest_avg_reward: null,
-          latest_timeout_rate: null,
-          latest_stopped_rate: null,
-          latest_avg_no_progress_steps: null,
-          latest_avg_distance_to_pen: null,
-          latest_avg_flock_spread: null,
-          latest_avg_farthest_distance_to_pen: null,
-          latest_avg_farthest_distance_to_flock_center: null,
-          phase: "offline",
-          message: "Server unreachable",
-          error: "Training server is unreachable. It may have crashed or stopped.",
-          error_type: "Connection Error",
-          starting_episode: null,
-        };
-        return {
-          ...base,
-          running: false,
-          phase: "offline",
-          message: "Server unreachable",
-          error: "Training server is unreachable. It may have crashed or stopped.",
-          error_type: "Connection Error",
-        };
-      });
-      // Back off: double the delay, cap at POLL_MAX
-      pollDelay = Math.min(pollDelay * 2, POLL_MAX);
-    };
+    let timerId: ReturnType<typeof setTimeout> | null = null;
+    // Track the very first fetch so we can apply initial-load stage adoption logic.
+    let isInitialFetch = true;
 
     const scheduleNext = () => {
       if (!active) return;
-      timerId = window.setTimeout(() => {
-        void (async () => {
-          try {
-            const status = await loadTrainingStatus();
-            applyStatus(status);
-            // Guard: only overwrite the UI stage while a batch is in flight.
-            // The running→idle useEffect handles locking the stage once done.
-            if (status.running) {
-              syncTrainingStageFromStatus(status);
-            }
-          } catch {
-            handleError();
-          } finally {
-            scheduleNext();
-          }
-        })();
-      }, pollDelay);
+      const delay = pollDelayRef.current;
+      console.log(`[Polling] Next status check in ${delay}ms.`);
+      timerId = setTimeout(() => {
+        void poll();
+      }, delay);
     };
 
-    // Initial fetch (no delay)
-    void (async () => {
+    const poll = async () => {
+      if (!active) return;
+      const currentDelay = pollDelayRef.current;
+      console.log(`[Polling] Attempting to fetch status... Current delay: ${currentDelay}ms`);
+      const firstFetch = isInitialFetch;
+      isInitialFetch = false;
       try {
         const status = await loadTrainingStatus();
-        if (active) {
-          applyStatus(status);
-          // Adopt the server's stage on initial load when training is running,
-          // or when the server reports a HIGHER stage than localStorage, or when
-          // localStorage holds a stale stage beyond a valid single-step promotion.
-          // Never overwrite a local stage that is exactly active + 1 so a pending
-          // Promote click is preserved.
-          const localStage = parseInt(
-            localStorage.getItem("sheepdog_curriculum_stage") ?? "0",
-            10,
-          );
+        if (!active) return;
+        if (pollDelayRef.current !== 500) {
+          console.log("[Polling] Server back online — resetting poll delay to 500ms.");
+          pollDelayRef.current = 500;
+        }
+        setTrainingStatus((previous) => mergeTrainingStatus(previous, status));
+        if (status.running) {
+          syncTrainingStageFromStatus(status);
+        } else if (firstFetch) {
+          // On the very first load, adopt the server's curriculum stage if it is
+          // higher than what localStorage holds (catches the case where the user
+          // has manually promoted in a previous session but the server has since
+          // advanced further), or if localStorage holds a stage beyond the valid
+          // single-step-ahead promote window.
+          const localStage = parseInt(localStorage.getItem("sheepdog_curriculum_stage") ?? "0", 10);
           const serverStage = status.curriculum_stage;
           const maxPromoteStage = (status.max_curriculum_stage ?? serverStage ?? 1) + 1;
-          if (
-            status.running ||
-            (
-              !manualStageOverrideRef.current &&
-              serverStage != null &&
-              (serverStage > localStage || localStage > maxPromoteStage)
-            )
-          ) {
+          if (!manualStageOverrideRef.current && serverStage != null && (serverStage > localStage || localStage > maxPromoteStage)) {
+            console.log(`[Polling] Initial load: adopting server stage ${serverStage} (local was ${localStage}).`);
             syncTrainingStageFromStatus(status);
           }
         }
       } catch {
-        handleError();
+        if (!active) return;
+        if (pollDelayRef.current !== 5000) {
+          console.error("[Polling] Connection failed, switching to backoff delay of 5000ms.");
+          pollDelayRef.current = 5000;
+        }
+        setTrainingStatus((prev) => {
+          const base = prev ?? {
+            running: false,
+            fast_mode: false,
+            enable_instinct_rewards: false,
+            debug_reward_breakdown: false,
+            curriculum_stage: 0,
+            requested_episodes: 0,
+            completed_episodes: 0,
+            batch_total_episodes: 0,
+            batch_completed_episodes: 0,
+            total_episodes_trained: 0,
+            stage_history: {},
+            grand_total_episodes: 0,
+            current_episode: null,
+            checkpoint_episode: null,
+            latest_checkpoint_episode: null,
+            latest_seed: null,
+            latest_replay_path: null,
+            best_score: null,
+            latest_success_rate: null,
+            latest_avg_sheep_penned: null,
+            latest_avg_reward: null,
+            latest_timeout_rate: null,
+            latest_stopped_rate: null,
+            latest_avg_no_progress_steps: null,
+            latest_avg_distance_to_pen: null,
+            latest_avg_flock_spread: null,
+            latest_avg_farthest_distance_to_pen: null,
+            latest_avg_farthest_distance_to_flock_center: null,
+            phase: "offline",
+            message: "Server unreachable",
+            error: "Training server is unreachable. It may have crashed or stopped.",
+            error_type: "Connection Error",
+            starting_episode: null,
+          };
+          return {
+            ...base,
+            running: false,
+            phase: "offline",
+            message: "Server unreachable",
+            error: "Training server is unreachable. It may have crashed or stopped.",
+            error_type: "Connection Error",
+          };
+        });
       } finally {
         scheduleNext();
       }
-    })();
+    };
 
     const refreshNow = () => {
-      if (document.visibilityState !== "visible") {
-        return;
+      if (document.visibilityState === "visible") {
+        // Cancel pending timer and fire immediately.
+        if (timerId !== null) { clearTimeout(timerId); timerId = null; }
+        void poll();
       }
-      // Cancel the pending scheduled poll and fire immediately.
-      if (timerId !== null) {
-        window.clearTimeout(timerId);
-        timerId = null;
-      }
-      void (async () => {
-        try {
-          const status = await loadTrainingStatus();
-          applyStatus(status);
-          if (status.running) {
-            syncTrainingStageFromStatus(status);
-          }
-        } catch {
-          handleError();
-        } finally {
-          scheduleNext();
-        }
-      })();
     };
+
+    // Kick off immediately on mount — no initial delay.
+    console.log("[Polling] Status polling started.");
+    void poll();
+
     document.addEventListener("visibilitychange", refreshNow);
     window.addEventListener("focus", refreshNow);
 
     return () => {
       active = false;
-      if (timerId !== null) window.clearTimeout(timerId);
+      if (timerId !== null) clearTimeout(timerId);
       document.removeEventListener("visibilitychange", refreshNow);
       window.removeEventListener("focus", refreshNow);
+      console.log("[Polling] Status polling stopped.");
     };
   }, [syncTrainingStageFromStatus]);
 
   useEffect(() => {
-    if (!trainingStatus?.running || trainingStatus.latest_checkpoint_episode === null) {
+    if (!trainingStatus?.running || trainingStatus.phase === "offline" || trainingStatus.latest_checkpoint_episode === null) {
       return;
     }
 
@@ -1007,10 +998,13 @@ export function App() {
 
   async function handleRefreshAllData() {
     try {
+      console.debug("[Sheepdog API] Refreshing all data...");
       const status = await loadTrainingStatus();
       setTrainingStatus(status);
-      const index = await loadCheckpointIndex();
-      applyCheckpointIndex(index);
+      if (status && status.phase !== "offline") {
+        const index = await loadCheckpointIndex();
+        applyCheckpointIndex(index);
+      }
     } catch (err) {
       console.error("Failed to refresh training data:", err);
     }
