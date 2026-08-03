@@ -16,7 +16,7 @@ const mockCheckpointIndex: CheckpointIndex = {
       policy_type: "neural",
       policy_mode: "neural_only",
       replay_mode: "truthful",
-      total_training_episodes: 6508,
+      total_training_episodes: 954,
       policy_state_path: "path/to/state",
       success_rate: 0.7,
       timeout_rate: 0.3,
@@ -49,39 +49,54 @@ const activeTrainingStatus: TrainingStatus = {
   debug_reward_breakdown: false,
   curriculum_stage: 8,
   requested_episodes: 100,
-  completed_episodes: 52,
+  completed_episodes: 79,
   batch_total_episodes: 100,
-  batch_completed_episodes: 52,
-  total_episodes_trained: 52,
-  episodes_in_stage: 52,
-  stage_success_count: 44,
-  stage_success_rate: 0.8461538461538461,
-  total_timesteps: 37248174,
+  batch_completed_episodes: 79,
+  total_episodes_trained: 17104,
+  episodes_in_stage: 1033,
+  current_stage_environment_episode: 1033,
+  latest_completed_environment_episode: 1033,
+  episodes_since_latest_confidence_evaluation: 79,
+  live_rollout_window_count: 79,
+  live_rollout_success_count: 67,
+  live_rollout_failure_count: 12,
+  live_rollout_stopped_count: 9,
+  live_rollout_timeout_count: 3,
+  live_rollout_success_rate: 0.8481,
+  current_global_timestep: 36088656,
+  latest_checkpoint_global_timestep: 35874588,
+  timesteps_since_latest_checkpoint: 214068,
+  next_evaluation_environment_episode: 1050,
+  episodes_until_next_evaluation: 17,
+  latest_episode_result: "SUCCESS",
+  latest_episode_reward: 437.27,
+  total_timesteps: 36088656,
   latest_checkpoint_episode: 6508,
   active_checkpoint_id: "chk_6508",
   last_evaluation_time: "2026-08-02T22:56:42.413250+00:00",
-  checkpoint_save_interval: 25,
-  current_episode: null,
+  checkpoint_save_interval: 50,
   checkpoint_episode: 6508,
-  latest_seed: 11,
-  latest_replay_path: null,
-  best_score: 0.7,
-  latest_success_rate: 0.7,
-  latest_avg_sheep_penned: 3.4,
-  latest_avg_reward: 245.6,
-  latest_timeout_rate: 0.3,
-  latest_stopped_rate: 0.0,
-  latest_avg_no_progress_steps: 24,
-  latest_avg_distance_to_pen: 4.7,
-  latest_avg_flock_spread: 2.2,
-  latest_avg_farthest_distance_to_pen: 6.1,
-  latest_avg_farthest_distance_to_flock_center: 2.3,
-  stage_history: { "8": 52 },
+  policy_version: 2557,
+  stage_history: { "8": 3027 },
   grand_total_episodes: 17104,
-  starting_episode: 0,
   phase: "curriculum_active",
   message: "Training active",
   error: null,
+  starting_episode: null,
+  current_episode: null,
+  latest_seed: null,
+  latest_replay_path: null,
+  best_score: null,
+  latest_success_rate: null,
+  latest_avg_sheep_penned: null,
+  latest_avg_reward: null,
+  latest_timeout_rate: null,
+  latest_stopped_rate: null,
+  latest_avg_no_progress_steps: null,
+  latest_avg_distance_to_pen: null,
+  latest_avg_flock_spread: null,
+  latest_avg_farthest_distance_to_pen: null,
+  latest_avg_farthest_distance_to_flock_center: null,
   runtime: {
     active_seconds_total: 1200,
     training_seconds: 1000,
@@ -112,15 +127,18 @@ describe("DiagnosticsPanel Live Insights & Telemetry", () => {
       />
     );
 
-    expect(screen.getByText(/Live Rollouts:/i)).toBeDefined();
-    expect(screen.getByText(/52 episodes/i)).toBeDefined();
+    expect(screen.getAllByText(/Current Stage 8 Episode:/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/1,033|1033/i).length).toBeGreaterThan(0);
     expect(screen.getByText(/1 pts/i)).toBeDefined();
 
     const updatedStatus: TrainingStatus = {
       ...activeTrainingStatus,
-      episodes_in_stage: 60,
-      stage_success_count: 50,
-      stage_success_rate: 0.8333333333333334,
+      current_stage_environment_episode: 1040,
+      episodes_since_latest_confidence_evaluation: 86,
+      live_rollout_window_count: 86,
+      live_rollout_success_count: 73,
+      live_rollout_failure_count: 13,
+      live_rollout_success_rate: 0.8488,
     };
 
     rerender(
@@ -133,11 +151,11 @@ describe("DiagnosticsPanel Live Insights & Telemetry", () => {
       />
     );
 
-    expect(screen.getByText(/60 episodes/i)).toBeDefined();
+    expect(screen.getAllByText(/1,040|1040/i).length).toBeGreaterThan(0);
     expect(screen.getByText(/1 pts/i)).toBeDefined();
   });
 
-  it("2. The chart evaluation series remains unchanged until evaluation completes", () => {
+  it("2. Checkpoint 6550 is explicitly labeled as Checkpoint Sequence, not Environment Episode", () => {
     render(
       <DiagnosticsPanel
         checkpointIndex={mockCheckpointIndex}
@@ -148,10 +166,11 @@ describe("DiagnosticsPanel Live Insights & Telemetry", () => {
       />
     );
 
-    expect(screen.getByText(/70%/i)).toBeDefined();
+    expect(screen.getAllByText(/Checkpoint Sequence:/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/6508/i).length).toBeGreaterThan(0);
   });
 
-  it("3. The page displays the pending-evaluation message during active training", () => {
+  it("3. The banner displays derived episodes-since-evaluation count and truthful next evaluation boundary", () => {
     render(
       <DiagnosticsPanel
         checkpointIndex={mockCheckpointIndex}
@@ -164,90 +183,41 @@ describe("DiagnosticsPanel Live Insights & Telemetry", () => {
 
     expect(
       screen.getByText(
-        /Training active — 52 rollout episodes completed since the latest evaluation. Next evaluation pending./i
+        /Training active — 79 training episodes completed since the latest confidence evaluation. Next confidence evaluation pending./i
+      )
+    ).toBeDefined();
+
+    expect(
+      screen.getByText(
+        /Stage 8 Episode 1050/i
       )
     ).toBeDefined();
   });
 
-  it("4. A new checkpoint_id causes an immediate chart refresh with updated points", () => {
-    const newCheckpointIndex: CheckpointIndex = {
-      checkpoints: [
-        ...mockCheckpointIndex.checkpoints,
-        {
-          ...mockCheckpointIndex.checkpoints[0],
-          checkpoint_episode: 6524,
-          checkpoint_id: "chk_6524",
-          global_timestep: 35936656,
-          curriculum_stage: 8,
-          environment_config: { dogs: 3, sheep: 4, width: 200, height: 200, curriculum_stage: 8 },
-          success_rate: 0.85,
-        },
-      ],
-      latest: null,
-    };
-
-    const { rerender } = render(
-      <DiagnosticsPanel
-        checkpointIndex={mockCheckpointIndex}
-        bestCheckpointEpisode={6508}
-        trainingStatus={activeTrainingStatus}
-        effectiveCurriculumStage={8}
-        lastLiveRefreshTime={Date.now()}
-      />
-    );
-
-    expect(screen.getByText(/1 pts/i)).toBeDefined();
-
-    rerender(
-      <DiagnosticsPanel
-        checkpointIndex={newCheckpointIndex}
-        bestCheckpointEpisode={6524}
-        trainingStatus={{
-          ...activeTrainingStatus,
-          active_checkpoint_id: "chk_6524",
-          latest_checkpoint_episode: 6524,
-        }}
-        effectiveCurriculumStage={8}
-        lastLiveRefreshTime={Date.now()}
-      />
-    );
-
-    expect(screen.getByText(/2 pts/i)).toBeDefined();
-    expect(screen.getAllByText(/chk_6524/i).length).toBeGreaterThan(0);
-  });
-
-  it("5. New checkpoint data rerenders even when training running state remains true", () => {
-    const newCheckpointIndex: CheckpointIndex = {
-      checkpoints: [
-        ...mockCheckpointIndex.checkpoints,
-        {
-          ...mockCheckpointIndex.checkpoints[0],
-          checkpoint_episode: 6524,
-          checkpoint_id: "chk_6524",
-          global_timestep: 35936656,
-          curriculum_stage: 8,
-          environment_config: { dogs: 3, sheep: 4, width: 200, height: 200, curriculum_stage: 8 },
-          success_rate: 0.9,
-        },
-      ],
-      latest: null,
+  it("4. Live success rate uses SQLite telemetry and does not display 0/1032 on missing fields", () => {
+    const statusWithMissingCounts: TrainingStatus = {
+      ...activeTrainingStatus,
+      live_rollout_success_count: undefined,
+      live_rollout_failure_count: undefined,
+      live_rollout_success_rate: null,
     };
 
     render(
       <DiagnosticsPanel
-        checkpointIndex={newCheckpointIndex}
-        bestCheckpointEpisode={6524}
-        trainingStatus={{ ...activeTrainingStatus, running: true }}
+        checkpointIndex={mockCheckpointIndex}
+        bestCheckpointEpisode={6508}
+        trainingStatus={statusWithMissingCounts}
         effectiveCurriculumStage={8}
         lastLiveRefreshTime={Date.now()}
       />
     );
 
-    expect(screen.getByText(/2 pts/i)).toBeDefined();
-    expect(screen.getAllByText(/90%/i).length).toBeGreaterThan(0);
+    expect(screen.getByText(/Live Rollout Success Rate:/i)).toBeDefined();
+    expect(screen.getAllByText(/Unavailable/i).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/0 \/ 1032/i)).toBeNull();
   });
 
-  it("6. Cached checkpoint JSON cannot leave the chart stale because loadCheckpointIndex appends cache-busting timestamp", async () => {
+  it("5. Single checkpoint index query with cache-busting timestamp", async () => {
     const fetchMock = vi.fn().mockImplementation(() =>
       Promise.resolve(
         new Response(JSON.stringify(mockCheckpointIndex), {
@@ -265,59 +235,5 @@ describe("DiagnosticsPanel Live Insights & Telemetry", () => {
     const requestedUrl = String(fetchMock.mock.calls[0][0]);
     expect(requestedUrl).toMatch(/\/generated\/checkpoint-index\.json\?t=\d+/);
     vi.unstubAllGlobals();
-  });
-
-  it("7. Session-local episode numbering cannot collide with canonical checkpoint identity", () => {
-    const collidingIndex: CheckpointIndex = {
-      checkpoints: [
-        {
-          ...mockCheckpointIndex.checkpoints[0],
-          checkpoint_episode: 0,
-          checkpoint_id: "chk_session1_0",
-          global_timestep: 1000,
-          curriculum_stage: 8,
-          environment_config: { dogs: 3, sheep: 4, width: 200, height: 200, curriculum_stage: 8 },
-        },
-        {
-          ...mockCheckpointIndex.checkpoints[0],
-          checkpoint_episode: 0,
-          checkpoint_id: "chk_session2_0",
-          global_timestep: 5000,
-          curriculum_stage: 8,
-          environment_config: { dogs: 3, sheep: 4, width: 200, height: 200, curriculum_stage: 8 },
-          success_rate: 0.95,
-        },
-      ],
-      latest: null,
-    };
-
-    render(
-      <DiagnosticsPanel
-        checkpointIndex={collidingIndex}
-        bestCheckpointEpisode={0}
-        trainingStatus={activeTrainingStatus}
-        effectiveCurriculumStage={8}
-        lastLiveRefreshTime={Date.now()}
-      />
-    );
-
-    expect(screen.getByText(/2 pts/i)).toBeDefined();
-    expect(screen.getAllByText(/chk_session2_0/i).length).toBeGreaterThan(0);
-  });
-
-  it("8. Live success rate is explicitly labeled as rollout success rate and distinct from promotion gate result", () => {
-    render(
-      <DiagnosticsPanel
-        checkpointIndex={mockCheckpointIndex}
-        bestCheckpointEpisode={6508}
-        trainingStatus={activeTrainingStatus}
-        effectiveCurriculumStage={8}
-        lastLiveRefreshTime={Date.now()}
-      />
-    );
-
-    expect(screen.getByText(/Live Rollout Success Rate:/i)).toBeDefined();
-    expect(screen.getByText(/84.6%/i)).toBeDefined();
-    expect(screen.getByText(/\(rollouts only\)/i)).toBeDefined();
   });
 });

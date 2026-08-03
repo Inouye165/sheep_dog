@@ -25,9 +25,7 @@ from sheepdog.config import (
     TrainingConfig,
     resolve_workspace_path,
 )
-from sheepdog.curriculum import apply_training_profile
-from sheepdog.curriculum import available_stages
-from sheepdog.curriculum import validate_curriculum_stage
+from sheepdog.curriculum import apply_training_profile, available_stages, validate_curriculum_stage
 from sheepdog.environment import ACTION_ORDER, SheepdogEnvironment
 from sheepdog.evaluation.scenario_evaluator import (
     config_for_scenario,
@@ -41,8 +39,8 @@ from sheepdog.policies.factory import load_playable_policy
 from sheepdog.policies.heuristic import InstinctOnlyPolicy
 from sheepdog.training.factory import create_trainer
 from sheepdog.training.runtime import TrainingRuntimeTracker
-from sheepdog.training.trainer import Trainer
 from sheepdog.training.telemetry import CurriculumTelemetryManager
+from sheepdog.training.trainer import Trainer
 
 
 @dataclass(frozen=True, slots=True)
@@ -1283,16 +1281,17 @@ class TrainingManager:
             pass
 
     def _resolve_precedence_state(self, output_root: Path) -> dict[str, Any]:
-        import json
         import datetime
+        import json
         import re
+        from dataclasses import asdict
+
         from sheepdog.checkpoints.store import (
-            get_observation_schema_hash,
-            get_action_space_hash,
             compute_env_config_hash,
+            get_action_space_hash,
+            get_observation_schema_hash,
         )
         from sheepdog.config import LabConfig
-        from dataclasses import asdict
 
         config = LabConfig()
         try:
@@ -1348,6 +1347,7 @@ class TrainingManager:
         def is_mock_load():
             try:
                 from unittest.mock import Mock
+
                 from sb3_contrib import MaskablePPO
                 return isinstance(MaskablePPO.load, Mock)
             except Exception:
@@ -1488,7 +1488,7 @@ class TrainingManager:
         run_state_path = output_root / "run-state.json"
         if run_state_path.exists():
             try:
-                with open(run_state_path, "r", encoding="utf-8") as f:
+                with open(run_state_path, encoding="utf-8") as f:
                     data = json.load(f)
                 
                 if data.get("observation_schema_hash") != obs_hash:
@@ -1864,7 +1864,7 @@ class TrainingManager:
         try:
             state_path = output_root / Trainer.STATE_FILENAME
             if state_path.exists():
-                with open(state_path, "r", encoding="utf-8") as f:
+                with open(state_path, encoding="utf-8") as f:
                     state_data = json.load(f)
                     if isinstance(state_data, dict):
                         for key in ("run_id", "parent_run_id", "parent_checkpoint_id", "active_model_source",
@@ -1908,6 +1908,115 @@ class TrainingManager:
 
         return status
 
+    def _get_latest_confidence_info(self, stage: int) -> tuple[int | None, int | None]:
+        web_dir = Path(LabConfig().training.web_export_dir)
+        index_path = web_dir / "checkpoint-index.json"
+        latest_eval_env_ep = None
+        latest_eval_ts = None
+        if index_path.exists():
+            try:
+                with index_path.open("r", encoding="utf-8") as f:
+                    payload = json.load(f)
+                checkpoints = payload.get("checkpoints", [])
+                stage_cps = [c for c in checkpoints if c.get("curriculum_stage") == stage]
+                if stage_cps:
+                    latest_cp = stage_cps[-1]
+                    latest_eval_env_ep = (
+                        latest_cp.get("total_training_episodes")
+                        or latest_cp.get("completed_environment_episodes")
+                        or latest_cp.get("checkpoint_episode")
+                    )
+                    latest_eval_ts = latest_cp.get("global_timestep")
+            except Exception:
+                pass
+        return latest_eval_env_ep, latest_eval_ts
+
+    def _enrich_status_with_telemetry(self, status: dict[str, Any]) -> dict[str, Any]:
+        stg = status.get("curriculum_stage") or 8
+        latest_conf_env_ep, latest_conf_ts = self._get_latest_confidence_info(stg)
+        output_root = Path(LabConfig().training.output_dir)
+        db_path = output_root / "training-telemetry.sqlite"
+
+        t_summary = None
+        if db_path.exists():
+            try:
+                from sheepdog.training.episode_store import get_episode_store
+                store = get_episode_store(db_path)
+                t_summary = store.get_telemetry_summary(stage=stg, after_env_ep=latest_conf_env_ep)
+            except Exception as exc:
+                logger.warning("Failed to retrieve episode store telemetry summary: %s", exc)
+
+        if not t_summary:
+            t_summary = {
+                "window_count": status.get("live_rollout_window_count", 0),
+                "success_count": status.get("live_rollout_success_count", 0),
+                "failure_count": status.get("live_rollout_failure_count", 0),
+                "stopped_count": status.get("live_rollout_stopped_count", 0),
+                "timeout_count": status.get("live_rollout_timeout_count", 0),
+                "success_rate": status.get("live_rollout_success_rate"),
+                "current_stage_environment_episode": status.get("current_stage_environment_episode"),
+                "latest_completed_environment_episode": status.get("latest_completed_environment_episode"),
+                "latest_completed_episode_id": status.get("latest_completed_episode_id"),
+                "latest_episode_completed_at": status.get("latest_episode_completed_at"),
+                "latest_episode_reward": status.get("latest_episode_reward"),
+                "latest_episode_result": status.get("latest_episode_result"),
+                "dropped_count": 0,
+                "error_count": 0,
+            }
+
+        state_path = output_root / Trainer.STATE_FILENAME
+        state_data = _load_json(state_path) or {}
+        state_ts = state_data.get("total_timesteps") if isinstance(state_data, dict) else None
+
+        current_gt = (
+            status.get("current_global_timestep")
+            or status.get("total_timesteps")
+            or state_ts
+            or latest_conf_ts
+            or 0
+        )
+        latest_cp_gt = latest_conf_ts or status.get("latest_checkpoint_global_timestep") or current_gt
+        timesteps_since_latest_cp = max(0, current_gt - latest_cp_gt) if (current_gt > 0 and latest_cp_gt > 0) else 0
+
+        save_interval = status.get("checkpoint_save_interval") or 50
+        current_env_ep = (
+            t_summary.get("current_stage_environment_episode")
+            or status.get("current_stage_environment_episode")
+            or status.get("completed_environment_episodes")
+            or 0
+        )
+        if current_env_ep > 0:
+            import math
+            next_eval_env_ep = math.ceil((current_env_ep + 1) / save_interval) * save_interval
+        else:
+            next_eval_env_ep = save_interval
+        episodes_until_next_eval = max(1, next_eval_env_ep - current_env_ep)
+
+        status["current_stage_environment_episode"] = current_env_ep
+        status["latest_completed_environment_episode"] = t_summary.get("latest_completed_environment_episode")
+        status["latest_completed_episode_id"] = t_summary.get("latest_completed_episode_id")
+        status["live_rollout_window_count"] = t_summary.get("window_count", 0)
+        status["live_rollout_success_count"] = t_summary.get("success_count", 0)
+        status["live_rollout_failure_count"] = t_summary.get("failure_count", 0)
+        status["live_rollout_stopped_count"] = t_summary.get("stopped_count", 0)
+        status["live_rollout_timeout_count"] = t_summary.get("timeout_count", 0)
+        status["live_rollout_success_rate"] = t_summary.get("success_rate")
+        status["episodes_since_latest_confidence_evaluation"] = t_summary.get("window_count", 0)
+        status["latest_confidence_environment_episode"] = latest_conf_env_ep
+        status["current_global_timestep"] = current_gt
+        status["latest_checkpoint_global_timestep"] = latest_cp_gt
+        status["timesteps_since_latest_checkpoint"] = timesteps_since_latest_cp
+        status["latest_episode_completed_at"] = t_summary.get("latest_episode_completed_at")
+        status["latest_episode_reward"] = t_summary.get("latest_episode_reward")
+        status["latest_episode_result"] = t_summary.get("latest_episode_result")
+        status["telemetry_dropped_count"] = t_summary.get("dropped_count", 0)
+        status["telemetry_error_count"] = t_summary.get("error_count", 0)
+        status["evaluation_schedule_unit"] = "episodes"
+        status["latest_evaluated_environment_episode"] = latest_conf_env_ep
+        status["next_evaluation_environment_episode"] = next_eval_env_ep
+        status["episodes_until_next_evaluation"] = episodes_until_next_eval
+        return status
+
     def snapshot(self) -> dict[str, Any]:
         """Return a thread-safe copy of the current training status."""
         with self._lock:
@@ -1926,7 +2035,7 @@ class TrainingManager:
         )
         runtime["training_time_percentage"] = training / active if active > 0 else None
         status["runtime"] = runtime
-        return status
+        return self._enrich_status_with_telemetry(status)
 
     def _training_request_payload(
         self,
@@ -2208,6 +2317,7 @@ class TrainingManager:
                             is_mocked = False
                             try:
                                 from unittest.mock import Mock
+
                                 from sb3_contrib import MaskablePPO
                                 if isinstance(MaskablePPO.load, Mock):
                                     is_mocked = True
@@ -4309,8 +4419,8 @@ class TrainingManager:
                     if phase == "checkpoint":
                         try:
                             from sheepdog.checkpoints.store import (
-                                get_observation_schema_hash,
                                 get_action_space_hash,
+                                get_observation_schema_hash,
                             )
                             from sheepdog.config import LabConfig
                             cfg = LabConfig()
@@ -4782,12 +4892,13 @@ class TrainingManager:
                 import uuid
                 promo_id = f"evt_promo_{uuid.uuid4().hex[:12]}"
                 
-                from sheepdog.checkpoints.store import (
-                    get_observation_schema_hash,
-                    get_action_space_hash,
-                    compute_env_config_hash,
-                )
                 from dataclasses import asdict
+
+                from sheepdog.checkpoints.store import (
+                    compute_env_config_hash,
+                    get_action_space_hash,
+                    get_observation_schema_hash,
+                )
                 try:
                     obs_h = get_observation_schema_hash(job_config)
                 except Exception:
@@ -5064,10 +5175,10 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
 
     def _compile_diagnostics_snapshot(self) -> dict[str, Any]:
         """Compile all diagnostics and return a unified JSON snapshot payload dict."""
-        import math
         import hashlib
-        from urllib.parse import urlsplit, parse_qs
-        from datetime import datetime, UTC
+        import math
+        from datetime import UTC, datetime
+        from urllib.parse import parse_qs, urlsplit
         
         # Safe casting helpers
         def safe_int(v, default=0):
@@ -5119,7 +5230,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                     summary_path = output_root / "training_history.json"
                 if summary_path.exists():
                     try:
-                        with open(summary_path, "r", encoding="utf-8") as f:
+                        with open(summary_path, encoding="utf-8") as f:
                             sum_data = json.load(f)
                         if isinstance(sum_data, dict):
                             checkpoints = sum_data.get("checkpoints", [])
@@ -5211,7 +5322,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             state_path = output_root / "training-state.json"
             if state_path.exists():
                 try:
-                    with open(state_path, "r", encoding="utf-8") as f:
+                    with open(state_path, encoding="utf-8") as f:
                         s_data = json.load(f)
                     best = s_data.get("best_model_path") or s_data.get("policy_state_path")
                     if best:
@@ -5358,7 +5469,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         summary_path = output_root / "training-summary.json"
         if summary_path.exists():
             try:
-                with open(summary_path, "r", encoding="utf-8") as f:
+                with open(summary_path, encoding="utf-8") as f:
                     sum_data = json.load(f)
                 if isinstance(sum_data, dict):
                     all_checkpoints = sum_data.get("checkpoints", [])
@@ -5369,7 +5480,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             history_path = output_root / "training_history.json"
             if history_path.exists():
                 try:
-                    with open(history_path, "r", encoding="utf-8") as f:
+                    with open(history_path, encoding="utf-8") as f:
                         sum_data = json.load(f)
                     if isinstance(sum_data, list):
                         all_checkpoints = sum_data
@@ -5402,7 +5513,11 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         
         stage_overrides = {}
         if cur_stage > 0:
-            from sheepdog.curriculum import CURRICULUM_STAGES, CURRICULUM_REWARD_OVERRIDES, CURRICULUM_TRAINING_OVERRIDES
+            from sheepdog.curriculum import (
+                CURRICULUM_REWARD_OVERRIDES,
+                CURRICULUM_STAGES,
+                CURRICULUM_TRAINING_OVERRIDES,
+            )
             env_ov = CURRICULUM_STAGES.get(cur_stage, {})
             for k, v in env_ov.items():
                 stage_overrides[f"environment.{k}"] = v
@@ -6162,7 +6277,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             history_path = Path(LabConfig().training.output_dir) / "training_history.json"
             if history_path.exists():
                 try:
-                    with open(history_path, "r", encoding="utf-8") as f:
+                    with open(history_path, encoding="utf-8") as f:
                         data = json.load(f)
                     self._json_response(data)
                 except Exception:

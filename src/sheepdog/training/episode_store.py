@@ -5,7 +5,6 @@ from __future__ import annotations
 import atexit
 import datetime
 import logging
-import os
 import queue
 import sqlite3
 import threading
@@ -132,7 +131,7 @@ class EpisodeStore:
             ?, ?, ?, ?
         )
         """
-        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        now_iso = datetime.datetime.now(datetime.UTC).isoformat()
         params_list = []
         for r in records:
             event_key = self._build_event_key(r)
@@ -325,6 +324,112 @@ class EpisodeStore:
             "has_more": has_more,
             "oldest_available_timestamp": oldest_timestamp or None,
             "total_matching": total_matching or 0,
+        }
+
+    def get_telemetry_summary(
+        self,
+        stage: int | None = None,
+        after_env_ep: int | None = None,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Aggregate telemetry window statistics cleanly from SQLite."""
+        self.flush()
+        conditions: list[str] = []
+        params: list[Any] = []
+
+        if stage is not None:
+            conditions.append("curriculum_stage = ?")
+            params.append(stage)
+        if after_env_ep is not None:
+            conditions.append("global_environment_episode > ?")
+            params.append(after_env_ep)
+        if run_id:
+            conditions.append("run_id = ?")
+            params.append(run_id)
+
+        where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+        sql = f"""
+            SELECT
+                COUNT(*) as window_count,
+                SUM(CASE WHEN success = 1 OR result = 'SUCCESS' THEN 1 ELSE 0 END) as success_count,
+                SUM(CASE WHEN stopped = 1 OR result = 'STOPPED' THEN 1 ELSE 0 END) as stopped_count,
+                SUM(CASE WHEN timeout = 1 OR result = 'TIMEOUT' THEN 1 ELSE 0 END) as timeout_count,
+                MAX(global_environment_episode) as latest_env_ep,
+                MAX(id) as latest_id,
+                MAX(completed_at) as latest_completed_at
+            FROM training_episodes
+            {where_clause}
+        """
+
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.execute(sql, params)
+                row_raw = cursor.fetchone()
+                row = dict(row_raw) if row_raw else {}
+
+                latest_reward = None
+                latest_result = None
+                latest_id_val = row.get("latest_id")
+                if latest_id_val is not None and latest_id_val > 0:
+                    latest_cursor = conn.execute(
+                        "SELECT reward, result FROM training_episodes WHERE id = ?",
+                        (latest_id_val,),
+                    )
+                    l_row = latest_cursor.fetchone()
+                    if l_row:
+                        latest_reward = l_row["reward"]
+                        latest_result = l_row["result"]
+
+                max_stage_env_ep_sql = "SELECT MAX(global_environment_episode) FROM training_episodes"
+                if stage is not None:
+                    max_stage_env_ep_sql += f" WHERE curriculum_stage = {stage}"
+                max_cursor = conn.execute(max_stage_env_ep_sql)
+                max_res = max_cursor.fetchone()
+                current_stage_env_ep = max_res[0] if max_res else None
+        except Exception as exc:
+            self.error_count += 1
+            self.last_error = str(exc)
+            logger.error("Failed to query telemetry summary from SQLite: %s", exc)
+            return {
+                "window_count": 0,
+                "success_count": 0,
+                "failure_count": 0,
+                "stopped_count": 0,
+                "timeout_count": 0,
+                "success_rate": None,
+                "current_stage_environment_episode": None,
+                "latest_completed_environment_episode": None,
+                "latest_completed_episode_id": None,
+                "latest_episode_completed_at": None,
+                "latest_episode_reward": None,
+                "latest_episode_result": None,
+                "dropped_count": self.dropped_count,
+                "error_count": self.error_count,
+            }
+
+        window_count = row.get("window_count") or 0
+        success_count = row.get("success_count") or 0
+        stopped_count = row.get("stopped_count") or 0
+        timeout_count = row.get("timeout_count") or 0
+        failure_count = max(0, window_count - success_count)
+        success_rate = (success_count / window_count) if window_count > 0 else None
+
+        return {
+            "window_count": window_count,
+            "success_count": success_count,
+            "failure_count": failure_count,
+            "stopped_count": stopped_count,
+            "timeout_count": timeout_count,
+            "success_rate": success_rate,
+            "current_stage_environment_episode": current_stage_env_ep,
+            "latest_completed_environment_episode": row.get("latest_env_ep"),
+            "latest_completed_episode_id": row.get("latest_id"),
+            "latest_episode_completed_at": row.get("latest_completed_at"),
+            "latest_episode_reward": latest_reward,
+            "latest_episode_result": latest_result,
+            "dropped_count": self.dropped_count,
+            "error_count": self.error_count,
         }
 
     def clear_store(self) -> None:

@@ -1,11 +1,11 @@
 """Unit tests for durable SQLite episode telemetry store, queue saturation, error safety, and 50k benchmark."""
 
-import os
 import tempfile
 import time
 from pathlib import Path
 
 import pytest
+
 from sheepdog.training.episode_store import EpisodeStore
 
 
@@ -182,7 +182,6 @@ def test_9_queue_saturation_drop_and_warning():
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
         db_path = Path(tmpdir) / "sat-test.sqlite"
         store = EpisodeStore(db_path=db_path, max_queue_size=5)
-        # Pause worker processing by taking lock if worker is running
         for i in range(10):
             store.add_episode({"event_key": f"sat_ep_{i}", "global_environment_episode": i})
 
@@ -198,7 +197,6 @@ def test_10_context_manager_close():
         db_path = Path(tmpdir) / "cm-test.sqlite"
         with EpisodeStore(db_path=db_path) as store:
             store.add_episode({"event_key": "cm_ep_1", "global_environment_episode": 1})
-        # After exiting context, store is flushed and closed
         new_store = EpisodeStore(db_path=db_path)
         res = new_store.get_episodes()
         assert res["total_matching"] == 1
@@ -227,22 +225,57 @@ def test_11_performance_benchmark_50k_dataset():
         t0 = time.perf_counter()
         with store._get_connection() as conn:
             store._insert_batch(conn, records)
-        t_insert = time.perf_counter() - t0
+        _t_insert = time.perf_counter() - t0
 
         t1 = time.perf_counter()
         res_after = store.get_episodes(after_id=25000, limit=500)
         t_query_after = time.perf_counter() - t1
 
         t2 = time.perf_counter()
-        res_stage = store.get_episodes(stage=8, limit=500)
+        _res_stage = store.get_episodes(stage=8, limit=500)
         t_query_stage = time.perf_counter() - t2
 
         db_size_mb = db_path.stat().st_size / (1024 * 1024)
 
         assert res_after["total_matching"] == 25000
         assert len(res_after["episodes"]) == 500
-        assert t_query_after < 0.1  # Fast indexed query under 100ms
-        assert t_query_stage < 0.1  # Fast stage filter under 100ms
+        assert t_query_after < 0.1
+        assert t_query_stage < 0.1
         assert db_size_mb > 0
 
         store.close()
+
+
+def test_12_controlled_fixture_telemetry_summary(temp_store):
+    """Test controlled pattern: SUCCESS, STOPPED, SUCCESS, TIMEOUT, SUCCESS."""
+    sequence = [
+        ("evt_1", 955, "SUCCESS", True),
+        ("evt_2", 956, "STOPPED", False),
+        ("evt_3", 957, "SUCCESS", True),
+        ("evt_4", 958, "TIMEOUT", False),
+        ("evt_5", 959, "SUCCESS", True),
+    ]
+
+    for key, env_ep, res_str, succ_bool in sequence:
+        temp_store.add_episode({
+            "event_key": key,
+            "run_id": "r_controlled",
+            "curriculum_stage": 8,
+            "global_environment_episode": env_ep,
+            "result": res_str,
+            "success": succ_bool,
+            "stopped": bool(res_str == "STOPPED"),
+            "timeout": bool(res_str == "TIMEOUT"),
+            "reward": 400.0 if succ_bool else -100.0,
+        })
+    temp_store.flush()
+
+    summary = temp_store.get_telemetry_summary(stage=8, after_env_ep=954)
+    assert summary["window_count"] == 5
+    assert summary["success_count"] == 3
+    assert summary["failure_count"] == 2
+    assert summary["stopped_count"] == 1
+    assert summary["timeout_count"] == 1
+    assert summary["success_rate"] == 0.6
+    assert summary["current_stage_environment_episode"] == 959
+    assert summary["latest_completed_environment_episode"] == 959

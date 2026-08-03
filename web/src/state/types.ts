@@ -212,6 +212,31 @@ export interface TrainingStatus {
   total_timesteps?: number;
   checkpoint_save_interval?: number;
   active_policy_identity?: string;
+
+  // Explicit Live Telemetry Fields
+  current_stage_environment_episode?: number;
+  latest_completed_environment_episode?: number;
+  latest_completed_episode_id?: number;
+  live_rollout_window_count?: number;
+  live_rollout_success_count?: number;
+  live_rollout_failure_count?: number;
+  live_rollout_stopped_count?: number;
+  live_rollout_timeout_count?: number;
+  live_rollout_success_rate?: number | null;
+  episodes_since_latest_confidence_evaluation?: number;
+  latest_confidence_environment_episode?: number;
+  current_global_timestep?: number;
+  latest_checkpoint_global_timestep?: number;
+  timesteps_since_latest_checkpoint?: number;
+  latest_episode_completed_at?: string;
+  latest_episode_reward?: number;
+  latest_episode_result?: string;
+  telemetry_dropped_count?: number;
+  telemetry_error_count?: number;
+  evaluation_schedule_unit?: string;
+  latest_evaluated_environment_episode?: number;
+  next_evaluation_environment_episode?: number;
+  episodes_until_next_evaluation?: number;
 }
 
 export interface RuntimeSessionRecord {

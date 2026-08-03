@@ -1854,7 +1854,7 @@ export function DiagnosticsPanel({
   const checkpointX = (checkpoint: CheckpointEntry): number | null => {
     if (xAxisMode === "timesteps") return checkpoint.global_timestep ?? null;
     if (xAxisMode === "episode") {
-      return checkpoint.total_training_episodes ?? checkpoint.global_environment_episode ?? checkpoint.checkpoint_episode;
+      return checkpoint.total_training_episodes ?? null;
     }
     if (xAxisMode === "runtime") return checkpoint.active_runtime_seconds_total ?? null;
     const timestamp = checkpoint.recorded_at ?? checkpoint.created_timestamp ?? checkpoint.evaluation_timestamp;
@@ -2134,21 +2134,60 @@ export function DiagnosticsPanel({
   // Reverse-order rows for the table (newest first)
   const tableRows = useMemo(() => [...filteredCheckpoints].reverse(), [filteredCheckpoints]);
 
-  const liveRolloutCount = trainingStatus?.episodes_in_stage ?? trainingStatus?.total_episodes_trained ?? 0;
-  const liveSuccessCount = trainingStatus?.stage_success_count ?? 0;
-  const liveFailureCount = Math.max(0, liveRolloutCount - liveSuccessCount);
-  const liveRolloutSuccessRateFormatted = trainingStatus?.stage_success_rate != null
-    ? `${(trainingStatus.stage_success_rate * 100).toFixed(1)}%`
-    : "N/A";
+  const currentStageEp = trainingStatus?.current_stage_environment_episode ?? trainingStatus?.latest_completed_environment_episode ?? 0;
+  const episodesSinceEvaluation = trainingStatus?.episodes_since_latest_confidence_evaluation ?? (
+    filteredEpisodes.length > 0 ? filteredEpisodes.length : 0
+  );
 
+  const liveSuccessCount = trainingStatus?.live_rollout_success_count ?? (
+    trainingEpisodes.length > 0
+      ? filteredEpisodes.filter((e) => e.success).length
+      : null
+  );
+  const liveFailureCount = trainingStatus?.live_rollout_failure_count ?? (
+    trainingEpisodes.length > 0
+      ? filteredEpisodes.filter((e) => !e.success).length
+      : null
+  );
+  const liveStoppedCount = trainingStatus?.live_rollout_stopped_count ?? (
+    trainingEpisodes.length > 0
+      ? filteredEpisodes.filter((e) => e.result === "STOPPED" || e.stopped).length
+      : 0
+  );
+  const liveTimeoutCount = trainingStatus?.live_rollout_timeout_count ?? (
+    trainingEpisodes.length > 0
+      ? filteredEpisodes.filter((e) => e.result === "TIMEOUT" || e.timeout).length
+      : 0
+  );
+
+  const liveRolloutSuccessRate = trainingStatus?.live_rollout_success_rate ?? (
+    trainingEpisodes.length > 0 && liveSuccessCount != null && liveFailureCount != null && (liveSuccessCount + liveFailureCount > 0)
+      ? liveSuccessCount / (liveSuccessCount + liveFailureCount)
+      : null
+  );
+
+  const liveRolloutSuccessRateFormatted = liveRolloutSuccessRate != null
+    ? `${(liveRolloutSuccessRate * 100).toFixed(1)}%`
+    : "Unavailable";
+
+  const currentGlobalTimestep = trainingStatus?.current_global_timestep ?? trainingStatus?.total_timesteps ?? 0;
   const latestCheckpoint = checkpoints.length > 0 ? checkpoints[checkpoints.length - 1] : null;
-  const latestCheckpointTimestep = latestCheckpoint?.global_timestep ?? 0;
-  const currentTotalTimesteps = trainingStatus?.total_timesteps ?? 0;
-  const timestepsSinceCheckpoint = Math.max(0, currentTotalTimesteps - latestCheckpointTimestep);
+  const latestCheckpointTimestep = trainingStatus?.latest_checkpoint_global_timestep ?? (latestCheckpoint?.global_timestep ?? 0);
+  const timestepsSinceCheckpoint = Math.max(0, currentGlobalTimestep - (latestCheckpointTimestep ?? 0));
 
-  const saveInterval = trainingStatus?.checkpoint_save_interval ?? 25;
-  const nextCheckpointBoundary = Math.ceil((liveRolloutCount + 1) / saveInterval) * saveInterval;
-  const episodesUntilNextCheckpoint = Math.max(1, nextCheckpointBoundary - liveRolloutCount);
+  const nextEvaluationBoundary = trainingStatus?.next_evaluation_environment_episode ?? (Math.ceil((currentStageEp + 1) / 50) * 50);
+  const episodesUntilNextEvaluation = trainingStatus?.episodes_until_next_evaluation ?? Math.max(1, nextEvaluationBoundary - currentStageEp);
+
+  const lastEpisodeResultFormatted = trainingStatus?.latest_episode_result
+    ? `${trainingStatus.latest_episode_result}, reward ${trainingStatus.latest_episode_reward != null && trainingStatus.latest_episode_reward > 0 ? "+" : ""}${trainingStatus.latest_episode_reward?.toFixed(2) ?? "0"}`
+    : "Unavailable";
+
+  const latestConfidenceEvalFormatted = latestCheckpoint?.success_rate != null
+    ? `${(latestCheckpoint.success_rate * 100).toFixed(0)}% over ${latestCheckpoint.evaluation_seed_count ?? 10} seeds`
+    : "None";
+  const checkpointSequenceFormatted = latestCheckpoint?.checkpoint_episode != null
+    ? `${latestCheckpoint.checkpoint_episode}`
+    : "None";
 
   const lastEvalTimestampRaw = latestCheckpoint?.created_timestamp || latestCheckpoint?.recorded_at || latestCheckpoint?.evaluation_timestamp || trainingStatus?.last_evaluation_time;
   const formattedLastEvalTime = lastEvalTimestampRaw ? formatDate(lastEvalTimestampRaw) : "None";
@@ -2479,27 +2518,29 @@ export function DiagnosticsPanel({
         flexShrink: 0
       }}>
         <div>
-          <span style={{ color: "var(--muted)", marginRight: "0.4rem" }}>Total Trained:</span>
-          <strong>{(trainingStatus?.grand_total_episodes ?? trainingStatus?.total_episodes_trained ?? 0).toLocaleString()}</strong>
+          <span style={{ color: "var(--muted)", marginRight: "0.4rem" }}>Current Stage {effectiveCurriculumStage} Episode:</span>
+          <strong>{currentStageEp.toLocaleString()}</strong>
         </div>
         <div>
-          <span style={{ color: "var(--muted)", marginRight: "0.4rem" }}>Stage {effectiveCurriculumStage} Trained:</span>
-          <strong>{(trainingStatus?.stage_history?.[effectiveCurriculumStage] ?? trainingStatus?.stage_history?.[String(effectiveCurriculumStage)] ?? 0).toLocaleString()}</strong>
+          <span style={{ color: "var(--muted)", marginRight: "0.4rem" }}>Checkpoint Sequence:</span>
+          <strong>{checkpointSequenceFormatted}</strong>
+        </div>
+        <div>
+          <span style={{ color: "var(--muted)", marginRight: "0.4rem" }}>Policy Version:</span>
+          <strong>{(trainingStatus?.policy_version ?? 0).toLocaleString()}</strong>
+        </div>
+        <div>
+          <span style={{ color: "var(--muted)", marginRight: "0.4rem" }}>Global Timestep:</span>
+          <strong>{currentGlobalTimestep.toLocaleString()}</strong>
+        </div>
+        <div>
+          <span style={{ color: "var(--muted)", marginRight: "0.4rem" }}>Total Trained (All Stages):</span>
+          <strong>{(trainingStatus?.grand_total_episodes ?? trainingStatus?.total_episodes_trained ?? 0).toLocaleString()}</strong>
         </div>
         <div>
           <span style={{ color: "var(--muted)", marginRight: "0.4rem" }}>Last Evaluation:</span>
           <strong>{formattedLastEvalTime}</strong>
         </div>
-        <div>
-          <span style={{ color: "var(--muted)", marginRight: "0.4rem" }}>Last Live Refresh:</span>
-          <strong>{formattedLastLiveRefresh}</strong>
-        </div>
-        {selectedStageScope !== "all" && selectedStageScope !== "current" && selectedStageScope !== "current-journey" && selectedStageScope !== effectiveCurriculumStage && (
-          <div>
-            <span style={{ color: "var(--muted)", marginRight: "0.4rem" }}>Stage {selectedStageScope} Trained:</span>
-            <strong>{(trainingStatus?.stage_history?.[selectedStageScope] ?? trainingStatus?.stage_history?.[String(selectedStageScope)] ?? 0).toLocaleString()}</strong>
-          </div>
-        )}
       </div>
 
       {/* Live Training Telemetry Summary */}
@@ -2512,20 +2553,24 @@ export function DiagnosticsPanel({
         >
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "0.5rem" }}>
             <div>
-              <strong>Training active — {liveRolloutCount} rollout episodes completed since the latest evaluation. Next evaluation pending.</strong>
+              <strong>
+                Training active — {episodesSinceEvaluation} training episodes completed since the latest confidence evaluation. Next confidence evaluation pending.
+              </strong>
             </div>
             <span className="pill pill--live">live telemetry</span>
           </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "0.4rem", fontSize: "0.85em", borderTop: "1px solid rgba(255,255,255,0.1)", paddingTop: "0.5rem", marginTop: "0.25rem" }}>
-            <div>• <strong>Live Rollouts:</strong> {liveRolloutCount} episodes</div>
-            <div>• <strong>Successes / Failures:</strong> {liveSuccessCount} / {liveFailureCount}</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "0.4rem", fontSize: "0.85em", borderTop: "1px solid rgba(255,255,255,0.1)", paddingTop: "0.5rem", marginTop: "0.25rem" }}>
+            <div>• <strong>Current Stage {effectiveCurriculumStage} Episode:</strong> {currentStageEp}</div>
+            <div>• <strong>Episodes Since Evaluation:</strong> {episodesSinceEvaluation}</div>
+            <div>• <strong>Live Results:</strong> {liveSuccessCount != null ? liveSuccessCount : "Unavailable"} success / {liveFailureCount != null ? liveFailureCount : "Unavailable"} failure <span style={{ opacity: 0.75 }}>({liveStoppedCount} stopped, {liveTimeoutCount} timeout)</span></div>
             <div>• <strong>Live Rollout Success Rate:</strong> {liveRolloutSuccessRateFormatted} <span style={{ opacity: 0.75 }}>(rollouts only)</span></div>
-            <div>• <strong>Active Runtime:</strong> {formatDuration(trainingStatus?.runtime?.active_seconds_total)}</div>
+            <div>• <strong>Current Global Timestep:</strong> {currentGlobalTimestep.toLocaleString()}</div>
             <div>• <strong>Timesteps Since Checkpoint:</strong> {timestepsSinceCheckpoint.toLocaleString()}</div>
-            <div>• <strong>Next Evaluation Boundary:</strong> Ep {nextCheckpointBoundary} (~{episodesUntilNextCheckpoint} remaining)</div>
-            <div>• <strong>Last Evaluation Time:</strong> {formattedLastEvalTime}</div>
-            <div>• <strong>Last Live Refresh Time:</strong> {formattedLastLiveRefresh}</div>
+            <div>• <strong>Next Confidence Evaluation:</strong> Stage {effectiveCurriculumStage} Episode {nextEvaluationBoundary} (~{episodesUntilNextEvaluation} remaining)</div>
+            <div>• <strong>Last Episode:</strong> {lastEpisodeResultFormatted}</div>
+            <div>• <strong>Latest Confidence Evaluation:</strong> {latestConfidenceEvalFormatted}</div>
+            <div>• <strong>Checkpoint Sequence:</strong> {checkpointSequenceFormatted}</div>
           </div>
         </div>
       )}
