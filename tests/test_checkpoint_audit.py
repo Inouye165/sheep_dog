@@ -7,6 +7,8 @@ from unittest.mock import patch
 from sheepdog.config import LabConfig, TrainingConfig, EnvironmentConfig, RewardConfig
 from sheepdog.server import TrainingManager
 from sheepdog.checkpoints.store import (
+    CheckpointMetadata,
+    CheckpointStore,
     get_observation_schema_hash,
     get_action_space_hash,
     verify_checkpoint_compatibility,
@@ -292,6 +294,36 @@ def test_checkpoint_id_resolution(tmp_path: Path) -> None:
 
         details_archived = manager.get_checkpoint_details(checkpoint_id="chk_run_archived_ep_50")
         assert details_archived["run_id"] == "run_archived"
+
+
+def test_checkpoint_store_preserves_repeated_episode_by_id(tmp_path: Path) -> None:
+    store = CheckpointStore(tmp_path / "checkpoints")
+
+    def metadata(checkpoint_id: str, reward: float) -> CheckpointMetadata:
+        return CheckpointMetadata(
+            checkpoint_episode=20,
+            total_training_episodes=20,
+            policy_name="neural_policy",
+            seed=11,
+            success_rate=0.5,
+            average_completion_steps=100.0,
+            timeout_rate=0.5,
+            average_sheep_penned=1.0,
+            average_reward=reward,
+            environment_config={},
+            reward_config={},
+            checkpoint_id=checkpoint_id,
+        )
+
+    first_path = store.write(metadata("chk_run-a_pv-1_ts-16", 10.0))
+    second_path = store.write(metadata("chk_run-a_pv-2_ts-32", 20.0))
+
+    assert first_path != second_path
+    assert first_path.exists()
+    assert second_path.exists()
+    assert json.loads(first_path.read_text(encoding="utf-8"))["average_reward"] == 10.0
+    assert json.loads(second_path.read_text(encoding="utf-8"))["average_reward"] == 20.0
+    assert (tmp_path / "checkpoints" / "checkpoint-000020.json").exists()
 
 
 def test_legacy_checkpoint_compatibility() -> None:

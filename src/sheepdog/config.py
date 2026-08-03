@@ -210,6 +210,7 @@ class TrainingConfig:
     policy_type: PolicyType = "linear"
     episodes: int = 1_000
     checkpoint_episodes: tuple[int, ...] = (0, 5, 10, 25, 50, 100, 500, 1_000)
+    checkpoint_timesteps: tuple[int, ...] = ()
     evaluation_seeds: tuple[int, ...] = (11, 23, 37, 41, 53, 59, 61, 67, 71, 73)
     train_seed: int = 7
     evaluation_seed: int = 91

@@ -197,6 +197,7 @@ export function App() {
   const [scenarioIndex, setScenarioIndex] = useState<ScenarioIndex | null>(null);
   const [scenarioCheckpointMode, setScenarioCheckpointMode] = useState<CheckpointMode>("latest");
   const [specificScenarioCheckpointEpisode, setSpecificScenarioCheckpointEpisode] = useState<number | null>(null);
+  const [lastLiveRefreshTime, setLastLiveRefreshTime] = useState<number | null>(null);
   const [selectedScenarioId, setSelectedScenarioId] = useState<string | null>(null);
   const [saveSnapshotSource, setSaveSnapshotSource] = useState<"initial" | "final">("final");
   const [evaluatingScenarios, setEvaluatingScenarios] = useState(false);
@@ -510,9 +511,11 @@ export function App() {
     setCheckpointIndex((prev) => {
       if (!prev && !index) return null;
       if (prev && index && prev.checkpoints.length === index.checkpoints.length) {
-        const prevLast = prev.checkpoints[prev.checkpoints.length - 1]?.checkpoint_episode;
-        const indexLast = index.checkpoints[index.checkpoints.length - 1]?.checkpoint_episode;
-        if (prevLast === indexLast) {
+        const prevLast = prev.checkpoints[prev.checkpoints.length - 1];
+        const indexLast = index.checkpoints[index.checkpoints.length - 1];
+        const prevLastId = prevLast?.checkpoint_id ?? prevLast?.global_timestep ?? prevLast?.checkpoint_episode;
+        const indexLastId = indexLast?.checkpoint_id ?? indexLast?.global_timestep ?? indexLast?.checkpoint_episode;
+        if (prevLastId === indexLastId) {
           return prev;
         }
       }
@@ -545,13 +548,17 @@ export function App() {
     }
     const isRunning = trainingStatus.running;
     const latestCpEp = trainingStatus.latest_checkpoint_episode;
-    const currentMaxEp = checkpointIndex?.checkpoints?.length
-      ? checkpointIndex.checkpoints[checkpointIndex.checkpoints.length - 1].checkpoint_episode
-      : -1;
+    const activeCpId = trainingStatus.active_checkpoint_id ?? trainingStatus.active_policy_identity;
+    const lastIndexCp = checkpointIndex?.checkpoints?.length
+      ? checkpointIndex.checkpoints[checkpointIndex.checkpoints.length - 1]
+      : null;
+    const currentMaxEp = lastIndexCp ? lastIndexCp.checkpoint_episode : -1;
+    const lastIndexCpId = lastIndexCp ? (lastIndexCp.checkpoint_id ?? lastIndexCp.global_timestep ?? lastIndexCp.checkpoint_episode) : null;
 
     const shouldFetch =
       checkpointIndex === null ||
-      (latestCpEp !== null && latestCpEp > currentMaxEp);
+      (latestCpEp !== null && latestCpEp > currentMaxEp) ||
+      (activeCpId != null && lastIndexCpId != null && String(activeCpId) !== String(lastIndexCpId));
 
     if (!shouldFetch && !isRunning) {
       return;
@@ -588,7 +595,7 @@ export function App() {
     return () => {
       active = false;
     };
-  }, [trainingStatus?.running, trainingStatus?.phase, trainingStatus?.error, trainingStatus?.latest_checkpoint_episode, checkpointIndex, applyCheckpointIndex]);
+  }, [trainingStatus?.running, trainingStatus?.phase, trainingStatus?.error, trainingStatus?.latest_checkpoint_episode, trainingStatus?.active_checkpoint_id, checkpointIndex, applyCheckpointIndex]);
 
   useEffect(() => {
     if (activeTab !== "network") {
@@ -671,6 +678,7 @@ export function App() {
       try {
         const status = await loadTrainingStatus();
         if (!active) return;
+        setLastLiveRefreshTime(Date.now());
         if (pollDelayRef.current !== 500) {
           console.log("[Polling] Server back online — resetting poll delay to 500ms.");
           pollDelayRef.current = 500;
@@ -1406,6 +1414,7 @@ export function App() {
               bestCheckpointEpisode={bestCheckpointEpisode}
               trainingStatus={trainingStatus}
               effectiveCurriculumStage={effectiveCurriculumStage}
+              lastLiveRefreshTime={lastLiveRefreshTime}
             />
           ) : activeTab === "results" ? (
             <ResultsPanel checkpointIndex={checkpointIndex} />

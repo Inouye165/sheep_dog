@@ -206,6 +206,12 @@ export interface TrainingStatus {
     recommendation?: string;
   } | null;
   runtime?: TrainingRuntimeSummary;
+  episodes_in_stage?: number;
+  stage_success_count?: number;
+  stage_success_rate?: number;
+  total_timesteps?: number;
+  checkpoint_save_interval?: number;
+  active_policy_identity?: string;
 }
 
 export interface RuntimeSessionRecord {
@@ -362,6 +368,7 @@ export interface CheckpointEntry {
   trainer_type?: string;
   policy_type?: string;
   policy_mode?: string;
+  policy_state_path?: string;
   policy_config?: any;
   run_id?: string;
   checkpoint_id?: string;
@@ -374,6 +381,7 @@ export interface CheckpointEntry {
   reward_schema_version?: string;
   deterministic_evaluation?: boolean;
   evaluation_seeds?: number[];
+  evaluation_seed_count?: number;
   replay_mode?: string;
   total_training_episodes?: number;
   policy_version?: number;
@@ -409,6 +417,7 @@ export interface CheckpointEntry {
   stopped_rate?: number;
   average_distance_to_pen?: number;
   average_sheep_distance_to_pen?: number;
+  average_flock_spread?: number;
   global_timestep?: number | null;
   created_timestamp?: string | null;
   active_runtime_seconds_total?: number | null;
@@ -420,6 +429,7 @@ export interface CheckpointEntry {
   promotion_eligible?: boolean;
   curriculum_stage?: number;
   promotion_gate?: AutoPromoteGateDiagnostics | null;
+  evaluation_timestamp?: string | null;
 }
 
 export interface EvaluationSummary {
@@ -766,4 +776,37 @@ export interface DiagnosticsResponse {
     exceptionType: string;
     endpoint: string;
   } | null;
+}
+
+export interface TrainingEpisode {
+  id: number;
+  event_key: string;
+  run_id: string | null;
+  session_id: string | null;
+  global_environment_episode: number;
+  episode_in_stage: number;
+  curriculum_stage: number;
+  global_timestep: number | null;
+  policy_version: number | null;
+  completed_at: string;
+  active_runtime_seconds_total: number | null;
+  reward: number;
+  result: string;
+  success: boolean;
+  timeout: boolean;
+  stopped: boolean;
+  sheep_penned: number;
+  total_sheep: number;
+  steps: number;
+  seed: number | null;
+  checkpoint_id: string | null;
+}
+
+export interface TrainingEpisodesResponse {
+  episodes: TrainingEpisode[];
+  latest_id: number;
+  next_after_id: number;
+  has_more: boolean;
+  oldest_available_timestamp: string | null;
+  total_matching: number;
 }

@@ -13,6 +13,7 @@ import type {
   UserHyperparams,
   TelemetryRecord,
   DiagnosticsResponse,
+  TrainingEpisodesResponse,
 } from "../state/types";
 
 export const API_BASE_URL = "http://127.0.0.1:8000";
@@ -98,7 +99,7 @@ export async function loadCheckpointIndex(): Promise<CheckpointIndex | null> {
     return null;
   }
   try {
-    return await fetchJson<CheckpointIndex>("/generated/checkpoint-index.json", undefined, API_BASE_URL);
+    return await fetchJson<CheckpointIndex>(`/generated/checkpoint-index.json?t=${Date.now()}`, undefined, API_BASE_URL);
   } catch (error) {
     const fetchError = error as ApiError;
     // Treat 404 and 500 (Vite serves 500 when the file doesn't exist yet)
@@ -124,6 +125,39 @@ export async function loadCheckpointIndex(): Promise<CheckpointIndex | null> {
       return null;
     }
     throw error;
+  }
+}
+
+export interface LoadEpisodesOptions {
+  afterId?: number;
+  beforeId?: number;
+  stage?: number;
+  runId?: string;
+  limit?: number;
+}
+
+export async function loadTrainingEpisodes(options: LoadEpisodesOptions = {}): Promise<TrainingEpisodesResponse | null> {
+  if (backendOfflineState) {
+    return null;
+  }
+  const queryParams = new URLSearchParams();
+  if (options.afterId !== undefined) queryParams.set("after_id", String(options.afterId));
+  if (options.beforeId !== undefined) queryParams.set("before_id", String(options.beforeId));
+  if (options.stage !== undefined) queryParams.set("stage", String(options.stage));
+  if (options.runId) queryParams.set("run_id", options.runId);
+  if (options.limit !== undefined) queryParams.set("limit", String(options.limit));
+
+  const queryString = queryParams.toString();
+  const path = `/api/insights/training-episodes${queryString ? `?${queryString}` : ""}`;
+
+  try {
+    return await fetchJson<TrainingEpisodesResponse>(path, undefined, API_BASE_URL);
+  } catch (error) {
+    const fetchErr = error as ApiError;
+    if (fetchErr.isNetworkError || fetchErr.status === 0 || !fetchErr.status || error instanceof TypeError) {
+      backendOfflineState = true;
+    }
+    return null;
   }
 }
 

@@ -3,6 +3,7 @@
 # pylint: disable=missing-function-docstring
 from __future__ import annotations
 
+import json
 import os
 import sys
 from dataclasses import replace
@@ -427,6 +428,104 @@ def test_quick_vs_confidence_evaluation_mode_selection(tmp_path: Path) -> None:
         trainer.train()
 
     assert "quick" in evaluate_calls
+
+
+def test_quick_and_confidence_evaluations_keep_distinct_artifacts(tmp_path: Path) -> None:
+    config = make_experiment_config(tmp_path)
+    evaluator = Evaluator(config, tmp_path / "evaluations")
+    policy = HeuristicExpertPolicy()
+
+    _, quick_json, quick_csv = evaluator.evaluate(
+        policy,
+        (11,),
+        checkpoint_episode=7,
+        capture_replays=False,
+        evaluation_mode="quick",
+        run_id="run-test",
+        checkpoint_id="chk-run-test-ts-16",
+        policy_version=1,
+    )
+    _, confidence_json, confidence_csv = evaluator.evaluate(
+        policy,
+        (11,),
+        checkpoint_episode=7,
+        capture_replays=False,
+        evaluation_mode="confidence",
+        run_id="run-test",
+        checkpoint_id="chk-run-test-ts-16",
+        policy_version=1,
+    )
+
+    assert quick_json != confidence_json
+    assert quick_csv != confidence_csv
+    assert quick_json.exists()
+    assert quick_csv.exists()
+    assert confidence_json.exists()
+    assert confidence_csv.exists()
+
+
+def test_consecutive_batches_do_not_reuse_terminal_checkpoint_episode(tmp_path: Path) -> None:
+    config = make_experiment_config(tmp_path)
+    config = replace(
+        config,
+        training=replace(
+            config.training,
+            checkpoint_episodes=(0, 1),
+            total_timesteps=96,
+        ),
+    )
+
+    first_summary = create_trainer(config, config.training.output_dir).train()
+    first_state = json.loads(
+        (Path(config.training.output_dir) / "training-state.json").read_text(encoding="utf-8")
+    )
+    second_summary = create_trainer(config, config.training.output_dir).train()
+    second_state = json.loads(
+        (Path(config.training.output_dir) / "training-state.json").read_text(encoding="utf-8")
+    )
+
+    first_terminal = first_summary.checkpoints[-1]["checkpoint_episode"]
+    second_new_checkpoints = [
+        checkpoint
+        for checkpoint in second_summary.checkpoints
+        if checkpoint.get("checkpoint_episode", -1) > first_terminal
+    ]
+
+    assert len(second_summary.checkpoints) == len(first_summary.checkpoints) + 2
+    assert len(second_new_checkpoints) == 2
+    assert second_new_checkpoints[0]["checkpoint_episode"] == first_terminal + 1
+    assert first_state["total_environment_episodes"] > 0
+    assert second_state["total_environment_episodes"] > first_state["total_environment_episodes"]
+    assert all(
+        checkpoint["environment_episodes_total"] >= first_state["total_environment_episodes"]
+        for checkpoint in second_new_checkpoints
+    )
+    assert second_new_checkpoints[-1]["environment_episodes_total"] == second_state[
+        "total_environment_episodes"
+    ]
+
+
+def test_training_uses_exact_checkpoint_timestep_targets(tmp_path: Path) -> None:
+    config = make_experiment_config(tmp_path)
+    config = replace(
+        config,
+        training=replace(
+            config.training,
+            checkpoint_episodes=(0, 1),
+            checkpoint_timesteps=(64, 96),
+            total_timesteps=96,
+        ),
+    )
+
+    summary = create_trainer(config, config.training.output_dir).train()
+    state = json.loads(
+        (Path(config.training.output_dir) / "training-state.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert [checkpoint["global_timestep"] for checkpoint in summary.checkpoints] == [64, 96]
+    assert state["total_timesteps"] == 96
 
 
 

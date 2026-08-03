@@ -56,6 +56,8 @@ class _TrainingProgressCallback(BaseCallback):
         total_timesteps: int,
         starting_total_episodes: int,
         batch_total_episodes: int,
+        batch_total_timesteps: int,
+        completed_timesteps: int,
         completed_segments: int,
         segment_index: int,
         policy_version: int,
@@ -69,6 +71,8 @@ class _TrainingProgressCallback(BaseCallback):
         self._total_timesteps = max(1, total_timesteps)
         self._starting_total_episodes = starting_total_episodes
         self._batch_total_episodes = batch_total_episodes
+        self._batch_total_timesteps = batch_total_timesteps
+        self._completed_timesteps = completed_timesteps
         self._completed_segments = completed_segments
         self._segment_index = segment_index
         self.policy_version = policy_version
@@ -145,6 +149,9 @@ class _TrainingProgressCallback(BaseCallback):
                     f"timesteps ({completion:.0%})"
                 ),
                 "batch_total_episodes": self._batch_total_episodes,
+                "batch_total_timesteps": self._batch_total_timesteps,
+                "batch_completed_timesteps": self._completed_timesteps
+                + min(num_timesteps, self._total_timesteps),
                 "policy_version": self.policy_version,
                 "ppo_update_count": ppo_update_count,
             }
@@ -258,6 +265,7 @@ class MaskablePPOTrainer(Trainer):
         if not self._state_path.exists():
             return {
                 "total_episodes_trained": 0,
+                "total_environment_episodes": 0,
                 "total_timesteps": 0,
                 "policy_state_path": None,
                 "policy_config": None,
@@ -271,6 +279,7 @@ class MaskablePPOTrainer(Trainer):
         except (OSError, json.JSONDecodeError):
             return {
                 "total_episodes_trained": 0,
+                "total_environment_episodes": 0,
                 "total_timesteps": 0,
                 "policy_state_path": None,
                 "policy_config": None,
@@ -281,6 +290,9 @@ class MaskablePPOTrainer(Trainer):
             }
         return {
             "total_episodes_trained": int(payload.get("total_episodes_trained", 0)),
+            "total_environment_episodes": int(
+                payload.get("total_environment_episodes", 0)
+            ),
             "total_timesteps": int(payload.get("total_timesteps", 0)),
             "policy_state_path": payload.get("policy_state_path"),
             "policy_config": payload.get("policy_config"),
@@ -314,6 +326,11 @@ class MaskablePPOTrainer(Trainer):
             and self.has_compatible_policy_state()
         )
         starting_total = self.total_episodes_trained if resuming_policy else 0
+        starting_environment_episodes = (
+            int(self._loaded_state.get("total_environment_episodes", 0))
+            if resuming_policy
+            else 0
+        )
         loaded_p_ver = self._loaded_state.get("policy_version")
         policy_version = int(loaded_p_ver) if (resuming_policy and loaded_p_ver is not None) else 0
         batch_total = max(1, len(train_config.checkpoint_episodes))
@@ -347,7 +364,36 @@ class MaskablePPOTrainer(Trainer):
                 )
                 wandb_enabled = False
         n_checkpoints = batch_total
-        steps_per_segment = max(1, train_config.total_timesteps // n_checkpoints)
+        configured_timestep_targets = tuple(train_config.checkpoint_timesteps)
+        if configured_timestep_targets:
+            if (
+                len(configured_timestep_targets) != n_checkpoints
+                or configured_timestep_targets[-1] != train_config.total_timesteps
+                or any(
+                    current <= previous
+                    for previous, current in zip(
+                        (0, *configured_timestep_targets[:-1]),
+                        configured_timestep_targets,
+                    )
+                )
+            ):
+                raise ValueError(
+                    "checkpoint_timesteps must be increasing, match checkpoint count, "
+                    "and end at total_timesteps"
+                )
+            timestep_targets = configured_timestep_targets
+        else:
+            steps_per_segment = max(1, train_config.total_timesteps // n_checkpoints)
+            timestep_targets = tuple(
+                steps_per_segment * segment for segment in range(1, n_checkpoints + 1)
+            )
+        segment_timesteps = tuple(
+            current - previous
+            for previous, current in zip((0, *timestep_targets[:-1]), timestep_targets)
+        )
+        uniform_segment_timesteps = (
+            segment_timesteps[0] if len(set(segment_timesteps)) == 1 else None
+        )
         starting_total_timesteps = (
             int(self._loaded_state.get("total_timesteps", 0)) if resuming_policy else 0
         )
@@ -357,10 +403,26 @@ class MaskablePPOTrainer(Trainer):
         if (
             isinstance(_incomplete, dict)
             and int(_incomplete.get("batch_total_segments", 0)) == n_checkpoints
-            and int(_incomplete.get("batch_steps_per_segment", 0)) == steps_per_segment
+            and (
+                _incomplete.get("batch_timestep_targets") == list(timestep_targets)
+                or (
+                    not configured_timestep_targets
+                    and int(_incomplete.get("batch_steps_per_segment", 0))
+                    == uniform_segment_timesteps
+                )
+            )
             and 0 < int(_incomplete.get("batch_completed_segments", 0)) < n_checkpoints
         ):
             skip_segments = int(_incomplete["batch_completed_segments"])
+        if skip_segments > 0 and isinstance(_incomplete, dict):
+            stored_batch_start = _incomplete.get("batch_starting_checkpoint_episode")
+            if stored_batch_start is not None:
+                batch_starting_checkpoint_episode = int(stored_batch_start)
+            else:
+                completed_slot = int(train_config.checkpoint_episodes[skip_segments - 1])
+                batch_starting_checkpoint_episode = starting_total - completed_slot
+        else:
+            batch_starting_checkpoint_episode = starting_total + (1 if resuming_policy else 0)
         best_success_rate: float = (
             float(self._loaded_state["best_success_rate"])
             if resuming_policy and self._loaded_state.get("best_success_rate") is not None
@@ -436,7 +498,9 @@ class MaskablePPOTrainer(Trainer):
         _batch_marker_pre: dict[str, Any] = {
             "batch_completed_segments": skip_segments,
             "batch_total_segments": n_checkpoints,
-            "batch_steps_per_segment": steps_per_segment,
+            "batch_steps_per_segment": uniform_segment_timesteps,
+            "batch_timestep_targets": list(timestep_targets),
+            "batch_starting_checkpoint_episode": batch_starting_checkpoint_episode,
         }
         _pre_loop_state = dict(self._loaded_state)
         _pre_loop_state["incomplete_batch"] = _batch_marker_pre
@@ -452,7 +516,13 @@ class MaskablePPOTrainer(Trainer):
             if completed_checkpoints <= skip_segments:
                 continue
             new_segments = completed_checkpoints - skip_segments
-            cumulative_ts = starting_total_timesteps + new_segments * steps_per_segment
+            segment_steps = segment_timesteps[completed_checkpoints - 1]
+            resumed_target = timestep_targets[skip_segments - 1] if skip_segments else 0
+            cumulative_ts = (
+                starting_total_timesteps
+                + timestep_targets[completed_checkpoints - 1]
+                - resumed_target
+            )
             emit(
                 {
                     "phase": "learning",
@@ -463,7 +533,7 @@ class MaskablePPOTrainer(Trainer):
                     "best_score": None,
                     "message": (
                         f"Learning neural policy: segment {completed_checkpoints}/{n_checkpoints}"
-                        f" (0/{steps_per_segment} timesteps)"
+                        f" (0/{segment_steps} timesteps)"
                     ),
                 }
             )
@@ -472,14 +542,20 @@ class MaskablePPOTrainer(Trainer):
                 should_stop=should_stop,
                 # Emit progress frequently enough that long PPO segments do not
                 # look stalled in the UI. Cap the update rate to avoid chatty logs.
-                report_interval=max(250, min(5_000, steps_per_segment // 100)),
-                total_timesteps=steps_per_segment,
+                report_interval=max(250, min(5_000, segment_steps // 100)),
+                total_timesteps=segment_steps,
                 starting_total_episodes=starting_total + new_segments - 1,
                 batch_total_episodes=batch_total,
+                batch_total_timesteps=timestep_targets[-1],
+                completed_timesteps=(
+                    timestep_targets[completed_checkpoints - 2]
+                    if completed_checkpoints > 1
+                    else 0
+                ),
                 completed_segments=completed_checkpoints - 1,
                 segment_index=completed_checkpoints - 1,
                 policy_version=policy_version,
-                starting_total=starting_total,
+                starting_total=starting_environment_episodes,
             )
             from stable_baselines3.common.callbacks import CallbackList
             callbacks_to_use = [progress_reporter]
@@ -520,7 +596,7 @@ class MaskablePPOTrainer(Trainer):
             )
             with training_phase:
                 policy.model.learn(
-                    total_timesteps=steps_per_segment,
+                    total_timesteps=segment_steps,
                     reset_num_timesteps=True,
                     progress_bar=False,
                     callback=callback_list,
@@ -529,6 +605,18 @@ class MaskablePPOTrainer(Trainer):
             # Increment policy update version
             policy_version += 1
             policy.policy_version = policy_version
+
+            environment_episodes_since_run_start = 0
+            try:
+                if hasattr(policy.model, "get_env") and policy.model.get_env() is not None:
+                    environment_episodes_since_run_start = int(
+                        sum(policy.model.get_env().get_attr("_episode_counter"))
+                    )
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                environment_episodes_since_run_start = 0
+            environment_episodes_total = (
+                starting_environment_episodes + environment_episodes_since_run_start
+            )
 
             # Retrieve training scenario coverage stats from env
             curr_coverage = self._loaded_state.get("training_scenario_coverage")
@@ -619,9 +707,9 @@ class MaskablePPOTrainer(Trainer):
             )
             with model_save_phase:
                 saved_model_path = policy.save(model_root / f"maskable-ppo-{cumulative_ts:08d}")
-            total_eps_this_checkpoint = starting_total + _checkpoint_slot
+            total_eps_this_checkpoint = batch_starting_checkpoint_episode + _checkpoint_slot
             run_id = self._loaded_state.get("run_id")
-            chk_id = f"chk_{run_id}_ep_{total_eps_this_checkpoint}"
+            chk_id = f"chk_{run_id}_pv_{policy_version}_ts_{cumulative_ts}"
             recorded_time = datetime.now(UTC).isoformat()
             active_stage = self.config.rewards.instincts.curriculum_stage
 
@@ -740,6 +828,8 @@ class MaskablePPOTrainer(Trainer):
                 ),
                 run_id=run_id,
                 checkpoint_id=chk_id,
+                environment_episodes_total=environment_episodes_total,
+                environment_episodes_since_run_start=environment_episodes_since_run_start,
                 parent_run_id=self._loaded_state.get("parent_run_id"),
                 parent_checkpoint_id=self._loaded_state.get("parent_checkpoint_id"),
                 global_timestep=cumulative_ts,
@@ -766,6 +856,7 @@ class MaskablePPOTrainer(Trainer):
                 evaluation_seed_count=len(summary.records),
                 environment_config_hash=compute_env_config_hash(self.config.to_dict()["environment"]),
                 evaluation_timestamp=recorded_time,
+                evaluation_id=summary.evaluation_id,
                 evaluation_mode=summary.evaluation_mode,
                 promotion_eligible=summary.promotion_eligible,
                 **runtime_snapshot,
@@ -813,6 +904,8 @@ class MaskablePPOTrainer(Trainer):
                 "records": [record.to_dict() for record in summary.records],
                 "run_id": run_id,
                 "checkpoint_id": chk_id,
+                "environment_episodes_total": environment_episodes_total,
+                "environment_episodes_since_run_start": environment_episodes_since_run_start,
                 "parent_run_id": self._loaded_state.get("parent_run_id"),
                 "parent_checkpoint_id": self._loaded_state.get("parent_checkpoint_id"),
                 "global_timestep": cumulative_ts,
@@ -839,6 +932,7 @@ class MaskablePPOTrainer(Trainer):
                 "evaluation_seed_count": len(summary.records),
                 "environment_config_hash": compute_env_config_hash(self.config.to_dict()["environment"]),
                 "evaluation_timestamp": recorded_time,
+                "evaluation_id": summary.evaluation_id,
                 "evaluation_mode": summary.evaluation_mode,
                 "promotion_eligible": summary.promotion_eligible,
                 **runtime_snapshot,
@@ -849,6 +943,7 @@ class MaskablePPOTrainer(Trainer):
             # batch is durable; every in-flight episode is lost on crash.
             intermediate_state: dict[str, Any] = {
                 "total_episodes_trained": total_eps_this_checkpoint,
+                "total_environment_episodes": environment_episodes_total,
                 "total_timesteps": cumulative_ts,
                 "policy_state_path": str(saved_model_path),
                 "best_model_path": str(tracked_best_model_path)
@@ -863,7 +958,9 @@ class MaskablePPOTrainer(Trainer):
                 "incomplete_batch": {
                     "batch_completed_segments": completed_checkpoints,
                     "batch_total_segments": n_checkpoints,
-                    "batch_steps_per_segment": steps_per_segment,
+                    "batch_steps_per_segment": uniform_segment_timesteps,
+                    "batch_timestep_targets": list(timestep_targets),
+                    "batch_starting_checkpoint_episode": batch_starting_checkpoint_episode,
                 },
                 "run_id": self._loaded_state.get("run_id"),
                 "parent_run_id": self._loaded_state.get("parent_run_id"),
@@ -917,6 +1014,14 @@ class MaskablePPOTrainer(Trainer):
                     "clip_fraction": clip_fraction,
                     "explained_variance": explained_variance,
                     "total_timesteps": cumulative_ts,
+                    "batch_total_timesteps": timestep_targets[-1],
+                    "batch_completed_timesteps": timestep_targets[
+                        completed_checkpoints - 1
+                    ],
+                    "environment_episodes_total": environment_episodes_total,
+                    "environment_episodes_since_run_start": (
+                        environment_episodes_since_run_start
+                    ),
                     "policy_version": policy_version,
                     "last_policy_update_time": datetime.now(UTC).isoformat(),
                     "last_evaluation_time": datetime.now(UTC).isoformat(),
@@ -953,10 +1058,17 @@ class MaskablePPOTrainer(Trainer):
                 total_episodes_trained = starting_total + max(1, batch_total - skip_segments)
 
         final_model_path_str = str(saved_model_path) if saved_model_path is not None else ""
+        total_environment_episodes = (
+            int(checkpoint_payloads[-1].get("environment_episodes_total", 0))
+            if checkpoint_payloads
+            else starting_environment_episodes
+        )
         state_payload = {
             "total_episodes_trained": total_episodes_trained,
+            "total_environment_episodes": total_environment_episodes,
             "total_timesteps": starting_total_timesteps
-            + (batch_total - skip_segments) * steps_per_segment,
+            + timestep_targets[-1]
+            - (timestep_targets[skip_segments - 1] if skip_segments else 0),
             "policy_state_path": final_model_path_str,
             "best_model_path": str(tracked_best_model_path) if tracked_best_model_path else None,
             "best_model_curriculum_stage": best_model_curriculum_stage,
@@ -989,6 +1101,7 @@ class MaskablePPOTrainer(Trainer):
                 if checkpoint_payloads
                 else None,
                 "total_episodes_trained": total_episodes_trained,
+                "cumulative_environment_episodes": total_environment_episodes,
                 "checkpoint_episode": checkpoint_payloads[-1]["checkpoint_episode"]
                 if checkpoint_payloads
                 else None,

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { CheckpointEntry, CheckpointIndex, TrainingStatus } from "../state/types";
+import type { CheckpointEntry, CheckpointIndex, TrainingStatus, TrainingEpisode } from "../state/types";
+import { loadTrainingEpisodes } from "../lib/api";
 import { CopyAgentDataButton } from "./CopyAgentDataButton";
 
 /** Number of most-recent checkpoints to watch for a plateau. */
@@ -56,6 +57,9 @@ function getCheckpointStage(c: CheckpointEntry): number {
   }
   if (c.environment_config?.curriculum_stage !== undefined && c.environment_config?.curriculum_stage !== null) {
     return c.environment_config.curriculum_stage;
+  }
+  if (c.curriculum_stage !== undefined && c.curriculum_stage !== null) {
+    return c.curriculum_stage;
   }
   return -1;
 }
@@ -191,10 +195,15 @@ interface ChartPoint {
   /** Optional secondary value (e.g. avg_completion_steps) for the right-axis overlay line. */
   secondaryY?: number | null;
   checkpoint?: CheckpointEntry;
+  rawEpisode?: TrainingEpisode;
+  isRolling?: boolean;
+  rollingWindowSize?: number;
 }
 
 interface LineChartProps {
   data: ChartPoint[];
+  rawPoints?: ChartPoint[];
+  rollingData?: ChartPoint[];
   label?: string;
   lineColor: string;
   yMin: number;
@@ -300,6 +309,65 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
       window.removeEventListener("scroll", updatePosition, true);
     };
   }, [updatePosition]);
+
+  if (hoveredPoint.rawEpisode) {
+    const ep = hoveredPoint.rawEpisode;
+    return createPortal(
+      <div ref={tooltipRef} className="chart-tooltip" style={style} data-testid="chart-tooltip">
+        <div className="chart-tooltip__header">
+          <span className="chart-tooltip__episode">Training Ep {ep.global_environment_episode}</span>
+          <span className="chart-tooltip__stage-pill" style={{ background: stageColor(ep.curriculum_stage) }}>
+            Stage {ep.curriculum_stage}
+          </span>
+        </div>
+        <div className="chart-tooltip__section-title">Raw Rollout Episode</div>
+        <div className="chart-tooltip__grid">
+          <span className="chart-tooltip__metric-label">Result:</span>
+          <span className="chart-tooltip__metric-value">{ep.result}</span>
+          <span></span>
+          <span className="chart-tooltip__metric-label">Reward:</span>
+          <span className="chart-tooltip__metric-value">{ep.reward.toFixed(2)}</span>
+          <span></span>
+          <span className="chart-tooltip__metric-label">Penned:</span>
+          <span className="chart-tooltip__metric-value">{ep.sheep_penned} / {ep.total_sheep}</span>
+          <span></span>
+          <span className="chart-tooltip__metric-label">Steps:</span>
+          <span className="chart-tooltip__metric-value">{ep.steps}</span>
+          <span></span>
+          {ep.seed != null && (
+            <>
+              <span className="chart-tooltip__metric-label">Seed:</span>
+              <span className="chart-tooltip__metric-value">{ep.seed}</span>
+              <span></span>
+            </>
+          )}
+        </div>
+        {formatDate(ep.completed_at) && (
+          <div className="chart-tooltip__time">{formatDate(ep.completed_at)}</div>
+        )}
+      </div>,
+      document.body
+    );
+  }
+
+  if (hoveredPoint.isRolling) {
+    return createPortal(
+      <div ref={tooltipRef} className="chart-tooltip" style={style} data-testid="chart-tooltip">
+        <div className="chart-tooltip__header">
+          <span className="chart-tooltip__episode">Rolling Training Average</span>
+        </div>
+        <div className="chart-tooltip__section-title">
+          Last {hoveredPoint.rollingWindowSize ?? 25} Completed Rollouts
+        </div>
+        <div className="chart-tooltip__grid">
+          <span className="chart-tooltip__metric-label">Value:</span>
+          <span className="chart-tooltip__metric-value">{hoveredPoint.labelText || hoveredPoint.y.toFixed(2)}</span>
+          <span></span>
+        </div>
+      </div>,
+      document.body
+    );
+  }
 
   const checkpoint = hoveredPoint.checkpoint;
   if (!checkpoint) return null;
@@ -448,6 +516,8 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
 
 function LineChart({
   data,
+  rawPoints,
+  rollingData,
   label,
   lineColor,
   yMin,
@@ -542,9 +612,15 @@ function LineChart({
 
   const hasData = data.length >= 2;
 
+  const allXValues = [
+    ...data.map((p) => p.x),
+    ...(rawPoints ? rawPoints.map((p) => p.x) : []),
+    ...(rollingData ? rollingData.map((p) => p.x) : []),
+  ];
+
   const yRange = yMax - yMin || 1;
-  const xMin = data.length ? Math.min(...data.map((point) => point.x)) : 0;
-  const xMax = data.length ? Math.max(...data.map((point) => point.x)) : 1;
+  const xMin = allXValues.length ? Math.min(...allXValues) : 0;
+  const xMax = allXValues.length ? Math.max(...allXValues) : 1;
   const xRange = xMax - xMin || 1;
 
   // Secondary scale — fewer steps = better = top of chart (inverted mapping)
@@ -559,23 +635,27 @@ function LineChart({
   const secTicks = hasSecondary ? [secYMax, (secYMax + secYMin) / 2, secYMin] : [];
 
   function toSvgX(x: number, index?: number): number {
-    if (useSequentialX) {
+    if (useSequentialX && !rawPoints && !rollingData) {
       if (data.length <= 1) return PAD.left + plotW / 2;
       const idx = index !== undefined ? index : data.findIndex((d) => d.x === x);
       return PAD.left + (idx / (data.length - 1)) * plotW;
     }
+    if (xRange === 0) return PAD.left + plotW / 2;
     return PAD.left + ((x - xMin) / xRange) * plotW;
   }
   function toSvgY(y: number): number {
     return PAD.top + plotH - ((y - yMin) / yRange) * plotH;
   }
   function toSvgY2(y: number): number {
-    // Fewer steps → smaller y value → top of chart (PAD.top)
     return PAD.top + ((y - secYMin) / secRange) * plotH;
   }
 
   const polyline = hasData
     ? data.map((d, idx) => `${toSvgX(d.x, idx).toFixed(1)},${toSvgY(d.y).toFixed(1)}`).join(" ")
+    : "";
+
+  const rollingPolyline = rollingData && rollingData.length >= 2
+    ? rollingData.map((d) => `${toSvgX(d.x).toFixed(1)},${toSvgY(d.y).toFixed(1)}`).join(" ")
     : "";
 
   // Y-axis tick values
@@ -593,9 +673,32 @@ function LineChart({
     }
   }
 
+  const maxRawPointsToRender = 1000;
+  const displayRawPoints = useMemo(() => {
+    if (!rawPoints || rawPoints.length <= maxRawPointsToRender) return rawPoints;
+    const step = Math.ceil(rawPoints.length / maxRawPointsToRender);
+    return rawPoints.filter((_, idx) => idx % step === 0);
+  }, [rawPoints]);
+
   return (
     <div className="mini-chart" style={{ position: "relative" }}>
-      {label ? <span className="mini-chart__label">{label}</span> : null}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.25rem" }}>
+        {label ? <span className="mini-chart__label">{label}</span> : <span />}
+        <div style={{ display: "flex", gap: "0.8rem", fontSize: "0.75rem", color: "var(--muted)" }}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: "0.25rem" }}>
+            <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: "rgba(56,189,248,0.7)" }} />
+            Training episode
+          </span>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: "0.25rem" }}>
+            <span style={{ display: "inline-block", width: 12, height: 2, background: "#38bdf8" }} />
+            Rolling training avg (25 eps)
+          </span>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: "0.25rem" }}>
+            <span style={{ display: "inline-block", width: 7, height: 7, transform: "rotate(45deg)", background: lineColor }} />
+            Confidence evaluation
+          </span>
+        </div>
+      </div>
       <svg
         viewBox={`0 0 ${W} ${H}`}
         className="mini-chart__svg"
@@ -671,7 +774,42 @@ function LineChart({
           </g>
         ) : null}
 
-        {/* Line */}
+        {/* Raw episode points */}
+        {displayRawPoints &&
+          displayRawPoints.map((p, i) => {
+            const cx = toSvgX(p.x);
+            const cy = toSvgY(p.y);
+            return (
+              <circle
+                key={`raw-${p.x}-${i}`}
+                cx={cx}
+                cy={cy}
+                r={2}
+                fill="rgba(56,189,248,0.45)"
+                onMouseEnter={(e) => {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  setHoveredState({ point: p, rect });
+                }}
+                onMouseLeave={() => setHoveredState(null)}
+                style={{ cursor: "pointer" }}
+              />
+            );
+          })}
+
+        {/* Rolling training average line */}
+        {rollingPolyline ? (
+          <polyline
+            points={rollingPolyline}
+            fill="none"
+            stroke="#38bdf8"
+            strokeWidth={2}
+            strokeLinejoin="round"
+            strokeLinecap="round"
+            opacity={0.85}
+          />
+        ) : null}
+
+        {/* Formal Checkpoint Evaluation Line */}
         {hasData ? (
           <polyline
             points={polyline}
@@ -1520,6 +1658,7 @@ interface DiagnosticsPanelProps {
   bestCheckpointEpisode: number | null;
   trainingStatus: TrainingStatus | null;
   effectiveCurriculumStage: number;
+  lastLiveRefreshTime?: number | null;
 }
 
 /** Diagnostics / Learning-Curve tab. */
@@ -1528,6 +1667,7 @@ export function DiagnosticsPanel({
   bestCheckpointEpisode,
   trainingStatus,
   effectiveCurriculumStage,
+  lastLiveRefreshTime,
 }: DiagnosticsPanelProps) {
   const [viewWindow, setViewWindow] = useState<ViewWindow>(() => {
     const saved = localStorage.getItem("sheepdog_insights_view_window");
@@ -1548,7 +1688,7 @@ export function DiagnosticsPanel({
     }
     return "current-journey";
   });
-  const [xAxisMode, setXAxisMode] = useState<XAxisMode>("episode");
+  const [xAxisMode, setXAxisMode] = useState<XAxisMode>("timesteps");
 
   const targetStage = useMemo(() => {
     if (selectedStageScope === "current") return effectiveCurriculumStage;
@@ -1712,10 +1852,12 @@ export function DiagnosticsPanel({
   );
 
   const checkpointX = (checkpoint: CheckpointEntry): number | null => {
-    if (xAxisMode === "episode") return checkpoint.checkpoint_episode;
     if (xAxisMode === "timesteps") return checkpoint.global_timestep ?? null;
+    if (xAxisMode === "episode") {
+      return checkpoint.total_training_episodes ?? checkpoint.global_environment_episode ?? checkpoint.checkpoint_episode;
+    }
     if (xAxisMode === "runtime") return checkpoint.active_runtime_seconds_total ?? null;
-    const timestamp = checkpoint.recorded_at ?? checkpoint.created_timestamp;
+    const timestamp = checkpoint.recorded_at ?? checkpoint.created_timestamp ?? checkpoint.evaluation_timestamp;
     return timestamp ? new Date(timestamp).getTime() : null;
   };
 
@@ -1791,19 +1933,192 @@ export function DiagnosticsPanel({
     [chartCheckpoints, bestCheckpointEpisode, xAxisMode],
   );
 
+  // ── Live Episode Telemetry Polling ──────────────────────────────────────
+  const [trainingEpisodes, setTrainingEpisodes] = useState<TrainingEpisode[]>([]);
+  const [lastEpisodeId, setLastEpisodeId] = useState<number>(0);
+  const isFetchingEpisodesRef = useRef<boolean>(false);
+  const isLiveTraining = trainingStatus?.running ?? false;
+
+  useEffect(() => {
+    let isMounted = true;
+    let timerId: any = null;
+
+    const pollEpisodes = async () => {
+      if (isFetchingEpisodesRef.current) return;
+      isFetchingEpisodesRef.current = true;
+      try {
+        const stageFilter = selectedStageScope === "all" || selectedStageScope === "current-journey"
+          ? undefined
+          : selectedStageScope === "current"
+          ? effectiveCurriculumStage
+          : typeof selectedStageScope === "number"
+          ? selectedStageScope
+          : undefined;
+
+        const res = await loadTrainingEpisodes({
+          afterId: lastEpisodeId,
+          stage: stageFilter,
+          limit: 1000,
+        });
+
+        if (isMounted && res && res.episodes.length > 0) {
+          setTrainingEpisodes((prev) => {
+            const existingIds = new Set(prev.map((e: TrainingEpisode) => e.id));
+            const newEps = res.episodes.filter((e: TrainingEpisode) => !existingIds.has(e.id));
+            const combined = [...prev, ...newEps];
+            return combined.length > 5000 ? combined.slice(-5000) : combined;
+          });
+          const maxId = Math.max(...res.episodes.map((e: TrainingEpisode) => e.id));
+          setLastEpisodeId(maxId);
+        }
+      } catch {
+        // Silently catch network errors
+      } finally {
+        isFetchingEpisodesRef.current = false;
+        if (isMounted) {
+          const delay = isLiveTraining ? 2000 : 10000;
+          timerId = setTimeout(pollEpisodes, delay);
+        }
+      }
+    };
+
+    pollEpisodes();
+
+    return () => {
+      isMounted = false;
+      if (timerId) clearTimeout(timerId);
+    };
+  }, [isLiveTraining, selectedStageScope, effectiveCurriculumStage, lastEpisodeId]);
+
+  const episodeX = (ep: TrainingEpisode): number | null => {
+    if (xAxisMode === "timesteps") return ep.global_timestep ?? null;
+    if (xAxisMode === "episode") return ep.global_environment_episode ?? ep.episode_in_stage;
+    if (xAxisMode === "runtime") return ep.active_runtime_seconds_total ?? null;
+    if (xAxisMode === "calendar") {
+      const ts = ep.completed_at;
+      return ts ? new Date(ts).getTime() : null;
+    }
+    return ep.global_timestep ?? ep.global_environment_episode ?? null;
+  };
+
+  const filteredEpisodes = useMemo(() => {
+    let list = trainingEpisodes;
+    if (selectedStageScope !== "all" && selectedStageScope !== "current-journey") {
+      const stageNum = selectedStageScope === "current" ? effectiveCurriculumStage : Number(selectedStageScope);
+      list = list.filter((e) => e.curriculum_stage === stageNum);
+    }
+    if (viewWindow !== "all") {
+      list = list.slice(-viewWindow);
+    }
+    return list;
+  }, [trainingEpisodes, selectedStageScope, effectiveCurriculumStage, viewWindow]);
+
+  const rawSuccessPoints: ChartPoint[] = useMemo(() => {
+    return filteredEpisodes.map((ep) => {
+      const xVal = episodeX(ep) ?? ep.global_environment_episode;
+      return {
+        x: xVal,
+        y: ep.success ? 1.0 : 0.0,
+        stage: ep.curriculum_stage,
+        rawEpisode: ep,
+      };
+    });
+  }, [filteredEpisodes, xAxisMode]);
+
+  const rollingSuccessData: ChartPoint[] = useMemo(() => {
+    if (filteredEpisodes.length < 2) return [];
+    const windowSize = 25;
+    return filteredEpisodes.map((ep, i) => {
+      const start = Math.max(0, i - windowSize + 1);
+      const slice = filteredEpisodes.slice(start, i + 1);
+      const avgSuccess = slice.reduce((sum, e) => sum + (e.success ? 1.0 : 0.0), 0) / slice.length;
+      const xVal = episodeX(ep) ?? ep.global_environment_episode;
+      return {
+        x: xVal,
+        y: avgSuccess,
+        stage: ep.curriculum_stage,
+        isRolling: true,
+        rollingWindowSize: slice.length,
+        labelText: `${(avgSuccess * 100).toFixed(1)}% (rolling ${slice.length} eps)`,
+      };
+    });
+  }, [filteredEpisodes, xAxisMode]);
+
+  const rawRewardPoints: ChartPoint[] = useMemo(() => {
+    return filteredEpisodes.map((ep) => {
+      const xVal = episodeX(ep) ?? ep.global_environment_episode;
+      return {
+        x: xVal,
+        y: ep.reward,
+        stage: ep.curriculum_stage,
+        rawEpisode: ep,
+      };
+    });
+  }, [filteredEpisodes, xAxisMode]);
+
+  const rollingRewardData: ChartPoint[] = useMemo(() => {
+    if (filteredEpisodes.length < 2) return [];
+    const windowSize = 25;
+    return filteredEpisodes.map((ep, i) => {
+      const start = Math.max(0, i - windowSize + 1);
+      const slice = filteredEpisodes.slice(start, i + 1);
+      const avgReward = slice.reduce((sum, e) => sum + e.reward, 0) / slice.length;
+      const xVal = episodeX(ep) ?? ep.global_environment_episode;
+      return {
+        x: xVal,
+        y: avgReward,
+        stage: ep.curriculum_stage,
+        isRolling: true,
+        rollingWindowSize: slice.length,
+        labelText: `Avg reward ${avgReward.toFixed(1)} (rolling ${slice.length} eps)`,
+      };
+    });
+  }, [filteredEpisodes, xAxisMode]);
+
+  const rawSheepPoints: ChartPoint[] = useMemo(() => {
+    return filteredEpisodes.map((ep) => {
+      const xVal = episodeX(ep) ?? ep.global_environment_episode;
+      return {
+        x: xVal,
+        y: ep.sheep_penned,
+        stage: ep.curriculum_stage,
+        rawEpisode: ep,
+      };
+    });
+  }, [filteredEpisodes, xAxisMode]);
+
+  const rollingSheepData: ChartPoint[] = useMemo(() => {
+    if (filteredEpisodes.length < 2) return [];
+    const windowSize = 25;
+    return filteredEpisodes.map((ep, i) => {
+      const start = Math.max(0, i - windowSize + 1);
+      const slice = filteredEpisodes.slice(start, i + 1);
+      const avgSheep = slice.reduce((sum, e) => sum + e.sheep_penned, 0) / slice.length;
+      const xVal = episodeX(ep) ?? ep.global_environment_episode;
+      return {
+        x: xVal,
+        y: avgSheep,
+        stage: ep.curriculum_stage,
+        isRolling: true,
+        rollingWindowSize: slice.length,
+        labelText: `Avg sheep ${avgSheep.toFixed(1)} (rolling ${slice.length} eps)`,
+      };
+    });
+  }, [filteredEpisodes, xAxisMode]);
+
   const rewardRange = useMemo(() => {
-    if (!rewardData.length) return { min: 0, max: 1 };
-    const vals = rewardData.map((d) => d.y);
+    if (!rewardData.length && !rawRewardPoints.length) return { min: 0, max: 1 };
+    const vals = [...rewardData.map((d) => d.y), ...rawRewardPoints.map((d) => d.y)];
     const minV = Math.min(...vals);
     const maxV = Math.max(...vals);
     const pad = (maxV - minV) * 0.12 || 1;
     return { min: minV - pad, max: maxV + pad };
-  }, [rewardData]);
+  }, [rewardData, rawRewardPoints]);
 
   const maxSheepPenned = useMemo(() => {
-    if (!sheepData.length) return 1;
-    return Math.max(...sheepData.map((d) => d.y), 1);
-  }, [sheepData]);
+    if (!sheepData.length && !rawSheepPoints.length) return 1;
+    return Math.max(...sheepData.map((d) => d.y), ...rawSheepPoints.map((d) => d.y), 1);
+  }, [sheepData, rawSheepPoints]);
 
   const stepsRange = useMemo(() => {
     const vals = filteredCheckpoints
@@ -1819,7 +2134,25 @@ export function DiagnosticsPanel({
   // Reverse-order rows for the table (newest first)
   const tableRows = useMemo(() => [...filteredCheckpoints].reverse(), [filteredCheckpoints]);
 
-  const isLiveTraining = trainingStatus?.running ?? false;
+  const liveRolloutCount = trainingStatus?.episodes_in_stage ?? trainingStatus?.total_episodes_trained ?? 0;
+  const liveSuccessCount = trainingStatus?.stage_success_count ?? 0;
+  const liveFailureCount = Math.max(0, liveRolloutCount - liveSuccessCount);
+  const liveRolloutSuccessRateFormatted = trainingStatus?.stage_success_rate != null
+    ? `${(trainingStatus.stage_success_rate * 100).toFixed(1)}%`
+    : "N/A";
+
+  const latestCheckpoint = checkpoints.length > 0 ? checkpoints[checkpoints.length - 1] : null;
+  const latestCheckpointTimestep = latestCheckpoint?.global_timestep ?? 0;
+  const currentTotalTimesteps = trainingStatus?.total_timesteps ?? 0;
+  const timestepsSinceCheckpoint = Math.max(0, currentTotalTimesteps - latestCheckpointTimestep);
+
+  const saveInterval = trainingStatus?.checkpoint_save_interval ?? 25;
+  const nextCheckpointBoundary = Math.ceil((liveRolloutCount + 1) / saveInterval) * saveInterval;
+  const episodesUntilNextCheckpoint = Math.max(1, nextCheckpointBoundary - liveRolloutCount);
+
+  const lastEvalTimestampRaw = latestCheckpoint?.created_timestamp || latestCheckpoint?.recorded_at || latestCheckpoint?.evaluation_timestamp || trainingStatus?.last_evaluation_time;
+  const formattedLastEvalTime = lastEvalTimestampRaw ? formatDate(lastEvalTimestampRaw) : "None";
+  const formattedLastLiveRefresh = lastLiveRefreshTime ? new Date(lastLiveRefreshTime).toLocaleTimeString() : "Just now";
   const uniqueStages = useMemo(() => [...new Set(stages)].sort((a, b) => a - b), [stages]);
   const [activeChart, setActiveChart] = useState<ChartTab>(() => {
     const saved = localStorage.getItem("sheepdog_insights_active_chart") as ChartTab | null;
@@ -1869,7 +2202,6 @@ export function DiagnosticsPanel({
   const [breakthroughNotes, setBreakthroughNotes] = useState<Record<number, string>>({});
   const [isHelpOpen, setIsHelpOpen] = useState(false);
 
-  const latestCheckpoint = checkpoints[checkpoints.length - 1] ?? null;
   const recentCheckpoints = useMemo(() => checkpoints.slice(-RECENT_WINDOW), [checkpoints]);
   const previousWindow = useMemo(() => checkpoints.slice(-(RECENT_WINDOW * 2), -RECENT_WINDOW), [checkpoints]);
 
@@ -2154,6 +2486,14 @@ export function DiagnosticsPanel({
           <span style={{ color: "var(--muted)", marginRight: "0.4rem" }}>Stage {effectiveCurriculumStage} Trained:</span>
           <strong>{(trainingStatus?.stage_history?.[effectiveCurriculumStage] ?? trainingStatus?.stage_history?.[String(effectiveCurriculumStage)] ?? 0).toLocaleString()}</strong>
         </div>
+        <div>
+          <span style={{ color: "var(--muted)", marginRight: "0.4rem" }}>Last Evaluation:</span>
+          <strong>{formattedLastEvalTime}</strong>
+        </div>
+        <div>
+          <span style={{ color: "var(--muted)", marginRight: "0.4rem" }}>Last Live Refresh:</span>
+          <strong>{formattedLastLiveRefresh}</strong>
+        </div>
         {selectedStageScope !== "all" && selectedStageScope !== "current" && selectedStageScope !== "current-journey" && selectedStageScope !== effectiveCurriculumStage && (
           <div>
             <span style={{ color: "var(--muted)", marginRight: "0.4rem" }}>Stage {selectedStageScope} Trained:</span>
@@ -2161,6 +2501,34 @@ export function DiagnosticsPanel({
           </div>
         )}
       </div>
+
+      {/* Live Training Telemetry Summary */}
+      {isLiveTraining && (
+        <div
+          className="warning-box warning-box--info"
+          role="status"
+          data-testid="live-training-summary"
+          style={{ display: "flex", flexDirection: "column", gap: "0.5rem", marginBottom: "0.75rem" }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "0.5rem" }}>
+            <div>
+              <strong>Training active — {liveRolloutCount} rollout episodes completed since the latest evaluation. Next evaluation pending.</strong>
+            </div>
+            <span className="pill pill--live">live telemetry</span>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "0.4rem", fontSize: "0.85em", borderTop: "1px solid rgba(255,255,255,0.1)", paddingTop: "0.5rem", marginTop: "0.25rem" }}>
+            <div>• <strong>Live Rollouts:</strong> {liveRolloutCount} episodes</div>
+            <div>• <strong>Successes / Failures:</strong> {liveSuccessCount} / {liveFailureCount}</div>
+            <div>• <strong>Live Rollout Success Rate:</strong> {liveRolloutSuccessRateFormatted} <span style={{ opacity: 0.75 }}>(rollouts only)</span></div>
+            <div>• <strong>Active Runtime:</strong> {formatDuration(trainingStatus?.runtime?.active_seconds_total)}</div>
+            <div>• <strong>Timesteps Since Checkpoint:</strong> {timestepsSinceCheckpoint.toLocaleString()}</div>
+            <div>• <strong>Next Evaluation Boundary:</strong> Ep {nextCheckpointBoundary} (~{episodesUntilNextCheckpoint} remaining)</div>
+            <div>• <strong>Last Evaluation Time:</strong> {formattedLastEvalTime}</div>
+            <div>• <strong>Last Live Refresh Time:</strong> {formattedLastLiveRefresh}</div>
+          </div>
+        </div>
+      )}
 
       {/* Plateau / cliff / spike alert */}
       {plateauRenderData ? (
@@ -2262,10 +2630,10 @@ export function DiagnosticsPanel({
           value={xAxisMode}
           onChange={(event) => setXAxisMode(event.target.value as XAxisMode)}
         >
-          <option value="episode">Episode</option>
-          <option value="timesteps">Training timesteps</option>
-          <option value="runtime">Active runtime</option>
-          <option value="calendar">Calendar timestamp</option>
+          <option value="timesteps">Global Timestep (Default)</option>
+          <option value="episode">Environment Episode</option>
+          <option value="runtime">Active Runtime (s)</option>
+          <option value="calendar">Calendar Timestamp</option>
         </select>
       </div>
 
@@ -2634,8 +3002,15 @@ export function DiagnosticsPanel({
 
       {activeChart === "success" && (
         <div className="chart-view">
+          {trainingEpisodes.length === 0 && (
+            <div style={{ fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.5rem", fontStyle: "italic" }}>
+              ℹ️ Live raw training episode history will record here as episodes finish. Formal confidence evaluations remain available on the chart.
+            </div>
+          )}
           <LineChart
             data={successData}
+            rawPoints={rawSuccessPoints}
+            rollingData={rollingSuccessData}
             formatX={formatChartX}
             lineColor="var(--good)"
             yMin={0}
@@ -2652,7 +3027,9 @@ export function DiagnosticsPanel({
           />
           <ChartLegend
             entries={[
-              { symbol: { kind: "line", color: "var(--good)" }, label: "Success rate", detail: "fraction of eval episodes where all sheep were penned" },
+              { symbol: { kind: "dot", color: "rgba(56,189,248,0.7)" }, label: "Training episode", detail: "individual terminal rollout result (100% = success, 0% = failure/timeout)" },
+              { symbol: { kind: "line", color: "#38bdf8" }, label: "Rolling training avg", detail: "moving average over the last 25 completed rollouts" },
+              { symbol: { kind: "line", color: "var(--good)" }, label: "Confidence evaluation", detail: "formal 10-seed benchmark evaluation at saved checkpoint" },
               { symbol: { kind: "dash", color: "rgba(251,146,60,0.85)" }, label: "Avg steps", detail: "average completion steps for successful episodes — fewer is faster (right axis, top = fewer)" },
               { symbol: { kind: "dash", color: "rgba(74,222,128,0.65)" }, label: "50% target", detail: "recommended threshold to promote to next curriculum stage" },
               { symbol: { kind: "diamond", color: "#9ca3af" }, label: "Running best", detail: "each point where a new personal best success rate was set — label shows the rate" },
@@ -2667,6 +3044,8 @@ export function DiagnosticsPanel({
         <div className="chart-view">
           <LineChart
             data={rewardData}
+            rawPoints={rawRewardPoints}
+            rollingData={rollingRewardData}
             formatX={formatChartX}
             lineColor="var(--accent)"
             yMin={rewardRange.min}
@@ -2676,7 +3055,9 @@ export function DiagnosticsPanel({
           />
           <ChartLegend
             entries={[
-              { symbol: { kind: "line", color: "var(--accent)" }, label: "Avg reward", detail: "mean total reward per episode — higher is better, but success rate matters more" },
+              { symbol: { kind: "dot", color: "rgba(56,189,248,0.7)" }, label: "Training episode", detail: "raw per-episode terminal reward" },
+              { symbol: { kind: "line", color: "#38bdf8" }, label: "Rolling training avg", detail: "moving average reward over the last 25 completed rollouts" },
+              { symbol: { kind: "line", color: "var(--accent)" }, label: "Confidence evaluation", detail: "mean total reward per 10-seed formal evaluation" },
               ...uniqueStages.map((s) => ({ symbol: { kind: "dot" as const, color: stageColor(s) }, label: stageLabel(s), detail: s === 0 ? "no curriculum — base difficulty" : `curriculum stage ${s}` })),
               { symbol: { kind: "ring", color: "#9ca3af" }, label: "Best checkpoint", detail: "the model currently loaded for inference — shown with an outer ring" },
             ]}
@@ -2688,6 +3069,8 @@ export function DiagnosticsPanel({
         <div className="chart-view">
           <LineChart
             data={sheepData}
+            rawPoints={rawSheepPoints}
+            rollingData={rollingSheepData}
             formatX={formatChartX}
             lineColor="#c084fc"
             yMin={0}
@@ -2697,7 +3080,9 @@ export function DiagnosticsPanel({
           />
           <ChartLegend
             entries={[
-              { symbol: { kind: "line", color: "#c084fc" }, label: "Avg sheep penned", detail: "average sheep penned per episode — flat at 0 = cliff; rising trend = learning" },
+              { symbol: { kind: "dot", color: "rgba(56,189,248,0.7)" }, label: "Training episode", detail: "raw per-episode sheep penned count" },
+              { symbol: { kind: "line", color: "#38bdf8" }, label: "Rolling training avg", detail: "moving average sheep penned over the last 25 completed rollouts" },
+              { symbol: { kind: "line", color: "#c084fc" }, label: "Confidence evaluation", detail: "average sheep penned per 10-seed formal evaluation" },
               ...uniqueStages.map((s) => ({ symbol: { kind: "dot" as const, color: stageColor(s) }, label: stageLabel(s), detail: s === 0 ? "no curriculum — base difficulty" : `curriculum stage ${s}` })),
               { symbol: { kind: "ring", color: "#9ca3af" }, label: "Best checkpoint", detail: "the model currently loaded for inference — shown with an outer ring" },
             ]}

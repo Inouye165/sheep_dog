@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,8 @@ class CheckpointMetadata:
     evaluation_replay_path: str | None = None
     run_id: str | None = None
     checkpoint_id: str | None = None
+    environment_episodes_total: int | None = None
+    environment_episodes_since_run_start: int | None = None
     parent_run_id: str | None = None
     parent_checkpoint_id: str | None = None
     global_timestep: int | None = None
@@ -56,6 +59,7 @@ class CheckpointMetadata:
     evaluation_seed_count: int | None = None
     environment_config_hash: str | None = None
     evaluation_timestamp: str | None = None
+    evaluation_id: str | None = None
     evaluation_mode: str | None = None
     promotion_eligible: bool | None = None
     active_runtime_seconds_total: float | None = None
@@ -92,9 +96,17 @@ class CheckpointStore:
         self.root.mkdir(parents=True, exist_ok=True)
 
     def write(self, metadata: CheckpointMetadata) -> Path:
-        path = self.root / f"checkpoint-{metadata.checkpoint_episode:06d}.json"
-        atomic_write_json(path, metadata.to_dict())
-        return path
+        payload = metadata.to_dict()
+        legacy_path = self.root / f"checkpoint-{metadata.checkpoint_episode:06d}.json"
+        if not metadata.checkpoint_id:
+            atomic_write_json(legacy_path, payload)
+            return legacy_path
+
+        safe_checkpoint_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", metadata.checkpoint_id)
+        checkpoint_path = self.root / f"checkpoint-{safe_checkpoint_id}.json"
+        atomic_write_json(checkpoint_path, payload)
+        atomic_write_json(legacy_path, payload)
+        return checkpoint_path
 
 
 def get_observation_schema_hash(config: Any) -> str:

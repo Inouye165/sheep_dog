@@ -1059,10 +1059,23 @@ def _training_checkpoint_schedule(total_episodes: int, curriculum_stage: int) ->
     return tuple(sorted({*range(0, total_episodes, interval), final_episode}))
 
 
+def _training_checkpoint_timestep_schedule(
+    total_timesteps: int,
+    rollout_quantum: int,
+) -> tuple[int, ...]:
+    """Return aligned cumulative timestep targets including the final target."""
+
+    cadence = max(rollout_quantum, (32_768 // rollout_quantum) * rollout_quantum)
+    return tuple(
+        sorted({*range(cadence, total_timesteps, cadence), total_timesteps})
+    )
+
+
 def _build_training_job_config(
-    requested_episodes: int,
-    fast_mode: bool,
+    requested_episodes: int | None = None,
+    fast_mode: bool = True,
     *,
+    total_timesteps: int | None = None,
     enable_instinct_rewards: bool | None = None,
     curriculum_stage: int | None = None,
     debug_reward_breakdown: bool | None = None,
@@ -1073,26 +1086,44 @@ def _build_training_job_config(
     output_root = Path(LabConfig().training.output_dir)
     user_params = _read_user_hyperparams(output_root)
     config = _apply_user_hyperparams(LabConfig(), user_params)
-    total_episodes = max(1, requested_episodes)
-    training_episodes = max(0, total_episodes - 1)
-    # Scale total_timesteps with the number of checkpoints so each segment
-    # receives a meaningful training budget.  Use at least the config default.
-    # Late curriculum stages need more rollouts to avoid timeout-only drift.
+    total_episodes = max(1, int(requested_episodes or 1))
     stage_for_budget = int(
         curriculum_stage
         if curriculum_stage is not None
         else config.rewards.instincts.curriculum_stage
     )
-    checkpoint_episodes = _training_checkpoint_schedule(total_episodes, stage_for_budget)
-    if fast_mode:
-        if stage_for_budget >= 25:
-            steps_per_episode = 12_000
-        elif stage_for_budget >= 21:
-            steps_per_episode = 8_000
-        else:
-            steps_per_episode = 4_000
+    if total_timesteps is not None:
+        if total_timesteps <= 0:
+            raise ValueError("total_timesteps must be positive")
+        from sheepdog.policies.neural import _resolve_env_workers
+
+        rollout_quantum = config.training.rollout_steps * _resolve_env_workers(config)
+        effective_timesteps = (
+            (int(total_timesteps) + rollout_quantum - 1) // rollout_quantum
+        ) * rollout_quantum
+        checkpoint_timesteps = _training_checkpoint_timestep_schedule(
+            effective_timesteps,
+            rollout_quantum,
+        )
+        checkpoint_episodes = tuple(range(len(checkpoint_timesteps)))
+        training_episodes = max(0, len(checkpoint_timesteps) - 1)
     else:
-        steps_per_episode = 25_000
+        training_episodes = max(0, total_episodes - 1)
+        checkpoint_episodes = _training_checkpoint_schedule(total_episodes, stage_for_budget)
+        checkpoint_timesteps = ()
+        if fast_mode:
+            if stage_for_budget >= 25:
+                steps_per_episode = 12_000
+            elif stage_for_budget >= 21:
+                steps_per_episode = 8_000
+            else:
+                steps_per_episode = 4_000
+        else:
+            steps_per_episode = 25_000
+        effective_timesteps = max(
+            config.training.total_timesteps,
+            total_episodes * steps_per_episode,
+        )
 
     if evaluation_mode == "confidence":
         evaluation_seeds = EVAL_SEED_BANK
@@ -1100,19 +1131,19 @@ def _build_training_job_config(
         evaluation_seeds = EVAL_SEED_BANK[:20]
     else:
         evaluation_seeds = config.training.evaluation_seeds
-    total_timesteps = max(config.training.total_timesteps, total_episodes * steps_per_episode)
     training_config = TrainingConfig(
         trainer_type="maskable_ppo",
         policy_type="neural",
         episodes=training_episodes,
         checkpoint_episodes=checkpoint_episodes,
+        checkpoint_timesteps=checkpoint_timesteps,
         evaluation_seeds=evaluation_seeds,
         train_seed=config.training.train_seed,
         evaluation_seed=config.training.evaluation_seed,
         candidate_evaluation_seeds=config.training.candidate_evaluation_seeds,
         candidate_pool_size=config.training.candidate_pool_size,
         mutation_scale=config.training.mutation_scale,
-        total_timesteps=total_timesteps,
+        total_timesteps=effective_timesteps,
         output_dir=config.training.output_dir,
         web_export_dir=config.training.web_export_dir,
         learning_rate=config.training.learning_rate,
@@ -1782,6 +1813,13 @@ class TrainingManager:
             "available_curriculum_stages": available_curriculum_stages,
             "max_curriculum_stage": max_curriculum_stage,
             "curriculum_stage": persisted.get("curriculum_stage", instincts.curriculum_stage),
+            "requested_timesteps": None,
+            "effective_timesteps": None,
+            "batch_total_timesteps": 0,
+            "batch_completed_timesteps": 0,
+            "durable_completed_timesteps": 0,
+            "completed_environment_episodes": 0,
+            "cumulative_environment_episodes": 0,
             "requested_episodes": 0,
             "completed_episodes": 0,
             "batch_total_episodes": 0,
@@ -1847,6 +1885,11 @@ class TrainingManager:
             resume_remaining = session_state.get("remaining_episodes")
             if isinstance(resume_remaining, (int, float)):
                 status["resume_remaining_episodes"] = max(0, int(resume_remaining))
+            resume_remaining_timesteps = session_state.get("remaining_timesteps")
+            if isinstance(resume_remaining_timesteps, (int, float)):
+                status["resume_remaining_timesteps"] = max(
+                    0, int(resume_remaining_timesteps)
+                )
             status["resume_available"] = bool(session_state.get("training_request"))
             status["resume_request"] = session_state.get("training_request")
             if status.get("message") in {None, "Idle", ""}:
@@ -1890,6 +1933,7 @@ class TrainingManager:
         requested_episodes: int,
         fast_mode: bool,
         *,
+        total_timesteps: int | None = None,
         enable_instinct_rewards: bool | None = None,
         curriculum_stage: int | None = None,
         debug_reward_breakdown: bool | None = None,
@@ -1899,9 +1943,7 @@ class TrainingManager:
     ) -> dict[str, Any]:
         """Return a JSON-serializable request payload for resume prompts."""
 
-        return {
-            "episodes": max(1, int(requested_episodes)),
-            "fast_mode": bool(fast_mode),
+        payload = {
             "enable_instinct_rewards": enable_instinct_rewards,
             "curriculum_stage": curriculum_stage,
             "debug_reward_breakdown": debug_reward_breakdown,
@@ -1909,6 +1951,14 @@ class TrainingManager:
             "promote_from_checkpoint_episode": promote_from_checkpoint_episode,
             "evaluation_mode": evaluation_mode,
         }
+        if total_timesteps is not None:
+            payload["total_timesteps"] = int(total_timesteps)
+            payload["training_request_migrated"] = False
+        else:
+            payload["episodes"] = max(1, int(requested_episodes))
+            payload["fast_mode"] = bool(fast_mode)
+            payload["training_request_migrated"] = True
+        return payload
 
     def _persist_training_session(
         self,
@@ -1925,10 +1975,16 @@ class TrainingManager:
             int(status.get("requested_episodes", 0))
             - int(status.get("batch_completed_episodes", 0)),
         )
+        remaining_timesteps = max(
+            0,
+            int(status.get("batch_total_timesteps", 0) or 0)
+            - int(status.get("durable_completed_timesteps", 0) or 0),
+        )
         payload = {
             "state": state,
             "requested_at": datetime.datetime.now(datetime.UTC).isoformat(),
             "remaining_episodes": remaining,
+            "remaining_timesteps": remaining_timesteps,
             "training_request": request,
             "status": status,
         }
@@ -1946,46 +2002,57 @@ class TrainingManager:
         request = session_state.get("training_request")
         if not isinstance(request, dict):
             return
-        remaining = session_state.get("remaining_episodes")
-        if not isinstance(remaining, (int, float)):
-            return
-        remaining_episodes = max(0, int(remaining))
-        if remaining_episodes <= 0:
+        remaining_timesteps = session_state.get("remaining_timesteps")
+        has_timestep_request = request.get("total_timesteps") is not None
+        if has_timestep_request and isinstance(remaining_timesteps, (int, float)):
+            remaining_work = max(0, int(remaining_timesteps))
+        else:
+            remaining = session_state.get("remaining_episodes")
+            if not isinstance(remaining, (int, float)):
+                return
+            remaining_work = max(0, int(remaining))
+        if remaining_work <= 0:
             self._clear_training_session()
             return
         raw_curriculum_stage = request.get("curriculum_stage")
         raw_promote_from_checkpoint = request.get("promote_from_checkpoint_episode")
         try:
-            self.start(
-                remaining_episodes,
-                bool(request.get("fast_mode", True)),
-                enable_instinct_rewards=(
+            resume_kwargs = {
+                "enable_instinct_rewards": (
                     None
                     if request.get("enable_instinct_rewards") is None
                     else bool(request.get("enable_instinct_rewards"))
                 ),
-                curriculum_stage=(
+                "curriculum_stage": (
                     None
                     if raw_curriculum_stage is None
                     else int(raw_curriculum_stage)
                 ),
-                debug_reward_breakdown=(
+                "debug_reward_breakdown": (
                     None
                     if request.get("debug_reward_breakdown") is None
                     else bool(request.get("debug_reward_breakdown"))
                 ),
-                auto_promote=(
+                "auto_promote": (
                     None
                     if request.get("auto_promote") is None
                     else bool(request.get("auto_promote"))
                 ),
-                promote_from_checkpoint_episode=(
+                "promote_from_checkpoint_episode": (
                     None
                     if raw_promote_from_checkpoint is None
                     else int(raw_promote_from_checkpoint)
                 ),
-                resume=True,
-            )
+                "resume": True,
+            }
+            if has_timestep_request:
+                self.start(total_timesteps=remaining_work, **resume_kwargs)
+            else:
+                self.start(
+                    remaining_work,
+                    bool(request.get("fast_mode", True)),
+                    **resume_kwargs,
+                )
         except ValueError as exc:
             message = f"Automatic resume blocked: {exc}"
             self._status.update(
@@ -1994,7 +2061,12 @@ class TrainingManager:
                     "phase": "paused",
                     "message": message,
                     "resume_available": True,
-                    "resume_remaining_episodes": remaining_episodes,
+                    "resume_remaining_timesteps": (
+                        remaining_work if has_timestep_request else None
+                    ),
+                    "resume_remaining_episodes": (
+                        None if has_timestep_request else remaining_work
+                    ),
                     "resume_request": request,
                 }
             )
@@ -2010,6 +2082,11 @@ class TrainingManager:
 
     def _request_training_control(self, state: str, message: str) -> dict[str, Any]:
         """Persist a pause/stop request and update the live status."""
+        try:
+            from sheepdog.training.episode_store import get_episode_store
+            get_episode_store().flush()
+        except Exception as exc:
+            logger.warning("Failed to flush episode store on control request: %s", exc)
 
         with self._lock:
             self._control_request = state
@@ -2038,9 +2115,10 @@ class TrainingManager:
 
     def start(
         self,
-        requested_episodes: int,
-        fast_mode: bool,
+        requested_episodes: int | None = None,
+        fast_mode: bool = True,
         *,
+        total_timesteps: int | None = None,
         enable_instinct_rewards: bool | None = None,
         curriculum_stage: int | None = None,
         debug_reward_breakdown: bool | None = None,
@@ -2050,6 +2128,9 @@ class TrainingManager:
         resume: bool = False,
     ) -> dict[str, Any]:
         """Start a background training job and return the initial status."""
+        if total_timesteps is not None and total_timesteps <= 0:
+            raise ValueError("total_timesteps must be positive")
+        requested_episodes = max(1, int(requested_episodes or 1))
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return dict(self._status)
@@ -2190,6 +2271,7 @@ class TrainingManager:
             self._active_start_request = self._training_request_payload(
                 requested_episodes,
                 fast_mode,
+                total_timesteps=total_timesteps,
                 enable_instinct_rewards=enable_instinct_rewards,
                 curriculum_stage=curriculum_stage,
                 debug_reward_breakdown=debug_reward_breakdown,
@@ -2201,6 +2283,10 @@ class TrainingManager:
                 {
                     "running": True,
                     "fast_mode": fast_mode,
+                    "requested_timesteps": total_timesteps,
+                    "batch_total_timesteps": total_timesteps,
+                    "batch_completed_timesteps": 0,
+                    "training_request_migrated": total_timesteps is None,
                     "enable_instinct_rewards": (
                         self._status["enable_instinct_rewards"]
                         if enable_instinct_rewards is None
@@ -2259,6 +2345,7 @@ class TrainingManager:
                 target=self._run_training,
                 args=(requested_episodes, fast_mode),
                 kwargs={
+                    "total_timesteps": total_timesteps,
                     "enable_instinct_rewards": enable_instinct_rewards,
                     "curriculum_stage": curriculum_stage,
                     "debug_reward_breakdown": debug_reward_breakdown,
@@ -3225,6 +3312,13 @@ class TrainingManager:
     def _clear_training_outputs(self, config: LabConfig) -> None:
         output_root = Path(config.training.output_dir)
         generated_root = Path(config.training.web_export_dir)
+        try:
+            from sheepdog.training.episode_store import get_episode_store
+            store = get_episode_store(output_root / "training-telemetry.sqlite")
+            store.clear_store()
+        except Exception as exc:
+            logger.warning("Failed to clear episode telemetry store: %s", exc)
+
         self._remove_path(output_root / "checkpoints")
         self._remove_path(output_root / "evaluations")
         self._remove_path(output_root / Trainer.STATE_FILENAME)
@@ -3244,6 +3338,7 @@ class TrainingManager:
         timestamp = datetime.datetime.now(datetime.UTC).strftime("%Y%m%d-%H%M%S")
         archive_root = output_root / "archive" / f"journey-{timestamp}"
         mappings: list[tuple[Path, Path]] = [
+            (output_root / "training-telemetry.sqlite", archive_root / "training-telemetry.sqlite"),
             (output_root / "checkpoints", archive_root / "checkpoints"),
             (output_root / "models", archive_root / "models"),
             (output_root / "evaluations", archive_root / "evaluations"),
@@ -3600,6 +3695,7 @@ class TrainingManager:
         self,
         requested_episodes: int,
         fast_mode: bool,
+        total_timesteps: int | None = None,
         enable_instinct_rewards: bool | None = None,
         curriculum_stage: int | None = None,
         debug_reward_breakdown: bool | None = None,
@@ -3643,6 +3739,7 @@ class TrainingManager:
                 self._active_start_request = self._training_request_payload(
                     batch_episodes,
                     fast_mode,
+                    total_timesteps=total_timesteps,
                     enable_instinct_rewards=enable_instinct_rewards,
                     curriculum_stage=current_stage,
                     debug_reward_breakdown=debug_reward_breakdown,
@@ -3653,12 +3750,31 @@ class TrainingManager:
                 job_config = _build_training_job_config(
                     batch_episodes,
                     fast_mode,
+                    total_timesteps=total_timesteps,
                     enable_instinct_rewards=enable_instinct_rewards,
                     curriculum_stage=current_stage,
                     debug_reward_breakdown=debug_reward_breakdown,
                     evaluation_mode=evaluation_mode,
                 )
-                self.telemetry_manager.initialize_wandb(config_dict=job_config.to_dict())
+                with self._lock:
+                    self._status.update(
+                        {
+                            "requested_timesteps": (
+                                total_timesteps
+                                if total_timesteps is not None
+                                else job_config.training.total_timesteps
+                            ),
+                            "effective_timesteps": job_config.training.total_timesteps,
+                            "batch_total_timesteps": job_config.training.total_timesteps,
+                            "batch_total_segments": len(
+                                job_config.training.checkpoint_episodes
+                            ),
+                        }
+                    )
+                self.telemetry_manager.initialize_wandb(
+                    config_dict=job_config.to_dict(),
+                    enabled=job_config.training.wandb_enabled,
+                )
                 trainer = create_trainer(job_config, job_config.training.output_dir)
                 trainer.runtime_tracker = self.runtime_tracker
                 if hasattr(trainer, "evaluator") and trainer.evaluator is not None:
@@ -3792,6 +3908,12 @@ class TrainingManager:
                                 success=ep_success,
                                 status=ep_status,
                                 seed=ep_seed,
+                                run_id=payload.get("run_id") or self._status.get("run_id"),
+                                session_id=payload.get("session_id") or self._status.get("session_id"),
+                                global_timestep=payload.get("global_timestep") or self._status.get("total_timesteps"),
+                                policy_version=payload.get("policy_version") or self._status.get("policy_version"),
+                                length=payload.get("length") or payload.get("steps"),
+                                checkpoint_id=payload.get("checkpoint_id") or self._status.get("active_checkpoint_id"),
                             )
                         except Exception:
                             pass
@@ -3815,6 +3937,21 @@ class TrainingManager:
                         "batch_completed_episodes": computed_batch_completed_episodes,
                         "batch_total_segments": batch_total_segments,
                         "batch_completed_segments": batch_completed_segments,
+                        "requested_timesteps": (
+                            total_timesteps
+                            if total_timesteps is not None
+                            else job_config.training.total_timesteps
+                        ),
+                        "effective_timesteps": job_config.training.total_timesteps,
+                        "batch_total_timesteps": payload.get(
+                            "batch_total_timesteps",
+                            job_config.training.total_timesteps,
+                        ),
+                        "batch_completed_timesteps": payload.get(
+                            "batch_completed_timesteps",
+                            self._status.get("batch_completed_timesteps", 0),
+                        ),
+                        "completed_environment_episodes": actual_completed,
                         "estimated_equivalent_episodes": computed_batch_completed_episodes,
                         "current_episode": payload.get("current_episode"),
                         "checkpoint_episode": checkpoint_episode,
@@ -3824,6 +3961,14 @@ class TrainingManager:
                         "error_type": None,
                         "traceback": None,
                     }
+                    if phase == "checkpoint":
+                        update["durable_completed_timesteps"] = update[
+                            "batch_completed_timesteps"
+                        ]
+                        update["cumulative_environment_episodes"] = payload.get(
+                            "environment_episodes_total",
+                            self._status.get("cumulative_environment_episodes", 0),
+                        )
                     if "approx_kl" in payload:
                         update["approx_kl"] = payload["approx_kl"]
                     if "clip_fraction" in payload:
@@ -4791,6 +4936,11 @@ class TrainingManager:
             self.runtime_tracker.end_session("unknown")
         finally:
             self.active_trainer = None
+            try:
+                from sheepdog.training.episode_store import get_episode_store
+                get_episode_store().flush()
+            except Exception as exc:
+                logger.warning("Failed to flush episode store in _run_training finally block: %s", exc)
 
 
 class _ManagerDescriptor:
@@ -6021,15 +6171,45 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                 self._json_response([])
             return
         if request_path == "/api/training/status":
-            import datetime
-            print(
-                f"[DEBUG] /api/training/status polled at {datetime.datetime.now().strftime('%H:%M:%S.%f')[:-3]}",
-                flush=True,
-            )
             self._json_response(self.manager.snapshot())
             return
         if request_path == "/api/training/diagnostics":
             self._handle_diagnostics()
+            return
+        if request_path == "/api/insights/training-episodes":
+            query = urlsplit(self.path).query
+            from urllib.parse import parse_qs
+            params = parse_qs(query)
+            try:
+                after_id = int(params["after_id"][0]) if "after_id" in params else None
+            except (ValueError, IndexError):
+                after_id = None
+            try:
+                before_id = int(params["before_id"][0]) if "before_id" in params else None
+            except (ValueError, IndexError):
+                before_id = None
+            try:
+                stage = int(params["stage"][0]) if "stage" in params else None
+            except (ValueError, IndexError):
+                stage = None
+            run_id = params["run_id"][0] if "run_id" in params else None
+            try:
+                limit = int(params["limit"][0]) if "limit" in params else 500
+            except (ValueError, IndexError):
+                limit = 500
+
+            from sheepdog.training.episode_store import get_episode_store
+            output_dir = Path(LabConfig().training.output_dir)
+            db_path = output_dir / "training-telemetry.sqlite"
+            store = get_episode_store(db_path)
+            res = store.get_episodes(
+                after_id=after_id,
+                before_id=before_id,
+                stage=stage,
+                run_id=run_id,
+                limit=limit,
+            )
+            self._json_response(res)
             return
         if request_path in ("/health", "/api/health"):
             self._json_response({"status": "ok", "service": "sheepdog-api"})
@@ -6269,7 +6449,15 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             )
             return
 
-        requested_episodes = max(1, int(payload.get("episodes", 1)))
+        raw_total_timesteps = payload.get("total_timesteps")
+        total_timesteps = (
+            None if raw_total_timesteps is None else int(raw_total_timesteps)
+        )
+        requested_episodes = (
+            None
+            if total_timesteps is not None
+            else max(1, int(payload.get("episodes", 1)))
+        )
         fast_mode = bool(payload.get("fast_mode", True))
         enable_instinct_rewards = payload.get("enable_instinct_rewards")
         curriculum_stage = payload.get("curriculum_stage")
@@ -6279,30 +6467,42 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         evaluation_mode = payload.get("evaluation_mode", "quick")
         resume = bool(payload.get("resume", False))
         print(
-            f"[Sheepdog] Received training start request (episodes={requested_episodes}, "
-            f"stage={curriculum_stage or 1}, fast_mode={fast_mode}, resume={resume})",
+            f"[Sheepdog] Received training start request (total_timesteps={total_timesteps}, "
+            f"legacy_episodes={requested_episodes}, stage={curriculum_stage or 1}, "
+            f"resume={resume})",
             flush=True,
         )
         try:
-            response = self.manager.start(
-                requested_episodes,
-                fast_mode,
-                enable_instinct_rewards=(
+            start_kwargs = {
+                "enable_instinct_rewards": (
                     None if enable_instinct_rewards is None else bool(enable_instinct_rewards)
                 ),
-                curriculum_stage=(None if curriculum_stage is None else int(curriculum_stage)),
-                debug_reward_breakdown=(
+                "curriculum_stage": (
+                    None if curriculum_stage is None else int(curriculum_stage)
+                ),
+                "debug_reward_breakdown": (
                     None if debug_reward_breakdown is None else bool(debug_reward_breakdown)
                 ),
-                auto_promote=(None if auto_promote is None else bool(auto_promote)),
-                promote_from_checkpoint_episode=(
+                "auto_promote": None if auto_promote is None else bool(auto_promote),
+                "promote_from_checkpoint_episode": (
                     None
                     if promote_from_checkpoint_episode is None
                     else int(promote_from_checkpoint_episode)
                 ),
-                evaluation_mode=evaluation_mode,
-                resume=resume,
-            )
+                "evaluation_mode": evaluation_mode,
+                "resume": resume,
+            }
+            if total_timesteps is not None:
+                response = self.manager.start(
+                    total_timesteps=total_timesteps,
+                    **start_kwargs,
+                )
+            else:
+                response = self.manager.start(
+                    requested_episodes,
+                    fast_mode,
+                    **start_kwargs,
+                )
         except ValueError as exc:
             self._json_response(
                 {"error": str(exc), "code": "TRAINING_START_REJECTED"},

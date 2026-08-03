@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -26,8 +27,15 @@ class CurriculumTelemetryManager:
         self,
         project_name: str = "sheep_dog_herding",
         config_dict: dict[str, Any] | None = None,
+        enabled: bool = True,
     ) -> None:
-        """Initialize Weights & Biases if present on the system."""
+        """Initialize Weights & Biases if enabled and present on the system."""
+        if os.getenv("WANDB_MODE", "").lower() == "disabled" or os.getenv("SHEEPDOG_WANDB_ENABLED", "").lower() in ("false", "0"):
+            logger.info("Weights & Biases telemetry is explicitly disabled via environment.")
+            return
+        if not enabled and os.getenv("SHEEPDOG_WANDB_ENABLED", "").lower() not in ("true", "1"):
+            logger.info("Weights & Biases telemetry is disabled.")
+            return
         try:
             import wandb
             # Avoid re-initializing if there is an active run
@@ -139,8 +147,39 @@ class CurriculumTelemetryManager:
         success: bool,
         status: str = "UNKNOWN",
         seed: int | None = None,
+        run_id: str | None = None,
+        session_id: str | None = None,
+        global_timestep: int | None = None,
+        policy_version: int | None = None,
+        length: int | None = None,
+        checkpoint_id: str | None = None,
     ) -> None:
-        """Log per-episode metrics to Weights & Biases and local history."""
+        """Log per-episode metrics to Weights & Biases and local SQLite history."""
+        try:
+            from sheepdog.training.episode_store import get_episode_store
+            db_path = self.output_dir / "training-telemetry.sqlite"
+            store = get_episode_store(db_path)
+            store.add_episode({
+                "global_environment_episode": episode,
+                "episode": episode,
+                "stage": stage,
+                "curriculum_stage": stage,
+                "reward": reward,
+                "penned": penned,
+                "total_sheep": total_sheep,
+                "success": success,
+                "status": status,
+                "seed": seed,
+                "run_id": run_id,
+                "session_id": session_id,
+                "global_timestep": global_timestep,
+                "policy_version": policy_version,
+                "length": length,
+                "checkpoint_id": checkpoint_id,
+            })
+        except Exception as exc:
+            logger.error("Failed to log episode to SQLite store: %s", exc)
+
         if self._wandb_initialized:
             try:
                 import wandb
