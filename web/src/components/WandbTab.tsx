@@ -588,11 +588,12 @@ export function WandbTab({
                         : selectedCheckpoint.checkpoint_episode === cp.checkpoint_episode && selectedCheckpoint.run_id === cp.run_id)
                     : false;
                   const isCompatible = cp.observation_schema_hash === checkpoints[checkpoints.length - 1]?.observation_schema_hash;
-                  const rowKey = cp.checkpoint_id
+                  const baseKey = cp.checkpoint_id
                     ? cp.checkpoint_id
                     : cp.run_id
                       ? `${cp.run_id}-ep-${cp.checkpoint_episode}`
-                      : `ep-${cp.checkpoint_episode}-${idx}`;
+                      : `ep-${cp.checkpoint_episode}`;
+                  const rowKey = `${baseKey}-${idx}`;
 
                   return (
                     <tr

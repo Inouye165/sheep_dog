@@ -64,6 +64,7 @@ const APP_TABS: { id: ActiveTab; label: string }[] = [
 
 const CLEAR_TRAINING_MESSAGE = "Training cleared. Baseline replay restored";
 const DEFAULT_MAX_CURRICULUM_STAGE = 32;
+const DEFAULT_EVAL_SEEDS = [101, 103, 107, 109, 113, 127, 131, 137, 139, 149];
 
 /** Mirrors RECOMMENDED_EPISODES in TrainingPanel — update both together. */
 const RECOMMENDED_EPISODES_BY_STAGE: Record<number, number> = {
@@ -271,10 +272,15 @@ export function App() {
     return checkpointIndex?.checkpoints.find((entry) => entry.checkpoint_episode === selectedCheckpointEpisode) ?? null;
   }, [checkpointIndex, selectedCheckpointEpisode]);
 
-  const seedOptions = useMemo(
-    () => (selectedCheckpoint?.records ? selectedCheckpoint.records.map((record) => record.seed) : []),
-    [selectedCheckpoint],
-  );
+  const seedOptions = useMemo(() => {
+    if (selectedCheckpoint?.records && selectedCheckpoint.records.length > 0) {
+      return selectedCheckpoint.records.map((record) => record.seed);
+    }
+    if (selectedCheckpoint) {
+      return DEFAULT_EVAL_SEEDS;
+    }
+    return [];
+  }, [selectedCheckpoint]);
 
   const playbackDelay = playbackFastMode ? 24 : 220;
   const scenarioPlaybackDelay = scenarioFastMode ? 24 : 220;
@@ -532,7 +538,7 @@ export function App() {
     const latestCheckpoint = index.checkpoints[index.checkpoints.length - 1] ?? null;
     const checkpointEpisode = latestCheckpoint?.checkpoint_episode ?? index.latest?.checkpoint_episode ?? null;
     setSelectedCheckpointEpisode(checkpointEpisode);
-    const seed = latestCheckpoint?.records?.[0]?.seed ?? index.latest?.records?.[0]?.seed ?? null;
+    const seed = latestCheckpoint?.records?.[0]?.seed ?? index.latest?.records?.[0]?.seed ?? DEFAULT_EVAL_SEEDS[0];
     setSelectedSeed(seed);
   }, []);
 
@@ -828,19 +834,33 @@ export function App() {
     if (!selectedCheckpoint) {
       return;
     }
-    const seed = selectedSeed ?? selectedCheckpoint.records?.[0]?.seed ?? null;
+    const seed = selectedSeed ?? selectedCheckpoint.records?.[0]?.seed ?? DEFAULT_EVAL_SEEDS[0];
     if (seed === null) {
       return;
     }
     const record = selectedCheckpoint.records?.find((entry) => entry.seed === seed) ?? selectedCheckpoint.records?.[0];
-    if (!record || !record.replay_path) {
-      return;
-    }
 
     let cancelled = false;
     void (async () => {
       try {
-        const bundle = await loadReplay(record.replay_path);
+        let bundle: ReplayBundle;
+        if (record?.replay_path) {
+          bundle = await loadReplay(record.replay_path);
+        } else {
+          const checkpointStage = getCheckpointStage(selectedCheckpoint);
+          bundle = await runReplay({
+            seed,
+            checkpoint_episode: selectedCheckpoint.checkpoint_episode,
+            trainer_type: selectedCheckpoint.trainer_type,
+            policy_type: selectedCheckpoint.policy_type,
+            policy_mode: selectedCheckpoint.policy_mode || selectedCheckpoint.policy_name,
+            effective_config: {
+              enable_instinct_rewards: effectiveEnableInstincts,
+              curriculum_stage: checkpointStage ?? effectiveCurriculumStage,
+              debug_reward_breakdown: effectiveDebugRewardBreakdown,
+            },
+          });
+        }
         if (cancelled) {
           return;
         }
@@ -848,13 +868,21 @@ export function App() {
         setFrameIndex(0);
         setRunState("idle");
       } catch (loadError) {
-        setError(loadError instanceof Error ? loadError.message : "Unable to load replay.");
+        if (!cancelled) {
+          setError(loadError instanceof Error ? loadError.message : "Unable to load replay.");
+        }
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [selectedCheckpoint, selectedSeed]);
+  }, [
+    selectedCheckpoint,
+    selectedSeed,
+    effectiveEnableInstincts,
+    effectiveCurriculumStage,
+    effectiveDebugRewardBreakdown,
+  ]);
 
   useEffect(() => {
     if (runState !== "running" || !replay) {
@@ -893,7 +921,8 @@ export function App() {
   function handleCheckpointChange(episode: number) {
     setSelectedCheckpointEpisode(episode);
     const checkpoint = checkpointIndex?.checkpoints.find((entry) => entry.checkpoint_episode === episode);
-    setSelectedSeed(checkpoint?.records?.[0]?.seed ?? null);
+    const seed = checkpoint?.records?.[0]?.seed ?? DEFAULT_EVAL_SEEDS[0];
+    setSelectedSeed(seed);
   }
 
   function handleSeedChange(seed: number) {
@@ -1260,25 +1289,38 @@ export function App() {
     const checkpoint = checkpointIndex?.checkpoints.find(
       (entry) => entry.checkpoint_episode === selectedCheckpointEpisode,
     );
+    const targetSeed = selectedSeed ?? checkpoint?.records?.[0]?.seed ?? DEFAULT_EVAL_SEEDS[0];
     const record =
-      checkpoint?.records?.find((r) => r.seed === selectedSeed) ??
+      checkpoint?.records?.find((r) => r.seed === targetSeed) ??
       checkpoint?.records?.[0];
-    if (!record) {
-      // No specific record found — just restart the current replay from the top.
-      setFrameIndex(0);
-      setRunState("running");
-      return;
-    }
+
     setLoadingSelectedReplay(true);
     setError(null);
     try {
-      if (!record.replay_path) {
-        setError("No replay path specified for selected seed.");
+      let bundle: ReplayBundle;
+      if (record?.replay_path) {
+        bundle = await loadReplay(record.replay_path);
+      } else if (checkpoint && targetSeed !== null) {
+        const checkpointStage = getCheckpointStage(checkpoint);
+        bundle = await runReplay({
+          seed: targetSeed,
+          checkpoint_episode: checkpoint.checkpoint_episode,
+          trainer_type: checkpoint.trainer_type,
+          policy_type: checkpoint.policy_type,
+          policy_mode: checkpoint.policy_mode || checkpoint.policy_name,
+          effective_config: {
+            enable_instinct_rewards: effectiveEnableInstincts,
+            curriculum_stage: checkpointStage ?? effectiveCurriculumStage,
+            debug_reward_breakdown: effectiveDebugRewardBreakdown,
+          },
+        });
+      } else {
+        setFrameIndex(0);
+        setRunState("running");
         return;
       }
-      const bundle = await loadReplay(record.replay_path);
       setReplay(bundle);
-      setSelectedSeed(record.seed);
+      setSelectedSeed(targetSeed);
       setFrameIndex(0);
       setRunState("running");
     } catch (loadError) {
