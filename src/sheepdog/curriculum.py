@@ -1161,7 +1161,7 @@ def stage_summary(stage: int) -> str:
         6: "2 dogs, 3 sheep, mostly grouped with occasional tiny nearby stray.",
         7: "2 dogs, 4 sheep, early nearby stray collection starts (6-9 cells).",
         8: "3 dogs, 4 sheep, larger field with frequent nearby strays (7-10 cells).",
-        9: "3 dogs, 4 sheep, nearby stray recovery emphasis (8-12 cells).",
+        9: "Stage 9: Remediation - Wall & Corner Recovery (70% wall_recovery, 20% randomized_flock, 10% fixed_easy).",
         10: "Stage 10A: 3 dogs, 5 sheep, introductory farther stray (12-16 cells, 2.5% spawn mix).",
         11: "Stage 10B: 3 dogs, 5 sheep, scaling farther stray (14-19 cells, 5.0% spawn mix).",
         12: "Stage 10C: 3 dogs, 5 sheep, scaling farther stray (16-22 cells, 7.5% spawn mix).",
