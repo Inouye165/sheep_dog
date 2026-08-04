@@ -206,6 +206,12 @@ class SheepdogEnvironment:
         self._right_flank_occupancy_steps = 0
         self._gate_corridor_occupancy_peak = 0.0
         self._gate_corridor_failure_steps = 0
+        self._wall_stall_steps = 0
+        self._max_wall_stall_steps = 0
+        self._sheep_wall_stalls: dict[int, int] = {}
+        self._wall_lateral_movements = 0
+        self._wall_inward_recoveries = 0
+        self._corner_occupancy_steps = 0
         self._spawn_mode = ""
         self._episode_reward_breakdown: dict[str, float] = {}
         self._initial_sheep_distance_to_pen = 0.0
@@ -1309,28 +1315,63 @@ class SheepdogEnvironment:
                 return sheep
 
             # all_corners
-            corner_margin = max(2, min(self.env_config.width, self.env_config.height) // 12)
-            corner_targets = [
-                Point(corner_margin, corner_margin),
-                Point(max(1, self.env_config.width - 1 - corner_margin), corner_margin),
-                Point(corner_margin, max(1, self.env_config.height - 1 - corner_margin)),
-                Point(
-                    max(1, self.env_config.width - 1 - corner_margin),
-                    max(1, self.env_config.height - 1 - corner_margin),
-                ),
-            ]
-            for index in range(self.env_config.sheep):
-                corner = corner_targets[index % len(corner_targets)]
-                position = self._sample_unique_position(
-                    preferred_x=corner.x,
-                    preferred_y=corner.y,
-                    occupied=occupied,
-                    jitter_x=1,
-                    jitter_y=1,
-                )
-                occupied.add(position)
-                append_sheep(index, position)
-            return sheep
+            if mode == "all_corners":
+                corner_margin = max(2, min(self.env_config.width, self.env_config.height) // 12)
+                corner_targets = [
+                    Point(corner_margin, corner_margin),
+                    Point(max(1, self.env_config.width - 1 - corner_margin), corner_margin),
+                    Point(corner_margin, max(1, self.env_config.height - 1 - corner_margin)),
+                    Point(
+                        max(1, self.env_config.width - 1 - corner_margin),
+                        max(1, self.env_config.height - 1 - corner_margin),
+                    ),
+                ]
+                for index in range(self.env_config.sheep):
+                    corner = corner_targets[index % len(corner_targets)]
+                    position = self._sample_unique_position(
+                        preferred_x=corner.x,
+                        preferred_y=corner.y,
+                        occupied=occupied,
+                        jitter_x=1,
+                        jitter_y=1,
+                    )
+                    occupied.add(position)
+                    append_sheep(index, position)
+                return sheep
+
+            # wall_recovery
+            if mode == "wall_recovery":
+                wall_choice = self._rng.choice(["top", "bottom", "left", "right", "corner"])
+                w_max = self.env_config.width - 1
+                h_max = self.env_config.height - 1
+                for index in range(self.env_config.sheep):
+                    dist = self._rng.choice([0, 1, 2, 3])
+                    if wall_choice == "top":
+                        px = self._rng.randint(10, max(11, w_max - 10))
+                        py = dist
+                    elif wall_choice == "bottom":
+                        px = self._rng.randint(10, max(11, w_max - 10))
+                        py = max(0, h_max - dist)
+                    elif wall_choice == "left":
+                        px = dist
+                        py = self._rng.randint(10, max(11, h_max - 10))
+                    elif wall_choice == "right":
+                        px = max(0, w_max - dist)
+                        py = self._rng.randint(10, max(11, h_max - 10))
+                    else:
+                        cx = self._rng.choice([dist, max(0, w_max - dist)])
+                        cy = self._rng.choice([dist, max(0, h_max - dist)])
+                        px, py = cx, cy
+                    position = self._sample_unique_position(
+                        preferred_x=px,
+                        preferred_y=py,
+                        occupied=occupied,
+                        jitter_x=1,
+                        jitter_y=1,
+                    )
+                    occupied.add(position)
+                    append_sheep(index, position)
+                return sheep
 
         self._spawn_mode = "legacy_stage_layout"
 
@@ -1664,12 +1705,38 @@ class SheepdogEnvironment:
             next_budgets,
             strict=True,
         ):
+            if not sheep.penned:
+                prev_margin = self._wall_margin(sheep.position)
+                curr_margin = self._wall_margin(position)
+                if prev_margin == 0 and curr_margin == 0 and position != sheep.position:
+                    self._wall_lateral_movements += 1
+                elif prev_margin == 0 and curr_margin > 0:
+                    self._wall_inward_recoveries += 1
             moved = position != sheep.position
             sheep.position = position
             sheep.penned = self._pen.contains(position)
             sheep.movement_budget = 0.0 if sheep.penned else remaining_budget
             sheep.blocked_steps = 0 if moved or sheep.penned else sheep.blocked_steps + 1
             self._record_position_history(sheep.recent_positions, position)
+
+        unpenned_sheep = [s for s in self._sheep if not s.penned]
+        w_max = self.env_config.width - 1
+        h_max = self.env_config.height - 1
+        for s in self._sheep:
+            if not s.penned and self._wall_margin(s.position) == 0:
+                self._sheep_wall_stalls[s.index] = self._sheep_wall_stalls.get(s.index, 0) + 1
+            else:
+                self._sheep_wall_stalls[s.index] = 0
+
+        self._wall_stall_steps = max(self._sheep_wall_stalls.values(), default=0)
+        self._max_wall_stall_steps = max(self._max_wall_stall_steps, self._wall_stall_steps)
+
+        for s in unpenned_sheep:
+            if self._wall_margin(s.position) == 0:
+                if (s.position.x == 0 or s.position.x == w_max) and (
+                    s.position.y == 0 or s.position.y == h_max
+                ):
+                    self._corner_occupancy_steps += 1
 
     def _validate_action(self, action: str) -> Action:
         if action not in ACTION_DELTAS:
@@ -1837,25 +1904,32 @@ class SheepdogEnvironment:
         step_x = candidate.x - position.x
         step_y = candidate.y - position.y
         dog_clearance = self._nearest_dog_distance(candidate, dog_positions)
+        curr_margin = self._wall_margin(position)
+        cand_margin = self._wall_margin(candidate)
+        inward_bonus = 0.0
+        if curr_margin <= 1.0 and cand_margin > curr_margin:
+            inward_bonus = self.env_config.sheep_inward_recovery_weight * (cand_margin - curr_margin)
         return (
             step_x * vector_x
             + step_y * vector_y
             + min(dog_clearance, self.env_config.sheep_vision * 2) * 0.35
-            + self._wall_margin(candidate) * 0.1
+            + cand_margin * 0.1
+            + inward_bonus
             + self._rng.random() * 1e-6
         )
 
     def _edge_escape_actions(self, position: Point) -> tuple[Action, ...]:
         actions: list[Action] = []
-        # A sheep cornered against (or one cell from) a wall should consider
-        # lateral escape along the wall as a real option, not just when
-        # exactly on the boundary.
         max_x = self.env_config.width - 1
         max_y = self.env_config.height - 1
-        if position.x <= 1 or position.x >= max_x - 1:
-            actions.extend(("up", "down"))
-        if position.y <= 1 or position.y >= max_y - 1:
-            actions.extend(("left", "right"))
+        if position.x <= 1:
+            actions.extend(("up", "down", "right"))
+        elif position.x >= max_x - 1:
+            actions.extend(("up", "down", "left"))
+        if position.y <= 1:
+            actions.extend(("left", "right", "down"))
+        elif position.y >= max_y - 1:
+            actions.extend(("left", "right", "up"))
         return tuple(dict.fromkeys(actions))
 
     def _nearest_dog_distance(self, position: Point, dog_positions: list[Point]) -> float:
@@ -2614,6 +2688,11 @@ class SheepdogEnvironment:
             "spawn_mode": self._spawn_mode,
             "cumulative_gate_progress": self._cumulative_gate_progress,
             "controlled_stall_steps": self._controlled_stall_steps,
+            "wall_stall_steps": self._wall_stall_steps,
+            "max_wall_stall_steps": self._max_wall_stall_steps,
+            "wall_lateral_movements": self._wall_lateral_movements,
+            "wall_inward_recoveries": self._wall_inward_recoveries,
+            "corner_occupancy_steps": self._corner_occupancy_steps,
             "gate_corridor_occupancy": self._gate_corridor_occupancy(),
             "flock_center": (
                 {"x": flock_center.x, "y": flock_center.y} if flock_center is not None else None

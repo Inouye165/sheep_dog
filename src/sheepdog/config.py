@@ -49,6 +49,10 @@ class EnvironmentConfig:
     # Sheep-to-flock attraction used by sheep movement. Lower values reduce
     # autonomous self-grouping, letting dog pressure matter more.
     sheep_flock_cohesion_weight: float = 0.2
+    # Inward boundary recovery bonus weight applied when a sheep candidate step reduces wall contact.
+    sheep_inward_recovery_weight: float = 16.0
+    # Threshold for consecutive steps on an outer wall to count as a wall stall episode diagnostic.
+    wall_stall_window: int = 15
     # When False, flock cohesion is only applied if at least one dog is within
     # sheep vision range, preventing autonomous regrouping across the field.
     sheep_cohere_without_dog_pressure: bool = True
@@ -130,6 +134,7 @@ SPAWN_MODES: tuple[str, ...] = (
     "partial_scattered",
     "scattered_sheep",
     "all_corners",
+    "wall_recovery",
 )
 
 # Pen placement modes understood by the environment.
