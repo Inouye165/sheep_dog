@@ -233,6 +233,16 @@ export async function rewindTraining(stage: number): Promise<TrainingStatus> {
   }, API_BASE_URL);
 }
 
+export async function startRemediationFork(targetStage = 9, canaryEpisodes = 20): Promise<TrainingStatus> {
+  return fetchJson<TrainingStatus>("/api/training/remediation", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ target_stage: targetStage, canary_episodes: canaryEpisodes }),
+  }, API_BASE_URL);
+}
+
 export async function runReplay(request: ReplayRunRequest): Promise<ReplayBundle> {
   return fetchJson<ReplayBundle>("/api/replay/run", {
     method: "POST",

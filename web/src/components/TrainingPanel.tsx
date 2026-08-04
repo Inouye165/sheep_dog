@@ -204,6 +204,7 @@ interface TrainingPanelProps {
   onClearTraining: () => void;
   onResetJourney: () => void;
   onPromote: () => void;
+  onStartRemediation?: () => void;
   currentBestEntry?: CheckpointEntry | null;
   previousBestEntry?: CheckpointEntry | null;
   seedEpisode?: number | null;
@@ -275,6 +276,7 @@ export function TrainingPanel({
   onClearTraining,
   onResetJourney,
   onPromote,
+  onStartRemediation,
   currentBestEntry,
   previousBestEntry,
   seedEpisode,
@@ -854,7 +856,26 @@ export function TrainingPanel({
               <span className="stage-chip__label">Stage {curriculumStage}</span>
               <span className="stage-chip__desc">{stageDesc}</span>
             </div>
-            {canPromote ? (
+            {curriculumStage === 8 && onStartRemediation ? (
+              <button
+                type="button"
+                className="button-row__remediation"
+                onClick={onStartRemediation}
+                disabled={busy}
+                style={{
+                  width: "100%",
+                  padding: "0.6rem",
+                  backgroundColor: "#8b5cf6",
+                  color: "#ffffff",
+                  fontWeight: "bold",
+                  borderRadius: "4px",
+                  border: "none",
+                  cursor: busy ? "not-allowed" : "pointer",
+                }}
+              >
+                Start Stage 9 Remediation
+              </button>
+            ) : canPromote ? (
               <button
                 type="button"
                 className="button-row__promote"

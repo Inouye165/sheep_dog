@@ -3328,6 +3328,104 @@ class TrainingManager:
         else:
             return {"error": "No prior active run artifacts found to archive"}, HTTPStatus.NOT_FOUND
 
+    def remediation_fork(
+        self,
+        target_stage: int = 9,
+        canary_episodes: int = 20,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        """Atomically fork from Stage 8 best-model into a new Stage 9 remediation run without running training."""
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return {
+                    "error": "Cannot create Stage 9 remediation run while training is active"
+                }, HTTPStatus.CONFLICT
+
+        config = LabConfig()
+        output_root = resolve_workspace_path(config.training.output_dir)
+        best_model_zip = output_root / "models" / "best-model.zip"
+
+        if not best_model_zip.exists():
+            return {
+                "error": "Stage 8 source best-model.zip does not exist"
+            }, HTTPStatus.NOT_FOUND
+
+        import uuid
+        now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        new_run_id = f"run_stage{target_stage}_remediation_{now_str}_{uuid.uuid4().hex[:4]}"
+
+        from sheepdog.curriculum import apply_curriculum_stage, stage_summary
+        stage_cfg = apply_curriculum_stage(config, target_stage)
+
+        try:
+            # 1. Update run-state.json
+            run_state_payload = {
+                "active_curriculum_stage": target_stage,
+                "active_stage_name": stage_summary(target_stage),
+                "run_id": new_run_id,
+                "batch_total_timesteps": 0,
+                "batch_completed_timesteps": 0,
+                "durable_completed_timesteps": 0,
+                "episodes_completed": 0,
+                "requested_episodes": canary_episodes,
+                "policy_state_path": str(best_model_zip),
+                "best_model_path": str(best_model_zip),
+                "latest_current_stage_evaluation_id": None,
+                "current_stage_promotion_streak": 0,
+                "source_stage": 8,
+                "source_checkpoint": "best-model.zip",
+            }
+            run_state_path = output_root / "run-state.json"
+            run_state_path.write_text(json.dumps(run_state_payload, indent=2), encoding="utf-8")
+
+            # 2. Update training-settings.json
+            training_settings_payload = {
+                "curriculum_stage": target_stage,
+                "enable_instinct_rewards": True,
+                "debug_reward_breakdown": False,
+                "auto_promote": True,
+            }
+            settings_path = output_root / "training-settings.json"
+            settings_path.write_text(json.dumps(training_settings_payload, indent=2), encoding="utf-8")
+
+            # 3. Update effective-training-config.json
+            eff_cfg_path = output_root / "effective-training-config.json"
+            eff_cfg_path.write_text(json.dumps(stage_cfg.to_dict(), indent=2), encoding="utf-8")
+
+            # 4. Update training-state.json
+            state_path = output_root / Trainer.STATE_FILENAME
+            state_payload = {
+                "total_episodes_trained": 0,
+                "policy_state_path": str(best_model_zip),
+                "best_model_path": str(best_model_zip),
+                "best_model_curriculum_stage": target_stage,
+                "run_id": new_run_id,
+            }
+            state_path.write_text(json.dumps(state_payload, indent=2), encoding="utf-8")
+
+            # 5. Atomically update in-memory status dictionary
+            with self._lock:
+                self._status["curriculum_stage"] = target_stage
+                self._status["active_curriculum_stage"] = target_stage
+                self._status["run_id"] = new_run_id
+                self._status["batch_completed_timesteps"] = 0
+                self._status["batch_total_timesteps"] = 0
+                self._status["durable_completed_timesteps"] = 0
+                self._status["episodes_completed"] = 0
+                self._status["requested_episodes"] = canary_episodes
+                self._status["running"] = False
+                self._status["phase"] = "idle"
+                self._status["message"] = f"Created Stage {target_stage} remediation run ({new_run_id}). Ready to start canary."
+
+            import logging
+            logging.getLogger(__name__).info("Successfully executed Stage %d remediation fork (%s)", target_stage, new_run_id)
+            return dict(self._status), HTTPStatus.OK
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).exception("Error executing Stage %d remediation fork: %s", target_stage, exc)
+            return {"error": f"Failed to execute remediation fork: {str(exc)}"}, HTTPStatus.INTERNAL_SERVER_ERROR
+
+
+
     def get_network_topology(self) -> dict[str, Any]:
         """Return read-only neural topology metadata for visualization."""
         config = LabConfig()
@@ -6467,6 +6565,14 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
 
         if self.path == "/api/training/archive-active":
             payload, status = self.manager.archive_active_run()
+            self._json_response(payload, status=status)
+            return
+
+        if self.path in {"/api/training/remediation", "/api/training/remediation-fork"}:
+            body = self._read_json() if self.headers.get("Content-Length") else {}
+            target_stage = int(body.get("target_stage", 9))
+            canary_episodes = int(body.get("canary_episodes", 20))
+            payload, status = self.manager.remediation_fork(target_stage=target_stage, canary_episodes=canary_episodes)
             self._json_response(payload, status=status)
             return
 

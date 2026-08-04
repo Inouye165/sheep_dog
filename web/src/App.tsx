@@ -28,6 +28,7 @@ import {
   rewindTraining,
   resetJourneyTraining,
   runReplay,
+  startRemediationFork,
   saveScenario,
   startTraining,
   stopTraining,
@@ -304,9 +305,7 @@ export function App() {
   const effectiveEnableInstincts = trainingRunning
     ? trainingStatus?.enable_instinct_rewards ?? trainingEnableInstincts
     : trainingEnableInstincts;
-  const effectiveCurriculumStage = trainingRunning
-    ? trainingStatus?.curriculum_stage ?? trainingCurriculumStage
-    : trainingCurriculumStage;
+  const effectiveCurriculumStage = trainingStatus?.active_curriculum_stage ?? trainingStatus?.curriculum_stage ?? trainingCurriculumStage;
   const effectiveDebugRewardBreakdown = trainingRunning
     ? trainingStatus?.debug_reward_breakdown ?? trainingDebugRewardBreakdown
     : trainingDebugRewardBreakdown;
@@ -1033,6 +1032,25 @@ export function App() {
     }
   }
 
+  async function handleStartRemediation() {
+    setTrainingError(null);
+    setError(null);
+    setIsStartingTraining(true);
+    try {
+      const status = await startRemediationFork(9, 20);
+      setTrainingStatus(status);
+      syncTrainingStageFromStatus(status);
+    } catch (remediationError) {
+      setTrainingError(
+        remediationError instanceof Error
+          ? remediationError.message
+          : "Unable to create Stage 9 remediation run.",
+      );
+    } finally {
+      setIsStartingTraining(false);
+    }
+  }
+
   async function handleRefreshAllData() {
     try {
       console.debug("[Sheepdog API] Refreshing all data...");
@@ -1555,6 +1573,7 @@ export function App() {
                   onClearTraining={handleClearTraining}
                   onResetJourney={handleResetJourney}
                   onPromote={handlePromote}
+                  onStartRemediation={handleStartRemediation}
                   onCloseApp={handleCloseApp}
                   currentBestEntry={currentBestEntry}
                   previousBestEntry={previousBestEntry}
