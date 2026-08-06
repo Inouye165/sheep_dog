@@ -153,6 +153,12 @@ class CurriculumTelemetryManager:
         policy_version: int | None = None,
         length: int | None = None,
         checkpoint_id: str | None = None,
+        replay_available: bool | None = None,
+        replay_id: str | None = None,
+        replay_path: str | None = None,
+        replay_source: str | None = None,
+        capture_reason: str | None = None,
+        capture_status: str | None = None,
     ) -> None:
         """Log per-episode metrics to Weights & Biases and local SQLite history."""
         try:
@@ -176,6 +182,12 @@ class CurriculumTelemetryManager:
                 "policy_version": policy_version,
                 "length": length,
                 "checkpoint_id": checkpoint_id,
+                "replay_available": replay_available,
+                "replay_id": replay_id,
+                "replay_path": replay_path,
+                "replay_source": replay_source,
+                "capture_reason": capture_reason,
+                "capture_status": capture_status,
             })
         except Exception as exc:
             logger.error("Failed to log episode to SQLite store: %s", exc)

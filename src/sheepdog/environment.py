@@ -414,6 +414,14 @@ class SheepdogEnvironment:
         )
         return self.get_state_snapshot()
 
+    @property
+    def simulated_seconds(self) -> float:
+        return float(self._simulated_seconds)
+
+    @property
+    def step_count(self) -> int:
+        return int(self._step_count)
+
 
     def _sample_pen_origin_and_opening(self) -> tuple[Point, str]:
         placement = (self.env_config.pen_placement or "corner").lower()

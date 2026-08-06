@@ -112,6 +112,12 @@ class _TrainingProgressCallback(BaseCallback):
                                 "total_sheep": int(ep_info.get("total_sheep", 0)),
                                 "status": str(ep_info.get("status", "UNKNOWN")),
                                 "seed": ep_info.get("seed"),
+                                "replay_available": ep_info.get("replay_available"),
+                                "replay_id": ep_info.get("replay_id"),
+                                "replay_path": ep_info.get("replay_path"),
+                                "replay_source": ep_info.get("replay_source"),
+                                "capture_reason": ep_info.get("capture_reason"),
+                                "capture_status": ep_info.get("capture_status"),
                             }
                         )
 
@@ -125,6 +131,8 @@ class _TrainingProgressCallback(BaseCallback):
         completion = min(1.0, num_timesteps / self._total_timesteps)
         fractional_completed = self._completed_segments + completion
         ppo_update_count = getattr(self.model, "_n_updates", 0)
+        current_policy_version = self.policy_version + ppo_update_count
+        last_policy_update_time = datetime.now(UTC).isoformat() if ppo_update_count > 0 else None
         
         actual_completed_episodes = 0
         try:
@@ -152,8 +160,9 @@ class _TrainingProgressCallback(BaseCallback):
                 "batch_total_timesteps": self._batch_total_timesteps,
                 "batch_completed_timesteps": self._completed_timesteps
                 + min(num_timesteps, self._total_timesteps),
-                "policy_version": self.policy_version,
+                "policy_version": current_policy_version,
                 "ppo_update_count": ppo_update_count,
+                "last_policy_update_time": last_policy_update_time,
             }
         )
         return True
@@ -321,6 +330,12 @@ class MaskablePPOTrainer(Trainer):
         web_export_dir.mkdir(parents=True, exist_ok=True)
         model_root = self.output_root / self.MODEL_DIRNAME
         model_root.mkdir(parents=True, exist_ok=True)
+        active_stage = self.config.rewards.instincts.curriculum_stage
+        if active_stage >= 9:
+            stage_model_root = self.output_root / "checkpoints" / f"stage{active_stage}"
+        else:
+            stage_model_root = model_root
+        stage_model_root.mkdir(parents=True, exist_ok=True)
         resuming_policy = (
             bool(self._loaded_state.get("policy_state_path"))
             and self.has_compatible_policy_state()
@@ -706,7 +721,9 @@ class MaskablePPOTrainer(Trainer):
                 else contextlib.nullcontext()
             )
             with model_save_phase:
-                saved_model_path = policy.save(model_root / f"maskable-ppo-{cumulative_ts:08d}")
+                active_stage = self.config.rewards.instincts.curriculum_stage
+                model_name = f"maskable-ppo-stage{active_stage}-{cumulative_ts:08d}" if active_stage >= 9 else f"maskable-ppo-{cumulative_ts:08d}"
+                saved_model_path = policy.save(stage_model_root / model_name)
             total_eps_this_checkpoint = batch_starting_checkpoint_episode + _checkpoint_slot
             run_id = self._loaded_state.get("run_id")
             chk_id = f"chk_{run_id}_pv_{policy_version}_ts_{cumulative_ts}"
@@ -866,7 +883,8 @@ class MaskablePPOTrainer(Trainer):
                 best_average_reward = summary.average_reward
                 best_completion_steps = summary.average_completion_steps
                 best_model_curriculum_stage = current_stage
-                tracked_best_model_path = policy.save(model_root / "best-model")
+                best_model_name = f"stage{current_stage}-best-model" if current_stage >= 9 else "best-model"
+                tracked_best_model_path = policy.save(stage_model_root / best_model_name)
             checkpoint_write_phase = (
                 self.runtime_tracker.phase("checkpoint_save")
                 if self.runtime_tracker is not None
@@ -977,19 +995,24 @@ class MaskablePPOTrainer(Trainer):
                 atomic_write_json(self._state_path, intermediate_state)
                 self._loaded_state = intermediate_state
                 # Keep history current so a resumed run retains every checkpoint.
-                self._export_neural_training_summary(
-                    checkpoint_payloads,
-                    str(saved_model_path),
-                    total_eps_this_checkpoint,
-                    policy.config.to_dict(),
-                )
-                self._export_web_assets(
-                    web_export_dir,
-                    checkpoint_payloads,
-                    summary,
-                    representative_replay_path,
-                    checkpoint_path,
-                )
+                try:
+                    self._export_neural_training_summary(
+                        checkpoint_payloads,
+                        str(saved_model_path),
+                        total_eps_this_checkpoint,
+                        policy.config.to_dict(),
+                    )
+                    self._export_web_assets(
+                        web_export_dir,
+                        checkpoint_payloads,
+                        summary,
+                        representative_replay_path,
+                        checkpoint_path,
+                    )
+                except Exception as exc:
+                    logging.getLogger(__name__).warning(
+                        "Optional summary/web asset export failed: %s", exc, exc_info=True
+                    )
             if self.should_evaluate_saved_scenarios(
                 completed_checkpoints, n_checkpoints
             ):
@@ -1085,12 +1108,17 @@ class MaskablePPOTrainer(Trainer):
         }
         atomic_write_json(self._state_path, state_payload)
         self._loaded_state = state_payload
-        self._export_neural_training_summary(
-            checkpoint_payloads,
-            final_model_path_str,
-            total_episodes_trained,
-            policy.config.to_dict(),
-        )
+        try:
+            self._export_neural_training_summary(
+                checkpoint_payloads,
+                final_model_path_str,
+                total_episodes_trained,
+                policy.config.to_dict(),
+            )
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "Optional summary export at batch completion failed: %s", exc, exc_info=True
+            )
         emit(
             {
                 "phase": "complete",
@@ -1127,8 +1155,17 @@ class MaskablePPOTrainer(Trainer):
         total_episodes_trained: int,
         policy_config: dict[str, Any],
     ) -> None:
+        records_start = max(0, len(checkpoints) - 3)
+        lightweight_checkpoints = []
+        for idx, cp in enumerate(checkpoints):
+            cp_copy = dict(cp)
+            if idx < records_start:
+                cp_copy.pop("records", None)
+                cp_copy.pop("training_scenario_coverage", None)
+            lightweight_checkpoints.append(cp_copy)
+
         payload = {
-            "checkpoints": checkpoints,
+            "checkpoints": lightweight_checkpoints,
             "final_model_path": final_model_path,
             "policy_config": policy_config,
             "trainer_type": "maskable_ppo",

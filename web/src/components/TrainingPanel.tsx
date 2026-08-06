@@ -195,9 +195,12 @@ interface TrainingPanelProps {
   onFastModeChange: (enabled: boolean) => void;
   onEnableInstinctsChange: (enabled: boolean) => void;
   onCurriculumStageChange: (stage: number) => void;
+  startingModelSource?: string;
+  onStartingModelSourceChange?: (source: string) => void;
   onDebugRewardBreakdownChange: (enabled: boolean) => void;
   onAutoPromoteChange: (enabled: boolean) => void;
   onStartTraining: () => void;
+  onCrossStageFork?: (targetStage: number, modelSource: string) => void;
   onPauseTraining: () => void;
   onStopTraining: () => void;
   onResumeTraining: () => void;
@@ -267,6 +270,8 @@ export function TrainingPanel({
   onFastModeChange,
   onEnableInstinctsChange,
   onCurriculumStageChange,
+  startingModelSource = "latest_stage9",
+  onStartingModelSourceChange,
   onDebugRewardBreakdownChange,
   onAutoPromoteChange,
   onStartTraining,
@@ -401,7 +406,7 @@ export function TrainingPanel({
             checkpointIndex={checkpointIndex}
             curriculumStage={curriculumStage}
           />
-          <span className={`pill ${running ? "pill--live" : phase === "offline" ? "pill--danger" : "pill--muted"}`}>{phase}</span>
+          <span className={`pill ${running ? "pill--live" : phase === "offline" ? "pill--danger" : "pill--muted"}`}>{phase === "offline" ? "Backend disconnected" : phase}</span>
         </div>
       </div>
 
@@ -454,31 +459,113 @@ export function TrainingPanel({
           gap: "0.75rem",
           flexShrink: 0
         }}>
-          {/* Quick Curriculum Stage Summary */}
+          {/* Quick Curriculum Stage & Starting Model Summary */}
           <div style={{
             background: "rgba(10, 20, 35, 0.4)",
             border: "1px solid var(--panel-border)",
             borderRadius: "0.6rem",
-            padding: "0.6rem 0.8rem",
+            padding: "0.65rem 0.85rem",
             display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center"
+            flexDirection: "column",
+            gap: "0.6rem"
           }}>
-            <div>
-              <span style={{ fontSize: "0.7rem", color: "var(--accent)", textTransform: "uppercase", fontWeight: "600", display: "block" }}>
-                Active Curriculum Stage
-              </span>
-              <strong style={{ fontSize: "0.9rem", color: "var(--text)" }}>Stage {curriculumStage}</strong>
-              <span style={{ fontSize: "0.72rem", color: "var(--muted)", marginLeft: "0.5rem" }}>({stageDesc})</span>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.2rem", flex: 1 }}>
+                <span style={{ fontSize: "0.7rem", color: "var(--accent)", textTransform: "uppercase", fontWeight: "600", display: "block" }}>
+                  Training Environment Stage
+                </span>
+                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                  <select
+                    id="curriculum-stage-select-console"
+                    value={curriculumStage}
+                    onChange={(e) => onCurriculumStageChange(Number(e.target.value))}
+                    disabled={busy}
+                    style={{
+                      padding: "0.3rem 0.5rem",
+                      fontSize: "0.85rem",
+                      fontWeight: "600",
+                      background: "var(--panel-bg)",
+                      color: "var(--text)",
+                      border: "1px solid var(--panel-border)",
+                      borderRadius: "0.4rem",
+                      cursor: busy ? "not-allowed" : "pointer"
+                    }}
+                  >
+                    {Array.from({ length: Math.max(maxCurriculumStage, 10) }, (_, i) => i + 1).map((s) => (
+                      <option key={s} value={s}>
+                        Stage {s} {s === (activeCurriculumStage ?? curriculumStage) ? "(Active Server Stage)" : ""}
+                      </option>
+                    ))}
+                  </select>
+                  <span style={{ fontSize: "0.72rem", color: "var(--muted)" }}>({stageDesc})</span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActiveSubTab("curriculum")}
+                title="Manage stages and curriculum details"
+                style={{ padding: "0.3rem 0.6rem", fontSize: "0.7rem" }}
+              >
+                Curriculum &rarr;
+              </button>
             </div>
-            <button
-              type="button"
-              onClick={() => setActiveSubTab("curriculum")}
-              title="Manage stages and curriculum details"
-              style={{ padding: "0.3rem 0.6rem", fontSize: "0.7rem" }}
-            >
-              Curriculum &rarr;
-            </button>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.2rem" }}>
+              <label htmlFor="starting-model-select-console" style={{ fontSize: "0.7rem", color: "var(--accent)", textTransform: "uppercase", fontWeight: "600", display: "block" }}>
+                Starting Model / Checkpoint Source
+              </label>
+              <select
+                id="starting-model-select-console"
+                aria-label="Starting Model Source"
+                value={startingModelSource ?? "latest_stage9"}
+                onChange={(e) => onStartingModelSourceChange?.(e.target.value)}
+                disabled={busy}
+                style={{
+                  padding: "0.35rem 0.5rem",
+                  fontSize: "0.8rem",
+                  fontWeight: "500",
+                  background: "var(--panel-bg)",
+                  color: "var(--text)",
+                  border: "1px solid var(--panel-border)",
+                  borderRadius: "0.4rem",
+                  cursor: busy ? "not-allowed" : "pointer"
+                }}
+              >
+                <option value="latest_stage9">
+                  Latest Stage 9 Checkpoint (Preserve Stage 9 Learning)
+                </option>
+                <option value="original_stage8">
+                  Original Stage 8 Baseline Checkpoint (Fresh Stage 8 Baseline)
+                </option>
+              </select>
+            </div>
+
+            {/* Explicit Confirmation Text */}
+            {curriculumStage === 8 && (startingModelSource ?? "latest_stage9") === "latest_stage9" ? (
+              <div style={{
+                background: "rgba(139, 92, 246, 0.12)",
+                border: "1px solid rgba(139, 92, 246, 0.3)",
+                borderRadius: "0.4rem",
+                padding: "0.5rem 0.65rem",
+                fontSize: "0.74rem",
+                color: "#c4b5fd",
+                lineHeight: "1.45"
+              }}>
+                ℹ️ <strong>Confirmation:</strong> You are about to train the latest Stage 9 model in the Stage 8 environment. Your Stage 9 checkpoint will remain preserved.
+              </div>
+            ) : curriculumStage === 8 && startingModelSource === "original_stage8" ? (
+              <div style={{
+                background: "rgba(59, 130, 246, 0.12)",
+                border: "1px solid rgba(59, 130, 246, 0.3)",
+                borderRadius: "0.4rem",
+                padding: "0.5rem 0.65rem",
+                fontSize: "0.74rem",
+                color: "#93c5fd",
+                lineHeight: "1.45"
+              }}>
+                ℹ️ <strong>Confirmation:</strong> You are about to load the original Stage 8 model. This run will not include Stage 9 learning.
+              </div>
+            ) : null}
           </div>
 
           {antiCollapseWarning?.triggered && (
@@ -623,7 +710,7 @@ export function TrainingPanel({
             {running && (
               <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem", marginTop: "0.2rem" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.68rem", color: "var(--muted)" }}>
-                  <span>Active Checkpoint Timesteps</span>
+                  <span>Checkpoint Step Progress (Fills per checkpoint interval)</span>
                   <span>{segmentPct}%</span>
                 </div>
                 <div
@@ -653,14 +740,14 @@ export function TrainingPanel({
               {running && currentEpisode !== null ? (
                 <>
                   <span>
-                    Episode {completedEpisodesDisplay} of {totalEpisodesInBatch}{" "}
+                    Saved Episode {completedEpisodesDisplay} of {totalEpisodesInBatch}{" "}
                     <span style={{ opacity: 0.85, fontWeight: "600", color: "var(--accent)", marginLeft: "0.2rem" }}>
                       (Overall Ep {currentEpisode})
                     </span>
                   </span>
                   <span>
                     {totalSegments > 0 ? `Checkpoint ${activeSegmentNumber} of ${totalSegments} · ` : ""}
-                    {displayEpisodeIndex} env episodes herded
+                    {displayEpisodeIndex} simulation episodes run
                   </span>
                 </>
               ) : (
@@ -852,8 +939,33 @@ export function TrainingPanel({
         }}>
           {/* Stage Chip */}
           <div className="stage-row" style={{ display: "flex", flexDirection: "column", gap: "0.4rem", margin: 0 }}>
-            <div className="stage-chip" style={{ width: "100%" }}>
-              <span className="stage-chip__label">Stage {curriculumStage}</span>
+            <div className="stage-chip" style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                <span className="stage-chip__label">Stage {curriculumStage}</span>
+                <select
+                  id="curriculum-stage-select-tab"
+                  aria-label="Select Stage"
+                  value={curriculumStage}
+                  onChange={(e) => onCurriculumStageChange(Number(e.target.value))}
+                  disabled={busy}
+                  style={{
+                    padding: "0.25rem 0.5rem",
+                    fontSize: "0.85rem",
+                    fontWeight: "600",
+                    background: "rgba(15, 23, 42, 0.6)",
+                    color: "var(--text)",
+                    border: "1px solid var(--panel-border)",
+                    borderRadius: "0.3rem",
+                    cursor: busy ? "not-allowed" : "pointer"
+                  }}
+                >
+                  {Array.from({ length: Math.max(maxCurriculumStage, 10) }, (_, i) => i + 1).map((s) => (
+                    <option key={s} value={s}>
+                      Stage {s} {s === (activeCurriculumStage ?? curriculumStage) ? "(Active)" : ""}
+                    </option>
+                  ))}
+                </select>
+              </div>
               <span className="stage-chip__desc">{stageDesc}</span>
             </div>
             {curriculumStage === 8 && onStartRemediation ? (

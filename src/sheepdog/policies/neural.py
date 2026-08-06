@@ -14,6 +14,10 @@ import numpy as np
 from sb3_contrib import MaskablePPO
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnv
 
+import uuid
+import zipfile
+
+from sheepdog.atomic_io import atomic_replace
 from sheepdog.config import LabConfig
 from sheepdog.environment import ACTION_ORDER
 from sheepdog.policies.base import Action
@@ -167,11 +171,38 @@ class NeuralPolicy:
         return policy_obj
 
     def save(self, path: str | Path) -> Path:
-        """Save the model to *path* and return the resolved path."""
+        """Save the model to *path* atomically and return the resolved path."""
         target = Path(path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        self.model.save(str(target))
         resolved_target = target if target.suffix == ".zip" else target.with_suffix(".zip")
+        resolved_target.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Save to a temporary location first
+        tmp_stem = f"{resolved_target.stem}-{uuid.uuid4().hex[:8]}.tmp"
+        tmp_target = resolved_target.parent / tmp_stem
+        self.model.save(str(tmp_target))
+        tmp_zip = tmp_target.with_suffix(".zip") if not str(tmp_target).endswith(".zip") else tmp_target
+        if not tmp_zip.exists() and tmp_target.exists():
+            tmp_zip = tmp_target
+
+        if not tmp_zip.exists():
+            raise FileNotFoundError(f"Failed to create temporary model file at {tmp_zip}")
+
+        # Validate zip file integrity before replacing target
+        try:
+            with zipfile.ZipFile(tmp_zip, "r") as zf:
+                bad_file = zf.testzip()
+                if bad_file is not None:
+                    raise ValueError(f"Corrupt file in zip archive: {bad_file}")
+            MaskablePPO.load(str(tmp_zip), device="cpu")
+        except Exception as exc:
+            if tmp_zip.exists():
+                try:
+                    os.remove(tmp_zip)
+                except Exception:
+                    pass
+            raise RuntimeError(f"Model checkpoint zip validation failed: {exc}") from exc
+
+        atomic_replace(tmp_zip, resolved_target)
         self.model_path = resolved_target
         return resolved_target
 

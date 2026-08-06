@@ -211,13 +211,15 @@ class ScriptedShepherd:
             return ShepherdCommand.GATHER
 
         # Sheep near pen – handle escape lanes or funnel in.
+        # When only 1 sheep remains unpenned, bypass escape-lane holding to drive the final sheep.
         if ctx.near_pen:
-            if ctx.escape_left and ctx.escape_right:
-                return ShepherdCommand.BLOCK_ESCAPE
-            if ctx.escape_left:
-                return ShepherdCommand.HOLD_LEFT
-            if ctx.escape_right:
-                return ShepherdCommand.HOLD_RIGHT
+            if (ctx.sheep_penned < ctx.total_sheep - 1) and (ctx.escape_left or ctx.escape_right):
+                if ctx.escape_left and ctx.escape_right:
+                    return ShepherdCommand.BLOCK_ESCAPE
+                if ctx.escape_left:
+                    return ShepherdCommand.HOLD_LEFT
+                if ctx.escape_right:
+                    return ShepherdCommand.HOLD_RIGHT
             # Dogs too close – create space so sheep settle into pen.
             if ctx.average_dog_sheep_distance < self.OVERPRESSURE_DISTANCE:
                 return ShepherdCommand.BACK_OFF

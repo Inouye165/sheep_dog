@@ -29,6 +29,7 @@ import {
   resetJourneyTraining,
   runReplay,
   startRemediationFork,
+  crossStageFork,
   saveScenario,
   startTraining,
   stopTraining,
@@ -178,6 +179,7 @@ export function App() {
     const parsed = saved !== null ? parseInt(saved, 10) : NaN;
     return !isNaN(parsed) && parsed >= 1 ? parsed : 1;
   });
+  const [startingModelSource, setStartingModelSource] = useState("latest_stage9");
   const [trainingDebugRewardBreakdown, setTrainingDebugRewardBreakdown] = useState(false);
   const [playbackFastMode, setPlaybackFastMode] = useState(false);
   const [trainingStatus, setTrainingStatus] = useState<TrainingStatus | null>(null);
@@ -305,7 +307,9 @@ export function App() {
   const effectiveEnableInstincts = trainingRunning
     ? trainingStatus?.enable_instinct_rewards ?? trainingEnableInstincts
     : trainingEnableInstincts;
-  const effectiveCurriculumStage = trainingStatus?.active_curriculum_stage ?? trainingStatus?.curriculum_stage ?? trainingCurriculumStage;
+  const effectiveCurriculumStage = trainingRunning
+    ? trainingStatus?.active_curriculum_stage ?? trainingStatus?.curriculum_stage ?? trainingCurriculumStage
+    : trainingCurriculumStage;
   const effectiveDebugRewardBreakdown = trainingRunning
     ? trainingStatus?.debug_reward_breakdown ?? trainingDebugRewardBreakdown
     : trainingDebugRewardBreakdown;
@@ -668,7 +672,6 @@ export function App() {
     const scheduleNext = () => {
       if (!active) return;
       const delay = pollDelayRef.current;
-      console.log(`[Polling] Next status check in ${delay}ms.`);
       timerId = setTimeout(() => {
         void poll();
       }, delay);
@@ -676,8 +679,6 @@ export function App() {
 
     const poll = async () => {
       if (!active) return;
-      const currentDelay = pollDelayRef.current;
-      console.log(`[Polling] Attempting to fetch status... Current delay: ${currentDelay}ms`);
       const firstFetch = isInitialFetch;
       isInitialFetch = false;
       try {
@@ -692,16 +693,11 @@ export function App() {
         if (status.running) {
           syncTrainingStageFromStatus(status);
         } else if (firstFetch) {
-          // On the very first load, adopt the server's curriculum stage if it is
-          // higher than what localStorage holds (catches the case where the user
-          // has manually promoted in a previous session but the server has since
-          // advanced further), or if localStorage holds a stage beyond the valid
-          // single-step-ahead promote window.
+          // On initial load, adopt the server's active curriculum stage so the UI
           const localStage = parseInt(localStorage.getItem("sheepdog_curriculum_stage") ?? "0", 10);
           const serverStage = status.curriculum_stage;
           const maxPromoteStage = (status.max_curriculum_stage ?? serverStage ?? 1) + 1;
           if (!manualStageOverrideRef.current && serverStage != null && (serverStage > localStage || localStage > maxPromoteStage)) {
-            console.log(`[Polling] Initial load: adopting server stage ${serverStage} (local was ${localStage}).`);
             syncTrainingStageFromStatus(status);
           }
         }
@@ -742,8 +738,8 @@ export function App() {
             latest_avg_farthest_distance_to_pen: null,
             latest_avg_farthest_distance_to_flock_center: null,
             phase: "offline",
-            message: "Server unreachable",
-            error: "Training server is unreachable. It may have crashed or stopped.",
+            message: "Backend disconnected",
+            error: "Backend disconnected",
             error_type: "Connection Error",
             starting_episode: null,
           };
@@ -751,8 +747,8 @@ export function App() {
             ...base,
             running: false,
             phase: "offline",
-            message: "Server unreachable",
-            error: "Training server is unreachable. It may have crashed or stopped.",
+            message: "Backend disconnected",
+            error: "Backend disconnected",
             error_type: "Connection Error",
           };
         });
@@ -951,18 +947,27 @@ export function App() {
     setError(null);
     setIsStartingTraining(true);
     try {
-      const status = await startTraining({
-        episodes: trainingEpisodes,
-        fast_mode: trainingFastMode,
-        enable_instinct_rewards: trainingEnableInstincts,
-        curriculum_stage: trainingCurriculumStage,
-        debug_reward_breakdown: trainingDebugRewardBreakdown,
-        auto_promote: trainingAutoPromote,
-        promote_from_checkpoint_episode: promoteFromEpisode ?? undefined,
-      });
-      // Clear the promote hint after it has been consumed by the training request.
+      const activeStage = trainingStatus?.curriculum_stage;
+      let status: TrainingStatus;
+      if (activeStage != null && trainingCurriculumStage !== activeStage) {
+        status = await crossStageFork({
+          target_stage: trainingCurriculumStage,
+          starting_model_source: startingModelSource,
+        });
+      } else {
+        status = await startTraining({
+          episodes: trainingEpisodes,
+          fast_mode: trainingFastMode,
+          enable_instinct_rewards: trainingEnableInstincts,
+          curriculum_stage: trainingCurriculumStage,
+          debug_reward_breakdown: trainingDebugRewardBreakdown,
+          auto_promote: trainingAutoPromote,
+          promote_from_checkpoint_episode: promoteFromEpisode ?? undefined,
+        });
+      }
       setPromoteFromEpisode(null);
       setTrainingStatus(status);
+      syncTrainingStageFromStatus(status);
     } catch (startError) {
       setTrainingError(startError instanceof Error ? startError.message : "Unable to start training.");
     } finally {
@@ -1564,6 +1569,8 @@ export function App() {
                   onFastModeChange={setTrainingFastMode}
                   onEnableInstinctsChange={setTrainingEnableInstincts}
                   onCurriculumStageChange={handleCurriculumStageChange}
+                  startingModelSource={startingModelSource}
+                  onStartingModelSourceChange={setStartingModelSource}
                   onDebugRewardBreakdownChange={setTrainingDebugRewardBreakdown}
                   onAutoPromoteChange={setTrainingAutoPromote}
                   onStartTraining={handleStartTraining}

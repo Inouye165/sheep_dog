@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { loadTrainingHistory } from "../lib/api";
 import type { TelemetryRecord } from "../state/types";
+import { RecentEpisodesViewer } from "./RecentEpisodesViewer";
 
 function getStageName(stage: number): string {
   if (stage === 10) return "10A";
@@ -104,6 +105,11 @@ export function HistoryTab() {
         </div>
       ) : (
         <>
+          {/* Recent Episode History Viewer & Replay */}
+          <div style={{ marginBottom: "2rem" }}>
+            <RecentEpisodesViewer />
+          </div>
+
           {/* KPI Cards */}
           <div className="network-tab__kpis" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "1rem", marginBottom: "2rem" }}>
             <div className="network-tab__card" style={{ padding: "1rem", borderRadius: "8px", border: "1px solid var(--border-color)" }}>

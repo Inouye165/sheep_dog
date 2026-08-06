@@ -489,10 +489,27 @@ def test_start_rejects_stage_below_current_journey_history(tmp_path: Path) -> No
     artifacts = tmp_path / "artifacts"
     generated = tmp_path / "web" / "public" / "generated"
     artifacts.mkdir(parents=True)
+    checkpoints = artifacts / "checkpoints"
+    models = artifacts / "models"
+    checkpoints.mkdir(parents=True)
+    models.mkdir(parents=True)
     generated.mkdir(parents=True)
-    (artifacts / "training-settings.json").write_text(
-        json.dumps({"curriculum_stage": 2}), encoding="utf-8"
+
+    model_path = models / "best-model.zip"
+    model_path.write_text("model", encoding="utf-8")
+    checkpoint = {
+        "checkpoint": "checkpoint-000008.json",
+        "checkpoint_episode": 8,
+        "total_training_episodes": 8,
+        "policy_state_path": str(model_path),
+        "policy_type": "neural",
+        "trainer_type": "maskable_ppo",
+        "reward_config": {"instincts": {"curriculum_stage": 8}},
+    }
+    (artifacts / "training-summary.json").write_text(
+        json.dumps({"checkpoints": [checkpoint]}), encoding="utf-8"
     )
+    (checkpoints / "checkpoint-000008.json").write_text(json.dumps(checkpoint), encoding="utf-8")
     (artifacts / "stage-history.json").write_text(json.dumps({"2": 50, "8": 122}), encoding="utf-8")
 
     config = LabConfig(
@@ -1257,6 +1274,62 @@ def test_health_endpoint_routes(tmp_path: Path) -> None:
         finally:
             server.shutdown()
             server.server_close()
+
+
+def test_worker_exception_handling_unexpected_vs_deliberate_shutdown(tmp_path: Path) -> None:
+    """Verify worker thread logs/persists unexpected exceptions, but re-raises KeyboardInterrupt and SystemExit after cleanup."""
+    artifacts = tmp_path / "artifacts"
+    generated = tmp_path / "web" / "public" / "generated"
+    artifacts.mkdir(parents=True)
+    generated.mkdir(parents=True)
+
+    config = LabConfig(
+        training=TrainingConfig(
+            episodes=1,
+            output_dir=str(artifacts),
+            web_export_dir=str(generated),
+        )
+    )
+
+    class TestConfig:
+        def __new__(cls):
+            return config
+
+    # 1. Test unexpected exception (ValueError) is caught & status set to error
+    class FailingTrainerValueError:
+        total_episodes_trained = 0
+        def train(self, progress_callback=None, should_stop=None):
+            raise ValueError("Unexpected worker failure")
+
+    with (
+        patch("sheepdog.server.LabConfig", TestConfig),
+        patch("sheepdog.server.create_trainer", return_value=FailingTrainerValueError()),
+    ):
+        manager = TrainingManager()
+        manager._run_training(1, True)
+        snap = manager.snapshot()
+        assert snap["running"] is False
+        assert snap["phase"] == "error"
+        assert "Unexpected worker failure" in snap["error"]
+
+    # 2. Test deliberate shutdown exception (KeyboardInterrupt) performs cleanup & re-raises
+    class FailingTrainerKeyboardInterrupt:
+        total_episodes_trained = 0
+        def train(self, progress_callback=None, should_stop=None):
+            raise KeyboardInterrupt("Deliberate shutdown signal")
+
+    with (
+        patch("sheepdog.server.LabConfig", TestConfig),
+        patch("sheepdog.server.create_trainer", return_value=FailingTrainerKeyboardInterrupt()),
+    ):
+        manager = TrainingManager()
+        with pytest.raises(KeyboardInterrupt):
+            manager._run_training(1, True)
+        snap = manager.snapshot()
+        assert snap["running"] is False
+        assert snap["phase"] == "error"
+        assert "KeyboardInterrupt" in snap["error_type"]
+
 
 
 

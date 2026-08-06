@@ -133,6 +133,31 @@ export interface ReplayBundle {
   scenario_name?: string;
 }
 
+export type EpisodeOutcome = "win" | "loss" | "timeout";
+
+export interface EpisodeRecord {
+  episode_id: number | string;
+  timestamp: string;
+  stage: number | null;
+  outcome: EpisodeOutcome;
+  outcome_label: string;
+  total_moves: number;
+  reward?: number;
+  sheep_penned?: number;
+  total_sheep?: number;
+  seed?: number;
+  policy_name?: string;
+  checkpoint_id?: string | null;
+  replayAvailable: boolean;
+  replaySource?: "training-diagnostic" | "checkpoint-evaluation" | "scenario-evaluation" | "reproduced" | null;
+  replayUrl?: string | null;
+  replay_id?: string | null;
+  capture_reason?: string | null;
+  capture_status?: "not_requested" | "queued" | "writing" | "available" | "failed" | "pruned" | null;
+  initial_state?: ReplaySnapshot;
+  move_history?: ReplayFrame[];
+}
+
 export interface TrainingStatus {
   running: boolean;
   fast_mode: boolean;
@@ -150,6 +175,7 @@ export interface TrainingStatus {
   auto_promote_gate?: AutoPromoteGateDiagnostics;
   available_curriculum_stages?: number[];
   max_curriculum_stage?: number;
+  active_curriculum_stage?: number;
   curriculum_stage: number;
   requested_episodes: number;
   completed_episodes: number;
@@ -825,6 +851,27 @@ export interface TrainingEpisode {
   steps: number;
   seed: number | null;
   checkpoint_id: string | null;
+  replay_available?: boolean;
+  replay_id?: string | null;
+  replay_path?: string | null;
+  replay_source?: string | null;
+  capture_reason?: string | null;
+  capture_status?: string | null;
+}
+
+export interface CapturePolicyConfig {
+  mode: "off" | "failures" | "selective" | "next_n" | "all";
+  next_n_counter: number;
+  success_sample_rate: number;
+  target_stage: number | null;
+  target_outcome: string;
+  queued_writes: number;
+  written_count: number;
+  dropped_count: number;
+  failure_count: number;
+  max_replays_per_stage?: number;
+  max_total_replays?: number;
+  max_disk_mb?: number;
 }
 
 export interface TrainingEpisodesResponse {

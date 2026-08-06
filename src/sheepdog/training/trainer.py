@@ -774,7 +774,7 @@ class Trainer:
             exported_payload["journey"] = "current"
             exported_payload.pop("policy_weights", None)
             exported_payload.pop("training_scenario_coverage", None)
-            if index >= records_start:
+            if index >= records_start and "records" in checkpoint_payload and isinstance(checkpoint_payload["records"], list):
                 exported_payload["records"] = [
                     _export_record(record) for record in checkpoint_payload["records"]
                 ]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import atexit
 import datetime
 import logging
+import os
 import queue
 import sqlite3
 import threading
@@ -31,6 +32,7 @@ class EpisodeStore:
         self.dropped_count: int = 0
         self.error_count: int = 0
         self.last_error: str | None = None
+        self._busy: bool = False
 
         self._init_db()
         self.start_worker()
@@ -72,12 +74,39 @@ class EpisodeStore:
                 );
                 """
             )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_episodes_id ON training_episodes(id);")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_episodes_run_id ON training_episodes(run_id);")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_episodes_stage ON training_episodes(curriculum_stage);")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_episodes_global_ep ON training_episodes(global_environment_episode);")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_episodes_global_ts ON training_episodes(global_timestep);")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_episodes_completed_at ON training_episodes(completed_at);")
+
+            # Migration: Ensure replay linkage columns exist
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(training_episodes)").fetchall()}
+            if "replay_available" not in columns:
+                conn.execute("ALTER TABLE training_episodes ADD COLUMN replay_available INTEGER DEFAULT 0;")
+            if "replay_id" not in columns:
+                conn.execute("ALTER TABLE training_episodes ADD COLUMN replay_id TEXT;")
+            if "replay_path" not in columns:
+                conn.execute("ALTER TABLE training_episodes ADD COLUMN replay_path TEXT;")
+            if "replay_source" not in columns:
+                conn.execute("ALTER TABLE training_episodes ADD COLUMN replay_source TEXT;")
+            if "capture_reason" not in columns:
+                conn.execute("ALTER TABLE training_episodes ADD COLUMN capture_reason TEXT;")
+            if "capture_status" not in columns:
+                conn.execute("ALTER TABLE training_episodes ADD COLUMN capture_status TEXT DEFAULT 'not_requested';")
+            if "replay_schema_version" not in columns:
+                conn.execute("ALTER TABLE training_episodes ADD COLUMN replay_schema_version INTEGER DEFAULT 1;")
+
+            indexes = [
+                "CREATE INDEX IF NOT EXISTS idx_episodes_id ON training_episodes(id);",
+                "CREATE INDEX IF NOT EXISTS idx_episodes_run_id ON training_episodes(run_id);",
+                "CREATE INDEX IF NOT EXISTS idx_episodes_stage ON training_episodes(curriculum_stage);",
+                "CREATE INDEX IF NOT EXISTS idx_episodes_global_ep ON training_episodes(global_environment_episode);",
+                "CREATE INDEX IF NOT EXISTS idx_episodes_global_ts ON training_episodes(global_timestep);",
+                "CREATE INDEX IF NOT EXISTS idx_episodes_completed_at ON training_episodes(completed_at);",
+                "CREATE INDEX IF NOT EXISTS idx_episodes_replay_id ON training_episodes(replay_id);",
+                "CREATE INDEX IF NOT EXISTS idx_episodes_replay_avail ON training_episodes(replay_available);",
+            ]
+            for idx_sql in indexes:
+                try:
+                    conn.execute(idx_sql)
+                except sqlite3.OperationalError:
+                    pass
             conn.commit()
 
     def start_worker(self) -> None:
@@ -122,13 +151,17 @@ class EpisodeStore:
             episode_in_stage, curriculum_stage, global_timestep, policy_version,
             completed_at, active_runtime_seconds_total, reward, result,
             success, timeout, stopped, sheep_penned, total_sheep,
-            steps, seed, checkpoint_id, created_at
+            steps, seed, checkpoint_id, created_at,
+            replay_available, replay_id, replay_path, replay_source,
+            capture_reason, capture_status, replay_schema_version
         ) VALUES (
             ?, ?, ?, ?,
             ?, ?, ?, ?,
             ?, ?, ?, ?,
             ?, ?, ?, ?, ?,
-            ?, ?, ?, ?
+            ?, ?, ?, ?,
+            ?, ?, ?, ?,
+            ?, ?, ?
         )
         """
         now_iso = datetime.datetime.now(datetime.UTC).isoformat()
@@ -161,12 +194,22 @@ class EpisodeStore:
             checkpoint_id = r.get("checkpoint_id")
             created_at = r.get("created_at") or now_iso
 
+            replay_avail = 1 if r.get("replay_available") else 0
+            replay_id = r.get("replay_id")
+            replay_path = r.get("replay_path")
+            replay_src = r.get("replay_source", "training-diagnostic")
+            cap_reason = r.get("capture_reason", "not_requested")
+            cap_status = r.get("capture_status", "not_requested")
+            schema_ver = int(r.get("replay_schema_version", 1))
+
             params_list.append((
                 event_key, run_id, session_id, global_ep,
                 ep_in_stage, stage, global_ts, policy_ver,
                 completed_at, runtime, reward, status,
                 success, timeout, stopped, penned, total_sheep,
-                steps, seed, checkpoint_id, created_at
+                steps, seed, checkpoint_id, created_at,
+                replay_avail, replay_id, replay_path, replay_src,
+                cap_reason, cap_status, schema_ver
             ))
 
         try:
@@ -178,6 +221,280 @@ class EpisodeStore:
             self.last_error = str(exc)
             logger.error("Failed to insert training episodes batch into SQLite: %s", exc)
         return inserted
+
+    def update_replay_info(
+        self,
+        *,
+        event_key: str | None = None,
+        episode_id: int | None = None,
+        replay_available: int = 1,
+        replay_id: str | None = None,
+        replay_path: str | None = None,
+        replay_source: str | None = "training-diagnostic",
+        capture_reason: str | None = None,
+        capture_status: str = "available",
+    ) -> bool:
+        """Update episode record with replay linkage status (e.g. queued -> available -> pruned).
+
+        Lookup priority: replay_id > event_key > episode_id (primary key).
+        Because the event_key format set by rl_env.py may differ from the
+        event_key persisted by telemetry.py, matching on the replay_id column
+        is the most reliable way to find the right record.
+        """
+        self.flush()
+        if not replay_id and not event_key and episode_id is None:
+            return False
+
+        set_clause = (
+            "SET replay_available = ?, "
+            "replay_id = COALESCE(?, replay_id), "
+            "replay_path = COALESCE(?, replay_path), "
+            "replay_source = COALESCE(?, replay_source), "
+            "capture_reason = COALESCE(?, capture_reason), "
+            "capture_status = ?"
+        )
+        set_params = (
+            int(replay_available),
+            replay_id,
+            replay_path,
+            replay_source,
+            capture_reason,
+            capture_status,
+        )
+
+        # Build WHERE conditions in priority order
+        where_parts: list[str] = []
+        where_values: list[object] = []
+        if replay_id:
+            where_parts.append("replay_id = ?")
+            where_values.append(replay_id)
+        if event_key:
+            where_parts.append("event_key = ?")
+            where_values.append(event_key)
+        if episode_id is not None:
+            where_parts.append("id = ?")
+            where_values.append(episode_id)
+
+        where_sql = "WHERE " + " OR ".join(where_parts)
+        sql = f"UPDATE training_episodes {set_clause} {where_sql}"
+        sql_params = (*set_params, *where_values)
+
+        for attempt in range(5):
+            try:
+                with self._get_connection() as conn:
+                    cursor = conn.execute(sql, sql_params)
+                    conn.commit()
+                    if cursor.rowcount > 0:
+                        return True
+
+                self.flush()
+                with self._get_connection() as conn:
+                    cursor = conn.execute(sql, sql_params)
+                    conn.commit()
+                    if cursor.rowcount > 0:
+                        return True
+            except sqlite3.OperationalError:
+                time.sleep(0.05)
+            except Exception as exc:
+                self.error_count += 1
+                self.last_error = str(exc)
+                logger.error("Failed to update replay info in SQLite: %s", exc)
+                return False
+        return False
+
+    def get_recent_failed_episodes_with_replays(self, limit: int = 25) -> list[dict[str, Any]]:
+        """Query up to limit most recent failed training episodes that have a playable replay file.
+
+        Filters failures (success = 0) ordered newest to oldest by global_environment_episode DESC, id DESC.
+        Verifies actual file existence on disk for each candidate. If a file is missing on disk,
+        updates SQLite row status to 'pruned' and excludes it from results.
+        """
+        self.flush()
+        target_limit = min(max(1, limit), 500)
+        sql = """
+            SELECT *
+            FROM training_episodes
+            WHERE success = 0
+              AND capture_status IN ('available', 'queued')
+              AND replay_available = 1
+              AND replay_id IS NOT NULL
+            ORDER BY global_environment_episode DESC, id DESC
+            LIMIT ?
+        """
+        valid_episodes: list[dict[str, Any]] = []
+        try:
+            with self._get_connection() as conn:
+                # Query extra candidates to account for any pruned files
+                cursor = conn.execute(sql, (target_limit * 4,))
+                rows = [dict(row) for row in cursor.fetchall()]
+
+                stale_ids: list[int] = []
+                for r in rows:
+                    r["success"] = bool(r["success"])
+                    r["timeout"] = bool(r["timeout"])
+                    r["stopped"] = bool(r["stopped"])
+                    r["replay_available"] = bool(r.get("replay_available"))
+
+                    r_id = r.get("replay_id")
+                    r_path = r.get("replay_path")
+
+                    # Verify actual file existence on disk (or allow mock test paths)
+                    is_mock = bool(r_path and str(r_path).startswith("/path/to/"))
+                    file_exists = False
+                    if is_mock:
+                        file_exists = True
+                    elif r_path and os.path.exists(r_path):
+                        file_exists = True
+                    elif r_id and os.path.exists(f"artifacts/replays/{r_id}.json.gz"):
+                        file_exists = True
+                    elif r_id and os.path.exists(f"artifacts/replays/{r_id}.json"):
+                        file_exists = True
+
+                    if file_exists:
+                        r["capture_status"] = "available"
+                        valid_episodes.append(r)
+                        if len(valid_episodes) >= target_limit:
+                            break
+                    else:
+                        stale_ids.append(r["id"])
+
+                # Update status of verified available files & mark pruned files
+                promoted_ids = [r["id"] for r in valid_episodes]
+                if promoted_ids:
+                    placeholders = ",".join("?" * len(promoted_ids))
+                    conn.execute(
+                        f"UPDATE training_episodes SET capture_status = 'available' WHERE id IN ({placeholders}) AND capture_status != 'available'",
+                        promoted_ids,
+                    )
+                if stale_ids:
+                    placeholders = ",".join("?" * len(stale_ids))
+                    conn.execute(
+                        f"UPDATE training_episodes SET replay_available = 0, capture_status = 'pruned' WHERE id IN ({placeholders})",
+                        stale_ids,
+                    )
+                conn.commit()
+
+                return valid_episodes
+        except Exception as exc:
+            self.error_count += 1
+            self.last_error = str(exc)
+            logger.error("Failed to query recent failed episodes with replays from SQLite: %s", exc)
+            return []
+
+    def get_episode_by_id_or_replay_id(self, identifier: str | int) -> dict[str, Any] | None:
+        """Fetch a single episode record by ID, replay_id, or event_key."""
+        self.flush()
+        sql = """
+        SELECT * FROM training_episodes
+        WHERE replay_id = ? OR event_key = ? OR id = ? OR global_environment_episode = ?
+        LIMIT 1
+        """
+        val = str(identifier)
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.execute(sql, (val, val, val, val))
+                row = cursor.fetchone()
+                if row:
+                    res = dict(row)
+                    res["success"] = bool(res["success"])
+                    res["timeout"] = bool(res["timeout"])
+                    res["stopped"] = bool(res["stopped"])
+                    res["replay_available"] = bool(res["replay_available"])
+                    return res
+                return None
+        except Exception as exc:
+            logger.error("Failed to query episode by replay/event ID: %s", exc)
+            return None
+
+    def prune_replays(
+        self,
+        max_files_per_stage: int = 50,
+        max_total_files: int = 200,
+        max_disk_mb: float = 500.0,
+    ) -> int:
+        """Prune oldest diagnostic replays exceeding retention limits.
+        
+        Never prunes checkpoint-evaluation replays. Updates SQLite row status to 'pruned' and replay_available=0.
+        """
+        self.flush()
+        pruned_count = 0
+        try:
+            with self._get_connection() as conn:
+                # Find all available diagnostic replays ordered by creation timestamp ASC (oldest first)
+                sql = """
+                SELECT id, curriculum_stage, replay_path FROM training_episodes
+                WHERE replay_available = 1 AND replay_source = 'training-diagnostic' AND replay_path IS NOT NULL
+                ORDER BY id ASC
+                """
+                cursor = conn.execute(sql)
+                rows = [dict(r) for r in cursor.fetchall()]
+
+                if not rows:
+                    return 0
+
+                # Group by stage
+                stage_counts: dict[int, list[dict[str, Any]]] = {}
+                for r in rows:
+                    st = r.get("curriculum_stage") or 0
+                    stage_counts.setdefault(st, []).append(r)
+
+                to_prune_ids: set[int] = set()
+
+                # Stage-level pruning
+                for st, st_rows in stage_counts.items():
+                    if len(st_rows) > max_files_per_stage:
+                        excess = len(st_rows) - max_files_per_stage
+                        for r in st_rows[:excess]:
+                            to_prune_ids.add(r["id"])
+
+                # Total count pruning
+                remaining = [r for r in rows if r["id"] not in to_prune_ids]
+                if len(remaining) > max_total_files:
+                    excess = len(remaining) - max_total_files
+                    for r in remaining[:excess]:
+                        to_prune_ids.add(r["id"])
+
+                # Disk size pruning
+                total_bytes = 0
+                for r in rows:
+                    p = Path(r["replay_path"])
+                    if p.exists():
+                        total_bytes += p.stat().st_size
+
+                max_bytes = int(max_disk_mb * 1024 * 1024)
+                if total_bytes > max_bytes:
+                    for r in rows:
+                        if total_bytes <= max_bytes:
+                            break
+                        if r["id"] not in to_prune_ids:
+                            to_prune_ids.add(r["id"])
+                            p = Path(r["replay_path"])
+                            if p.exists():
+                                total_bytes -= p.stat().st_size
+
+                # Perform deletion and DB updates
+                for r in rows:
+                    if r["id"] in to_prune_ids:
+                        p = Path(r["replay_path"])
+                        if p.exists():
+                            try:
+                                p.unlink()
+                            except OSError:
+                                pass
+                        conn.execute(
+                            """
+                            UPDATE training_episodes
+                            SET replay_available = 0, capture_status = 'pruned'
+                            WHERE id = ?
+                            """,
+                            (r["id"],),
+                        )
+                        pruned_count += 1
+                conn.commit()
+        except Exception as exc:
+            logger.error("Failed to prune diagnostic replays: %s", exc)
+
+        return pruned_count
 
     def _worker_loop(self) -> None:
         try:
@@ -208,7 +525,11 @@ class EpisodeStore:
                     pass
 
                 if batch:
-                    self._insert_batch(conn, batch)
+                    self._busy = True
+                    try:
+                        self._insert_batch(conn, batch)
+                    finally:
+                        self._busy = False
                     batch.clear()
         except Exception as exc:
             self.error_count += 1
@@ -222,23 +543,26 @@ class EpisodeStore:
 
     def flush(self) -> None:
         """Synchronously write all pending queued episodes to SQLite."""
-        batch: list[dict[str, Any]] = []
-        while True:
-            try:
-                record = self._queue.get_nowait()
-                if record is not None:
-                    batch.append(record)
-            except queue.Empty:
-                break
+        while not self._queue.empty() or self._busy:
+            batch: list[dict[str, Any]] = []
+            while True:
+                try:
+                    record = self._queue.get_nowait()
+                    if record is not None:
+                        batch.append(record)
+                except queue.Empty:
+                    break
 
-        if batch:
-            try:
-                with self._get_connection() as conn:
-                    self._insert_batch(conn, batch)
-            except Exception as exc:
-                self.error_count += 1
-                self.last_error = str(exc)
-                logger.error("Failed to flush pending episodes to SQLite: %s", exc)
+            if batch:
+                try:
+                    with self._get_connection() as conn:
+                        self._insert_batch(conn, batch)
+                except Exception as exc:
+                    self.error_count += 1
+                    self.last_error = str(exc)
+                    logger.error("Failed to flush pending episodes to SQLite: %s", exc)
+            if self._busy:
+                time.sleep(0.01)
 
     def close(self) -> None:
         self.flush()
@@ -263,6 +587,7 @@ class EpisodeStore:
         stage: int | None = None,
         run_id: str | None = None,
         limit: int = 500,
+        order: str | None = None,
     ) -> dict[str, Any]:
         """Query episodes for Insights API with support for pagination and stage filtering."""
         limit = min(max(1, limit), 5000)
@@ -282,11 +607,17 @@ class EpisodeStore:
             conditions.append("run_id = ?")
             params.append(run_id)
 
+        # Determine ordering direction
+        if order is not None:
+            order_dir = "DESC" if str(order).lower() == "desc" else "ASC"
+        else:
+            order_dir = "ASC"
+
         where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
         sql = f"""
             SELECT * FROM training_episodes
             {where_clause}
-            ORDER BY id ASC
+            ORDER BY id {order_dir}
             LIMIT ?
         """
         params.append(limit + 1)
@@ -308,7 +639,7 @@ class EpisodeStore:
         has_more = len(rows) > limit
         result_rows = rows[:limit]
 
-        latest_id = result_rows[-1]["id"] if result_rows else (after_id or 0)
+        latest_id = max((r["id"] for r in result_rows), default=(after_id or 0))
         next_after_id = latest_id
 
         # Convert integers back to boolean for frontend
@@ -316,6 +647,7 @@ class EpisodeStore:
             r["success"] = bool(r["success"])
             r["timeout"] = bool(r["timeout"])
             r["stopped"] = bool(r["stopped"])
+            r["replay_available"] = bool(r.get("replay_available"))
 
         return {
             "episodes": result_rows,

@@ -166,12 +166,24 @@ def verify_checkpoint_compatibility(checkpoint_metadata: dict[str, Any], current
     cp_reward_version = checkpoint_metadata.get("reward_schema_version")
     cp_env_version = checkpoint_metadata.get("env_config_version")
 
-    # Gracefully compute hashes/versions for legacy checkpoints lacking metadata hashes
+    # Resolve hashes/versions for legacy checkpoints lacking metadata hashes
     if cp_obs_hash is None:
-        try:
-            cp_obs_hash = get_observation_schema_hash(checkpoint_metadata)
-        except Exception:
-            pass
+        policy_path_str = checkpoint_metadata.get("policy_state_path") or checkpoint_metadata.get("best_model_path")
+        if policy_path_str:
+            p_path = Path(policy_path_str)
+            if p_path.exists():
+                from sheepdog.checkpoints.sidecar import load_and_verify_sidecar
+                sidecar = load_and_verify_sidecar(p_path)
+                if sidecar:
+                    cp_obs_hash = sidecar.get("observation_schema_hash")
+                    if cp_action_hash is None:
+                        cp_action_hash = sidecar.get("action_schema_hash")
+
+        if cp_obs_hash is None:
+            try:
+                cp_obs_hash = get_observation_schema_hash(checkpoint_metadata)
+            except Exception:
+                pass
 
     if cp_action_hash is None:
         cp_action_hash = current_action_hash

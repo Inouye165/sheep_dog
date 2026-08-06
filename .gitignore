@@ -36,9 +36,11 @@ pytest_*.txt
 # WandB logs
 wandb/
 
-# Local test outputs
 fresh_test_artifacts/
 scratch/
 .tmp.driveupload/
+
+# Local test databases
+*.sqlite
 
 

@@ -155,6 +155,10 @@ def test_6_api_default_pagination_and_after_id(temp_store):
     assert len(res2["episodes"]) == 5
     assert res2["episodes"][0]["id"] > first_latest
 
+    res_desc = temp_store.get_episodes(order="desc", limit=5)
+    assert len(res_desc["episodes"]) == 5
+    assert res_desc["episodes"][0]["global_environment_episode"] == 14
+
 
 def test_7_stage_and_run_filtering(temp_store):
     temp_store.add_episode({"event_key": "st1_ep1", "run_id": "r1", "curriculum_stage": 1, "global_environment_episode": 1})
