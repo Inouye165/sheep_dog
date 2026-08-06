@@ -760,7 +760,7 @@ class MaskablePPOTrainer(Trainer):
                     quick_summary.success_rate
                     >= float(train_config.confidence_candidate_success_rate)
                 )
-                if is_final_checkpoint or confidence_candidate:
+                if is_final_checkpoint or confidence_candidate or len(quick_summary.records) < len(train_config.evaluation_seeds):
                     summary, evaluation_json, _csv_path = self.evaluator.evaluate(
                         policy,
                         tuple(train_config.evaluation_seeds),

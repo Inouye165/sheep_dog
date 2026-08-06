@@ -127,7 +127,8 @@ class JointActionRLEnv(gym.Env[np.ndarray, int]):
         """Pre-generate initial positions for standard evaluation seeds to check training similarity."""
         try:
             temp_env = SheepdogEnvironment(self.config)
-            for seed in [11, 23, 37, 41, 53]:
+            seeds = getattr(getattr(self.config, "training", None), "evaluation_seeds", (11, 23, 37, 41, 53, 59, 61, 67, 71, 73))
+            for seed in seeds:
                 temp_env.reset(seed=seed)
                 self._evaluation_layouts[seed] = {
                     "dog_positions": [(dog.position.x, dog.position.y) for dog in temp_env.dogs],

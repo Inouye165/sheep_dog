@@ -6413,7 +6413,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         eval_geometry_validations = {}
         evaluation_seeds = list(checkpoint_payload.get("evaluation_seeds", [])) if checkpoint_payload else []
         if not evaluation_seeds:
-            evaluation_seeds = list(active_config.training.evaluation_seeds) if hasattr(active_config.training, "evaluation_seeds") else [11, 23, 37, 41, 53]
+            evaluation_seeds = list(active_config.training.evaluation_seeds) if hasattr(active_config.training, "evaluation_seeds") else [11, 23, 37, 41, 53, 59, 61, 67, 71, 73]
         for seed in evaluation_seeds:
             try:
                 temp_env = SheepdogEnvironment(active_config)

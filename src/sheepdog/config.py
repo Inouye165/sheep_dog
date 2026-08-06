@@ -236,7 +236,7 @@ class TrainingConfig:
     # Number of vectorized RL environments used by neural PPO training.
     # >1 enables process-based parallel stepping (SubprocVecEnv).
     ppo_env_workers: int = 8
-    quick_evaluation_seed_count: int = 3
+    quick_evaluation_seed_count: int = 10
     confidence_candidate_success_rate: float = 0.5
     replay_export_on_new_best: bool = True
     replay_export_on_promotion: bool = True
