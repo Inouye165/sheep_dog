@@ -26,6 +26,8 @@ from sheepdog.policies.neural import NeuralPolicy, tensorboard_available
 from sheepdog.rewards import REWARD_SCHEMA_VERSION
 from sheepdog.training.trainer import Trainer
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True, slots=True)
 class NeuralTrainingRunSummary:
@@ -98,6 +100,7 @@ class _TrainingProgressCallback(BaseCallback):
                         except Exception:
                             actual_eps = 0
                         ep_num = self._starting_total + actual_eps
+                        current_global_ts = self._completed_timesteps + int(self.num_timesteps)
                         self._emit(
                             {
                                 "phase": "episode_complete",
@@ -105,6 +108,7 @@ class _TrainingProgressCallback(BaseCallback):
                                 "current_episode": ep_num,
                                 "total_episodes_trained": ep_num,
                                 "actual_completed_episodes": actual_eps,
+                                "global_timestep": current_global_ts,
                                 "reward": float(ep_info.get("r", 0.0)),
                                 "length": int(ep_info.get("l", 0)),
                                 "success": bool(ep_info.get("success", False)),
@@ -112,6 +116,7 @@ class _TrainingProgressCallback(BaseCallback):
                                 "total_sheep": int(ep_info.get("total_sheep", 0)),
                                 "status": str(ep_info.get("status", "UNKNOWN")),
                                 "seed": ep_info.get("seed"),
+                                "field_setup": ep_info.get("field_setup"),
                                 "replay_available": ep_info.get("replay_available"),
                                 "replay_id": ep_info.get("replay_id"),
                                 "replay_path": ep_info.get("replay_path"),
@@ -563,9 +568,12 @@ class MaskablePPOTrainer(Trainer):
                 batch_total_episodes=batch_total,
                 batch_total_timesteps=timestep_targets[-1],
                 completed_timesteps=(
-                    timestep_targets[completed_checkpoints - 2]
-                    if completed_checkpoints > 1
-                    else 0
+                    starting_total_timesteps
+                    + (
+                        timestep_targets[completed_checkpoints - 2]
+                        if completed_checkpoints > 1
+                        else 0
+                    )
                 ),
                 completed_segments=completed_checkpoints - 1,
                 segment_index=completed_checkpoints - 1,
@@ -609,13 +617,31 @@ class MaskablePPOTrainer(Trainer):
                 if self.runtime_tracker is not None
                 else contextlib.nullcontext()
             )
+            if hasattr(policy.model, "tensorboard_log") and policy.model.tensorboard_log:
+                try:
+                    Path(policy.model.tensorboard_log).mkdir(parents=True, exist_ok=True)
+                except Exception:
+                    policy.model.tensorboard_log = None
+
             with training_phase:
-                policy.model.learn(
-                    total_timesteps=segment_steps,
-                    reset_num_timesteps=True,
-                    progress_bar=False,
-                    callback=callback_list,
-                )
+                try:
+                    policy.model.learn(
+                        total_timesteps=segment_steps,
+                        reset_num_timesteps=True,
+                        progress_bar=False,
+                        callback=callback_list,
+                    )
+                except (FileNotFoundError, OSError) as tb_err:
+                    logger.warning("Tensorboard logging failed (%s). Continuing rollout without Tensorboard logging.", tb_err)
+                    policy.model.tensorboard_log = None
+                    if hasattr(policy.model, "_logger"):
+                        policy.model._logger = None
+                    policy.model.learn(
+                        total_timesteps=segment_steps,
+                        reset_num_timesteps=False,
+                        progress_bar=False,
+                        callback=callback_list,
+                    )
             
             # Increment policy update version
             policy_version += 1
@@ -634,6 +660,7 @@ class MaskablePPOTrainer(Trainer):
             )
 
             # Retrieve training scenario coverage stats from env
+            eval_seeds = getattr(getattr(self.config, "training", None), "evaluation_seeds", (11, 23, 37, 41, 53, 59, 61, 67, 71, 73))
             curr_coverage = self._loaded_state.get("training_scenario_coverage")
             if not isinstance(curr_coverage, dict):
                 curr_coverage = {
@@ -647,8 +674,8 @@ class MaskablePPOTrainer(Trainer):
                     "max_dog_to_sheep": float("-inf"),
                     "sum_dog_to_sheep": 0.0,
                     "count_dog_to_sheep": 0,
-                    "similarity_episodes": {str(k): 0 for k in (11, 23, 37, 41, 53)},
-                    "similarity_successes": {str(k): 0 for k in (11, 23, 37, 41, 53)},
+                    "similarity_episodes": {str(k): 0 for k in eval_seeds},
+                    "similarity_successes": {str(k): 0 for k in eval_seeds},
                 }
             curr_coverage["similarity_episodes"] = {str(k): v for k, v in curr_coverage.get("similarity_episodes", {}).items()}
             curr_coverage["similarity_successes"] = {str(k): v for k, v in curr_coverage.get("similarity_successes", {}).items()}
@@ -681,10 +708,15 @@ class MaskablePPOTrainer(Trainer):
                                 curr_coverage["sum_dog_to_sheep"] += ws["sum_dog_to_sheep"]
                                 curr_coverage["count_dog_to_sheep"] += ws["count_dog_to_sheep"]
 
-                            for k in (11, 23, 37, 41, 53):
+                            ws_sim_episodes = ws.get("similarity_episodes", {})
+                            ws_sim_successes = ws.get("similarity_successes", {})
+                            all_keys = set(eval_seeds) | {int(k) for k in ws_sim_episodes.keys() if str(k).isdigit()}
+                            for k in all_keys:
                                 k_str = str(k)
-                                curr_coverage["similarity_episodes"][k_str] = curr_coverage["similarity_episodes"].get(k_str, 0) + ws.get("similarity_episodes", {}).get(k, 0)
-                                curr_coverage["similarity_successes"][k_str] = curr_coverage["similarity_successes"].get(k_str, 0) + ws.get("similarity_successes", {}).get(k, 0)
+                                ep_val = ws_sim_episodes.get(k, ws_sim_episodes.get(k_str, 0))
+                                suc_val = ws_sim_successes.get(k, ws_sim_successes.get(k_str, 0))
+                                curr_coverage["similarity_episodes"][k_str] = curr_coverage["similarity_episodes"].get(k_str, 0) + ep_val
+                                curr_coverage["similarity_successes"][k_str] = curr_coverage["similarity_successes"].get(k_str, 0) + suc_val
                 except (AttributeError, RuntimeError, TypeError, ValueError):
                     logging.getLogger(__name__).debug(
                         "PPO environment coverage statistics are unavailable",

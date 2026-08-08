@@ -65,9 +65,9 @@ class HierarchicalNeuralPolicyConfig:
     ) -> HierarchicalNeuralPolicyConfig:
         """Reconstruct a HierarchicalNeuralPolicyConfig from persisted state."""
         if not payload:
-            return cls(hidden_sizes=(64, 64), observation_size=observation_size)
+            return cls(hidden_sizes=(128, 128, 128), observation_size=observation_size)
         return cls(
-            hidden_sizes=tuple(int(v) for v in payload.get("hidden_sizes", (64, 64))),
+            hidden_sizes=tuple(int(v) for v in payload.get("hidden_sizes", (128, 128, 128))),
             observation_size=int(payload.get("observation_size", observation_size)),
             action_size=int(payload.get("action_size", len(ACTION_ORDER))),
         )
@@ -161,12 +161,19 @@ class ShepherdNeuralDogPolicy:
         observation_size = int(adapter.observation_space.shape[0])
         resolved_path = Path(path)
         model = MaskablePPO.load(str(resolved_path), env=adapter)
+        loaded_pconfig = HierarchicalNeuralPolicyConfig.from_dict(
+            policy_config_dict, observation_size
+        )
+        expected_arch = tuple(config.training.neural_hidden_sizes)
+        if loaded_pconfig.hidden_sizes != expected_arch:
+            raise ValueError(
+                f"Incompatible model architecture: checkpoint hidden layers {list(loaded_pconfig.hidden_sizes)} "
+                f"do not match target configuration {list(expected_arch)}"
+            )
         policy_obj = cls(
             model=model,
             model_path=resolved_path,
-            policy_config=HierarchicalNeuralPolicyConfig.from_dict(
-                policy_config_dict, observation_size
-            ),
+            policy_config=loaded_pconfig,
             shepherd=shepherd,
         )
         policy_obj.policy_version = policy_version

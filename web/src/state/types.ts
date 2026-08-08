@@ -435,6 +435,7 @@ export interface CheckpointEntry {
   evaluation_seed_count?: number;
   replay_mode?: string;
   total_training_episodes?: number;
+  cumulative_environment_episodes?: number;
   policy_version?: number;
   policy_gradient_loss?: number;
   value_loss?: number;
@@ -881,4 +882,5 @@ export interface TrainingEpisodesResponse {
   has_more: boolean;
   oldest_available_timestamp: string | null;
   total_matching: number;
+  max_id?: number;
 }

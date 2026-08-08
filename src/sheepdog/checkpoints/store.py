@@ -68,6 +68,8 @@ class CheckpointMetadata:
     wall_clock_elapsed_seconds: float | None = None
     session_id: str | None = None
     promotion_gate: dict[str, Any] | None = None
+    policy_hidden_layers: list[int] | None = None
+    value_hidden_layers: list[int] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

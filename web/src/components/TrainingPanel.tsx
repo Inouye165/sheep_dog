@@ -320,6 +320,7 @@ export function TrainingPanel({
   const hasPromotionHeadroom = curriculumStage < maxCurriculumStage;
   const canPromote = hasPromotionHeadroom && !busy;
   const readyToPromote = canPromote && successRate !== null && successRate >= PROMOTE_THRESHOLD;
+  const activeCheckpointsCount = checkpointIndex ? (Array.isArray(checkpointIndex.checkpoints) ? checkpointIndex.checkpoints.length : Object.keys(checkpointIndex.checkpoints || {}).length) : 0;
   const canResume = !busy && resumeAvailable && (resumeRemainingEpisodes ?? 0) > 0;
   const effectiveAutoPromoteThreshold = autoPromoteThreshold ?? PROMOTE_THRESHOLD;
   const hasAutoPromoteGate = autoPromoteGate != null;
@@ -517,7 +518,7 @@ export function TrainingPanel({
               <select
                 id="starting-model-select-console"
                 aria-label="Starting Model Source"
-                value={startingModelSource ?? "latest_stage9"}
+                value={startingModelSource ?? "fresh"}
                 onChange={(e) => onStartingModelSourceChange?.(e.target.value)}
                 disabled={busy}
                 style={{
@@ -531,29 +532,19 @@ export function TrainingPanel({
                   cursor: busy ? "not-allowed" : "pointer"
                 }}
               >
-                <option value="latest_stage9">
-                  Latest Stage 9 Checkpoint (Preserve Stage 9 Learning)
+                <option value="fresh">
+                  Fresh Model (Initialize from Scratch)
                 </option>
-                <option value="original_stage8">
-                  Original Stage 8 Baseline Checkpoint (Fresh Stage 8 Baseline)
-                </option>
+                {activeCheckpointsCount > 0 && (
+                  <option value="latest">
+                    Latest Stage Checkpoint (Continue Learning)
+                  </option>
+                )}
               </select>
             </div>
 
             {/* Explicit Confirmation Text */}
-            {curriculumStage === 8 && (startingModelSource ?? "latest_stage9") === "latest_stage9" ? (
-              <div style={{
-                background: "rgba(139, 92, 246, 0.12)",
-                border: "1px solid rgba(139, 92, 246, 0.3)",
-                borderRadius: "0.4rem",
-                padding: "0.5rem 0.65rem",
-                fontSize: "0.74rem",
-                color: "#c4b5fd",
-                lineHeight: "1.45"
-              }}>
-                ℹ️ <strong>Confirmation:</strong> You are about to train the latest Stage 9 model in the Stage 8 environment. Your Stage 9 checkpoint will remain preserved.
-              </div>
-            ) : curriculumStage === 8 && startingModelSource === "original_stage8" ? (
+            {startingModelSource === "fresh" ? (
               <div style={{
                 background: "rgba(59, 130, 246, 0.12)",
                 border: "1px solid rgba(59, 130, 246, 0.3)",
@@ -563,9 +554,21 @@ export function TrainingPanel({
                 color: "#93c5fd",
                 lineHeight: "1.45"
               }}>
-                ℹ️ <strong>Confirmation:</strong> You are about to load the original Stage 8 model. This run will not include Stage 9 learning.
+                ℹ️ <strong>Confirmation:</strong> Training will initialize a brand-new 3-hidden-layer [128, 128, 128] neural network model starting at Stage {curriculumStage}.
               </div>
-            ) : null}
+            ) : (
+              <div style={{
+                background: "rgba(139, 92, 246, 0.12)",
+                border: "1px solid rgba(139, 92, 246, 0.3)",
+                borderRadius: "0.4rem",
+                padding: "0.5rem 0.65rem",
+                fontSize: "0.74rem",
+                color: "#c4b5fd",
+                lineHeight: "1.45"
+              }}>
+                ℹ️ <strong>Confirmation:</strong> Training will start from the latest saved checkpoint for Stage {curriculumStage}.
+              </div>
+            )}
           </div>
 
           {antiCollapseWarning?.triggered && (

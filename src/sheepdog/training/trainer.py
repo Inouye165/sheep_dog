@@ -757,7 +757,11 @@ class Trainer:
             source_path = Path(replay_value)
             target_path = replay_output_dir / source_path.name
             if source_path.exists():
-                target_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
+                try:
+                    target_path.parent.mkdir(parents=True, exist_ok=True)
+                    target_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
+                except (FileNotFoundError, OSError):
+                    pass
             exported_record = dict(record)
             exported_record.pop("failed_trajectory_summary", None)
             exported_record.pop("observation_diagnostics", None)

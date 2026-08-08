@@ -179,7 +179,7 @@ export function App() {
     const parsed = saved !== null ? parseInt(saved, 10) : NaN;
     return !isNaN(parsed) && parsed >= 1 ? parsed : 1;
   });
-  const [startingModelSource, setStartingModelSource] = useState("latest_stage9");
+  const [startingModelSource, setStartingModelSource] = useState("fresh");
   const [trainingDebugRewardBreakdown, setTrainingDebugRewardBreakdown] = useState(false);
   const [playbackFastMode, setPlaybackFastMode] = useState(false);
   const [trainingStatus, setTrainingStatus] = useState<TrainingStatus | null>(null);
@@ -1083,6 +1083,7 @@ export function App() {
       const index = await loadCheckpointIndex();
       setTrainingStatus(status);
       setTrainingCurriculumStage(1);
+      setStartingModelSource("fresh");
       localStorage.setItem("sheepdog_curriculum_stage", "1");
       setTrainingEpisodes(recommendedEpisodesForStage(1));
       setPromoteFromEpisode(null);
@@ -1120,6 +1121,7 @@ export function App() {
       const index = await loadCheckpointIndex();
       setTrainingStatus(status);
       setTrainingCurriculumStage(1);
+      setStartingModelSource("fresh");
       localStorage.setItem("sheepdog_curriculum_stage", "1");
       setTrainingEpisodes(recommendedEpisodesForStage(1));
       setPromoteFromEpisode(null);

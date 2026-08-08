@@ -9,6 +9,7 @@ import os
 import queue
 import sqlite3
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -38,76 +39,85 @@ class EpisodeStore:
         self.start_worker()
 
     def _get_connection(self) -> sqlite3.Connection:
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self.db_path), timeout=30.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
+        
+        # Self-healing schema check: auto-recreate table if database file was recreated on disk
+        tables = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        if "training_episodes" not in tables:
+            self._ensure_schema(conn)
         return conn
+
+    def _ensure_schema(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS training_episodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_key TEXT NOT NULL UNIQUE,
+                run_id TEXT,
+                session_id TEXT,
+                global_environment_episode INTEGER,
+                episode_in_stage INTEGER,
+                curriculum_stage INTEGER,
+                global_timestep INTEGER,
+                policy_version INTEGER,
+                completed_at TEXT,
+                active_runtime_seconds_total REAL,
+                reward REAL,
+                result TEXT,
+                success INTEGER,
+                timeout INTEGER,
+                stopped INTEGER,
+                sheep_penned INTEGER,
+                total_sheep INTEGER,
+                steps INTEGER,
+                seed INTEGER,
+                checkpoint_id TEXT,
+                created_at TEXT
+            );
+            """
+        )
+
+        # Migration: Ensure replay linkage columns exist
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(training_episodes)").fetchall()}
+        if "replay_available" not in columns:
+            conn.execute("ALTER TABLE training_episodes ADD COLUMN replay_available INTEGER DEFAULT 0;")
+        if "replay_id" not in columns:
+            conn.execute("ALTER TABLE training_episodes ADD COLUMN replay_id TEXT;")
+        if "replay_path" not in columns:
+            conn.execute("ALTER TABLE training_episodes ADD COLUMN replay_path TEXT;")
+        if "replay_source" not in columns:
+            conn.execute("ALTER TABLE training_episodes ADD COLUMN replay_source TEXT;")
+        if "capture_reason" not in columns:
+            conn.execute("ALTER TABLE training_episodes ADD COLUMN capture_reason TEXT;")
+        if "capture_status" not in columns:
+            conn.execute("ALTER TABLE training_episodes ADD COLUMN capture_status TEXT DEFAULT 'not_requested';")
+        if "replay_schema_version" not in columns:
+            conn.execute("ALTER TABLE training_episodes ADD COLUMN replay_schema_version INTEGER DEFAULT 1;")
+
+        indexes = [
+            "CREATE INDEX IF NOT EXISTS idx_episodes_id ON training_episodes(id);",
+            "CREATE INDEX IF NOT EXISTS idx_episodes_run_id ON training_episodes(run_id);",
+            "CREATE INDEX IF NOT EXISTS idx_episodes_stage ON training_episodes(curriculum_stage);",
+            "CREATE INDEX IF NOT EXISTS idx_episodes_global_ep ON training_episodes(global_environment_episode);",
+            "CREATE INDEX IF NOT EXISTS idx_episodes_global_ts ON training_episodes(global_timestep);",
+            "CREATE INDEX IF NOT EXISTS idx_episodes_completed_at ON training_episodes(completed_at);",
+            "CREATE INDEX IF NOT EXISTS idx_episodes_replay_id ON training_episodes(replay_id);",
+            "CREATE INDEX IF NOT EXISTS idx_episodes_replay_avail ON training_episodes(replay_available);",
+        ]
+        for idx_sql in indexes:
+            try:
+                conn.execute(idx_sql)
+            except sqlite3.OperationalError:
+                pass
+        conn.commit()
 
     def _init_db(self) -> None:
         with self._get_connection() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS training_episodes (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    event_key TEXT NOT NULL UNIQUE,
-                    run_id TEXT,
-                    session_id TEXT,
-                    global_environment_episode INTEGER,
-                    episode_in_stage INTEGER,
-                    curriculum_stage INTEGER,
-                    global_timestep INTEGER,
-                    policy_version INTEGER,
-                    completed_at TEXT,
-                    active_runtime_seconds_total REAL,
-                    reward REAL,
-                    result TEXT,
-                    success INTEGER,
-                    timeout INTEGER,
-                    stopped INTEGER,
-                    sheep_penned INTEGER,
-                    total_sheep INTEGER,
-                    steps INTEGER,
-                    seed INTEGER,
-                    checkpoint_id TEXT,
-                    created_at TEXT
-                );
-                """
-            )
-
-            # Migration: Ensure replay linkage columns exist
-            columns = {row["name"] for row in conn.execute("PRAGMA table_info(training_episodes)").fetchall()}
-            if "replay_available" not in columns:
-                conn.execute("ALTER TABLE training_episodes ADD COLUMN replay_available INTEGER DEFAULT 0;")
-            if "replay_id" not in columns:
-                conn.execute("ALTER TABLE training_episodes ADD COLUMN replay_id TEXT;")
-            if "replay_path" not in columns:
-                conn.execute("ALTER TABLE training_episodes ADD COLUMN replay_path TEXT;")
-            if "replay_source" not in columns:
-                conn.execute("ALTER TABLE training_episodes ADD COLUMN replay_source TEXT;")
-            if "capture_reason" not in columns:
-                conn.execute("ALTER TABLE training_episodes ADD COLUMN capture_reason TEXT;")
-            if "capture_status" not in columns:
-                conn.execute("ALTER TABLE training_episodes ADD COLUMN capture_status TEXT DEFAULT 'not_requested';")
-            if "replay_schema_version" not in columns:
-                conn.execute("ALTER TABLE training_episodes ADD COLUMN replay_schema_version INTEGER DEFAULT 1;")
-
-            indexes = [
-                "CREATE INDEX IF NOT EXISTS idx_episodes_id ON training_episodes(id);",
-                "CREATE INDEX IF NOT EXISTS idx_episodes_run_id ON training_episodes(run_id);",
-                "CREATE INDEX IF NOT EXISTS idx_episodes_stage ON training_episodes(curriculum_stage);",
-                "CREATE INDEX IF NOT EXISTS idx_episodes_global_ep ON training_episodes(global_environment_episode);",
-                "CREATE INDEX IF NOT EXISTS idx_episodes_global_ts ON training_episodes(global_timestep);",
-                "CREATE INDEX IF NOT EXISTS idx_episodes_completed_at ON training_episodes(completed_at);",
-                "CREATE INDEX IF NOT EXISTS idx_episodes_replay_id ON training_episodes(replay_id);",
-                "CREATE INDEX IF NOT EXISTS idx_episodes_replay_avail ON training_episodes(replay_available);",
-            ]
-            for idx_sql in indexes:
-                try:
-                    conn.execute(idx_sql)
-                except sqlite3.OperationalError:
-                    pass
-            conn.commit()
+            self._ensure_schema(conn)
 
     def start_worker(self) -> None:
         with self._lock:
@@ -512,6 +522,7 @@ class EpisodeStore:
                     record = self._queue.get(timeout=0.2)
                     if record is None:
                         break
+                    self._busy = True
                     batch.append(record)
                     while len(batch) < 100:
                         try:
@@ -525,12 +536,13 @@ class EpisodeStore:
                     pass
 
                 if batch:
-                    self._busy = True
                     try:
                         self._insert_batch(conn, batch)
                     finally:
                         self._busy = False
                     batch.clear()
+                else:
+                    self._busy = False
         except Exception as exc:
             self.error_count += 1
             self.last_error = str(exc)
@@ -630,6 +642,10 @@ class EpisodeStore:
                 count_sql = f"SELECT COUNT(*), MIN(completed_at) FROM training_episodes {where_clause}"
                 count_cursor = conn.execute(count_sql, params[:-1])
                 total_matching, oldest_timestamp = count_cursor.fetchone()
+
+                max_id_cursor = conn.execute("SELECT MAX(id) FROM training_episodes")
+                max_id_row = max_id_cursor.fetchone()
+                max_db_id = max_id_row[0] if max_id_row and max_id_row[0] is not None else 0
         except Exception as exc:
             self.error_count += 1
             self.last_error = str(exc)
@@ -656,6 +672,7 @@ class EpisodeStore:
             "has_more": has_more,
             "oldest_available_timestamp": oldest_timestamp or None,
             "total_matching": total_matching or 0,
+            "max_id": max_db_id,
         }
 
     def get_telemetry_summary(

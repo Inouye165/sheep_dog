@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { DiagnosticsPanel } from "./DiagnosticsPanel";
 import type { CheckpointIndex, TrainingStatus } from "../state/types";
@@ -166,6 +166,9 @@ describe("DiagnosticsPanel Live Insights & Telemetry", () => {
       />
     );
 
+    const toggleBtn = screen.queryByRole("button", { name: /expand details/i });
+    if (toggleBtn) fireEvent.click(toggleBtn);
+
     expect(screen.getAllByText(/Checkpoint Sequence:/i).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/6508/i).length).toBeGreaterThan(0);
   });
@@ -180,6 +183,9 @@ describe("DiagnosticsPanel Live Insights & Telemetry", () => {
         lastLiveRefreshTime={Date.now()}
       />
     );
+
+    const toggleBtn = screen.queryByRole("button", { name: /expand details/i });
+    if (toggleBtn) fireEvent.click(toggleBtn);
 
     expect(
       screen.getByText(
@@ -211,6 +217,9 @@ describe("DiagnosticsPanel Live Insights & Telemetry", () => {
         lastLiveRefreshTime={Date.now()}
       />
     );
+
+    const toggleBtn = screen.queryByRole("button", { name: /expand details/i });
+    if (toggleBtn) fireEvent.click(toggleBtn);
 
     expect(screen.getByText(/Live Rollout Success Rate:/i)).toBeDefined();
     expect(screen.getAllByText(/Unavailable/i).length).toBeGreaterThan(0);
