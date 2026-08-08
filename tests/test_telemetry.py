@@ -27,6 +27,19 @@ def test_initialize_wandb_without_reinit_boolean(tmp_path: Path) -> None:
         )
 
 
+def test_initialize_wandb_disabled(tmp_path: Path) -> None:
+    """Test that initialize_wandb does not initialize wandb when enabled is False."""
+    manager = CurriculumTelemetryManager(output_dir=tmp_path)
+    mock_wandb = MagicMock()
+    mock_wandb.run = None
+    mock_wandb.init = MagicMock()
+
+    with patch.dict("sys.modules", {"wandb": mock_wandb}):
+        manager.initialize_wandb(project_name="test_project", enabled=False)
+        assert manager._wandb_initialized is False
+        mock_wandb.init.assert_not_called()
+
+
 def test_telemetry_wandb_step_monotonicity(tmp_path: Path) -> None:
     """Test that interleaving log_episode and log calls maintains monotonic steps in wandb.log."""
     manager = CurriculumTelemetryManager(output_dir=tmp_path)

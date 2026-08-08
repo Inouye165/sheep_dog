@@ -117,8 +117,9 @@ class JointActionRLEnv(gym.Env[np.ndarray, int]):
         self._stage_unique_configs = set()
         self._starting_sheep_to_pen_stats = {"min": float("inf"), "max": float("-inf"), "sum": 0.0, "count": 0}
         self._starting_dog_to_sheep_stats = {"min": float("inf"), "max": float("-inf"), "sum": 0.0, "count": 0}
-        self._similarity_episodes = {11: 0, 23: 0, 37: 0, 41: 0, 53: 0}
-        self._similarity_successes = {11: 0, 23: 0, 37: 0, 41: 0, 53: 0}
+        seeds = getattr(getattr(config, "training", None), "evaluation_seeds", (11, 23, 37, 41, 53, 59, 61, 67, 71, 73))
+        self._similarity_episodes = {s: 0 for s in seeds}
+        self._similarity_successes = {s: 0 for s in seeds}
         self._evaluation_layouts = {}
         self._precompute_evaluation_layouts()
         self._current_episode_similarity_match = None
@@ -127,7 +128,8 @@ class JointActionRLEnv(gym.Env[np.ndarray, int]):
         """Pre-generate initial positions for standard evaluation seeds to check training similarity."""
         try:
             temp_env = SheepdogEnvironment(self.config)
-            for seed in [11, 23, 37, 41, 53]:
+            seeds = getattr(getattr(self.config, "training", None), "evaluation_seeds", (11, 23, 37, 41, 53, 59, 61, 67, 71, 73))
+            for seed in seeds:
                 temp_env.reset(seed=seed)
                 self._evaluation_layouts[seed] = {
                     "dog_positions": [(dog.position.x, dog.position.y) for dog in temp_env.dogs],
@@ -282,6 +284,20 @@ class JointActionRLEnv(gym.Env[np.ndarray, int]):
                 penned = getattr(snapshot, "penned_count", sum(1 for s in snapshot.sheep if getattr(s, "penned", False)))
                 total_sheep = len(snapshot.sheep)
                 status_str = "SUCCESS" if snapshot.success else ("TIMEOUT" if snapshot.timeout else "STOPPED")
+                dog_cnt = self._environment.dog_count
+                spawn_mode = getattr(snapshot, "spawn_mode", getattr(self._environment, "_spawn_mode", ""))
+                pen = getattr(snapshot, "pen", getattr(self._environment, "_pen", None))
+                parts = [f"{dog_cnt}d/{total_sheep}s"]
+                if spawn_mode:
+                    parts.append(f"Spawn: {spawn_mode}")
+                if pen and hasattr(pen, "origin"):
+                    pen_ox, pen_oy = int(pen.origin.x), int(pen.origin.y)
+                    opening = getattr(pen, "opening", "")
+                    if opening:
+                        parts.append(f"Pen: ({pen_ox},{pen_oy},{opening})")
+                    else:
+                        parts.append(f"Pen: ({pen_ox},{pen_oy})")
+                field_setup_str = " | ".join(parts)
                 info["episode"] = {
                     "r": float(self._episode_reward),
                     "l": int(getattr(snapshot, "step", 0)),
@@ -290,12 +306,14 @@ class JointActionRLEnv(gym.Env[np.ndarray, int]):
                     "total_sheep": int(total_sheep),
                     "status": status_str,
                     "seed": int(self._latest_seed),
+                    "field_setup": field_setup_str,
                 }
 
                 if self._current_episode_similarity_match is not None:
-                    self._similarity_episodes[self._current_episode_similarity_match] += 1
+                    match_seed = self._current_episode_similarity_match
+                    self._similarity_episodes[match_seed] = self._similarity_episodes.get(match_seed, 0) + 1
                     if snapshot.success:
-                        self._similarity_successes[self._current_episode_similarity_match] += 1
+                        self._similarity_successes[match_seed] = self._similarity_successes.get(match_seed, 0) + 1
                     self._current_episode_similarity_match = None
         else:
             info = self._info(action_mask=mask)

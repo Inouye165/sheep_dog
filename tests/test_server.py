@@ -489,10 +489,27 @@ def test_start_rejects_stage_below_current_journey_history(tmp_path: Path) -> No
     artifacts = tmp_path / "artifacts"
     generated = tmp_path / "web" / "public" / "generated"
     artifacts.mkdir(parents=True)
+    checkpoints = artifacts / "checkpoints"
+    models = artifacts / "models"
+    checkpoints.mkdir(parents=True)
+    models.mkdir(parents=True)
     generated.mkdir(parents=True)
-    (artifacts / "training-settings.json").write_text(
-        json.dumps({"curriculum_stage": 2}), encoding="utf-8"
+
+    model_path = models / "best-model.zip"
+    model_path.write_text("model", encoding="utf-8")
+    checkpoint = {
+        "checkpoint": "checkpoint-000008.json",
+        "checkpoint_episode": 8,
+        "total_training_episodes": 8,
+        "policy_state_path": str(model_path),
+        "policy_type": "neural",
+        "trainer_type": "maskable_ppo",
+        "reward_config": {"instincts": {"curriculum_stage": 8}},
+    }
+    (artifacts / "training-summary.json").write_text(
+        json.dumps({"checkpoints": [checkpoint]}), encoding="utf-8"
     )
+    (checkpoints / "checkpoint-000008.json").write_text(json.dumps(checkpoint), encoding="utf-8")
     (artifacts / "stage-history.json").write_text(json.dumps({"2": 50, "8": 122}), encoding="utf-8")
 
     config = LabConfig(
@@ -703,6 +720,62 @@ def test_startup_auto_resumes_interrupted_running_session(tmp_path: Path) -> Non
     assert start_calls[0]["resume"] is True
 
 
+def test_startup_auto_resumes_canonical_remaining_timesteps(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    generated = tmp_path / "web" / "public" / "generated"
+    session_dir = artifacts / "startup"
+    generated.mkdir(parents=True)
+    session_dir.mkdir(parents=True)
+    (session_dir / "training-session.json").write_text(
+        json.dumps(
+            {
+                "state": "running",
+                "remaining_timesteps": 18_432,
+                "training_request": {
+                    "total_timesteps": 51_200,
+                    "curriculum_stage": 2,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = LabConfig(
+        training=TrainingConfig(
+            output_dir=str(artifacts),
+            web_export_dir=str(generated),
+        )
+    )
+
+    class TestConfig:
+        def __new__(cls):
+            return config
+
+    start_calls: list[dict[str, object]] = []
+
+    def fake_start(_self, *args, **kwargs):
+        start_calls.append({"args": args, **kwargs})
+        return {"running": True}
+
+    with (
+        patch("sheepdog.server.LabConfig", TestConfig),
+        patch.object(TrainingManager, "start", autospec=True, side_effect=fake_start),
+    ):
+        TrainingManager()
+
+    assert start_calls == [
+        {
+            "args": (),
+            "total_timesteps": 18_432,
+            "enable_instinct_rewards": None,
+            "curriculum_stage": 2,
+            "debug_reward_breakdown": None,
+            "auto_promote": None,
+            "promote_from_checkpoint_episode": None,
+            "resume": True,
+        }
+    ]
+
+
 def test_launcher_resume_request_preserves_resume_semantics() -> None:
     launcher = Path(__file__).parents[1] / "start-app.ps1"
     launcher_text = launcher.read_text(encoding="utf-8")
@@ -743,6 +816,58 @@ def test_start_endpoint_returns_json_conflict_when_start_is_rejected() -> None:
             "error": "Requested stage 8 does not match active stage 2",
             "code": "TRAINING_START_REJECTED",
         }
+    finally:
+        server.shutdown()
+        server.server_close()
+        TrainingRequestHandler.manager = original_manager
+
+
+def test_start_endpoint_accepts_canonical_timestep_request() -> None:
+    start_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def start(*args, **kwargs):
+        start_calls.append((args, kwargs))
+        return {"running": True, "requested_timesteps": kwargs["total_timesteps"]}
+
+    manager = cast(
+        TrainingManager,
+        SimpleNamespace(_status={"phase": "idle"}, start=start),
+    )
+    original_manager = TrainingRequestHandler.manager
+    TrainingRequestHandler.manager = manager
+    server = ThreadingHTTPServer(("127.0.0.1", 0), TrainingRequestHandler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    try:
+        body = json.dumps({"total_timesteps": 50_000, "curriculum_stage": 2}).encode(
+            "utf-8"
+        )
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{server.server_port}/api/training/start",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+
+        assert payload["requested_timesteps"] == 50_000
+        assert start_calls == [
+            (
+                (),
+                {
+                    "total_timesteps": 50_000,
+                    "enable_instinct_rewards": None,
+                    "curriculum_stage": 2,
+                    "debug_reward_breakdown": None,
+                    "auto_promote": None,
+                    "promote_from_checkpoint_episode": None,
+                    "evaluation_mode": "quick",
+                    "resume": False,
+                },
+            )
+        ]
     finally:
         server.shutdown()
         server.server_close()
@@ -1149,6 +1274,62 @@ def test_health_endpoint_routes(tmp_path: Path) -> None:
         finally:
             server.shutdown()
             server.server_close()
+
+
+def test_worker_exception_handling_unexpected_vs_deliberate_shutdown(tmp_path: Path) -> None:
+    """Verify worker thread logs/persists unexpected exceptions, but re-raises KeyboardInterrupt and SystemExit after cleanup."""
+    artifacts = tmp_path / "artifacts"
+    generated = tmp_path / "web" / "public" / "generated"
+    artifacts.mkdir(parents=True)
+    generated.mkdir(parents=True)
+
+    config = LabConfig(
+        training=TrainingConfig(
+            episodes=1,
+            output_dir=str(artifacts),
+            web_export_dir=str(generated),
+        )
+    )
+
+    class TestConfig:
+        def __new__(cls):
+            return config
+
+    # 1. Test unexpected exception (ValueError) is caught & status set to error
+    class FailingTrainerValueError:
+        total_episodes_trained = 0
+        def train(self, progress_callback=None, should_stop=None):
+            raise ValueError("Unexpected worker failure")
+
+    with (
+        patch("sheepdog.server.LabConfig", TestConfig),
+        patch("sheepdog.server.create_trainer", return_value=FailingTrainerValueError()),
+    ):
+        manager = TrainingManager()
+        manager._run_training(1, True)
+        snap = manager.snapshot()
+        assert snap["running"] is False
+        assert snap["phase"] == "error"
+        assert "Unexpected worker failure" in snap["error"]
+
+    # 2. Test deliberate shutdown exception (KeyboardInterrupt) performs cleanup & re-raises
+    class FailingTrainerKeyboardInterrupt:
+        total_episodes_trained = 0
+        def train(self, progress_callback=None, should_stop=None):
+            raise KeyboardInterrupt("Deliberate shutdown signal")
+
+    with (
+        patch("sheepdog.server.LabConfig", TestConfig),
+        patch("sheepdog.server.create_trainer", return_value=FailingTrainerKeyboardInterrupt()),
+    ):
+        manager = TrainingManager()
+        with pytest.raises(KeyboardInterrupt):
+            manager._run_training(1, True)
+        snap = manager.snapshot()
+        assert snap["running"] is False
+        assert snap["phase"] == "error"
+        assert "KeyboardInterrupt" in snap["error_type"]
+
 
 
 

@@ -137,6 +137,7 @@ class EvaluationSummary:
     environment_config_hash: str | None = None
     observation_schema_hash: str | None = None
     action_space_hash: str | None = None
+    evaluation_id: str | None = None
     evaluation_mode: str = "confidence"
     promotion_eligible: bool = True
 
@@ -257,6 +258,11 @@ class Evaluator:
         evaluation_timestamp = datetime.datetime.now(datetime.UTC).isoformat()
         evaluation_seed_set_id = compute_seed_set_id(seeds)
         evaluation_seed_count = len(seeds)
+        evaluation_id = (
+            f"eval_{active_checkpoint_id}_{evaluation_mode}_{evaluation_seed_set_id[:12]}"
+            if active_checkpoint_id
+            else None
+        )
 
         if hasattr(self.config, "to_dict"):
             env_dict = self.config.to_dict()["environment"]
@@ -331,12 +337,14 @@ class Evaluator:
             environment_config_hash=environment_config_hash,
             observation_schema_hash=observation_schema_hash,
             action_space_hash=action_space_hash,
+            evaluation_id=evaluation_id,
             evaluation_mode=evaluation_mode,
             promotion_eligible=evaluation_mode == "confidence",
         )
 
-        json_path = self.output_root / f"evaluation-checkpoint-{checkpoint_episode:06d}.json"
-        csv_path = self.output_root / f"evaluation-checkpoint-{checkpoint_episode:06d}.csv"
+        artifact_name = evaluation_id or f"evaluation-checkpoint-{checkpoint_episode:06d}"
+        json_path = self.output_root / f"{artifact_name}.json"
+        csv_path = self.output_root / f"{artifact_name}.csv"
         with json_path.open("w", encoding="utf-8") as handle:
             json.dump(summary.to_dict(), handle, indent=2)
         with csv_path.open("w", encoding="utf-8", newline="") as handle:

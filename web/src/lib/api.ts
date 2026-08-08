@@ -13,6 +13,9 @@ import type {
   UserHyperparams,
   TelemetryRecord,
   DiagnosticsResponse,
+  TrainingEpisodesResponse,
+  TrainingEpisode,
+  CapturePolicyConfig,
 } from "../state/types";
 
 export const API_BASE_URL = "http://127.0.0.1:8000";
@@ -98,7 +101,7 @@ export async function loadCheckpointIndex(): Promise<CheckpointIndex | null> {
     return null;
   }
   try {
-    return await fetchJson<CheckpointIndex>("/generated/checkpoint-index.json", undefined, API_BASE_URL);
+    return await fetchJson<CheckpointIndex>(`/generated/checkpoint-index.json?t=${Date.now()}`, undefined, API_BASE_URL);
   } catch (error) {
     const fetchError = error as ApiError;
     // Treat 404 and 500 (Vite serves 500 when the file doesn't exist yet)
@@ -127,11 +130,104 @@ export async function loadCheckpointIndex(): Promise<CheckpointIndex | null> {
   }
 }
 
+export interface LoadEpisodesOptions {
+  afterId?: number;
+  beforeId?: number;
+  stage?: number;
+  runId?: string;
+  limit?: number;
+  order?: "asc" | "desc";
+}
+
+export async function loadTrainingEpisodes(options: LoadEpisodesOptions = {}): Promise<TrainingEpisodesResponse | null> {
+  if (backendOfflineState) {
+    return null;
+  }
+  const queryParams = new URLSearchParams();
+  if (options.afterId !== undefined) queryParams.set("after_id", String(options.afterId));
+  if (options.beforeId !== undefined) queryParams.set("before_id", String(options.beforeId));
+  if (options.stage !== undefined) queryParams.set("stage", String(options.stage));
+  if (options.runId) queryParams.set("run_id", options.runId);
+  if (options.limit !== undefined) queryParams.set("limit", String(options.limit));
+  if (options.order) queryParams.set("order", options.order);
+
+  const queryString = queryParams.toString();
+  const path = `/api/insights/training-episodes${queryString ? `?${queryString}` : ""}`;
+
+  try {
+    return await fetchJson<TrainingEpisodesResponse>(path, undefined, API_BASE_URL);
+  } catch (error) {
+    const fetchErr = error as ApiError;
+    if (fetchErr.isNetworkError || fetchErr.status === 0 || !fetchErr.status || error instanceof TypeError) {
+      backendOfflineState = true;
+    }
+    return null;
+  }
+}
+
+export async function loadFailedEpisodes(limit: number = 25): Promise<TrainingEpisode[] | null> {
+  if (backendOfflineState) {
+    return null;
+  }
+  const path = `/api/insights/failed-episodes?limit=${limit}`;
+  try {
+    const res = await fetchJson<{ episodes: TrainingEpisode[] } | TrainingEpisode[]>(path, undefined, API_BASE_URL);
+    if (!res) return null;
+    if (Array.isArray(res)) return res;
+    if (Array.isArray(res.episodes)) return res.episodes;
+    return [];
+  } catch (error) {
+    const fetchErr = error as ApiError;
+    if (fetchErr.isNetworkError || fetchErr.status === 0 || !fetchErr.status || error instanceof TypeError) {
+      backendOfflineState = true;
+    }
+    return null;
+  }
+}
+
 export async function loadReplay(path: string): Promise<ReplayBundle> {
   if (!path || !path.trim()) {
     throw new Error("No replay path specified.");
   }
   return fetchJson<ReplayBundle>(path, undefined, API_BASE_URL);
+}
+
+export async function fetchReplayById(replayId: string): Promise<ReplayBundle | null> {
+  try {
+    return await fetchJson<ReplayBundle>(`/api/replays/${replayId}`, undefined, API_BASE_URL);
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchCapturePolicy(): Promise<CapturePolicyConfig | null> {
+  try {
+    return await fetchJson<CapturePolicyConfig>("/api/training/capture-policy", undefined, API_BASE_URL);
+  } catch {
+    return null;
+  }
+}
+
+export async function updateCapturePolicy(params: Record<string, unknown>): Promise<CapturePolicyConfig | null> {
+  try {
+    return await fetchJson<CapturePolicyConfig>("/api/training/capture-policy", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    }, API_BASE_URL);
+  } catch {
+    return null;
+  }
+}
+
+export async function reproduceEpisode(episodeId: number | string): Promise<ReplayBundle | null> {
+  try {
+    return await fetchJson<ReplayBundle>(`/api/episodes/${episodeId}/reproduce`, {
+      method: "POST",
+    }, API_BASE_URL);
+  } catch {
+    return null;
+  }
 }
 
 export async function loadTrainingStatus(): Promise<TrainingStatus> {
@@ -196,6 +292,30 @@ export async function rewindTraining(stage: number): Promise<TrainingStatus> {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ stage }),
+  }, API_BASE_URL);
+}
+
+export async function startRemediationFork(targetStage = 9, canaryEpisodes = 20): Promise<TrainingStatus> {
+  return fetchJson<TrainingStatus>("/api/training/remediation", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ target_stage: targetStage, canary_episodes: canaryEpisodes }),
+  }, API_BASE_URL);
+}
+
+export async function crossStageFork(request: {
+  target_stage: number;
+  starting_model_source: string;
+  source_checkpoint_id?: string;
+}): Promise<TrainingStatus> {
+  return fetchJson<TrainingStatus>("/api/training/cross-stage-fork", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(request),
   }, API_BASE_URL);
 }
 

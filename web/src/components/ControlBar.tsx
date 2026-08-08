@@ -69,11 +69,12 @@ export function ControlBar({
               let label = `${stageStr}Ep ${episode} · ${successStr} · ${steps} steps avg · ${rewardStr} R avg${runDesc}`;
               if (isBest) label += " — ★ Best";
 
-              const optKey = entry.checkpoint_id
+              const baseKey = entry.checkpoint_id
                 ? entry.checkpoint_id
                 : entry.run_id
                   ? `${entry.run_id}-ep-${episode}`
-                  : `ep-${episode}-${entry.recorded_at || ""}-${idx}`;
+                  : `ep-${episode}-${entry.recorded_at || ""}`;
+              const optKey = `${baseKey}-${idx}`;
 
               return (
                 <option key={optKey} value={episode}>

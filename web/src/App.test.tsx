@@ -439,6 +439,7 @@ describe("App", () => {
     render(<App />);
 
     await waitFor(() => expect(screen.getByLabelText("Training controls")).toBeInTheDocument());
+    await userEvent.click(screen.getAllByRole("button", { name: /^Curriculum/i })[0]);
     expect(screen.getByText("Stage 2", { selector: ".stage-chip__label" })).toBeInTheDocument();
     expect(window.localStorage.getItem("sheepdog_curriculum_stage")).toBe("2");
   });
@@ -1042,5 +1043,50 @@ describe("App", () => {
     expect(window.localStorage.getItem("sheepdog_insights_stage_scope")).toBe("all");
     expect(window.localStorage.getItem("sheepdog_insights_view_window")).toBe("50");
     expect(window.localStorage.getItem("sheepdog_insights_active_chart")).toBe("reward");
+  });
+
+  it("displays 'Backend disconnected' when backend polling fails during active training", async () => {
+    const fetchMock = vi.mocked(fetch);
+    let pollCount = 0;
+
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.includes("/api/training/status")) {
+        pollCount++;
+        if (pollCount === 1) {
+          return jsonResponse({
+            ...idleTrainingStatus,
+            running: true,
+            phase: "learning",
+            message: "Learning neural policy: segment 1/5",
+            curriculum_stage: 9,
+            requested_episodes: 200,
+            completed_episodes: 20,
+            batch_total_episodes: 200,
+            batch_completed_episodes: 20,
+          });
+        }
+        throw new TypeError("Failed to fetch");
+      }
+      if (path.includes("checkpoint-index.json")) {
+        return jsonResponse(checkpointIndex);
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    render(<App />);
+
+    // First poll succeeds (shows training state)
+    await waitFor(() => {
+      expect(screen.getByText("Learning neural policy: segment 1/5")).toBeInTheDocument();
+    });
+
+    // Advance timer or trigger re-poll to simulate backend disconnect failure
+    await waitFor(() => {
+      expect(screen.getAllByText("Backend disconnected").length).toBeGreaterThan(0);
+    });
+
+    // Verify stale 'learning' phase is no longer shown
+    expect(screen.queryByText("Learning neural policy: segment 1/5")).not.toBeInTheDocument();
   });
 });

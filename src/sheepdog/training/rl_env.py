@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 import gymnasium as gym
@@ -33,6 +34,7 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
         self.fixed_seed_sequence = tuple(fixed_seed_sequence or ())
         self._fixed_seed_index = 0
         self._episode_counter = 0
+        self.env_index: int = getattr(config, "env_index", 0)
         self._environment = SheepdogEnvironment(config)
         initial_snapshot = self._environment.reset(seed=config.training.train_seed)
         del initial_snapshot
@@ -48,6 +50,8 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
         self._current_dog_index = 0
         self._latest_seed = config.training.train_seed
         self._episode_reward = 0.0
+        self._active_trajectory_buffer: list[dict[str, Any]] = []
+
         # Scenario sampler for mixing difficult training scenarios
         self._scenario_sampler = ScenarioSampler(
             config.training,
@@ -60,8 +64,9 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
         self._stage_unique_configs = set()
         self._starting_sheep_to_pen_stats = {"min": float("inf"), "max": float("-inf"), "sum": 0.0, "count": 0}
         self._starting_dog_to_sheep_stats = {"min": float("inf"), "max": float("-inf"), "sum": 0.0, "count": 0}
-        self._similarity_episodes = {11: 0, 23: 0, 37: 0, 41: 0, 53: 0}
-        self._similarity_successes = {11: 0, 23: 0, 37: 0, 41: 0, 53: 0}
+        seeds = getattr(getattr(config, "training", None), "evaluation_seeds", (11, 23, 37, 41, 53, 59, 61, 67, 71, 73))
+        self._similarity_episodes = {s: 0 for s in seeds}
+        self._similarity_successes = {s: 0 for s in seeds}
         self._evaluation_layouts = {}
         self._precompute_evaluation_layouts()
         self._current_episode_similarity_match = None
@@ -70,7 +75,8 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
         """Pre-generate initial positions for standard evaluation seeds to check training similarity."""
         try:
             temp_env = SheepdogEnvironment(self.config)
-            for seed in [11, 23, 37, 41, 53]:
+            seeds = getattr(getattr(self.config, "training", None), "evaluation_seeds", (11, 23, 37, 41, 53, 59, 61, 67, 71, 73))
+            for seed in seeds:
                 temp_env.reset(seed=seed)
                 self._evaluation_layouts[seed] = {
                     "dog_positions": [(dog.position.x, dog.position.y) for dog in temp_env.dogs],
@@ -99,6 +105,14 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
             "similarity_successes": self._similarity_successes,
         }
 
+    def _next_seed(self) -> int:
+        if self.fixed_seed_sequence:
+            seed = self.fixed_seed_sequence[self._fixed_seed_index % len(self.fixed_seed_sequence)]
+            self._fixed_seed_index += 1
+            return int(seed)
+        self._episode_counter += 1
+        return int(self.config.training.train_seed + self._episode_counter)
+
     def reset(
         self,
         *,
@@ -112,19 +126,38 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
         self._pending_actions = []
         self._current_dog_index = 0
         self._episode_reward = 0.0
+        self._active_trajectory_buffer = []
 
         # Use scenario sampler if scenario training is enabled
         if self.config.training.scenario_training_enabled:
             selection = self._scenario_sampler.sample(self._episode_counter)
             if selection.scenario is not None:
-                # Use predefined scenario
                 self._environment.reset_from_scenario(selection.scenario)
             else:
-                # Use normal random reset
                 self._environment.reset(seed=self._latest_seed)
         else:
-            # Scenario training disabled: use normal random reset
             self._environment.reset(seed=self._latest_seed)
+
+        # Buffer step 0 initial state snapshot
+        init_snap = self._environment.get_state_snapshot()
+        self._active_trajectory_buffer.append({
+            "step": 0,
+            "actions": [],
+            "snapshot": init_snap.to_dict(),
+            "reward": {
+                "progress_to_pen": 0.0,
+                "sheep_penned": 0.0,
+                "flock_cohesion": 0.0,
+                "scatter_penalty": 0.0,
+                "time_penalty": 0.0,
+                "no_progress_penalty": 0.0,
+                "wall_pressure_penalty": 0.0,
+                "wait_penalty": 0.0,
+                "terminal_success": 0.0,
+                "terminal_failure": 0.0,
+                "total": 0.0,
+            },
+        })
 
         # Stage checks and trackers
         curr_stage = self.config.rewards.instincts.curriculum_stage
@@ -216,14 +249,100 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
             info = self._info()
             info["team_step_completed"] = True
             info["final_snapshot"] = snapshot.to_dict()
+
+            # Append frame to active trajectory buffer
+            self._active_trajectory_buffer.append({
+                "step": int(snapshot.step),
+                "actions": list(self._pending_actions),
+                "snapshot": snapshot.to_dict(),
+                "reward": breakdown.to_dict(),
+            })
+
+            team_actions = list(self._pending_actions)
             self._pending_actions = []
             self._current_dog_index = 0
 
-            # Increment similarity counters if episode finished
+            # Handle episode completion & selective trajectory capture
             if terminated or truncated:
                 penned = getattr(snapshot, "penned_count", sum(1 for s in snapshot.sheep if getattr(s, "penned", False)))
                 total_sheep = len(snapshot.sheep)
                 status_str = "SUCCESS" if snapshot.success else ("TIMEOUT" if snapshot.timeout else "STOPPED")
+                stage = self.config.rewards.instincts.curriculum_stage
+
+                from sheepdog.training.replay_writer import (
+                    get_global_capture_policy,
+                    get_replay_writer,
+                    ReplayWriteJob,
+                )
+                from sheepdog.training.episode_store import get_episode_store
+
+                policy = get_global_capture_policy()
+                should_capture, capture_reason = policy.should_capture(
+                    stage=stage,
+                    success=bool(snapshot.success),
+                    status=status_str,
+                    reward=float(self._episode_reward),
+                )
+
+                replay_id = None
+                replay_path_str = None
+
+                if should_capture:
+                    import time
+                    ep_num = int(self._episode_counter)
+                    seed_val = int(self._latest_seed)
+                    ts_suffix = int(time.time())
+                    replay_id = f"diag_stage{stage}_ep{ep_num}_seed{seed_val}_t{ts_suffix}"
+                    event_key = f"ep_{ep_num}_stage_{stage}_seed_{seed_val}_env_{self.env_index}_t{ts_suffix}"
+
+                    output_dir = Path("artifacts/replays")
+                    output_path = output_dir / f"{replay_id}.json.gz"
+                    replay_path_str = str(output_path)
+
+                    stats_dict = self._environment._stats.to_dict() if hasattr(self._environment, "_stats") else {}
+
+                    payload = {
+                        "seed": seed_val,
+                        "policy_name": f"ppo_stage_{stage}",
+                        "trainer_type": "maskable_ppo",
+                        "policy_type": "team_shared",
+                        "replay_mode": "training_diagnostic",
+                        "replay_source": "training-diagnostic",
+                        "capture_reason": capture_reason,
+                        "capture_status": "queued",
+                        "environment": self.config.to_dict()["environment"],
+                        "final_snapshot": snapshot.to_dict(),
+                        "stats": stats_dict,
+                        "frames": list(self._active_trajectory_buffer),
+                    }
+
+                    job = ReplayWriteJob(
+                        replay_id=replay_id,
+                        event_key=event_key,
+                        payload=payload,
+                        output_path=output_path,
+                        capture_reason=capture_reason,
+                        replay_source="training-diagnostic",
+                        use_gzip=True,
+                    )
+
+                    writer = get_replay_writer(output_dir=output_dir, episode_store=get_episode_store())
+                    writer.enqueue(job)
+
+                dog_cnt = self._environment.dog_count
+                spawn_mode = getattr(snapshot, "spawn_mode", getattr(self._environment, "_spawn_mode", ""))
+                pen = getattr(snapshot, "pen", getattr(self._environment, "_pen", None))
+                parts = [f"{dog_cnt}d/{total_sheep}s"]
+                if spawn_mode:
+                    parts.append(f"Spawn: {spawn_mode}")
+                if pen and hasattr(pen, "origin"):
+                    pen_ox, pen_oy = int(pen.origin.x), int(pen.origin.y)
+                    opening = getattr(pen, "opening", "")
+                    if opening:
+                        parts.append(f"Pen: ({pen_ox},{pen_oy},{opening})")
+                    else:
+                        parts.append(f"Pen: ({pen_ox},{pen_oy})")
+                field_setup_str = " | ".join(parts)
                 info["episode"] = {
                     "r": float(self._episode_reward),
                     "l": int(getattr(snapshot, "step", 0)),
@@ -232,17 +351,28 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
                     "total_sheep": int(total_sheep),
                     "status": status_str,
                     "seed": int(self._latest_seed),
+                    "field_setup": field_setup_str,
+                    "replay_available": 1 if should_capture else 0,
+                    "replay_id": replay_id,
+                    "replay_path": replay_path_str,
+                    "replay_source": "training-diagnostic" if should_capture else None,
+                    "capture_reason": capture_reason if should_capture else "not_requested",
+                    "capture_status": "queued" if should_capture else "not_requested",
                 }
 
                 if self._current_episode_similarity_match is not None:
-                    self._similarity_episodes[self._current_episode_similarity_match] += 1
+                    match_seed = self._current_episode_similarity_match
+                    self._similarity_episodes[match_seed] = self._similarity_episodes.get(match_seed, 0) + 1
                     if snapshot.success:
-                        self._similarity_successes[self._current_episode_similarity_match] += 1
+                        self._similarity_successes[match_seed] = self._similarity_successes.get(match_seed, 0) + 1
                     self._current_episode_similarity_match = None
+
+                self._active_trajectory_buffer = []
         else:
             info = self._info(action_mask=mask)
             self._current_dog_index += 1
             info["team_step_completed"] = False
+
         observation = (
             self._current_observation()
             if not (terminated or truncated)
@@ -258,44 +388,30 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
         mask_map = self._environment.action_mask_for_dog(
             self._current_dog_index,
             reserved_positions={
-                self._environment.project_dog_action(index, action)
-                for index, action in enumerate(self._pending_actions)
+                self._environment.dogs[i].position
+                for i in range(self._current_dog_index)
             },
         )
-        return np.asarray([mask_map[action] for action in ACTION_ORDER], dtype=bool)
-
-    def _current_observation(self) -> np.ndarray:
-        return np.asarray(
-            self._environment.build_observation_for_dog(self._current_dog_index).values,
-            dtype=np.float32,
+        return np.array(
+            [mask_map.get(action, False) for action in ACTION_ORDER],
+            dtype=bool,
         )
 
-    def _info(self, action_mask: np.ndarray | None = None) -> dict[str, Any]:
+    def _info(
+        self, action_mask: np.ndarray | None = None
+    ) -> dict[str, Any]:
+        """Build metadata dict emitted alongside step observations."""
+        if action_mask is None:
+            action_mask = self.action_masks()
         return {
-            "seed": self._latest_seed,
             "current_dog_index": self._current_dog_index,
-            "action_mask": (
-                action_mask if action_mask is not None else self.action_masks()
-            ).tolist(),
-            "pending_actions": list(self._pending_actions),
+            "action_mask": action_mask,
+            "simulated_seconds": self._environment.simulated_seconds,
+            "step_count": self._environment.step_count,
+            "latest_seed": self._latest_seed,
         }
 
-    def _next_seed(self) -> int:
-        if self.fixed_seed_sequence:
-            seed = self.fixed_seed_sequence[self._fixed_seed_index % len(self.fixed_seed_sequence)]
-            self._fixed_seed_index += 1
-            return int(seed)
-        seed = self.config.training.train_seed + self._episode_counter
-        self._episode_counter += 1
-        return int(seed)
-
-    def get_scenario_usage_summary(self) -> dict[str, Any]:
-        """Return scenario usage statistics for observability."""
-        if not self.config.training.scenario_training_enabled:
-            return {"scenario_training_enabled": False}
-        return self._scenario_sampler.get_usage_summary()
-
-    @property
-    def episode_counter(self) -> int:
-        """Return the count of training episodes completed in this environment instance."""
-        return self._episode_counter
+    def _current_observation(self) -> np.ndarray:
+        """Extract observation vector for the active dog."""
+        obs = self._environment.build_observation_for_dog(self._current_dog_index)
+        return np.array(obs.values, dtype=np.float32)

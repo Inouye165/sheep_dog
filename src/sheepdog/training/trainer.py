@@ -757,7 +757,11 @@ class Trainer:
             source_path = Path(replay_value)
             target_path = replay_output_dir / source_path.name
             if source_path.exists():
-                target_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
+                try:
+                    target_path.parent.mkdir(parents=True, exist_ok=True)
+                    target_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
+                except (FileNotFoundError, OSError):
+                    pass
             exported_record = dict(record)
             exported_record.pop("failed_trajectory_summary", None)
             exported_record.pop("observation_diagnostics", None)
@@ -774,7 +778,7 @@ class Trainer:
             exported_payload["journey"] = "current"
             exported_payload.pop("policy_weights", None)
             exported_payload.pop("training_scenario_coverage", None)
-            if index >= records_start:
+            if index >= records_start and "records" in checkpoint_payload and isinstance(checkpoint_payload["records"], list):
                 exported_payload["records"] = [
                     _export_record(record) for record in checkpoint_payload["records"]
                 ]

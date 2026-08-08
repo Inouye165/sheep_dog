@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from math import hypot
+from typing import Any
 
 
 class DogRole(StrEnum):
@@ -197,4 +198,8 @@ class EpisodeStats:
     num_invalid_actions: int = 0
     most_frequent_action: str = ""
     oscillation_detected: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain dict."""
+        return asdict(self)
 

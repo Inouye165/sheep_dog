@@ -116,28 +116,29 @@ class TeamStrategy:
             lateral_y = 1
 
         flank_offset = max(4, round(flock_spread) + 3)
-        rear_target = Point(
+        raw_rear = Point(
             flock_center.x - pen_dx * 4,
             flock_center.y - pen_dy * 4,
-        ).clamp(self._width, self._height)
-        # Flankers sit BESIDE the flock (same pen-axis depth as flock_center),
-        # not behind-and-to-the-side.  This puts them at the correct lateral
-        # position to prevent sideways escapes and avoids clustering all three
-        # role targets in the same rear quadrant.
-        left_target = Point(
+        )
+        raw_left = Point(
             flock_center.x + lateral_x * flank_offset,
             flock_center.y + lateral_y * flank_offset,
-        ).clamp(self._width, self._height)
-        right_target = Point(
+        )
+        raw_right = Point(
             flock_center.x - lateral_x * flank_offset,
             flock_center.y - lateral_y * flank_offset,
-        ).clamp(self._width, self._height)
+        )
+
+        rear_target = self._safe_open_field_target(raw_rear, flock_center, unpenned)
+        left_target = self._safe_open_field_target(raw_left, flock_center, unpenned)
+        right_target = self._safe_open_field_target(raw_right, flock_center, unpenned)
         blocker_target = self._blocker_target(flock_center, pen, lateral_x, lateral_y)
 
         assignments: dict[int, RoleAssignment] = {}
         remaining = list(dogs)
         if stray is not None:
-            collector_target = self._collector_target(stray.position, flock_center)
+            raw_collector = self._collector_target(stray.position, flock_center, pen)
+            collector_target = self._safe_open_field_target(raw_collector, flock_center, unpenned)
             collector = self._best_dog_for_role(
                 remaining,
                 collector_target,
@@ -155,7 +156,12 @@ class TeamStrategy:
         # Only assign a blocker when enough dogs remain to still push the flock.
         # blocker_min_remaining_dogs (default 1) ensures at least one herder
         # keeps applying rear-pressure after the blocker is stationed.
-        if near_pen and len(remaining) > self._config.blocker_min_remaining_dogs:
+        # When only 1 sheep is unpenned, avoid gate blocking so the entry lane remains open.
+        if (
+            near_pen
+            and len(unpenned) > 1
+            and len(remaining) > self._config.blocker_min_remaining_dogs
+        ):
             blocker = self._best_dog_for_role(
                 remaining,
                 blocker_target,
@@ -230,6 +236,10 @@ class TeamStrategy:
         flock_center: Point,
         flock_spread: float,
     ) -> SheepState | None:
+        if not sheep:
+            return None
+        if len(sheep) == 1:
+            return sheep[0]
         threshold = max(5.0, flock_spread + 2.0)
         furthest = max(sheep, key=lambda animal: animal.position.distance_to(flock_center))
         nearest_neighbor = min(
@@ -247,9 +257,14 @@ class TeamStrategy:
             return None
         return furthest
 
-    def _collector_target(self, stray_position: Point, flock_center: Point) -> Point:
+    def _collector_target(
+        self, stray_position: Point, flock_center: Point, pen: Pen | None = None
+    ) -> Point:
         dx = self._axis_sign(stray_position.x - flock_center.x)
         dy = self._axis_sign(stray_position.y - flock_center.y)
+        if dx == 0 and dy == 0 and pen is not None:
+            dx = self._axis_sign(stray_position.x - pen.center.x)
+            dy = self._axis_sign(stray_position.y - pen.center.y)
         if dx == 0 and dy == 0:
             dx = 1
         return Point(stray_position.x + dx * 2, stray_position.y + dy * 2).clamp(
@@ -284,8 +299,8 @@ class TeamStrategy:
             or 1
         )
         return Point(
-            gate.x - approach_x + lateral_x * escape_side * 2,
-            gate.y - approach_y + lateral_y * escape_side * 2,
+            gate.x - approach_x + lateral_x * escape_side * 3,
+            gate.y - approach_y + lateral_y * escape_side * 3,
         ).clamp(self._width, self._height)
 
     def _best_dog_for_role(
@@ -336,3 +351,43 @@ class TeamStrategy:
 
     def _axis_sign(self, value: float) -> int:
         return 0 if value == 0 else (1 if value > 0 else -1)
+
+    def _safe_open_field_target(
+        self,
+        target: Point,
+        flock_center: Point,
+        sheep: list[SheepState],
+        margin: int = 2,
+    ) -> Point:
+        """Ensure a role target stays in the open field and on the open-field side of the flock near boundaries."""
+        tx = target.x
+        ty = target.y
+
+        tx = max(margin, min(self._width - 1 - margin, tx))
+        ty = max(margin, min(self._height - 1 - margin, ty))
+
+        if flock_center.y <= margin + 1 and ty <= flock_center.y:
+            ty = min(self._height - 1 - margin, flock_center.y + 3)
+        elif flock_center.y >= self._height - 1 - (margin + 1) and ty >= flock_center.y:
+            ty = max(margin, flock_center.y - 3)
+
+        if flock_center.x <= margin + 1 and tx <= flock_center.x:
+            tx = min(self._width - 1 - margin, flock_center.x + 3)
+        elif flock_center.x >= self._width - 1 - (margin + 1) and tx >= flock_center.x:
+            tx = max(margin, flock_center.x - 3)
+
+        cand = Point(tx, ty)
+        sheep_positions = {s.position for s in sheep if not s.penned}
+        if cand in sheep_positions:
+            nudge_candidates = [
+                Point(tx + 1, ty).clamp(self._width, self._height),
+                Point(tx - 1, ty).clamp(self._width, self._height),
+                Point(tx, ty + 1).clamp(self._width, self._height),
+                Point(tx, ty - 1).clamp(self._width, self._height),
+            ]
+            for nc in nudge_candidates:
+                if nc not in sheep_positions:
+                    cand = nc
+                    break
+
+        return cand

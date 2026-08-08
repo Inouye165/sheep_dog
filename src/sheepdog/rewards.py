@@ -430,12 +430,7 @@ class RewardComputer:
                     target,
                     dog,
                 )
-                if forward_distance <= 0.0:
-                    continue
-                if forward_distance >= min(
-                    lane_length,
-                    self._config.lane_crowding_forward_distance,
-                ):
+                if forward_distance <= 0.0 or forward_distance >= lane_length:
                     continue
                 if lateral_distance >= self._config.lane_crowding_lateral_tolerance:
                     continue
@@ -445,7 +440,7 @@ class RewardComputer:
                 )
                 forward_factor = 1.0 - min(
                     1.0,
-                    forward_distance / max(0.1, self._config.lane_crowding_forward_distance),
+                    forward_distance / max(0.1, lane_length),
                 )
                 blocking_score += 0.35 + 0.65 * lateral_factor * forward_factor
         if blocking_score <= 0.0:

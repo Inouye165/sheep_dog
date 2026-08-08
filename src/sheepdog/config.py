@@ -49,6 +49,10 @@ class EnvironmentConfig:
     # Sheep-to-flock attraction used by sheep movement. Lower values reduce
     # autonomous self-grouping, letting dog pressure matter more.
     sheep_flock_cohesion_weight: float = 0.2
+    # Inward boundary recovery bonus weight applied when a sheep candidate step reduces wall contact.
+    sheep_inward_recovery_weight: float = 16.0
+    # Threshold for consecutive steps on an outer wall to count as a wall stall episode diagnostic.
+    wall_stall_window: int = 15
     # When False, flock cohesion is only applied if at least one dog is within
     # sheep vision range, preventing autonomous regrouping across the field.
     sheep_cohere_without_dog_pressure: bool = True
@@ -130,6 +134,7 @@ SPAWN_MODES: tuple[str, ...] = (
     "partial_scattered",
     "scattered_sheep",
     "all_corners",
+    "wall_recovery",
 )
 
 # Pen placement modes understood by the environment.
@@ -210,13 +215,14 @@ class TrainingConfig:
     policy_type: PolicyType = "linear"
     episodes: int = 1_000
     checkpoint_episodes: tuple[int, ...] = (0, 5, 10, 25, 50, 100, 500, 1_000)
+    checkpoint_timesteps: tuple[int, ...] = ()
     evaluation_seeds: tuple[int, ...] = (11, 23, 37, 41, 53, 59, 61, 67, 71, 73)
     train_seed: int = 7
     evaluation_seed: int = 91
     candidate_evaluation_seeds: tuple[int, ...] = (91, 92, 93, 94, 95)
     candidate_pool_size: int = 4
     mutation_scale: float = 0.08
-    neural_hidden_sizes: tuple[int, ...] = (256, 256)
+    neural_hidden_sizes: tuple[int, ...] = (128, 128, 128)
     learning_rate: float = 1e-4
     learning_rate_final: float = 3e-5
     rollout_steps: int = 2048
@@ -230,7 +236,7 @@ class TrainingConfig:
     # Number of vectorized RL environments used by neural PPO training.
     # >1 enables process-based parallel stepping (SubprocVecEnv).
     ppo_env_workers: int = 8
-    quick_evaluation_seed_count: int = 3
+    quick_evaluation_seed_count: int = 10
     confidence_candidate_success_rate: float = 0.5
     replay_export_on_new_best: bool = True
     replay_export_on_promotion: bool = True

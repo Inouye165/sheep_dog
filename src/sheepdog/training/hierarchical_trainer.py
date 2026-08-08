@@ -106,6 +106,13 @@ class _HierarchicalProgressCallback(BaseCallback):
                                 "total_sheep": int(ep_info.get("total_sheep", 0)),
                                 "status": str(ep_info.get("status", "UNKNOWN")),
                                 "seed": ep_info.get("seed"),
+                                "field_setup": ep_info.get("field_setup"),
+                                "replay_available": ep_info.get("replay_available"),
+                                "replay_id": ep_info.get("replay_id"),
+                                "replay_path": ep_info.get("replay_path"),
+                                "replay_source": ep_info.get("replay_source"),
+                                "capture_reason": ep_info.get("capture_reason"),
+                                "capture_status": ep_info.get("capture_status"),
                             }
                         )
 

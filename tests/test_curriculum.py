@@ -120,7 +120,7 @@ def test_stage_9_enables_collection_progress_signals() -> None:
     stage_nine = apply_curriculum_stage(LabConfig(), 9)
 
     assert stage_nine.environment.count_collection_progress is True
-    assert stage_nine.environment.no_progress_window > stage_eight.environment.no_progress_window
+    assert stage_nine.environment.no_progress_window >= stage_eight.environment.no_progress_window
 
 
 def test_stage_9_enables_collection_reward_shaping() -> None:

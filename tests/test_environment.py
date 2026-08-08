@@ -989,3 +989,14 @@ def test_sheep_move_when_dogs_within_sheep_vision() -> None:
     assert after.x >= before.x, "Sheep should not move toward dog within sheep_vision"
     # After the step, panic should be set for the next step
     assert sheep.panic_steps > 0, "Sheep should panic when dog is within sheep_vision"
+
+
+def test_episode_stats_to_dict() -> None:
+    from sheepdog.entities import EpisodeStats
+    stats = EpisodeStats(steps=10, reward_total=100.5, success=True)
+    d = stats.to_dict()
+    assert isinstance(d, dict)
+    assert d["steps"] == 10
+    assert d["reward_total"] == 100.5
+    assert d["success"] is True
+

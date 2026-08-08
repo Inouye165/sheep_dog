@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { loadTrainingHistory } from "../lib/api";
 import type { TelemetryRecord } from "../state/types";
+import { RecentEpisodesViewer } from "./RecentEpisodesViewer";
 
 function getStageName(stage: number): string {
   if (stage === 10) return "10A";
@@ -104,6 +105,11 @@ export function HistoryTab() {
         </div>
       ) : (
         <>
+          {/* Recent Episode History Viewer & Replay */}
+          <div style={{ marginBottom: "2rem" }}>
+            <RecentEpisodesViewer />
+          </div>
+
           {/* KPI Cards */}
           <div className="network-tab__kpis" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "1rem", marginBottom: "2rem" }}>
             <div className="network-tab__card" style={{ padding: "1rem", borderRadius: "8px", border: "1px solid var(--border-color)" }}>
@@ -195,11 +201,12 @@ export function HistoryTab() {
 
                   {/* Dots for checkpoints */}
                   {chartPoints.map((pt, idx) => {
-                    const dotKey = pt.record.checkpoint_id 
+                    const baseKey = pt.record.checkpoint_id 
                       ? pt.record.checkpoint_id 
                       : pt.record.evaluation_id 
                         ? pt.record.evaluation_id 
-                        : `${pt.record.run_id || "unknown"}-${pt.record.stage}-${pt.record.global_episode || pt.record.step}-${pt.record.episode_in_stage || pt.record.step}-${pt.record.recorded_at || pt.record.timestamp}-${idx}`;
+                        : `${pt.record.run_id || "unknown"}-${pt.record.stage}-${pt.record.global_episode || pt.record.step}-${pt.record.episode_in_stage || pt.record.step}-${pt.record.recorded_at || pt.record.timestamp}`;
+                    const dotKey = `${baseKey}-${idx}`;
                     return (
                       <g key={dotKey} className="chart-dot">
                         <circle 
@@ -260,11 +267,12 @@ export function HistoryTab() {
                   </thead>
                   <tbody>
                     {[...history].reverse().map((record, index) => {
-                      const rowKey = record.checkpoint_id 
+                      const baseKey = record.checkpoint_id 
                         ? record.checkpoint_id 
                         : record.evaluation_id 
                           ? record.evaluation_id 
-                          : `${record.run_id || "unknown"}-${record.stage}-${record.global_episode || record.step}-${record.episode_in_stage || record.step}-${record.recorded_at || record.timestamp}-${index}`;
+                          : `${record.run_id || "unknown"}-${record.stage}-${record.global_episode || record.step}-${record.episode_in_stage || record.step}-${record.recorded_at || record.timestamp}`;
+                      const rowKey = `${baseKey}-${index}`;
                       return (
                         <tr key={rowKey} style={{ borderBottom: "1px solid var(--border-color)" }}>
                           <td style={{ padding: "0.75rem" }}>{record.step.toLocaleString()}</td>

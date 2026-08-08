@@ -146,7 +146,7 @@ class RoleAwareObservationBuilder:
 
         sorted_sheep = sorted(
             environment.sheep,
-            key=lambda sheep: (dog.position.distance_to(sheep.position), sheep.index),
+            key=lambda sheep: (sheep.penned, dog.position.distance_to(sheep.position), sheep.index),
         )
         for sheep_slot in range(MAX_SHEEP_SLOTS):
             sheep = sorted_sheep[sheep_slot] if sheep_slot < len(sorted_sheep) else None
@@ -436,10 +436,10 @@ class EmergentObservationBuilder:
             0.0 if farthest is None else dog.position.distance_to(farthest.position) / diagonal
         )
 
-        # Per-slot sheep positions + penned flag
+        # Per-slot sheep positions + penned flag (unpenned sheep sorted first)
         sorted_sheep = sorted(
             environment.sheep,
-            key=lambda sheep: (dog.position.distance_to(sheep.position), sheep.index),
+            key=lambda sheep: (sheep.penned, dog.position.distance_to(sheep.position), sheep.index),
         )
         for sheep_slot in range(MAX_SHEEP_SLOTS):
             sheep = sorted_sheep[sheep_slot] if sheep_slot < len(sorted_sheep) else None

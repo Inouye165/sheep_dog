@@ -133,6 +133,31 @@ export interface ReplayBundle {
   scenario_name?: string;
 }
 
+export type EpisodeOutcome = "win" | "loss" | "timeout";
+
+export interface EpisodeRecord {
+  episode_id: number | string;
+  timestamp: string;
+  stage: number | null;
+  outcome: EpisodeOutcome;
+  outcome_label: string;
+  total_moves: number;
+  reward?: number;
+  sheep_penned?: number;
+  total_sheep?: number;
+  seed?: number;
+  policy_name?: string;
+  checkpoint_id?: string | null;
+  replayAvailable: boolean;
+  replaySource?: "training-diagnostic" | "checkpoint-evaluation" | "scenario-evaluation" | "reproduced" | null;
+  replayUrl?: string | null;
+  replay_id?: string | null;
+  capture_reason?: string | null;
+  capture_status?: "not_requested" | "queued" | "writing" | "available" | "failed" | "pruned" | null;
+  initial_state?: ReplaySnapshot;
+  move_history?: ReplayFrame[];
+}
+
 export interface TrainingStatus {
   running: boolean;
   fast_mode: boolean;
@@ -150,6 +175,7 @@ export interface TrainingStatus {
   auto_promote_gate?: AutoPromoteGateDiagnostics;
   available_curriculum_stages?: number[];
   max_curriculum_stage?: number;
+  active_curriculum_stage?: number;
   curriculum_stage: number;
   requested_episodes: number;
   completed_episodes: number;
@@ -206,6 +232,37 @@ export interface TrainingStatus {
     recommendation?: string;
   } | null;
   runtime?: TrainingRuntimeSummary;
+  episodes_in_stage?: number;
+  stage_success_count?: number;
+  stage_success_rate?: number;
+  total_timesteps?: number;
+  checkpoint_save_interval?: number;
+  active_policy_identity?: string;
+
+  // Explicit Live Telemetry Fields
+  current_stage_environment_episode?: number;
+  latest_completed_environment_episode?: number;
+  latest_completed_episode_id?: number;
+  live_rollout_window_count?: number;
+  live_rollout_success_count?: number;
+  live_rollout_failure_count?: number;
+  live_rollout_stopped_count?: number;
+  live_rollout_timeout_count?: number;
+  live_rollout_success_rate?: number | null;
+  episodes_since_latest_confidence_evaluation?: number;
+  latest_confidence_environment_episode?: number;
+  current_global_timestep?: number;
+  latest_checkpoint_global_timestep?: number;
+  timesteps_since_latest_checkpoint?: number;
+  latest_episode_completed_at?: string;
+  latest_episode_reward?: number;
+  latest_episode_result?: string;
+  telemetry_dropped_count?: number;
+  telemetry_error_count?: number;
+  evaluation_schedule_unit?: string;
+  latest_evaluated_environment_episode?: number;
+  next_evaluation_environment_episode?: number;
+  episodes_until_next_evaluation?: number;
 }
 
 export interface RuntimeSessionRecord {
@@ -362,6 +419,7 @@ export interface CheckpointEntry {
   trainer_type?: string;
   policy_type?: string;
   policy_mode?: string;
+  policy_state_path?: string;
   policy_config?: any;
   run_id?: string;
   checkpoint_id?: string;
@@ -374,8 +432,10 @@ export interface CheckpointEntry {
   reward_schema_version?: string;
   deterministic_evaluation?: boolean;
   evaluation_seeds?: number[];
+  evaluation_seed_count?: number;
   replay_mode?: string;
   total_training_episodes?: number;
+  cumulative_environment_episodes?: number;
   policy_version?: number;
   policy_gradient_loss?: number;
   value_loss?: number;
@@ -409,6 +469,7 @@ export interface CheckpointEntry {
   stopped_rate?: number;
   average_distance_to_pen?: number;
   average_sheep_distance_to_pen?: number;
+  average_flock_spread?: number;
   global_timestep?: number | null;
   created_timestamp?: string | null;
   active_runtime_seconds_total?: number | null;
@@ -420,6 +481,7 @@ export interface CheckpointEntry {
   promotion_eligible?: boolean;
   curriculum_stage?: number;
   promotion_gate?: AutoPromoteGateDiagnostics | null;
+  evaluation_timestamp?: string | null;
 }
 
 export interface EvaluationSummary {
@@ -766,4 +828,59 @@ export interface DiagnosticsResponse {
     exceptionType: string;
     endpoint: string;
   } | null;
+}
+
+export interface TrainingEpisode {
+  id: number;
+  event_key: string;
+  run_id: string | null;
+  session_id: string | null;
+  global_environment_episode: number;
+  episode_in_stage: number;
+  curriculum_stage: number;
+  global_timestep: number | null;
+  policy_version: number | null;
+  completed_at: string;
+  active_runtime_seconds_total: number | null;
+  reward: number;
+  result: string;
+  success: boolean;
+  timeout: boolean;
+  stopped: boolean;
+  sheep_penned: number;
+  total_sheep: number;
+  steps: number;
+  seed: number | null;
+  checkpoint_id: string | null;
+  replay_available?: boolean;
+  replay_id?: string | null;
+  replay_path?: string | null;
+  replay_source?: string | null;
+  capture_reason?: string | null;
+  capture_status?: string | null;
+}
+
+export interface CapturePolicyConfig {
+  mode: "off" | "failures" | "selective" | "next_n" | "all";
+  next_n_counter: number;
+  success_sample_rate: number;
+  target_stage: number | null;
+  target_outcome: string;
+  queued_writes: number;
+  written_count: number;
+  dropped_count: number;
+  failure_count: number;
+  max_replays_per_stage?: number;
+  max_total_replays?: number;
+  max_disk_mb?: number;
+}
+
+export interface TrainingEpisodesResponse {
+  episodes: TrainingEpisode[];
+  latest_id: number;
+  next_after_id: number;
+  has_more: boolean;
+  oldest_available_timestamp: string | null;
+  total_matching: number;
+  max_id?: number;
 }

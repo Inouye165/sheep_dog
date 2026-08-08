@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
 import shutil
 import threading
+import time
 import traceback
 from dataclasses import asdict, dataclass, replace
 from http import HTTPStatus
@@ -14,6 +16,24 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlsplit
+
+def _setup_server_logger() -> logging.Logger:
+    lg = logging.getLogger("sheepdog.server")
+    lg.setLevel(logging.INFO)
+    if not lg.handlers:
+        try:
+            logs_dir = Path(LabConfig().training.output_dir) / "logs"
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            log_file = logs_dir / f"server-{datetime.datetime.now().strftime('%Y%m%d')}.log"
+            fh = logging.FileHandler(log_file, encoding="utf-8")
+            fmt = logging.Formatter("[%(asctime)s] [%(levelname)s] [%(name)s]: %(message)s")
+            fh.setFormatter(fmt)
+            lg.addHandler(fh)
+        except Exception:
+            pass
+    return lg
+
+logger = _setup_server_logger()
 
 from sheepdog.atomic_io import atomic_write_json, atomic_write_text
 from sheepdog.checkpoints.store import CheckpointMetadata
@@ -25,9 +45,7 @@ from sheepdog.config import (
     TrainingConfig,
     resolve_workspace_path,
 )
-from sheepdog.curriculum import apply_training_profile
-from sheepdog.curriculum import available_stages
-from sheepdog.curriculum import validate_curriculum_stage
+from sheepdog.curriculum import apply_training_profile, available_stages, validate_curriculum_stage
 from sheepdog.environment import ACTION_ORDER, SheepdogEnvironment
 from sheepdog.evaluation.scenario_evaluator import (
     config_for_scenario,
@@ -41,8 +59,8 @@ from sheepdog.policies.factory import load_playable_policy
 from sheepdog.policies.heuristic import InstinctOnlyPolicy
 from sheepdog.training.factory import create_trainer
 from sheepdog.training.runtime import TrainingRuntimeTracker
-from sheepdog.training.trainer import Trainer
 from sheepdog.training.telemetry import CurriculumTelemetryManager
+from sheepdog.training.trainer import Trainer
 
 
 @dataclass(frozen=True, slots=True)
@@ -1048,21 +1066,32 @@ def _append_promotion_history(output_root: Path, event: dict[str, Any]) -> list[
 
 
 def _training_checkpoint_schedule(total_episodes: int, curriculum_stage: int) -> tuple[int, ...]:
-    """Return stage-aware checkpoint slots including the first and final slots."""
-    if curriculum_stage <= 12:
-        interval = 8
-    elif curriculum_stage <= 25:
-        interval = 5
-    else:
-        interval = 3
+    """Return checkpoint slots including episode 0, every 5 episodes, and final episode."""
+    interval = 5
     final_episode = max(0, total_episodes - 1)
-    return tuple(sorted({*range(0, total_episodes, interval), final_episode}))
+    slots = set(range(0, total_episodes, interval))
+    slots.add(0)
+    slots.add(final_episode)
+    return tuple(sorted(slots))
+
+
+def _training_checkpoint_timestep_schedule(
+    total_timesteps: int,
+    rollout_quantum: int,
+) -> tuple[int, ...]:
+    """Return aligned cumulative timestep targets including the final target."""
+
+    cadence = max(rollout_quantum, (32_768 // rollout_quantum) * rollout_quantum)
+    return tuple(
+        sorted({*range(cadence, total_timesteps, cadence), total_timesteps})
+    )
 
 
 def _build_training_job_config(
-    requested_episodes: int,
-    fast_mode: bool,
+    requested_episodes: int | None = None,
+    fast_mode: bool = True,
     *,
+    total_timesteps: int | None = None,
     enable_instinct_rewards: bool | None = None,
     curriculum_stage: int | None = None,
     debug_reward_breakdown: bool | None = None,
@@ -1073,26 +1102,44 @@ def _build_training_job_config(
     output_root = Path(LabConfig().training.output_dir)
     user_params = _read_user_hyperparams(output_root)
     config = _apply_user_hyperparams(LabConfig(), user_params)
-    total_episodes = max(1, requested_episodes)
-    training_episodes = max(0, total_episodes - 1)
-    # Scale total_timesteps with the number of checkpoints so each segment
-    # receives a meaningful training budget.  Use at least the config default.
-    # Late curriculum stages need more rollouts to avoid timeout-only drift.
+    total_episodes = max(1, int(requested_episodes or 1))
     stage_for_budget = int(
         curriculum_stage
         if curriculum_stage is not None
         else config.rewards.instincts.curriculum_stage
     )
-    checkpoint_episodes = _training_checkpoint_schedule(total_episodes, stage_for_budget)
-    if fast_mode:
-        if stage_for_budget >= 25:
-            steps_per_episode = 12_000
-        elif stage_for_budget >= 21:
-            steps_per_episode = 8_000
-        else:
-            steps_per_episode = 4_000
+    if total_timesteps is not None:
+        if total_timesteps <= 0:
+            raise ValueError("total_timesteps must be positive")
+        from sheepdog.policies.neural import _resolve_env_workers
+
+        rollout_quantum = config.training.rollout_steps * _resolve_env_workers(config)
+        effective_timesteps = (
+            (int(total_timesteps) + rollout_quantum - 1) // rollout_quantum
+        ) * rollout_quantum
+        checkpoint_timesteps = _training_checkpoint_timestep_schedule(
+            effective_timesteps,
+            rollout_quantum,
+        )
+        checkpoint_episodes = tuple(range(len(checkpoint_timesteps)))
+        training_episodes = max(0, len(checkpoint_timesteps) - 1)
     else:
-        steps_per_episode = 25_000
+        training_episodes = max(0, total_episodes - 1)
+        checkpoint_episodes = _training_checkpoint_schedule(total_episodes, stage_for_budget)
+        checkpoint_timesteps = ()
+        if fast_mode:
+            if stage_for_budget >= 25:
+                steps_per_episode = 12_000
+            elif stage_for_budget >= 21:
+                steps_per_episode = 8_000
+            else:
+                steps_per_episode = 4_000
+        else:
+            steps_per_episode = 25_000
+        effective_timesteps = max(
+            config.training.total_timesteps,
+            total_episodes * steps_per_episode,
+        )
 
     if evaluation_mode == "confidence":
         evaluation_seeds = EVAL_SEED_BANK
@@ -1100,19 +1147,19 @@ def _build_training_job_config(
         evaluation_seeds = EVAL_SEED_BANK[:20]
     else:
         evaluation_seeds = config.training.evaluation_seeds
-    total_timesteps = max(config.training.total_timesteps, total_episodes * steps_per_episode)
     training_config = TrainingConfig(
         trainer_type="maskable_ppo",
         policy_type="neural",
         episodes=training_episodes,
         checkpoint_episodes=checkpoint_episodes,
+        checkpoint_timesteps=checkpoint_timesteps,
         evaluation_seeds=evaluation_seeds,
         train_seed=config.training.train_seed,
         evaluation_seed=config.training.evaluation_seed,
         candidate_evaluation_seeds=config.training.candidate_evaluation_seeds,
         candidate_pool_size=config.training.candidate_pool_size,
         mutation_scale=config.training.mutation_scale,
-        total_timesteps=total_timesteps,
+        total_timesteps=effective_timesteps,
         output_dir=config.training.output_dir,
         web_export_dir=config.training.web_export_dir,
         learning_rate=config.training.learning_rate,
@@ -1234,6 +1281,32 @@ class TrainingManager:
             self._status["message"] = f"Restore failed. Existing files preserved. Action required. Error: {str(e)}"
         self._resume_interrupted_session()
         self.active_trainer = None
+        self._watchdog_stop_event = threading.Event()
+        self._watchdog_thread = threading.Thread(target=self._run_watchdog, daemon=True)
+        self._watchdog_thread.start()
+
+    def _run_watchdog(self) -> None:
+        """Periodically verify worker thread health and reconcile status if dead."""
+        while not self._watchdog_stop_event.is_set():
+            time.sleep(2.0)
+            try:
+                with self._lock:
+                    if self._status.get("running") and self._thread is not None:
+                        if not self._thread.is_alive():
+                            logger.error("Worker watchdog: Background training thread died unexpectedly. Setting phase=error.")
+                            self._status["running"] = False
+                            self._status["phase"] = "error"
+                            self._status["error"] = "Background worker thread died unexpectedly"
+                            self._status["error_type"] = "WorkerThreadDied"
+                            self._status["message"] = "Training process/thread terminated unexpectedly"
+                            self._active_start_request = None
+                            self._persist_training_session(
+                                state="error",
+                                status=dict(self._status),
+                                request=None,
+                            )
+            except Exception as exc:
+                logger.warning("Watchdog exception: %s", exc)
 
     @staticmethod
     def _reconcile_web_exports() -> None:
@@ -1252,16 +1325,17 @@ class TrainingManager:
             pass
 
     def _resolve_precedence_state(self, output_root: Path) -> dict[str, Any]:
-        import json
         import datetime
+        import json
         import re
+        from dataclasses import asdict
+
         from sheepdog.checkpoints.store import (
-            get_observation_schema_hash,
-            get_action_space_hash,
             compute_env_config_hash,
+            get_action_space_hash,
+            get_observation_schema_hash,
         )
         from sheepdog.config import LabConfig
-        from dataclasses import asdict
 
         config = LabConfig()
         try:
@@ -1317,6 +1391,7 @@ class TrainingManager:
         def is_mock_load():
             try:
                 from unittest.mock import Mock
+
                 from sb3_contrib import MaskablePPO
                 return isinstance(MaskablePPO.load, Mock)
             except Exception:
@@ -1457,16 +1532,37 @@ class TrainingManager:
         run_state_path = output_root / "run-state.json"
         if run_state_path.exists():
             try:
-                with open(run_state_path, "r", encoding="utf-8") as f:
+                with open(run_state_path, encoding="utf-8") as f:
                     data = json.load(f)
+
+                obs_hash_in_data = data.get("observation_schema_hash")
+                act_hash_in_data = data.get("action_space_hash")
+
+                model_path_str = data.get("active_model_path") or data.get("policy_state_path")
+                model_p = None
+                if model_path_str:
+                    model_p = Path(model_path_str)
+                    if not model_p.is_absolute():
+                        if (output_root.parent / model_p).exists():
+                            model_p = output_root.parent / model_p
+                        else:
+                            model_p = output_root / model_p
+
+                if not obs_hash_in_data and model_p and model_p.exists():
+                    from sheepdog.checkpoints.sidecar import load_and_verify_sidecar
+                    sidecar = load_and_verify_sidecar(model_p)
+                    if sidecar:
+                        obs_hash_in_data = sidecar.get("observation_schema_hash")
+                        if not act_hash_in_data:
+                            act_hash_in_data = sidecar.get("action_schema_hash")
                 
-                if data.get("observation_schema_hash") != obs_hash:
+                if obs_hash_in_data != obs_hash:
                     raise RestoreCompatibilityError(
-                        f"Observation schema mismatch: expected {obs_hash}, got {data.get('observation_schema_hash')}"
+                        f"Observation schema mismatch: expected {obs_hash}, got {obs_hash_in_data}"
                     )
-                if data.get("action_space_hash") != act_hash:
+                if act_hash_in_data != act_hash:
                     raise RestoreCompatibilityError(
-                        f"Action space mismatch: expected {act_hash}, got {data.get('action_space_hash')}"
+                        f"Action space mismatch: expected {act_hash}, got {act_hash_in_data}"
                     )
                 
                 model_path_str = data.get("active_model_path")
@@ -1499,7 +1595,7 @@ class TrainingManager:
                         except Exception as e:
                             raise RestoreCompatibilityError(f"Failed to load neural model: {str(e)}")
                 
-                if authoritative_stage is not None and data.get("active_curriculum_stage") != authoritative_stage:
+                if authoritative_stage is not None and data.get("active_curriculum_stage") != authoritative_stage and not data.get("target_environment_stage"):
                     data["active_curriculum_stage"] = authoritative_stage
                     data["active_stage_name"] = f"Stage {authoritative_stage}"
                 
@@ -1514,98 +1610,95 @@ class TrainingManager:
         # 2. Latest compatible active checkpoint metadata
         if compatible_checkpoints:
             compatible_checkpoints.sort(key=lambda x: x.get("checkpoint_episode", 0), reverse=True)
-            latest_chk = compatible_checkpoints[0]
-            
-            model_path_str = latest_chk.get("policy_state_path")
-            p_model_resolved = None
-            if model_path_str:
-                p = Path(model_path_str)
-                if not p.is_absolute():
-                    if (output_root.parent / p).exists():
-                        p = output_root.parent / p
+            for latest_chk in compatible_checkpoints:
+                model_path_str = latest_chk.get("policy_state_path")
+                p_model_resolved = None
+                if model_path_str:
+                    p = Path(model_path_str)
+                    if not p.is_absolute():
+                        if (output_root.parent / p).exists():
+                            p = output_root.parent / p
+                        else:
+                            p = output_root / p
+                    
+                    if p.exists():
+                        p_model_resolved = str(p)
+                        if latest_chk.get("policy_type") == "neural" or "best-model" in model_path_str:
+                            try:
+                                is_real_zip = False
+                                if is_mock_load():
+                                    is_real_zip = True
+                                else:
+                                    try:
+                                        with open(p, "rb") as f:
+                                            header = f.read(4)
+                                            if header == b"PK\x03\x04":
+                                                is_real_zip = True
+                                    except Exception:
+                                        pass
+                                if is_real_zip:
+                                    from sb3_contrib import MaskablePPO
+                                    MaskablePPO.load(str(p))
+                            except Exception:
+                                continue
                     else:
-                        p = output_root / p
-                
-                if p.exists():
-                    p_model_resolved = str(p)
-                    if latest_chk.get("policy_type") == "neural" or "best-model" in model_path_str:
-                        try:
-                            is_real_zip = False
-                            if is_mock_load():
-                                is_real_zip = True
-                            else:
-                                try:
-                                    with open(p, "rb") as f:
-                                        header = f.read(4)
-                                        if header == b"PK\x03\x04":
-                                            is_real_zip = True
-                                except Exception:
-                                    pass
-                            if is_real_zip:
-                                from sb3_contrib import MaskablePPO
-                                MaskablePPO.load(str(p))
-                        except Exception as e:
-                            raise RestoreCompatibilityError(f"Failed to load checkpoint neural model: {str(e)}")
+                        if is_best_model_valid:
+                            p_model_resolved = str(best_model_path_obj)
+                            recovery_warnings.append(
+                                f"Checkpoint model path does not exist: {model_path_str}. Using verified best-model.zip instead."
+                            )
+                        else:
+                            continue
                 else:
                     if is_best_model_valid:
                         p_model_resolved = str(best_model_path_obj)
-                        recovery_warnings.append(
-                            f"Checkpoint model path does not exist: {model_path_str}. Using verified best-model.zip instead."
-                        )
                     else:
-                        raise RestoreCompatibilityError(
-                            f"Checkpoint model path does not exist: {model_path_str}, and best-model.zip is invalid: {best_model_err}"
-                        )
-            else:
-                if is_best_model_valid:
-                    p_model_resolved = str(best_model_path_obj)
-                else:
-                    p_model_resolved = None
-            
-            policy_type = latest_chk.get("policy_type")
-            policy_mode = latest_chk.get("policy_mode")
-            trainer_type = latest_chk.get("trainer_type")
-            if not policy_type and model_path_str and "best-model" in model_path_str:
-                policy_type = "neural"
-                policy_mode = "neural_policy"
-                trainer_type = "maskable_ppo"
-            
-            stage_to_use = authoritative_stage if authoritative_stage is not None else latest_chk.get("curriculum_stage", 1)
-            model_source = "recovered_best_model" if p_model_resolved == str(best_model_path_obj) else "checkpoint"
-            
-            previous_promotion = None
-            if promotion_history:
-                promo_events = [ev for ev in promotion_history if ev.get("event_type") == "promotion" or ev.get("from_stage") is not None]
-                if promo_events:
-                    previous_promotion = promo_events[-1]
-            
-            return {
-                "run_id": latest_chk.get("run_id") or (latest_event.get("run_id") if latest_event else None),
-                "active_curriculum_stage": stage_to_use,
-                "active_stage_name": f"Stage {stage_to_use}",
-                "trainer_type": trainer_type or "maskable_ppo",
-                "policy_type": policy_type or "neural",
-                "policy_mode": policy_mode or "neural_policy",
-                "active_model_path": p_model_resolved,
-                "active_model_source": model_source,
-                "active_checkpoint_id": latest_chk.get("checkpoint_id"),
-                "active_checkpoint_episode": latest_chk.get("checkpoint_episode"),
-                "active_policy_version": latest_chk.get("policy_version"),
-                "ppo_update_count": latest_chk.get("ppo_update_count", 0),
-                "observation_schema_hash": obs_hash,
-                "action_space_hash": act_hash,
-                "reward_schema_version": latest_chk.get("reward_schema_version"),
-                "environment_config_hash": latest_chk.get("environment_config_hash"),
-                "last_policy_update_time": latest_chk.get("last_policy_update_time"),
-                "last_evaluation_time": latest_chk.get("last_evaluation_time"),
-                "latest_current_stage_evaluation_id": None,
-                "current_stage_promotion_streak": 0,
-                "promotion_seed_set_id": latest_chk.get("promotion_seed_set_id") or (latest_event.get("evaluation_seed_set_id") if latest_event else None),
-                "previous_stage_promotion_result": previous_promotion,
-                "updated_at": datetime.datetime.now(datetime.UTC).isoformat(),
-                "recovery_status": recovery_status,
-                "recovery_warnings": recovery_warnings,
-            }
+                        p_model_resolved = None
+
+                policy_type = latest_chk.get("policy_type")
+                policy_mode = latest_chk.get("policy_mode")
+                trainer_type = latest_chk.get("trainer_type")
+                if not policy_type and model_path_str and "best-model" in model_path_str:
+                    policy_type = "neural"
+                    policy_mode = "neural_policy"
+                    trainer_type = "maskable_ppo"
+                
+                stage_to_use = authoritative_stage if authoritative_stage is not None else latest_chk.get("curriculum_stage", 1)
+                model_source = "recovered_best_model" if p_model_resolved == str(best_model_path_obj) else "checkpoint"
+                
+                previous_promotion = None
+                if promotion_history:
+                    promo_events = [ev for ev in promotion_history if ev.get("event_type") == "promotion" or ev.get("from_stage") is not None]
+                    if promo_events:
+                        previous_promotion = promo_events[-1]
+                
+                return {
+                    "run_id": latest_chk.get("run_id") or (latest_event.get("run_id") if latest_event else None),
+                    "active_curriculum_stage": stage_to_use,
+                    "active_stage_name": f"Stage {stage_to_use}",
+                    "trainer_type": trainer_type or "maskable_ppo",
+                    "policy_type": policy_type or "neural",
+                    "policy_mode": policy_mode or "neural_policy",
+                    "active_model_path": p_model_resolved,
+                    "active_model_source": model_source,
+                    "active_checkpoint_id": latest_chk.get("checkpoint_id"),
+                    "active_checkpoint_episode": latest_chk.get("checkpoint_episode"),
+                    "active_policy_version": latest_chk.get("policy_version"),
+                    "ppo_update_count": latest_chk.get("ppo_update_count", 0),
+                    "observation_schema_hash": obs_hash,
+                    "action_space_hash": act_hash,
+                    "reward_schema_version": latest_chk.get("reward_schema_version"),
+                    "environment_config_hash": latest_chk.get("environment_config_hash"),
+                    "last_policy_update_time": latest_chk.get("last_policy_update_time"),
+                    "last_evaluation_time": latest_chk.get("last_evaluation_time"),
+                    "latest_current_stage_evaluation_id": None,
+                    "current_stage_promotion_streak": 0,
+                    "promotion_seed_set_id": latest_chk.get("promotion_seed_set_id") or (latest_event.get("evaluation_seed_set_id") if latest_event else None),
+                    "previous_stage_promotion_result": previous_promotion,
+                    "updated_at": datetime.datetime.now(datetime.UTC).isoformat(),
+                    "recovery_status": recovery_status,
+                    "recovery_warnings": recovery_warnings,
+                }
 
         # 3. Latest valid promotion event
         if promotion_history and latest_event is not None:
@@ -1741,6 +1834,10 @@ class TrainingManager:
             "last_evaluation_time": resolved.get("last_evaluation_time"),
             "recovery_status": resolved.get("recovery_status") or "success",
             "recovery_warnings": resolved.get("recovery_warnings") or [],
+            "parent_run_id": resolved.get("parent_run_id"),
+            "parent_checkpoint_id": resolved.get("parent_checkpoint_id"),
+            "target_environment_stage": resolved.get("target_environment_stage"),
+            "source_stage": resolved.get("source_stage"),
         })
 
         run_state_path = output_root / "run-state.json"
@@ -1782,6 +1879,13 @@ class TrainingManager:
             "available_curriculum_stages": available_curriculum_stages,
             "max_curriculum_stage": max_curriculum_stage,
             "curriculum_stage": persisted.get("curriculum_stage", instincts.curriculum_stage),
+            "requested_timesteps": None,
+            "effective_timesteps": None,
+            "batch_total_timesteps": 0,
+            "batch_completed_timesteps": 0,
+            "durable_completed_timesteps": 0,
+            "completed_environment_episodes": 0,
+            "cumulative_environment_episodes": 0,
             "requested_episodes": 0,
             "completed_episodes": 0,
             "batch_total_episodes": 0,
@@ -1821,12 +1925,14 @@ class TrainingManager:
             "last_policy_update_time": None,
             "last_evaluation_time": None,
             "policy_version": 0,
+            "policy_hidden_layers": [128, 128, 128],
+            "value_hidden_layers": [128, 128, 128],
         }
 
         try:
             state_path = output_root / Trainer.STATE_FILENAME
             if state_path.exists():
-                with open(state_path, "r", encoding="utf-8") as f:
+                with open(state_path, encoding="utf-8") as f:
                     state_data = json.load(f)
                     if isinstance(state_data, dict):
                         for key in ("run_id", "parent_run_id", "parent_checkpoint_id", "active_model_source",
@@ -1847,6 +1953,11 @@ class TrainingManager:
             resume_remaining = session_state.get("remaining_episodes")
             if isinstance(resume_remaining, (int, float)):
                 status["resume_remaining_episodes"] = max(0, int(resume_remaining))
+            resume_remaining_timesteps = session_state.get("remaining_timesteps")
+            if isinstance(resume_remaining_timesteps, (int, float)):
+                status["resume_remaining_timesteps"] = max(
+                    0, int(resume_remaining_timesteps)
+                )
             status["resume_available"] = bool(session_state.get("training_request"))
             status["resume_request"] = session_state.get("training_request")
             if status.get("message") in {None, "Idle", ""}:
@@ -1865,10 +1976,128 @@ class TrainingManager:
 
         return status
 
+    def _get_latest_confidence_info(self, stage: int) -> tuple[int | None, int | None]:
+        web_dir = Path(LabConfig().training.web_export_dir)
+        index_path = web_dir / "checkpoint-index.json"
+        latest_eval_env_ep = None
+        latest_eval_ts = None
+        if index_path.exists():
+            try:
+                with index_path.open("r", encoding="utf-8") as f:
+                    payload = json.load(f)
+                checkpoints = payload.get("checkpoints", [])
+                stage_cps = [c for c in checkpoints if c.get("curriculum_stage") == stage]
+                if stage_cps:
+                    latest_cp = stage_cps[-1]
+                    latest_eval_env_ep = (
+                        latest_cp.get("total_training_episodes")
+                        or latest_cp.get("completed_environment_episodes")
+                        or latest_cp.get("checkpoint_episode")
+                    )
+                    latest_eval_ts = latest_cp.get("global_timestep")
+            except Exception:
+                pass
+        return latest_eval_env_ep, latest_eval_ts
+
+    def _enrich_status_with_telemetry(self, status: dict[str, Any]) -> dict[str, Any]:
+        stg = status.get("curriculum_stage") or 8
+        latest_conf_env_ep, latest_conf_ts = self._get_latest_confidence_info(stg)
+        output_root = Path(LabConfig().training.output_dir)
+        db_path = output_root / "training-telemetry.sqlite"
+
+        t_summary = None
+        if db_path.exists():
+            try:
+                from sheepdog.training.episode_store import get_episode_store
+                store = get_episode_store(db_path)
+                t_summary = store.get_telemetry_summary(stage=stg, after_env_ep=latest_conf_env_ep)
+            except Exception as exc:
+                logger.warning("Failed to retrieve episode store telemetry summary: %s", exc)
+
+        if not t_summary:
+            t_summary = {
+                "window_count": status.get("live_rollout_window_count", 0),
+                "success_count": status.get("live_rollout_success_count", 0),
+                "failure_count": status.get("live_rollout_failure_count", 0),
+                "stopped_count": status.get("live_rollout_stopped_count", 0),
+                "timeout_count": status.get("live_rollout_timeout_count", 0),
+                "success_rate": status.get("live_rollout_success_rate"),
+                "current_stage_environment_episode": status.get("current_stage_environment_episode"),
+                "latest_completed_environment_episode": status.get("latest_completed_environment_episode"),
+                "latest_completed_episode_id": status.get("latest_completed_episode_id"),
+                "latest_episode_completed_at": status.get("latest_episode_completed_at"),
+                "latest_episode_reward": status.get("latest_episode_reward"),
+                "latest_episode_result": status.get("latest_episode_result"),
+                "dropped_count": 0,
+                "error_count": 0,
+            }
+
+        state_path = output_root / Trainer.STATE_FILENAME
+        state_data = _load_json(state_path) or {}
+        state_ts = state_data.get("total_timesteps") if isinstance(state_data, dict) else None
+
+        current_gt = (
+            status.get("current_global_timestep")
+            or status.get("total_timesteps")
+            or state_ts
+            or latest_conf_ts
+            or 0
+        )
+        latest_cp_gt = latest_conf_ts or status.get("latest_checkpoint_global_timestep") or current_gt
+        timesteps_since_latest_cp = max(0, current_gt - latest_cp_gt) if (current_gt > 0 and latest_cp_gt > 0) else 0
+
+        save_interval = status.get("checkpoint_save_interval") or 50
+        current_env_ep = (
+            t_summary.get("current_stage_environment_episode")
+            or status.get("current_stage_environment_episode")
+            or status.get("completed_environment_episodes")
+            or 0
+        )
+        if current_env_ep > 0:
+            import math
+            next_eval_env_ep = math.ceil((current_env_ep + 1) / save_interval) * save_interval
+        else:
+            next_eval_env_ep = save_interval
+        episodes_until_next_eval = max(1, next_eval_env_ep - current_env_ep)
+
+        status["current_stage_environment_episode"] = current_env_ep
+        status["latest_completed_environment_episode"] = t_summary.get("latest_completed_environment_episode")
+        status["latest_completed_episode_id"] = t_summary.get("latest_completed_episode_id")
+        status["live_rollout_window_count"] = t_summary.get("window_count", 0)
+        status["live_rollout_success_count"] = t_summary.get("success_count", 0)
+        status["live_rollout_failure_count"] = t_summary.get("failure_count", 0)
+        status["live_rollout_stopped_count"] = t_summary.get("stopped_count", 0)
+        status["live_rollout_timeout_count"] = t_summary.get("timeout_count", 0)
+        status["live_rollout_success_rate"] = t_summary.get("success_rate")
+        status["episodes_since_latest_confidence_evaluation"] = t_summary.get("window_count", 0)
+        status["latest_confidence_environment_episode"] = latest_conf_env_ep
+        status["current_global_timestep"] = current_gt
+        status["latest_checkpoint_global_timestep"] = latest_cp_gt
+        status["timesteps_since_latest_checkpoint"] = timesteps_since_latest_cp
+        status["latest_episode_completed_at"] = t_summary.get("latest_episode_completed_at")
+        status["latest_episode_reward"] = t_summary.get("latest_episode_reward")
+        status["latest_episode_result"] = t_summary.get("latest_episode_result")
+        status["telemetry_dropped_count"] = t_summary.get("dropped_count", 0)
+        status["telemetry_error_count"] = t_summary.get("error_count", 0)
+        status["evaluation_schedule_unit"] = "episodes"
+        status["latest_evaluated_environment_episode"] = latest_conf_env_ep
+        status["next_evaluation_environment_episode"] = next_eval_env_ep
+        status["episodes_until_next_evaluation"] = episodes_until_next_eval
+        return status
+
     def snapshot(self) -> dict[str, Any]:
         """Return a thread-safe copy of the current training status."""
         with self._lock:
+            thread_alive = self._thread is not None and self._thread.is_alive()
+            if not thread_alive and self._status.get("running"):
+                self._status["running"] = False
+                if self._status.get("phase") in {"learning", "training", "starting", "checkpoint"}:
+                    self._status["phase"] = "error"
+                    self._status["error"] = "Background training thread terminated unexpectedly"
+                    self._status["error_type"] = "WorkerThreadDied"
+                    self._status["message"] = "Training process/thread terminated unexpectedly"
             status = dict(self._status)
+            status["running"] = thread_alive and status.get("running", False)
         runtime = self.runtime_tracker.snapshot()
         active = float(runtime.get("active_seconds_total", 0.0))
         training = float(runtime.get("training_seconds", 0.0))
@@ -1883,13 +2112,14 @@ class TrainingManager:
         )
         runtime["training_time_percentage"] = training / active if active > 0 else None
         status["runtime"] = runtime
-        return status
+        return self._enrich_status_with_telemetry(status)
 
     def _training_request_payload(
         self,
         requested_episodes: int,
         fast_mode: bool,
         *,
+        total_timesteps: int | None = None,
         enable_instinct_rewards: bool | None = None,
         curriculum_stage: int | None = None,
         debug_reward_breakdown: bool | None = None,
@@ -1899,9 +2129,7 @@ class TrainingManager:
     ) -> dict[str, Any]:
         """Return a JSON-serializable request payload for resume prompts."""
 
-        return {
-            "episodes": max(1, int(requested_episodes)),
-            "fast_mode": bool(fast_mode),
+        payload = {
             "enable_instinct_rewards": enable_instinct_rewards,
             "curriculum_stage": curriculum_stage,
             "debug_reward_breakdown": debug_reward_breakdown,
@@ -1909,6 +2137,14 @@ class TrainingManager:
             "promote_from_checkpoint_episode": promote_from_checkpoint_episode,
             "evaluation_mode": evaluation_mode,
         }
+        if total_timesteps is not None:
+            payload["total_timesteps"] = int(total_timesteps)
+            payload["training_request_migrated"] = False
+        else:
+            payload["episodes"] = max(1, int(requested_episodes))
+            payload["fast_mode"] = bool(fast_mode)
+            payload["training_request_migrated"] = True
+        return payload
 
     def _persist_training_session(
         self,
@@ -1925,10 +2161,16 @@ class TrainingManager:
             int(status.get("requested_episodes", 0))
             - int(status.get("batch_completed_episodes", 0)),
         )
+        remaining_timesteps = max(
+            0,
+            int(status.get("batch_total_timesteps", 0) or 0)
+            - int(status.get("durable_completed_timesteps", 0) or 0),
+        )
         payload = {
             "state": state,
             "requested_at": datetime.datetime.now(datetime.UTC).isoformat(),
             "remaining_episodes": remaining,
+            "remaining_timesteps": remaining_timesteps,
             "training_request": request,
             "status": status,
         }
@@ -1946,46 +2188,57 @@ class TrainingManager:
         request = session_state.get("training_request")
         if not isinstance(request, dict):
             return
-        remaining = session_state.get("remaining_episodes")
-        if not isinstance(remaining, (int, float)):
-            return
-        remaining_episodes = max(0, int(remaining))
-        if remaining_episodes <= 0:
+        remaining_timesteps = session_state.get("remaining_timesteps")
+        has_timestep_request = request.get("total_timesteps") is not None
+        if has_timestep_request and isinstance(remaining_timesteps, (int, float)):
+            remaining_work = max(0, int(remaining_timesteps))
+        else:
+            remaining = session_state.get("remaining_episodes")
+            if not isinstance(remaining, (int, float)):
+                return
+            remaining_work = max(0, int(remaining))
+        if remaining_work <= 0:
             self._clear_training_session()
             return
         raw_curriculum_stage = request.get("curriculum_stage")
         raw_promote_from_checkpoint = request.get("promote_from_checkpoint_episode")
         try:
-            self.start(
-                remaining_episodes,
-                bool(request.get("fast_mode", True)),
-                enable_instinct_rewards=(
+            resume_kwargs = {
+                "enable_instinct_rewards": (
                     None
                     if request.get("enable_instinct_rewards") is None
                     else bool(request.get("enable_instinct_rewards"))
                 ),
-                curriculum_stage=(
+                "curriculum_stage": (
                     None
                     if raw_curriculum_stage is None
                     else int(raw_curriculum_stage)
                 ),
-                debug_reward_breakdown=(
+                "debug_reward_breakdown": (
                     None
                     if request.get("debug_reward_breakdown") is None
                     else bool(request.get("debug_reward_breakdown"))
                 ),
-                auto_promote=(
+                "auto_promote": (
                     None
                     if request.get("auto_promote") is None
                     else bool(request.get("auto_promote"))
                 ),
-                promote_from_checkpoint_episode=(
+                "promote_from_checkpoint_episode": (
                     None
                     if raw_promote_from_checkpoint is None
                     else int(raw_promote_from_checkpoint)
                 ),
-                resume=True,
-            )
+                "resume": True,
+            }
+            if has_timestep_request:
+                self.start(total_timesteps=remaining_work, **resume_kwargs)
+            else:
+                self.start(
+                    remaining_work,
+                    bool(request.get("fast_mode", True)),
+                    **resume_kwargs,
+                )
         except ValueError as exc:
             message = f"Automatic resume blocked: {exc}"
             self._status.update(
@@ -1994,7 +2247,12 @@ class TrainingManager:
                     "phase": "paused",
                     "message": message,
                     "resume_available": True,
-                    "resume_remaining_episodes": remaining_episodes,
+                    "resume_remaining_timesteps": (
+                        remaining_work if has_timestep_request else None
+                    ),
+                    "resume_remaining_episodes": (
+                        None if has_timestep_request else remaining_work
+                    ),
                     "resume_request": request,
                 }
             )
@@ -2010,6 +2268,11 @@ class TrainingManager:
 
     def _request_training_control(self, state: str, message: str) -> dict[str, Any]:
         """Persist a pause/stop request and update the live status."""
+        try:
+            from sheepdog.training.episode_store import get_episode_store
+            get_episode_store().flush()
+        except Exception as exc:
+            logger.warning("Failed to flush episode store on control request: %s", exc)
 
         with self._lock:
             self._control_request = state
@@ -2038,9 +2301,10 @@ class TrainingManager:
 
     def start(
         self,
-        requested_episodes: int,
-        fast_mode: bool,
+        requested_episodes: int | None = None,
+        fast_mode: bool = True,
         *,
+        total_timesteps: int | None = None,
         enable_instinct_rewards: bool | None = None,
         curriculum_stage: int | None = None,
         debug_reward_breakdown: bool | None = None,
@@ -2050,6 +2314,9 @@ class TrainingManager:
         resume: bool = False,
     ) -> dict[str, Any]:
         """Start a background training job and return the initial status."""
+        if total_timesteps is not None and total_timesteps <= 0:
+            raise ValueError("total_timesteps must be positive")
+        requested_episodes = max(1, int(requested_episodes or 1))
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return dict(self._status)
@@ -2061,7 +2328,8 @@ class TrainingManager:
                 "active_model_path", "active_model_source", "active_checkpoint_id",
                 "checkpoint_episode", "policy_version", "ppo_update_count",
                 "last_policy_update_time", "last_evaluation_time",
-                "recovery_status", "recovery_warnings", "phase"
+                "recovery_status", "recovery_warnings", "phase",
+                "target_environment_stage", "source_stage"
             ]:
                 if k in self._status:
                     preserved[k] = self._status[k]
@@ -2070,9 +2338,17 @@ class TrainingManager:
             self._status = self._initial_status()
             self._status.update(preserved)
 
+            active_stage = self._status.get("curriculum_stage")
+            if (active_stage is not None and active_stage > 1) or self._status.get("active_model_path"):
+                if not self._status.get("trainer_type"):
+                    self._status["trainer_type"] = "maskable_ppo"
+                if not self._status.get("policy_type"):
+                    self._status["policy_type"] = "neural"
+                if not self._status.get("policy_mode"):
+                    self._status["policy_mode"] = "neural_policy"
+
             # Start Training Guard assertions
             requested_stage = curriculum_stage if curriculum_stage is not None else self._status.get("curriculum_stage")
-            active_stage = self._status.get("curriculum_stage")
 
             # Find latest valid promotion event in history
             latest_promo_stage = None
@@ -2090,12 +2366,18 @@ class TrainingManager:
                 if float(episodes) > 0
             ]
             highest_recorded_stage = max(recorded_stages, default=0)
-            if requested_stage is not None and int(requested_stage) < highest_recorded_stage:
+            is_cross_stage = bool(
+                self._status.get("target_environment_stage")
+                or "from_stage" in str(self._status.get("run_id") or "")
+                or (active_stage is not None and requested_stage == active_stage)
+                or self._status.get("active_model_source") in {"forked", "original_stage8_baseline", "latest_stage9_checkpoint"}
+            )
+            if requested_stage is not None and int(requested_stage) < highest_recorded_stage and not is_cross_stage:
                 validation_errors.append(
                     f"Requested stage {requested_stage} is below the current journey's highest "
                     f"stage {highest_recorded_stage}; use the rewind action to train an earlier stage"
                 )
-            if latest_promo_stage is not None and requested_stage != active_stage:
+            if latest_promo_stage is not None and requested_stage != active_stage and not is_cross_stage:
                 validation_errors.append(
                     f"Requested stage {requested_stage} does not match active stage {active_stage}"
                 )
@@ -2127,6 +2409,7 @@ class TrainingManager:
                             is_mocked = False
                             try:
                                 from unittest.mock import Mock
+
                                 from sb3_contrib import MaskablePPO
                                 if isinstance(MaskablePPO.load, Mock):
                                     is_mocked = True
@@ -2190,6 +2473,7 @@ class TrainingManager:
             self._active_start_request = self._training_request_payload(
                 requested_episodes,
                 fast_mode,
+                total_timesteps=total_timesteps,
                 enable_instinct_rewards=enable_instinct_rewards,
                 curriculum_stage=curriculum_stage,
                 debug_reward_breakdown=debug_reward_breakdown,
@@ -2201,6 +2485,10 @@ class TrainingManager:
                 {
                     "running": True,
                     "fast_mode": fast_mode,
+                    "requested_timesteps": total_timesteps,
+                    "batch_total_timesteps": total_timesteps,
+                    "batch_completed_timesteps": 0,
+                    "training_request_migrated": total_timesteps is None,
                     "enable_instinct_rewards": (
                         self._status["enable_instinct_rewards"]
                         if enable_instinct_rewards is None
@@ -2259,6 +2547,7 @@ class TrainingManager:
                 target=self._run_training,
                 args=(requested_episodes, fast_mode),
                 kwargs={
+                    "total_timesteps": total_timesteps,
                     "enable_instinct_rewards": enable_instinct_rewards,
                     "curriculum_stage": curriculum_stage,
                     "debug_reward_breakdown": debug_reward_breakdown,
@@ -3131,6 +3420,365 @@ class TrainingManager:
         else:
             return {"error": "No prior active run artifacts found to archive"}, HTTPStatus.NOT_FOUND
 
+    def remediation_fork(
+        self,
+        target_stage: int = 9,
+        canary_episodes: int = 20,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        """Atomically fork from Stage 8 best-model into a new Stage 9 remediation run without running training."""
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return {
+                    "error": "Cannot create Stage 9 remediation run while training is active"
+                }, HTTPStatus.CONFLICT
+
+        config = LabConfig()
+        output_root = resolve_workspace_path(config.training.output_dir)
+        best_model_zip = output_root / "models" / "best-model.zip"
+
+        if not best_model_zip.exists():
+            return {
+                "error": "Stage 8 source best-model.zip does not exist"
+            }, HTTPStatus.NOT_FOUND
+
+        import uuid
+        now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        new_run_id = f"run_stage{target_stage}_remediation_{now_str}_{uuid.uuid4().hex[:4]}"
+
+        from sheepdog.curriculum import apply_curriculum_stage, stage_summary
+        stage_cfg = apply_curriculum_stage(config, target_stage)
+
+        prev_run_state = _load_json(output_root / "run-state.json") or {}
+        prev_training_state = _load_json(output_root / Trainer.STATE_FILENAME) or {}
+        prev_summary = _load_json(output_root / "training-summary.json") or {}
+
+        # Resolve Stage 8 parent lineage
+        curr_active_stage = prev_run_state.get("active_curriculum_stage") or prev_training_state.get("active_curriculum_stage")
+        if curr_active_stage == 8:
+            parent_run_id = prev_run_state.get("run_id") or prev_training_state.get("run_id")
+            parent_checkpoint_id = (
+                prev_run_state.get("active_checkpoint_id")
+                or prev_training_state.get("active_checkpoint_id")
+                or prev_run_state.get("parent_checkpoint_id")
+                or "chk_stage8_best_model"
+            )
+        else:
+            # Current workspace state is already at Stage 9 (or beyond).
+            # Preserve the original Stage 8 parent lineage and ignore any Stage 9 IDs.
+            cand_run_id = prev_run_state.get("parent_run_id") or prev_training_state.get("parent_run_id")
+            cand_chk_id = prev_run_state.get("parent_checkpoint_id") or prev_training_state.get("parent_checkpoint_id")
+
+            if cand_run_id and (cand_run_id.startswith(f"run_stage{target_stage}_") or cand_run_id.startswith("run_stage9_")):
+                cand_run_id = None
+            if cand_chk_id and (cand_chk_id.startswith(f"chk_run_stage{target_stage}_") or cand_chk_id.startswith("chk_run_stage9_") or cand_chk_id.startswith("chk_stage9_")):
+                cand_chk_id = None
+
+            if not cand_run_id or not cand_chk_id:
+                try:
+                    from sheepdog.checkpoints.store import CheckpointStore
+                    store = CheckpointStore(output_root / "checkpoints")
+                    s8_metas = [m for m in store.list_checkpoints() if getattr(m, "curriculum_stage", 1) == 8]
+                    if s8_metas:
+                        latest_s8 = s8_metas[-1]
+                        if not cand_run_id:
+                            cand_run_id = getattr(latest_s8, "run_id", None)
+                        if not cand_chk_id:
+                            cand_chk_id = getattr(latest_s8, "checkpoint_id", None)
+                except Exception:
+                    pass
+
+            parent_run_id = cand_run_id or "run_stage8_legacy"
+            parent_checkpoint_id = cand_chk_id or "chk_stage8_source"
+
+        prev_total_episodes = int(
+            prev_summary.get("total_episodes_trained")
+            or prev_training_state.get("total_episodes_trained")
+            or prev_run_state.get("episodes_completed")
+            or 0
+        )
+        policy_version = int(
+            prev_training_state.get("policy_version")
+            or prev_run_state.get("policy_version")
+            or 0
+        )
+
+        from sheepdog.checkpoints.store import get_observation_schema_hash, get_action_space_hash
+        from sheepdog.checkpoints.sidecar import create_sidecar_metadata
+        obs_hash = get_observation_schema_hash(stage_cfg)
+        act_hash = get_action_space_hash()
+
+        # Reconstruct and persist sidecar for Stage 8 source model
+        create_sidecar_metadata(
+            model_path=best_model_zip,
+            config=apply_curriculum_stage(config, 8),
+            policy_architecture="MaskableActorCriticPolicy",
+            migration_method="reconstructed_from_stage8_canonical_schema",
+        )
+
+        from sheepdog.training.maskable_ppo import MaskablePPOTrainer
+        trainer_instance = MaskablePPOTrainer(stage_cfg, output_root)
+        training_signature = trainer_instance._training_signature()
+
+        try:
+            # 1. Update run-state.json
+            run_state_payload = {
+                "active_curriculum_stage": target_stage,
+                "active_stage_name": stage_summary(target_stage),
+                "run_id": new_run_id,
+                "parent_run_id": parent_run_id,
+                "parent_checkpoint_id": parent_checkpoint_id,
+                "active_model_path": str(best_model_zip),
+                "active_model_source": "remediation",
+                "active_checkpoint_id": parent_checkpoint_id,
+                "observation_schema_hash": obs_hash,
+                "action_space_hash": act_hash,
+                "batch_total_timesteps": 0,
+                "batch_completed_timesteps": 0,
+                "durable_completed_timesteps": 0,
+                "episodes_completed": 0,
+                "total_episodes_trained": prev_total_episodes,
+                "requested_episodes": canary_episodes,
+                "policy_state_path": str(best_model_zip),
+                "best_model_path": str(best_model_zip),
+                "policy_version": policy_version,
+                "latest_current_stage_evaluation_id": None,
+                "current_stage_promotion_streak": 0,
+                "source_stage": 8,
+                "source_checkpoint": "best-model.zip",
+            }
+            run_state_path = output_root / "run-state.json"
+            run_state_path.write_text(json.dumps(run_state_payload, indent=2), encoding="utf-8")
+
+            # 2. Update training-settings.json
+            training_settings_payload = {
+                "curriculum_stage": target_stage,
+                "enable_instinct_rewards": True,
+                "debug_reward_breakdown": False,
+                "auto_promote": True,
+            }
+            settings_path = output_root / "training-settings.json"
+            settings_path.write_text(json.dumps(training_settings_payload, indent=2), encoding="utf-8")
+
+            # 3. Update effective-training-config.json
+            eff_cfg_path = output_root / "effective-training-config.json"
+            eff_cfg_path.write_text(json.dumps(stage_cfg.to_dict(), indent=2), encoding="utf-8")
+
+            # 4. Update training-state.json
+            state_path = output_root / Trainer.STATE_FILENAME
+            state_payload = {
+                "total_episodes_trained": prev_total_episodes,
+                "policy_state_path": str(best_model_zip),
+                "best_model_path": str(best_model_zip),
+                "best_model_curriculum_stage": target_stage,
+                "run_id": new_run_id,
+                "parent_run_id": parent_run_id,
+                "parent_checkpoint_id": parent_checkpoint_id,
+                "active_model_source": "remediation",
+                "active_checkpoint_id": parent_checkpoint_id,
+                "observation_schema_hash": obs_hash,
+                "action_space_hash": act_hash,
+                "policy_version": policy_version,
+                "training_signature": training_signature,
+            }
+            state_path.write_text(json.dumps(state_payload, indent=2), encoding="utf-8")
+
+            # 5. Atomically update in-memory status dictionary
+            with self._lock:
+                self._status["curriculum_stage"] = target_stage
+                self._status["active_curriculum_stage"] = target_stage
+                self._status["run_id"] = new_run_id
+                self._status["parent_run_id"] = parent_run_id
+                self._status["parent_checkpoint_id"] = parent_checkpoint_id
+                self._status["active_model_path"] = str(best_model_zip)
+                self._status["active_model_source"] = "remediation"
+                self._status["active_checkpoint_id"] = parent_checkpoint_id
+                self._status["observation_schema_hash"] = obs_hash
+                self._status["action_space_hash"] = act_hash
+                self._status["source_stage"] = 8
+                self._status["policy_version"] = policy_version
+                if target_stage > 1:
+                    self._status["trainer_type"] = "maskable_ppo"
+                    self._status["policy_type"] = "neural"
+                    self._status["policy_mode"] = "neural_policy"
+                self._status["batch_completed_timesteps"] = 0
+                self._status["batch_total_timesteps"] = 0
+                self._status["durable_completed_timesteps"] = 0
+                self._status["episodes_completed"] = 0
+                self._status["requested_episodes"] = canary_episodes
+                self._status["running"] = False
+                self._status["phase"] = "idle"
+                self._status["message"] = f"Created Stage {target_stage} remediation run ({new_run_id}). Ready to start canary."
+
+            import logging
+            logging.getLogger(__name__).info("Successfully executed Stage %d remediation fork (%s)", target_stage, new_run_id)
+            return dict(self._status), HTTPStatus.OK
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).exception("Error executing Stage %d remediation fork: %s", target_stage, exc)
+            return {"error": f"Failed to execute remediation fork: {str(exc)}"}, HTTPStatus.INTERNAL_SERVER_ERROR
+
+    def cross_stage_fork(
+        self,
+        target_stage: int,
+        starting_model_source: str = "latest_stage9",
+        source_checkpoint_id: str | None = None,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        """Atomically fork training into target_stage using specified starting_model_source without mutating source checkpoints."""
+        output_root = resolve_workspace_path(LabConfig().training.output_dir)
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return {
+                    "error": "Cannot create cross-stage run while training is active"
+                }, HTTPStatus.CONFLICT
+
+        try:
+            current_status = self._status or {}
+            source_stage = current_status.get("curriculum_stage", 9)
+            
+            # Resolve source checkpoint & model path
+            if starting_model_source == "original_stage8":
+                src_model = output_root / "models" / "best-model.zip"
+                if not src_model.exists():
+                    src_model = output_root / "best-model.zip"
+                parent_checkpoint_id = "chk_stage8_ep6551"
+                parent_run_id = "run_stage8_legacy_6551"
+                model_source_name = "original_stage8_baseline"
+                source_stage = 8
+            elif starting_model_source == "latest_stage9" or starting_model_source == "stage9":
+                active_path_str = current_status.get("active_model_path")
+                if active_path_str and Path(active_path_str).exists():
+                    src_model = Path(active_path_str)
+                else:
+                    src_model = output_root / "models" / "best-model.zip"
+                    if not src_model.exists():
+                        src_model = output_root / "best-model.zip"
+                parent_checkpoint_id = current_status.get("active_checkpoint_id") or "chk_stage9_latest"
+                parent_run_id = current_status.get("run_id") or "run_stage9_latest"
+                model_source_name = "latest_stage9_checkpoint"
+                source_stage = 9
+            elif source_checkpoint_id:
+                try:
+                    episode, journey = self.find_checkpoint_by_id(source_checkpoint_id)
+                    details = self.get_checkpoint_details(episode, journey)
+                    src_model = Path(details.get("policy_state_path"))
+                    parent_checkpoint_id = source_checkpoint_id
+                    parent_run_id = details.get("run_id")
+                    model_source_name = f"checkpoint_{source_checkpoint_id}"
+                    source_stage = details.get("environment_config", {}).get("curriculum_stage", source_stage)
+                except Exception:
+                    src_model = output_root / "models" / "best-model.zip"
+                    if not src_model.exists():
+                        src_model = output_root / "best-model.zip"
+                    parent_checkpoint_id = current_status.get("active_checkpoint_id") or "chk_stage9_latest"
+                    parent_run_id = current_status.get("run_id") or "run_stage9_latest"
+                    model_source_name = "latest_stage9_checkpoint"
+            else:
+                src_model = output_root / "models" / "best-model.zip"
+                if not src_model.exists():
+                    src_model = output_root / "best-model.zip"
+                parent_checkpoint_id = current_status.get("active_checkpoint_id") or "chk_stage9_latest"
+                parent_run_id = current_status.get("run_id") or "run_stage9_latest"
+                model_source_name = "latest_stage9_checkpoint"
+
+            if not src_model.exists():
+                return {
+                    "error": f"Source model path does not exist: {src_model}"
+                }, HTTPStatus.BAD_REQUEST
+
+            import uuid
+            now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            new_run_id = f"run_stage{target_stage}_from_stage{source_stage}_{now_str}_{uuid.uuid4().hex[:4]}"
+
+            # Copy model zip file to a distinct model file so source is never mutated or overwritten
+            dest_models_dir = output_root / "models"
+            dest_models_dir.mkdir(parents=True, exist_ok=True)
+            active_model_zip = dest_models_dir / f"model_{new_run_id}.zip"
+            shutil.copy2(src_model, active_model_zip)
+
+            # Create sidecar metadata for active_model_zip if needed
+            from sheepdog.checkpoints.sidecar import load_and_verify_sidecar, create_sidecar_metadata
+            from sheepdog.curriculum import apply_curriculum_stage
+            sidecar = load_and_verify_sidecar(src_model)
+            if sidecar:
+                target_cfg = apply_curriculum_stage(LabConfig(), target_stage)
+                create_sidecar_metadata(
+                    model_path=active_model_zip,
+                    config=target_cfg,
+                    policy_architecture=sidecar.get("policy_architecture", "MaskableActorCriticPolicy"),
+                    migration_method="cross_stage_fork",
+                )
+
+            from sheepdog.checkpoints.store import get_observation_schema_hash, get_action_space_hash
+            target_config = apply_curriculum_stage(LabConfig(), target_stage)
+            obs_hash = get_observation_schema_hash(target_config)
+            act_hash = get_action_space_hash()
+
+            training_state = {
+                "run_id": new_run_id,
+                "parent_run_id": parent_run_id,
+                "parent_checkpoint_id": parent_checkpoint_id,
+                "active_model_path": str(active_model_zip),
+                "active_model_source": model_source_name,
+                "source_stage": source_stage,
+                "target_environment_stage": target_stage,
+                "observation_schema_hash": obs_hash,
+                "action_space_hash": act_hash,
+                "curriculum_stage": target_stage,
+                "total_episodes_trained": 0,
+                "best_model_path": str(active_model_zip),
+                "created_at": datetime.datetime.now(datetime.UTC).isoformat(),
+            }
+            (output_root / Trainer.STATE_FILENAME).write_text(
+                json.dumps(training_state, indent=2), encoding="utf-8"
+            )
+
+            run_state = {
+                "active_curriculum_stage": target_stage,
+                "active_stage_name": f"Stage {target_stage}",
+                "run_id": new_run_id,
+                "parent_run_id": parent_run_id,
+                "parent_checkpoint_id": parent_checkpoint_id,
+                "source_stage": source_stage,
+                "target_environment_stage": target_stage,
+                "active_model_path": str(active_model_zip),
+                "active_model_source": model_source_name,
+                "active_checkpoint_id": parent_checkpoint_id,
+                "observation_schema_hash": obs_hash,
+                "action_space_hash": act_hash,
+                "trainer_type": "maskable_ppo" if target_stage > 1 else "baseline",
+                "policy_type": "neural" if target_stage > 1 else "instinct",
+                "policy_mode": "neural_policy" if target_stage > 1 else "instinct_only",
+                "updated_at": datetime.datetime.now(datetime.UTC).isoformat(),
+            }
+            (output_root / "run-state.json").write_text(
+                json.dumps(run_state, indent=2), encoding="utf-8"
+            )
+
+            with self._lock:
+                self.restore_active_run_state()
+                self._status["curriculum_stage"] = target_stage
+                self._status["active_curriculum_stage"] = target_stage
+                self._status["run_id"] = new_run_id
+                self._status["parent_run_id"] = parent_run_id
+                self._status["parent_checkpoint_id"] = parent_checkpoint_id
+                self._status["source_stage"] = source_stage
+                self._status["target_environment_stage"] = target_stage
+                self._status["active_model_path"] = str(active_model_zip)
+                self._status["active_model_source"] = model_source_name
+                self._status["running"] = False
+                self._status["phase"] = "idle"
+                self._status["message"] = (
+                    f"Created Stage {target_stage} run from {model_source_name} ({new_run_id}). Ready to train."
+                )
+
+            return dict(self._status), HTTPStatus.OK
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).exception("Error in cross_stage_fork: %s", exc)
+            return {"error": f"Failed to execute cross-stage fork: {str(exc)}"}, HTTPStatus.INTERNAL_SERVER_ERROR
+
+
+
     def get_network_topology(self) -> dict[str, Any]:
         """Return read-only neural topology metadata for visualization."""
         config = LabConfig()
@@ -3225,18 +3873,68 @@ class TrainingManager:
     def _clear_training_outputs(self, config: LabConfig) -> None:
         output_root = Path(config.training.output_dir)
         generated_root = Path(config.training.web_export_dir)
-        self._remove_path(output_root / "checkpoints")
-        self._remove_path(output_root / "evaluations")
-        self._remove_path(output_root / Trainer.STATE_FILENAME)
-        self._remove_path(output_root / "training-summary.json")
-        self._remove_path(output_root / STAGE_HISTORY_FILENAME)
-        self._remove_path(output_root / PROMOTION_HISTORY_FILENAME)
-        self._remove_path(output_root / TRAINING_SETTINGS_FILENAME)
-        self._remove_path(generated_root / "replays")
-        self._remove_path(generated_root / "latest-checkpoint.json")
-        self._remove_path(generated_root / "latest-evaluation.json")
-        self._remove_path(generated_root / "latest-replay.json")
-        self._remove_path(generated_root / "checkpoint-index.json")
+        try:
+            from sheepdog.training.episode_store import get_episode_store
+            store = get_episode_store(output_root / "training-telemetry.sqlite")
+            store.clear_store()
+            store.close()
+        except Exception as exc:
+            logger.warning("Failed to clear episode telemetry store: %s", exc)
+
+        directories_to_remove = [
+            output_root / "checkpoints",
+            output_root / "models",
+            output_root / "evaluations",
+            output_root / "replays",
+            output_root / "demos",
+            output_root / "tb_logs",
+            output_root / "startup",
+            output_root / "tmp-smoke",
+            output_root / "tmp-smoke-web",
+            generated_root / "replays",
+        ]
+        for d in directories_to_remove:
+            self._remove_path(d)
+        (output_root / "tb_logs").mkdir(parents=True, exist_ok=True)
+        (generated_root / "replays").mkdir(parents=True, exist_ok=True)
+
+        files_to_remove = [
+            output_root / Trainer.STATE_FILENAME,
+            output_root / "training-summary.json",
+            output_root / STAGE_HISTORY_FILENAME,
+            output_root / PROMOTION_HISTORY_FILENAME,
+            output_root / TRAINING_SETTINGS_FILENAME,
+            output_root / TRAINING_SESSION_FILENAME,
+            output_root / HYPERPARAMS_FILENAME,
+            output_root / "run-state.json",
+            output_root / "training-runtime.json",
+            output_root / "training_history.json",
+            output_root / "config-history.json",
+            output_root / "effective-training-config.json",
+            output_root / "smoke-config.json",
+            output_root / "training-telemetry.sqlite",
+            output_root / "training-telemetry.sqlite-wal",
+            output_root / "training-telemetry.sqlite-shm",
+            generated_root / "latest-checkpoint.json",
+            generated_root / "latest-evaluation.json",
+            generated_root / "latest-replay.json",
+            generated_root / "checkpoint-index.json",
+            generated_root / "scenario-index.json",
+        ]
+        for f in files_to_remove:
+            self._remove_path(f)
+
+        # Glob patterns for temporary and evaluation files
+        for p in output_root.glob("evaluation-checkpoint-*"):
+            self._remove_path(p)
+        for p in output_root.glob("training-runtime-*.tmp"):
+            self._remove_path(p)
+        for p in output_root.glob("training-summary-*.tmp"):
+            self._remove_path(p)
+        for p in output_root.glob("stage9-stall-*.json"):
+            self._remove_path(p)
+        for p in generated_root.glob("*.tmp"):
+            self._remove_path(p)
 
     def _archive_training_outputs(self, config: LabConfig) -> str | None:
         output_root = Path(config.training.output_dir)
@@ -3244,6 +3942,7 @@ class TrainingManager:
         timestamp = datetime.datetime.now(datetime.UTC).strftime("%Y%m%d-%H%M%S")
         archive_root = output_root / "archive" / f"journey-{timestamp}"
         mappings: list[tuple[Path, Path]] = [
+            (output_root / "training-telemetry.sqlite", archive_root / "training-telemetry.sqlite"),
             (output_root / "checkpoints", archive_root / "checkpoints"),
             (output_root / "models", archive_root / "models"),
             (output_root / "evaluations", archive_root / "evaluations"),
@@ -3263,12 +3962,30 @@ class TrainingManager:
             (generated_root / "checkpoint-index.json", archive_root / "checkpoint-index.json"),
         ]
 
+        try:
+            from sheepdog.training.episode_store import get_episode_store
+            store = get_episode_store(output_root / "training-telemetry.sqlite")
+            store.close()
+        except Exception:
+            pass
+
         moved_any = False
         for src, dst in mappings:
             if not src.exists():
                 continue
             dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(src), str(dst))
+            try:
+                shutil.move(str(src), str(dst))
+            except Exception:
+                try:
+                    if src.is_dir():
+                        shutil.copytree(str(src), str(dst), dirs_exist_ok=True)
+                        shutil.rmtree(str(src), ignore_errors=True)
+                    else:
+                        shutil.copy2(str(src), str(dst))
+                        src.unlink(missing_ok=True)
+                except Exception:
+                    pass
             moved_any = True
         return str(archive_root) if moved_any else None
 
@@ -3361,9 +4078,27 @@ class TrainingManager:
         if not path.exists():
             return
         if path.is_dir():
-            shutil.rmtree(path)
+            def _on_error(func: Any, path_str: str, exc: Any) -> None:
+                try:
+                    os.chmod(path_str, 0o777)
+                    func(path_str)
+                except Exception:
+                    pass
+            shutil.rmtree(path, onexc=_on_error)
+            if path.exists():
+                try:
+                    shutil.rmtree(path, ignore_errors=True)
+                except Exception:
+                    pass
             return
-        path.unlink()
+        try:
+            os.chmod(str(path), 0o777)
+            path.unlink()
+        except Exception:
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     def _update_status(self, payload: dict[str, Any]) -> None:
         with self._lock:
@@ -3600,6 +4335,7 @@ class TrainingManager:
         self,
         requested_episodes: int,
         fast_mode: bool,
+        total_timesteps: int | None = None,
         enable_instinct_rewards: bool | None = None,
         curriculum_stage: int | None = None,
         debug_reward_breakdown: bool | None = None,
@@ -3643,6 +4379,7 @@ class TrainingManager:
                 self._active_start_request = self._training_request_payload(
                     batch_episodes,
                     fast_mode,
+                    total_timesteps=total_timesteps,
                     enable_instinct_rewards=enable_instinct_rewards,
                     curriculum_stage=current_stage,
                     debug_reward_breakdown=debug_reward_breakdown,
@@ -3653,12 +4390,31 @@ class TrainingManager:
                 job_config = _build_training_job_config(
                     batch_episodes,
                     fast_mode,
+                    total_timesteps=total_timesteps,
                     enable_instinct_rewards=enable_instinct_rewards,
                     curriculum_stage=current_stage,
                     debug_reward_breakdown=debug_reward_breakdown,
                     evaluation_mode=evaluation_mode,
                 )
-                self.telemetry_manager.initialize_wandb(config_dict=job_config.to_dict())
+                with self._lock:
+                    self._status.update(
+                        {
+                            "requested_timesteps": (
+                                total_timesteps
+                                if total_timesteps is not None
+                                else job_config.training.total_timesteps
+                            ),
+                            "effective_timesteps": job_config.training.total_timesteps,
+                            "batch_total_timesteps": job_config.training.total_timesteps,
+                            "batch_total_segments": len(
+                                job_config.training.checkpoint_episodes
+                            ),
+                        }
+                    )
+                self.telemetry_manager.initialize_wandb(
+                    config_dict=job_config.to_dict(),
+                    enabled=job_config.training.wandb_enabled,
+                )
                 trainer = create_trainer(job_config, job_config.training.output_dir)
                 trainer.runtime_tracker = self.runtime_tracker
                 if hasattr(trainer, "evaluator") and trainer.evaluator is not None:
@@ -3774,9 +4530,22 @@ class TrainingManager:
                         ep_status = str(payload.get("status", "UNKNOWN"))
                         ep_success = bool(payload.get("success", False))
                         ep_seed = payload.get("seed")
+                        field_setup = payload.get("field_setup")
+                        if not field_setup:
+                            env_cfg = job_config.environment
+                            dog_cnt = env_cfg.dogs
+                            sheep_cnt = ep_total_sheep or env_cfg.sheep
+                            parts = [f"{dog_cnt}d/{sheep_cnt}s"]
+                            pen_placement = getattr(env_cfg, "pen_placement", None)
+                            if pen_placement:
+                                parts.append(f"Pen: {pen_placement}")
+                            field_setup = " | ".join(parts)
                         res_str = "SUCCESS" if ep_success else ep_status
+                        now_str = datetime.datetime.now().strftime("%H:%M:%S")
+                        seed_str = f"Seed: {ep_seed}" if ep_seed is not None else "Seed: N/A"
                         print(
-                            f"[Sheepdog] Ep {int(ep_num):06d} | Stage {stage} | "
+                            f"[Sheepdog] [{now_str}] Ep {int(ep_num):06d} | Stage {stage} | "
+                            f"{seed_str} | Setup: {field_setup} | "
                             f"Reward: {ep_reward:.2f} | Penned: {ep_penned}/{ep_total_sheep} | Result: {res_str}",
                             flush=True,
                         )
@@ -3790,8 +4559,20 @@ class TrainingManager:
                                 penned=ep_penned,
                                 total_sheep=ep_total_sheep,
                                 success=ep_success,
-                                status=ep_status,
+                                status=res_str,
                                 seed=ep_seed,
+                                run_id=payload.get("run_id") or self._status.get("run_id"),
+                                session_id=payload.get("session_id") or self._status.get("session_id"),
+                                global_timestep=payload.get("global_timestep"),
+                                policy_version=payload.get("policy_version") or self._status.get("policy_version"),
+                                length=payload.get("length") or payload.get("steps"),
+                                checkpoint_id=payload.get("checkpoint_id") or self._status.get("active_checkpoint_id"),
+                                replay_available=payload.get("replay_available"),
+                                replay_id=payload.get("replay_id"),
+                                replay_path=payload.get("replay_path"),
+                                replay_source=payload.get("replay_source"),
+                                capture_reason=payload.get("capture_reason"),
+                                capture_status=payload.get("capture_status"),
                             )
                         except Exception:
                             pass
@@ -3815,6 +4596,21 @@ class TrainingManager:
                         "batch_completed_episodes": computed_batch_completed_episodes,
                         "batch_total_segments": batch_total_segments,
                         "batch_completed_segments": batch_completed_segments,
+                        "requested_timesteps": (
+                            total_timesteps
+                            if total_timesteps is not None
+                            else job_config.training.total_timesteps
+                        ),
+                        "effective_timesteps": job_config.training.total_timesteps,
+                        "batch_total_timesteps": payload.get(
+                            "batch_total_timesteps",
+                            job_config.training.total_timesteps,
+                        ),
+                        "batch_completed_timesteps": payload.get(
+                            "batch_completed_timesteps",
+                            self._status.get("batch_completed_timesteps", 0),
+                        ),
+                        "completed_environment_episodes": actual_completed,
                         "estimated_equivalent_episodes": computed_batch_completed_episodes,
                         "current_episode": payload.get("current_episode"),
                         "checkpoint_episode": checkpoint_episode,
@@ -3824,6 +4620,14 @@ class TrainingManager:
                         "error_type": None,
                         "traceback": None,
                     }
+                    if phase == "checkpoint":
+                        update["durable_completed_timesteps"] = update[
+                            "batch_completed_timesteps"
+                        ]
+                        update["cumulative_environment_episodes"] = payload.get(
+                            "environment_episodes_total",
+                            self._status.get("cumulative_environment_episodes", 0),
+                        )
                     if "approx_kl" in payload:
                         update["approx_kl"] = payload["approx_kl"]
                     if "clip_fraction" in payload:
@@ -3846,7 +4650,20 @@ class TrainingManager:
                         update["latest_checkpoint_episode"] = checkpoint_episode
                         update["latest_seed"] = latest_seed
                         update["latest_replay_path"] = replay_path
-                        update["active_checkpoint_id"] = f"chk_{update.get('run_id') or self._status.get('run_id') or 'unknown'}_ep_{checkpoint_episode}"
+                        chk_id_cand = (
+                            (isinstance(summary, dict) and summary.get("checkpoint_id"))
+                            or (isinstance(payload, dict) and payload.get("checkpoint_id"))
+                        )
+                        if not chk_id_cand:
+                            try:
+                                trigger_cp = self.get_checkpoint_details(checkpoint_episode)
+                                chk_id_cand = trigger_cp.get("checkpoint_id")
+                            except Exception:
+                                pass
+                        update["active_checkpoint_id"] = (
+                            chk_id_cand
+                            or f"chk_{update.get('run_id') or self._status.get('run_id') or 'unknown'}_ep_{checkpoint_episode}"
+                        )
                     if isinstance(summary, dict) and phase == "checkpoint":
                         promotion_eligible = bool(summary.get("promotion_eligible", True))
                         update["latest_success_rate"] = summary.get("success_rate")
@@ -4164,8 +4981,8 @@ class TrainingManager:
                     if phase == "checkpoint":
                         try:
                             from sheepdog.checkpoints.store import (
-                                get_observation_schema_hash,
                                 get_action_space_hash,
+                                get_observation_schema_hash,
                             )
                             from sheepdog.config import LabConfig
                             cfg = LabConfig()
@@ -4347,8 +5164,9 @@ class TrainingManager:
                 early_promotion: _EarlyPromotionSignal | None = None
                 rollback_signal: _RollbackSignal | None = None
                 try:
+                    now_str = datetime.datetime.now().strftime("%H:%M:%S")
                     print(
-                        f"[Sheepdog] Training session started | Stage {current_stage} | "
+                        f"[Sheepdog] [{now_str}] Training session started | Stage {current_stage} | "
                         f"Target: {batch_episodes} ep | Mode: {job_config.policy.policy_mode} | "
                         f"Fast mode: {fast_mode}",
                         flush=True,
@@ -4438,7 +5256,8 @@ class TrainingManager:
                     final_message = self._status.get("message") or (
                         "Training paused" if control_request == "paused" else "Training stopped"
                     )
-                    print(f"[Sheepdog] Training {control_request}: {final_message}", flush=True)
+                    now_str = datetime.datetime.now().strftime("%H:%M:%S")
+                    print(f"[Sheepdog] [{now_str}] Training {control_request}: {final_message}", flush=True)
                     self._update_status(
                         {
                             "running": False,
@@ -4637,12 +5456,13 @@ class TrainingManager:
                 import uuid
                 promo_id = f"evt_promo_{uuid.uuid4().hex[:12]}"
                 
-                from sheepdog.checkpoints.store import (
-                    get_observation_schema_hash,
-                    get_action_space_hash,
-                    compute_env_config_hash,
-                )
                 from dataclasses import asdict
+
+                from sheepdog.checkpoints.store import (
+                    compute_env_config_hash,
+                    get_action_space_hash,
+                    get_observation_schema_hash,
+                )
                 try:
                     obs_h = get_observation_schema_hash(job_config)
                 except Exception:
@@ -4770,13 +5590,15 @@ class TrainingManager:
                 self._active_start_request = None
                 self._control_request = None
             if final_control_request not in {"paused", "stopped"}:
+                now_str = datetime.datetime.now().strftime("%H:%M:%S")
+                print(f"[Sheepdog] [{now_str}] Training complete: {self._status.get('message', 'Training complete')}", flush=True)
                 self._clear_training_session()
                 self.runtime_tracker.end_session("completed")
-        except Exception as exc:  # pragma: no cover  # pylint: disable=broad-exception-caught
+        except BaseException as exc:  # pragma: no cover  # pylint: disable=broad-exception-caught
             full_traceback = traceback.format_exc()
-            # Print the full traceback to the server console so the failure is
-            # always visible even when the UI only surfaces a short message.
-            print("\n===== TRAINING FAILED =====", flush=True)
+            logger.error("\n===== TRAINING FAILED =====\n%s\n===========================\n", full_traceback)
+            now_str = datetime.datetime.now().strftime("%H:%M:%S")
+            print(f"\n[Sheepdog] [{now_str}] ===== TRAINING FAILED =====", flush=True)
             print(full_traceback, flush=True)
             print("===========================\n", flush=True)
             with self._lock:
@@ -4787,10 +5609,18 @@ class TrainingManager:
                 self._status["error_type"] = type(exc).__name__
                 self._status["traceback"] = full_traceback
                 self._active_start_request = None
+            self._persist_training_session(state="error", status=dict(self._status), request=None)
             self._clear_training_session()
-            self.runtime_tracker.end_session("unknown")
+            self.runtime_tracker.end_session("error")
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
         finally:
             self.active_trainer = None
+            try:
+                from sheepdog.training.episode_store import get_episode_store
+                get_episode_store().flush()
+            except Exception as exc:
+                logger.warning("Failed to flush episode store in _run_training finally block: %s", exc)
 
 
 class _ManagerDescriptor:
@@ -4818,26 +5648,24 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
     manager = _ManagerDescriptor()
 
     def log_message(self, format: str, *args: Any) -> None:
-        """Filter out routine GET polling noise (e.g. /api/training/status) from server logs."""
-        message = format % args if args else format
-        if " 200 " in message or " 304 " in message:
-            request_line = message.split('"')[1] if '"' in message else ""
-            if any(
-                path in request_line
-                for path in (
-                    "/api/training/status",
-                    "/api/training/history",
-                    "/api/health",
-                    "/api/config",
-                    "/generated/",
-                )
-            ):
-                return
-        super().log_message(format, *args)
+        """Suppress routine HTTP access log messages to keep terminal clean."""
+        pass
 
     def _json_response(self, payload: Any, status: int = HTTPStatus.OK) -> None:
         try:
-            body = json.dumps(payload, indent=2).encode("utf-8")
+            def _default(o: Any) -> Any:
+                import numpy as np
+                if isinstance(o, (np.integer, np.floating)):
+                    return o.item()
+                if isinstance(o, np.ndarray):
+                    return o.tolist()
+                if isinstance(o, np.bool_):
+                    return bool(o)
+                if hasattr(o, "to_dict"):
+                    return o.to_dict()
+                return str(o)
+
+            body = json.dumps(payload, indent=2, default=_default).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Access-Control-Allow-Origin", "*")
@@ -4849,6 +5677,9 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
         except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
             pass
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
 
     def _file_response(self, file_path: Path) -> None:
         """Read *file_path* fully then send — avoids Content-Length races."""
@@ -4914,10 +5745,10 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
 
     def _compile_diagnostics_snapshot(self) -> dict[str, Any]:
         """Compile all diagnostics and return a unified JSON snapshot payload dict."""
-        import math
         import hashlib
-        from urllib.parse import urlsplit, parse_qs
-        from datetime import datetime, UTC
+        import math
+        from datetime import UTC, datetime
+        from urllib.parse import parse_qs, urlsplit
         
         # Safe casting helpers
         def safe_int(v, default=0):
@@ -4969,7 +5800,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                     summary_path = output_root / "training_history.json"
                 if summary_path.exists():
                     try:
-                        with open(summary_path, "r", encoding="utf-8") as f:
+                        with open(summary_path, encoding="utf-8") as f:
                             sum_data = json.load(f)
                         if isinstance(sum_data, dict):
                             checkpoints = sum_data.get("checkpoints", [])
@@ -5061,7 +5892,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             state_path = output_root / "training-state.json"
             if state_path.exists():
                 try:
-                    with open(state_path, "r", encoding="utf-8") as f:
+                    with open(state_path, encoding="utf-8") as f:
                         s_data = json.load(f)
                     best = s_data.get("best_model_path") or s_data.get("policy_state_path")
                     if best:
@@ -5208,7 +6039,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         summary_path = output_root / "training-summary.json"
         if summary_path.exists():
             try:
-                with open(summary_path, "r", encoding="utf-8") as f:
+                with open(summary_path, encoding="utf-8") as f:
                     sum_data = json.load(f)
                 if isinstance(sum_data, dict):
                     all_checkpoints = sum_data.get("checkpoints", [])
@@ -5219,7 +6050,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             history_path = output_root / "training_history.json"
             if history_path.exists():
                 try:
-                    with open(history_path, "r", encoding="utf-8") as f:
+                    with open(history_path, encoding="utf-8") as f:
                         sum_data = json.load(f)
                     if isinstance(sum_data, list):
                         all_checkpoints = sum_data
@@ -5252,7 +6083,11 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         
         stage_overrides = {}
         if cur_stage > 0:
-            from sheepdog.curriculum import CURRICULUM_STAGES, CURRICULUM_REWARD_OVERRIDES, CURRICULUM_TRAINING_OVERRIDES
+            from sheepdog.curriculum import (
+                CURRICULUM_REWARD_OVERRIDES,
+                CURRICULUM_STAGES,
+                CURRICULUM_TRAINING_OVERRIDES,
+            )
             env_ov = CURRICULUM_STAGES.get(cur_stage, {})
             for k, v in env_ov.items():
                 stage_overrides[f"environment.{k}"] = v
@@ -5409,6 +6244,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
 
         # 6. Training Scenario Coverage
         coverage_data = checkpoint_payload.get("training_scenario_coverage") if checkpoint_payload else status.get("training_scenario_coverage")
+        eval_seeds = getattr(getattr(active_config, "training", None), "evaluation_seeds", (11, 23, 37, 41, 53, 59, 61, 67, 71, 73))
         if not coverage_data:
             coverage_data = {
                 "seeds_seen": [],
@@ -5421,8 +6257,8 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                 "max_dog_to_sheep": 0.0,
                 "sum_dog_to_sheep": 0.0,
                 "count_dog_to_sheep": 0,
-                "similarity_episodes": {str(k): 0 for k in (11, 23, 37, 41, 53)},
-                "similarity_successes": {str(k): 0 for k in (11, 23, 37, 41, 53)},
+                "similarity_episodes": {str(k): 0 for k in eval_seeds},
+                "similarity_successes": {str(k): 0 for k in eval_seeds},
             }
             
         avg_sheep_to_pen = 0.0
@@ -5432,6 +6268,12 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         avg_dog_to_sheep = 0.0
         if coverage_data.get("count_dog_to_sheep", 0) > 0:
             avg_dog_to_sheep = float(coverage_data["sum_dog_to_sheep"] / coverage_data["count_dog_to_sheep"])
+
+        sim_ep_dict = coverage_data.get("similarity_episodes", {})
+        sim_suc_dict = coverage_data.get("similarity_successes", {})
+        all_resemblance_keys = set(eval_seeds) | {int(k) for k in sim_ep_dict.keys() if str(k).isdigit()}
+        resemblance_counts = {str(k): sim_ep_dict.get(str(k), sim_ep_dict.get(k, 0)) for k in all_resemblance_keys}
+        resemblance_successes = {str(k): sim_suc_dict.get(str(k), sim_suc_dict.get(k, 0)) for k in all_resemblance_keys}
 
         coverage_payload = {
             "unique_seeds_count": len(coverage_data.get("seeds_seen", [])),
@@ -5446,8 +6288,8 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                 "max": coverage_data.get("max_dog_to_sheep", 0.0),
                 "avg": avg_dog_to_sheep
             },
-            "resemblance_counts": {str(k): coverage_data.get("similarity_episodes", {}).get(str(k), 0) for k in (11, 23, 37, 41, 53)},
-            "resemblance_successes": {str(k): coverage_data.get("similarity_successes", {}).get(str(k), 0) for k in (11, 23, 37, 41, 53)}
+            "resemblance_counts": resemblance_counts,
+            "resemblance_successes": resemblance_successes
         }
 
         # 7. Version and Failed Seed History
@@ -5658,7 +6500,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         eval_geometry_validations = {}
         evaluation_seeds = list(checkpoint_payload.get("evaluation_seeds", [])) if checkpoint_payload else []
         if not evaluation_seeds:
-            evaluation_seeds = list(active_config.training.evaluation_seeds) if hasattr(active_config.training, "evaluation_seeds") else [11, 23, 37, 41, 53]
+            evaluation_seeds = list(active_config.training.evaluation_seeds) if hasattr(active_config.training, "evaluation_seeds") else [11, 23, 37, 41, 53, 59, 61, 67, 71, 73]
         for seed in evaluation_seeds:
             try:
                 temp_env = SheepdogEnvironment(active_config)
@@ -6012,7 +6854,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             history_path = Path(LabConfig().training.output_dir) / "training_history.json"
             if history_path.exists():
                 try:
-                    with open(history_path, "r", encoding="utf-8") as f:
+                    with open(history_path, encoding="utf-8") as f:
                         data = json.load(f)
                     self._json_response(data)
                 except Exception:
@@ -6021,15 +6863,65 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                 self._json_response([])
             return
         if request_path == "/api/training/status":
-            import datetime
-            print(
-                f"[DEBUG] /api/training/status polled at {datetime.datetime.now().strftime('%H:%M:%S.%f')[:-3]}",
-                flush=True,
-            )
             self._json_response(self.manager.snapshot())
             return
         if request_path == "/api/training/diagnostics":
             self._handle_diagnostics()
+            return
+        if request_path == "/api/insights/training-episodes":
+            query = urlsplit(self.path).query
+            from urllib.parse import parse_qs
+            params = parse_qs(query)
+            try:
+                after_id = int(params["after_id"][0]) if "after_id" in params else None
+            except (ValueError, IndexError):
+                after_id = None
+            try:
+                before_id = int(params["before_id"][0]) if "before_id" in params else None
+            except (ValueError, IndexError):
+                before_id = None
+            try:
+                stage = int(params["stage"][0]) if "stage" in params else None
+            except (ValueError, IndexError):
+                stage = None
+            run_id = params["run_id"][0] if "run_id" in params else None
+            try:
+                limit = int(params["limit"][0]) if "limit" in params else 500
+            except (ValueError, IndexError):
+                limit = 500
+            order = params["order"][0] if "order" in params else None
+
+            from sheepdog.training.episode_store import get_episode_store
+            output_dir = Path(LabConfig().training.output_dir)
+            db_path = output_dir / "training-telemetry.sqlite"
+            store = get_episode_store(db_path)
+            res = store.get_episodes(
+                after_id=after_id,
+                before_id=before_id,
+                stage=stage,
+                run_id=run_id,
+                limit=limit,
+                order=order,
+            )
+            self._json_response(res)
+            return
+        if request_path in ("/api/insights/failed-episodes", "/api/episodes/failed-replays"):
+            query = urlsplit(self.path).query
+            from urllib.parse import parse_qs
+
+            params = parse_qs(query)
+            try:
+                limit = int(params["limit"][0]) if "limit" in params else 25
+            except (ValueError, IndexError):
+                limit = 25
+
+            from sheepdog.training.episode_store import get_episode_store
+
+            output_dir = Path(LabConfig().training.output_dir)
+            db_path = output_dir / "training-telemetry.sqlite"
+            store = get_episode_store(db_path)
+            res = store.get_recent_failed_episodes_with_replays(limit=limit)
+            self._json_response({"episodes": res})
             return
         if request_path in ("/health", "/api/health"):
             self._json_response({"status": "ok", "service": "sheepdog-api"})
@@ -6093,6 +6985,58 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         if request_path == "/api/scenarios":
             self._json_response(self.manager.list_scenarios())
             return
+        if request_path.startswith("/api/replays/"):
+            replay_id = request_path[len("/api/replays/"):]
+            if ".." in replay_id or "/" in replay_id or "\\" in replay_id or not replay_id:
+                self._json_response({"error": "Invalid replay ID"}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            replays_dir = Path("artifacts/replays")
+            gz_path = replays_dir / f"{replay_id}.json.gz"
+            json_path = replays_dir / f"{replay_id}.json"
+
+            if not gz_path.exists() and not json_path.exists():
+                eval_replays_dir = Path("web/public/generated/replays")
+                json_path = eval_replays_dir / f"{replay_id}.json"
+                gz_path = eval_replays_dir / f"{replay_id}.json.gz"
+
+            target_file = gz_path if gz_path.exists() else (json_path if json_path.exists() else None)
+            if target_file is None:
+                self._json_response({"error": "Authentic replay file not found or pruned"}, status=HTTPStatus.NOT_FOUND)
+                return
+
+            try:
+                if str(target_file).endswith(".gz"):
+                    import gzip
+                    with gzip.open(target_file, "rt", encoding="utf-8") as f:
+                        data = json.load(f)
+                else:
+                    with target_file.open("r", encoding="utf-8") as f:
+                        data = json.load(f)
+                self._json_response(data)
+            except Exception as exc:
+                self._json_response({"error": f"Failed to read replay file: {exc}"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        if request_path == "/api/training/capture-policy":
+            from sheepdog.training.replay_writer import get_global_capture_policy, get_replay_writer
+            policy = get_global_capture_policy()
+            writer = get_replay_writer()
+            self._json_response({
+                "mode": policy.mode,
+                "next_n_counter": policy.next_n_counter,
+                "success_sample_rate": policy.success_sample_rate,
+                "target_stage": policy.target_stage,
+                "target_outcome": policy.target_outcome,
+                "queued_writes": writer.queued_count,
+                "written_count": writer.written_count,
+                "dropped_count": writer.dropped_count,
+                "failure_count": writer.failure_count,
+                "max_replays_per_stage": policy.max_replays_per_stage,
+                "max_total_replays": policy.max_total_replays,
+                "max_disk_mb": policy.max_disk_mb,
+            })
+            return
         self._json_response({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:  # noqa: N802  # pylint: disable=invalid-name
@@ -6112,12 +7056,14 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             threading.Thread(target=shutdown_server, daemon=True).start()
             return
         if self.path == "/api/training/pause":
-            print("[Sheepdog] Received training pause request", flush=True)
+            now_str = datetime.datetime.now().strftime("%H:%M:%S")
+            print(f"[Sheepdog] [{now_str}] Received training pause request", flush=True)
             payload = self.manager.pause()
             self._json_response(payload)
             return
         if self.path == "/api/training/stop":
-            print("[Sheepdog] Received training stop request", flush=True)
+            now_str = datetime.datetime.now().strftime("%H:%M:%S")
+            print(f"[Sheepdog] [{now_str}] Received training stop request", flush=True)
             payload = self.manager.stop()
             self._json_response(payload)
             return
@@ -6172,6 +7118,27 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
 
         if self.path == "/api/training/archive-active":
             payload, status = self.manager.archive_active_run()
+            self._json_response(payload, status=status)
+            return
+
+        if self.path in {"/api/training/remediation", "/api/training/remediation-fork"}:
+            body = self._read_json() if self.headers.get("Content-Length") else {}
+            target_stage = int(body.get("target_stage", 9))
+            canary_episodes = int(body.get("canary_episodes", 20))
+            payload, status = self.manager.remediation_fork(target_stage=target_stage, canary_episodes=canary_episodes)
+            self._json_response(payload, status=status)
+            return
+
+        if self.path in {"/api/training/cross-stage-fork", "/api/training/cross-stage"}:
+            body = self._read_json() if self.headers.get("Content-Length") else {}
+            target_stage = int(body.get("target_stage", 8))
+            starting_model_source = str(body.get("starting_model_source", "latest_stage9"))
+            source_checkpoint_id = body.get("source_checkpoint_id")
+            payload, status = self.manager.cross_stage_fork(
+                target_stage=target_stage,
+                starting_model_source=starting_model_source,
+                source_checkpoint_id=source_checkpoint_id,
+            )
             self._json_response(payload, status=status)
             return
 
@@ -6258,6 +7225,117 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             self._json_response(replay)
             return
 
+        if self.path == "/api/training/capture-policy":
+            from sheepdog.training.replay_writer import get_global_capture_policy, get_replay_writer
+            policy = get_global_capture_policy()
+            writer = get_replay_writer()
+
+            if "mode" in payload:
+                policy.mode = str(payload["mode"])
+            if "next_n" in payload:
+                try:
+                    count = int(payload["next_n"])
+                    if count > 0:
+                        policy.next_n_counter = min(count, 100)
+                        if policy.mode == "off":
+                            policy.mode = "selective"
+                except (ValueError, TypeError):
+                    pass
+            if "target_stage" in payload:
+                policy.target_stage = int(payload["target_stage"]) if payload["target_stage"] is not None else None
+            if "target_outcome" in payload:
+                policy.target_outcome = str(payload["target_outcome"])
+            if "success_sample_rate" in payload:
+                try:
+                    policy.success_sample_rate = float(payload["success_sample_rate"])
+                except (ValueError, TypeError):
+                    pass
+
+            self._json_response({
+                "status": "updated",
+                "mode": policy.mode,
+                "next_n_counter": policy.next_n_counter,
+                "success_sample_rate": policy.success_sample_rate,
+                "target_stage": policy.target_stage,
+                "target_outcome": policy.target_outcome,
+                "queued_writes": writer.queued_count,
+                "written_count": writer.written_count,
+                "dropped_count": writer.dropped_count,
+                "failure_count": writer.failure_count,
+            })
+            return
+
+        if self.path.startswith("/api/episodes/") and self.path.endswith("/reproduce"):
+            ep_id_str = self.path[len("/api/episodes/"): -len("/reproduce")]
+            try:
+                from sheepdog.training.episode_store import get_episode_store
+                from sheepdog.config import LabConfig
+
+                output_dir = Path(LabConfig().training.output_dir)
+                db_path = output_dir / "training-telemetry.sqlite"
+                store = get_episode_store(db_path)
+                ep_record = store.get_episode_by_id_or_replay_id(ep_id_str)
+                if not ep_record:
+                    self._json_response({"error": f"Episode {ep_id_str} not found"}, status=HTTPStatus.NOT_FOUND)
+                    return
+
+                seed = ep_record.get("seed") or 42
+                stage = ep_record.get("curriculum_stage") or ep_record.get("stage") or 8
+                checkpoint_id = ep_record.get("checkpoint_id")
+                checkpoint_ep = None
+                if checkpoint_id and "_ep_" in str(checkpoint_id):
+                    try:
+                        checkpoint_ep = int(str(checkpoint_id).split("_ep_")[-1])
+                    except (ValueError, TypeError):
+                        pass
+
+                bundle = self.manager.run_live_replay(
+                    seed=int(seed),
+                    checkpoint_episode=checkpoint_ep,
+                    environment_overrides={"rewards": {"instincts": {"curriculum_stage": int(stage)}}},
+                )
+                bundle["replay_mode"] = "reproduced"
+                bundle["replay_source"] = "reproduced"
+                bundle["capture_reason"] = "reproduced"
+                bundle["capture_status"] = "available"
+                bundle["disclaimer"] = "Episode rerun from recorded seed and configuration. Trajectory labeled reproduced."
+
+                ep_num = ep_record.get("id") or ep_id_str
+                replay_id = f"reproduced_ep_{ep_num}_seed_{seed}"
+                reproduced_path = Path("artifacts/replays") / f"{replay_id}.json.gz"
+                reproduced_path.parent.mkdir(parents=True, exist_ok=True)
+                import gzip
+                import numpy as np
+                def _ser(o: Any) -> Any:
+                    if isinstance(o, (np.integer, np.floating)):
+                        return o.item()
+                    if isinstance(o, np.ndarray):
+                        return o.tolist()
+                    if isinstance(o, np.bool_):
+                        return bool(o)
+                    if hasattr(o, "to_dict"):
+                        return o.to_dict()
+                    return str(o)
+
+                with gzip.open(reproduced_path, "wt", encoding="utf-8") as handle:
+                    json.dump(bundle, handle, indent=None, default=_ser)
+
+                store.update_replay_info(
+                    episode_id=ep_record.get("id"),
+                    replay_available=1,
+                    replay_id=replay_id,
+                    replay_path=str(reproduced_path),
+                    replay_source="reproduced",
+                    capture_reason="reproduced",
+                    capture_status="available",
+                )
+                self._json_response(bundle)
+            except Exception as exc:
+                import traceback
+                traceback.print_exc()
+                self._json_response({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
         if self.path != "/api/training/start":
             self._json_response({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
             return
@@ -6269,7 +7347,15 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             )
             return
 
-        requested_episodes = max(1, int(payload.get("episodes", 1)))
+        raw_total_timesteps = payload.get("total_timesteps")
+        total_timesteps = (
+            None if raw_total_timesteps is None else int(raw_total_timesteps)
+        )
+        requested_episodes = (
+            None
+            if total_timesteps is not None
+            else max(1, int(payload.get("episodes", 1)))
+        )
         fast_mode = bool(payload.get("fast_mode", True))
         enable_instinct_rewards = payload.get("enable_instinct_rewards")
         curriculum_stage = payload.get("curriculum_stage")
@@ -6278,31 +7364,44 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         promote_from_checkpoint_episode = payload.get("promote_from_checkpoint_episode")
         evaluation_mode = payload.get("evaluation_mode", "quick")
         resume = bool(payload.get("resume", False))
+        now_str = datetime.datetime.now().strftime("%H:%M:%S")
         print(
-            f"[Sheepdog] Received training start request (episodes={requested_episodes}, "
-            f"stage={curriculum_stage or 1}, fast_mode={fast_mode}, resume={resume})",
+            f"[Sheepdog] [{now_str}] Received training start request (total_timesteps={total_timesteps}, "
+            f"legacy_episodes={requested_episodes}, stage={curriculum_stage or 1}, "
+            f"resume={resume})",
             flush=True,
         )
         try:
-            response = self.manager.start(
-                requested_episodes,
-                fast_mode,
-                enable_instinct_rewards=(
+            start_kwargs = {
+                "enable_instinct_rewards": (
                     None if enable_instinct_rewards is None else bool(enable_instinct_rewards)
                 ),
-                curriculum_stage=(None if curriculum_stage is None else int(curriculum_stage)),
-                debug_reward_breakdown=(
+                "curriculum_stage": (
+                    None if curriculum_stage is None else int(curriculum_stage)
+                ),
+                "debug_reward_breakdown": (
                     None if debug_reward_breakdown is None else bool(debug_reward_breakdown)
                 ),
-                auto_promote=(None if auto_promote is None else bool(auto_promote)),
-                promote_from_checkpoint_episode=(
+                "auto_promote": None if auto_promote is None else bool(auto_promote),
+                "promote_from_checkpoint_episode": (
                     None
                     if promote_from_checkpoint_episode is None
                     else int(promote_from_checkpoint_episode)
                 ),
-                evaluation_mode=evaluation_mode,
-                resume=resume,
-            )
+                "evaluation_mode": evaluation_mode,
+                "resume": resume,
+            }
+            if total_timesteps is not None:
+                response = self.manager.start(
+                    total_timesteps=total_timesteps,
+                    **start_kwargs,
+                )
+            else:
+                response = self.manager.start(
+                    requested_episodes,
+                    fast_mode,
+                    **start_kwargs,
+                )
         except ValueError as exc:
             self._json_response(
                 {"error": str(exc), "code": "TRAINING_START_REJECTED"},
@@ -6312,20 +7411,8 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         self._json_response(response)
 
     def log_message(self, format: str, *args: Any) -> None:
-        """Suppress routine 200 OK polling HTTP request log messages to keep terminal clean."""
-        msg = format % args if args else format
-        if " 200 " in msg or " 204 " in msg or " 304 " in msg:
-            for route in (
-                "/api/training/status",
-                "/api/training/history",
-                "/api/scenarios",
-                "/api/health",
-                "/health",
-                "/generated/",
-            ):
-                if route in msg:
-                    return
-        super().log_message(format, *args)
+        """Suppress routine HTTP access log messages to keep terminal clean."""
+        pass
 
     def do_OPTIONS(self) -> None:  # noqa: N802  # pylint: disable=invalid-name
         """Handle HTTP OPTIONS (CORS preflight) requests."""

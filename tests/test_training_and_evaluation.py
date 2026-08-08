@@ -225,6 +225,27 @@ def test_build_training_job_config_scales_fast_mode_budget_for_late_stage() -> N
     assert config.training.total_timesteps >= 4 * 12_000
 
 
+def test_build_training_job_config_honors_explicit_timestep_budget() -> None:
+    config = _build_training_job_config(
+        total_timesteps=50_000,
+        curriculum_stage=2,
+    )
+
+    assert config.training.total_timesteps == 51_200
+    assert config.training.checkpoint_timesteps == (32_768, 51_200)
+    assert config.training.checkpoint_episodes == (0, 1)
+
+
+def test_build_training_job_config_preserves_legacy_budget_conversion() -> None:
+    config = _build_training_job_config(
+        210,
+        True,
+        curriculum_stage=2,
+    )
+
+    assert config.training.total_timesteps == 840_000
+
+
 def test_seed_success_gate_allows_two_of_three() -> None:
     assert _seed_success_gate(2, 3) is True
     assert _seed_success_gate(1, 3) is False

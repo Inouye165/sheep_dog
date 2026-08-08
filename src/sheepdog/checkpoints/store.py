@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,8 @@ class CheckpointMetadata:
     evaluation_replay_path: str | None = None
     run_id: str | None = None
     checkpoint_id: str | None = None
+    environment_episodes_total: int | None = None
+    environment_episodes_since_run_start: int | None = None
     parent_run_id: str | None = None
     parent_checkpoint_id: str | None = None
     global_timestep: int | None = None
@@ -56,6 +59,7 @@ class CheckpointMetadata:
     evaluation_seed_count: int | None = None
     environment_config_hash: str | None = None
     evaluation_timestamp: str | None = None
+    evaluation_id: str | None = None
     evaluation_mode: str | None = None
     promotion_eligible: bool | None = None
     active_runtime_seconds_total: float | None = None
@@ -64,6 +68,8 @@ class CheckpointMetadata:
     wall_clock_elapsed_seconds: float | None = None
     session_id: str | None = None
     promotion_gate: dict[str, Any] | None = None
+    policy_hidden_layers: list[int] | None = None
+    value_hidden_layers: list[int] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -92,9 +98,17 @@ class CheckpointStore:
         self.root.mkdir(parents=True, exist_ok=True)
 
     def write(self, metadata: CheckpointMetadata) -> Path:
-        path = self.root / f"checkpoint-{metadata.checkpoint_episode:06d}.json"
-        atomic_write_json(path, metadata.to_dict())
-        return path
+        payload = metadata.to_dict()
+        legacy_path = self.root / f"checkpoint-{metadata.checkpoint_episode:06d}.json"
+        if not metadata.checkpoint_id:
+            atomic_write_json(legacy_path, payload)
+            return legacy_path
+
+        safe_checkpoint_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", metadata.checkpoint_id)
+        checkpoint_path = self.root / f"checkpoint-{safe_checkpoint_id}.json"
+        atomic_write_json(checkpoint_path, payload)
+        atomic_write_json(legacy_path, payload)
+        return checkpoint_path
 
 
 def get_observation_schema_hash(config: Any) -> str:
@@ -154,12 +168,24 @@ def verify_checkpoint_compatibility(checkpoint_metadata: dict[str, Any], current
     cp_reward_version = checkpoint_metadata.get("reward_schema_version")
     cp_env_version = checkpoint_metadata.get("env_config_version")
 
-    # Gracefully compute hashes/versions for legacy checkpoints lacking metadata hashes
+    # Resolve hashes/versions for legacy checkpoints lacking metadata hashes
     if cp_obs_hash is None:
-        try:
-            cp_obs_hash = get_observation_schema_hash(checkpoint_metadata)
-        except Exception:
-            pass
+        policy_path_str = checkpoint_metadata.get("policy_state_path") or checkpoint_metadata.get("best_model_path")
+        if policy_path_str:
+            p_path = Path(policy_path_str)
+            if p_path.exists():
+                from sheepdog.checkpoints.sidecar import load_and_verify_sidecar
+                sidecar = load_and_verify_sidecar(p_path)
+                if sidecar:
+                    cp_obs_hash = sidecar.get("observation_schema_hash")
+                    if cp_action_hash is None:
+                        cp_action_hash = sidecar.get("action_schema_hash")
+
+        if cp_obs_hash is None:
+            try:
+                cp_obs_hash = get_observation_schema_hash(checkpoint_metadata)
+            except Exception:
+                pass
 
     if cp_action_hash is None:
         cp_action_hash = current_action_hash
