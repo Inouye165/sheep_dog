@@ -88,7 +88,7 @@ export function normalizeEpisodeRecord(raw: Partial<TrainingEpisode>, indexFallb
     ? "SUCCESS"
     : "TIMEOUT";
 
-  const completedAt = raw.completed_at || raw.created_at || new Date(1700000000000 + id * 1000).toISOString();
+  const completedAt = raw.completed_at || (raw as any).created_at || new Date(1700000000000 + id * 1000).toISOString();
   let tsMs = new Date(completedAt).getTime();
   if (isNaN(tsMs)) {
     tsMs = 1700000000000 + id * 1000;
@@ -96,8 +96,8 @@ export function normalizeEpisodeRecord(raw: Partial<TrainingEpisode>, indexFallb
 
   return {
     id,
-    run_id: raw.run_id,
-    session_id: raw.session_id,
+    run_id: raw.run_id ?? undefined,
+    session_id: raw.session_id ?? undefined,
     curriculum_stage: stage,
     global_environment_episode: globalEp,
     episode_in_stage: stageEp,
@@ -114,7 +114,7 @@ export function normalizeEpisodeRecord(raw: Partial<TrainingEpisode>, indexFallb
 }
 
 export function getCheckpointStage(c: Partial<CheckpointEntry>): number {
-  if (c.stage != null && typeof c.stage === "number" && !isNaN(c.stage)) return c.stage;
+  if ((c as any).stage != null && typeof (c as any).stage === "number" && !isNaN((c as any).stage)) return (c as any).stage;
   if (c.curriculum_stage != null && typeof c.curriculum_stage === "number" && !isNaN(c.curriculum_stage)) return c.curriculum_stage;
   return 1;
 }
@@ -144,8 +144,8 @@ export function normalizeCheckpointToCanonical(
 
   return {
     id: episodeNum,
-    run_id: c.session_id || c.journey || "current",
-    session_id: c.session_id,
+    run_id: c.journey || c.session_id || "current",
+    session_id: c.session_id ?? undefined,
     curriculum_stage: stage,
     global_environment_episode: episodeNum,
     episode_in_stage: episodeNum,
@@ -218,17 +218,31 @@ export function processCanonicalHistory(
   // Helper to filter canonical records by stage scope
   const applyFilters = (records: CanonicalEpisodeRecord[]): CanonicalEpisodeRecord[] => {
     if (stageScope === "current-journey") {
+      let filtered = records.filter((e) => !e.run_id || e.run_id === "current" || !e.run_id.startsWith("journey-"));
       if (activeRunId) {
-        return records.filter((e) => e.run_id === activeRunId);
+        filtered = filtered.filter((e) => e.run_id === activeRunId || e.run_id === "current" || !e.run_id?.startsWith("journey-"));
       }
-      return records;
+      return filtered;
     }
     if (stageScope === "all") {
       return records;
     }
-    const targetStage = stageScope === "current" ? effectiveStage : Number(stageScope);
+    if (stageScope === "current") {
+      let filtered = records.filter((e) => e.curriculum_stage === effectiveStage);
+      // For "current" stage, strictly exclude archived journeys
+      filtered = filtered.filter((e) => !e.run_id || e.run_id === "current" || !e.run_id.startsWith("journey-") || e.run_id === activeRunId);
+      if (activeRunId && filtered.some((e) => e.run_id === activeRunId)) {
+        filtered = filtered.filter((e) => e.run_id === activeRunId);
+      }
+      return filtered;
+    }
+    const targetStage = Number(stageScope);
     if (!isNaN(targetStage)) {
       let filtered = records.filter((e) => e.curriculum_stage === targetStage);
+      const currentRunRecords = filtered.filter((e) => !e.run_id || e.run_id === "current" || !e.run_id.startsWith("journey-") || e.run_id === activeRunId);
+      if (currentRunRecords.length > 0) {
+        filtered = currentRunRecords;
+      }
       if (activeRunId && filtered.some((e) => e.run_id === activeRunId)) {
         filtered = filtered.filter((e) => e.run_id === activeRunId);
       }
@@ -244,13 +258,30 @@ export function processCanonicalHistory(
     for (const ep of normalized) {
       map.set(ep.id, ep);
     }
-    const filtered = applyFilters(Array.from(map.values()));
+    const allDeduped = Array.from(map.values());
+    const filtered = applyFilters(allDeduped);
+
     if (filtered.length > 0) {
       return filtered.sort(compareCanonicalEpisodes);
     }
+
+    // We have raw episodes but the run_id sub-filter eliminated all of them
+    // (e.g. activeRunId not yet loaded or from a previous run).
+    // Do NOT fall back to checkpoints — return the stage-filtered episodes WITHOUT
+    // the run_id sub-filter so today's data is always visible.
+    const stageOnlyFiltered = ((): CanonicalEpisodeRecord[] => {
+      if (stageScope === "all" || stageScope === "current-journey") return allDeduped;
+      const targetStage = stageScope === "current" ? effectiveStage : Number(stageScope);
+      if (!isNaN(targetStage)) return allDeduped.filter((e) => e.curriculum_stage === targetStage);
+      return allDeduped;
+    })();
+
+    if (stageOnlyFiltered.length > 0) {
+      return stageOnlyFiltered.sort(compareCanonicalEpisodes);
+    }
   }
 
-  // 2. Fallback to checkpoints if rawEpisodes is empty or returned 0 items
+  // 2. Fallback to checkpoints ONLY when we have zero raw rollout episodes at all
   if (checkpoints && checkpoints.length > 0) {
     const normalizedCkpts = checkpoints.map((c, idx) => normalizeCheckpointToCanonical(c, idx + 1));
     const filteredCkpts = applyFilters(normalizedCkpts);
@@ -303,6 +334,7 @@ export function buildEpisodeBuckets(
       avgAllReward: ep.reward,
       avgSheepPenned: ep.sheep_penned,
       isCheckpointFallback: true,
+      episodes: [ep],
     }));
   }
 
@@ -394,37 +426,37 @@ export function buildFormalEvalMarkers(
     });
   }
 
-  return filtered
-    .map((c) => {
-      let xVal: number | null = null;
-      if (xAxisMode === "timesteps") {
-        xVal = c.global_timesteps ?? c.checkpoint_episode ?? null;
-      } else if (xAxisMode === "episode") {
-        xVal = c.total_training_episodes ?? c.cumulative_environment_episodes ?? c.checkpoint_episode ?? null;
-      } else if (xAxisMode === "runtime") {
-        xVal = c.checkpoint_episode ?? null;
-      } else if (xAxisMode === "calendar") {
-        const ts = c.recorded_at ?? c.evaluation_timestamp ?? c.created_timestamp;
-        xVal = ts ? new Date(ts).getTime() : c.checkpoint_episode ?? null;
-      }
+  const markers: FormalEvalMarker[] = [];
+  for (const c of filtered) {
+    let xVal: number | null = null;
+    if (xAxisMode === "timesteps") {
+      xVal = c.global_timesteps ?? c.checkpoint_episode ?? null;
+    } else if (xAxisMode === "episode") {
+      xVal = c.total_training_episodes ?? c.cumulative_environment_episodes ?? c.checkpoint_episode ?? null;
+    } else if (xAxisMode === "runtime") {
+      xVal = c.checkpoint_episode ?? null;
+    } else if (xAxisMode === "calendar") {
+      const ts = c.recorded_at ?? c.evaluation_timestamp ?? c.created_timestamp;
+      xVal = ts ? new Date(ts).getTime() : c.checkpoint_episode ?? null;
+    }
 
-      if (xVal == null || isNaN(xVal)) return null;
+    if (xVal == null || isNaN(xVal)) continue;
 
-      const rawRate = c.success_rate;
-      const ratePct = rawRate <= 1.0 ? rawRate * 100 : rawRate;
+    const rawRate = c.success_rate;
+    const ratePct = rawRate <= 1.0 ? rawRate * 100 : rawRate;
 
-      return {
-        checkpoint: c,
-        xVal,
-        successRatePct: ratePct,
-        avgSteps: c.average_completion_steps ?? null,
-        avgReward: c.average_reward ?? null,
-        avgSheepPenned: c.average_sheep_penned ?? null,
-        stage: c.curriculum_stage ?? 1,
-        isBest: c.checkpoint_episode === bestCheckpointEpisode,
-        label: `Formal Benchmark: ${Math.round(ratePct)}% (${c.evaluation_seed_count ?? 10}-seed test at ep ${c.checkpoint_episode})`,
-      };
-    })
-    .filter((m): m is FormalEvalMarker => m !== null)
-    .sort((a, b) => a.xVal - b.xVal);
+    markers.push({
+      checkpoint: c,
+      xVal,
+      successRatePct: ratePct,
+      avgSteps: c.average_completion_steps ?? null,
+      avgReward: c.average_reward ?? null,
+      avgSheepPenned: c.average_sheep_penned ?? null,
+      stage: c.curriculum_stage ?? 1,
+      isBest: c.checkpoint_episode === bestCheckpointEpisode,
+      label: `Formal Benchmark: ${Math.round(ratePct)}% (${c.evaluation_seed_count ?? 10}-seed test at ep ${c.checkpoint_episode})`,
+    });
+  }
+
+  return markers.sort((a, b) => a.xVal - b.xVal);
 }

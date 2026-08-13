@@ -1591,21 +1591,157 @@ select {
 .chart-tooltip {
   position: absolute;
   background: rgba(15, 23, 42, 0.96);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   border: 1px solid rgba(148, 163, 184, 0.25);
-  border-radius: 10px;
-  padding: 12px 14px;
+  border-radius: 12px;
+  padding: 14px 16px;
   color: #f8fafc;
   font-size: 0.75rem;
-  box-shadow: 0 10px 30px -5px rgba(0, 0, 0, 0.6), 0 8px 12px -6px rgba(0, 0, 0, 0.6);
-  min-width: 240px;
+  box-shadow: 0 16px 36px -6px rgba(0, 0, 0, 0.75), 0 8px 16px -4px rgba(0, 0, 0, 0.5);
+  min-width: 280px;
+  max-width: 340px;
   pointer-events: none;
   z-index: 100;
   transition: opacity 0.15s ease-out, transform 0.15s ease-out;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
+}
+
+/* Auto-Promote Hover Popover Styles */
+.auto-promote-popover-anchor {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.auto-promote-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  width: 320px;
+  background: rgba(15, 23, 42, 0.98);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 12px;
+  padding: 14px 16px;
+  color: #f8fafc;
+  font-size: 0.75rem;
+  box-shadow: 0 18px 40px -6px rgba(0, 0, 0, 0.8), 0 8px 20px -4px rgba(0, 0, 0, 0.6);
+  z-index: 1000;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  animation: fadeIn 0.15s ease-out;
+}
+
+.auto-promote-popover__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.auto-promote-popover__title {
+  font-weight: 700;
+  font-size: 0.82rem;
+  color: #f8fafc;
+}
+
+.auto-promote-popover__badge {
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.auto-promote-popover__rules {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.72rem;
+  color: #cbd5e1;
+  line-height: 1.35;
+}
+
+.auto-promote-popover__rule {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.auto-promote-popover__divider {
+  height: 1px;
+  background: rgba(148, 163, 184, 0.15);
+  margin: 2px 0;
+}
+
+.auto-promote-popover__status-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.72rem;
+}
+
+.auto-promote-popover__section-title {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #94a3b8;
+  font-weight: 700;
+  margin-bottom: 2px;
+}
+
+.auto-promote-popover__stat-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: #cbd5e1;
+}
+
+.auto-promote-popover__stat-row strong {
+  color: #f8fafc;
+  font-weight: 600;
+}
+
+.auto-promote-popover__status-banner {
+  padding: 8px 10px;
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 2px;
+}
+
+.auto-promote-popover__status-banner--ready {
+  background: rgba(34, 197, 94, 0.15);
+  border: 1px solid rgba(34, 197, 94, 0.35);
+  color: #4ade80;
+}
+
+.auto-promote-popover__status-banner--not-ready {
+  background: rgba(239, 68, 68, 0.15);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  color: #f87171;
+}
+
+.auto-promote-popover__status-banner--pending {
+  background: rgba(59, 130, 246, 0.15);
+  border: 1px solid rgba(59, 130, 246, 0.35);
+  color: #60a5fa;
+}
+
+.auto-promote-popover__status-label {
+  font-weight: 700;
+  font-size: 0.76rem;
+}
+
+.auto-promote-popover__status-detail {
+  font-size: 0.68rem;
+  opacity: 0.9;
 }
 
 .chart-tooltip__header {
@@ -1613,14 +1749,16 @@ select {
   justify-content: space-between;
   align-items: center;
   border-bottom: 1px solid rgba(148, 163, 184, 0.2);
-  padding-bottom: 6px;
-  margin-bottom: 4px;
+  padding-bottom: 8px;
+  margin-bottom: 2px;
+  gap: 8px;
 }
 
 .chart-tooltip__episode {
   font-weight: 700;
-  font-size: 0.85rem;
+  font-size: 0.88rem;
   color: #ffffff;
+  letter-spacing: -0.01em;
 }
 
 .chart-tooltip__stage-pill {
@@ -1632,13 +1770,67 @@ select {
   text-shadow: 0 1px 1px rgba(0, 0, 0, 0.3);
 }
 
+/* Accessible High-Legibility Timestamp Badge */
+.chart-tooltip__timestamp-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: 'Roboto Mono', 'SF Mono', 'Cascadia Code', monospace;
+  font-size: 0.73rem;
+  font-weight: 600;
+  color: #e2e8f0;
+  background: rgba(30, 41, 59, 0.85);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 6px;
+  padding: 3px 8px;
+  white-space: nowrap;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.chart-tooltip__timestamp-icon {
+  font-size: 0.7rem;
+  opacity: 0.85;
+}
+
 .chart-tooltip__section-title {
   font-size: 0.68rem;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: rgba(148, 163, 184, 0.75);
+  letter-spacing: 0.06em;
+  color: #94a3b8;
   margin-top: 4px;
+  font-weight: 700;
+}
+
+/* Stat Grid & Card Layout */
+.chart-tooltip__stat-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.chart-tooltip__stat-card {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 8px;
+  padding: 6px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.chart-tooltip__stat-label {
+  font-size: 0.64rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #94a3b8;
   font-weight: 600;
+}
+
+.chart-tooltip__stat-value {
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: #f8fafc;
 }
 
 .chart-tooltip__grid {
@@ -1649,7 +1841,7 @@ select {
 }
 
 .chart-tooltip__metric-label {
-  color: rgba(148, 163, 184, 0.9);
+  color: #94a3b8;
 }
 
 .chart-tooltip__metric-value {
@@ -1664,6 +1856,83 @@ select {
   justify-content: center;
   font-size: 0.8rem;
   width: 14px;
+}
+
+/* Stage Progress Bar */
+.chart-tooltip__progress-container {
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px dashed rgba(148, 163, 184, 0.25);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.chart-tooltip__progress-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #cbd5e1;
+}
+
+.chart-tooltip__progress-track {
+  height: 6px;
+  width: 100%;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
+  overflow: hidden;
+  position: relative;
+}
+
+.chart-tooltip__progress-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+/* Actionable Stage Recommendation Banner */
+.chart-tooltip__banner {
+  margin-top: 6px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.chart-tooltip__banner--ready {
+  background: rgba(6, 95, 70, 0.35);
+  border: 1px solid rgba(52, 211, 153, 0.4);
+  color: #6ee7b7;
+}
+
+.chart-tooltip__banner--progress {
+  background: rgba(12, 74, 110, 0.35);
+  border: 1px solid rgba(56, 189, 248, 0.4);
+  color: #7dd3fc;
+}
+
+.chart-tooltip__banner--stagnant {
+  background: rgba(69, 26, 3, 0.4);
+  border: 1px solid rgba(251, 191, 36, 0.4);
+  color: #fcd34d;
+}
+
+.chart-tooltip__banner-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 700;
+  font-size: 0.78rem;
+  letter-spacing: 0.02em;
+}
+
+.chart-tooltip__banner-desc {
+  font-size: 0.7rem;
+  opacity: 0.9;
+  line-height: 1.3;
 }
 
 .chart-tooltip__promo-section {

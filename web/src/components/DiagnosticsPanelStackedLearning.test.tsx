@@ -112,6 +112,8 @@ describe("StackedLearningPanels — Canonical Data Semantics", () => {
         average_sheep_penned: 0.5,
         average_reward: -80,
         average_completion_seconds: 30,
+        timeout_rate: 0.9,
+        records: [],
       },
     ];
 

@@ -296,8 +296,23 @@ export interface TrainingRuntimeSummary {
 }
 
 export interface AutoPromoteGateDiagnostics {
+  ready?: boolean;
   decision: "pending" | "hold" | "promote" | "promote_ready" | "blocked" | string;
+  status_text?: "READY TO PROMOTE" | "NOT READY" | "COLLECTING EVIDENCE" | string;
   reason: string;
+  blocking_reasons?: string[];
+  stage?: number;
+  success_threshold?: number;
+  window_size?: number;
+  formal_evaluations_available?: number;
+  formal_evaluations_required?: number;
+  qualified_evaluations?: number;
+  qualified_evaluations_required?: number;
+  recent_average_success?: number;
+  persistent_seed_failure?: boolean;
+  blocking_seed?: number | null;
+  blocking_seed_consecutive_failures?: number;
+  blocking_seeds?: number[];
   seed_count?: number;
   success_count?: number;
   best_success?: number;
@@ -306,7 +321,6 @@ export interface AutoPromoteGateDiagnostics {
   success_rate_ok?: boolean;
   timeout_ok?: boolean;
   reward_close_ok?: boolean;
-  window_size?: number;
   minimum_required_evaluations?: number;
   minimum_seed_trials?: number;
   total_seed_trials?: number;
@@ -319,8 +333,6 @@ export interface AutoPromoteGateDiagnostics {
   latest_floor_passed?: boolean;
   reward_guard_passed?: boolean;
   seed_consistency_passed?: boolean;
-  blocking_seeds?: number[];
-  blocking_reasons?: string[];
   [key: string]: any;
 }
 

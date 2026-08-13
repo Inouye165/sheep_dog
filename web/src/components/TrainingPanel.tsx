@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { CopyAgentDataButton } from "./CopyAgentDataButton";
 import type { AutoPromoteGateDiagnostics, CheckpointEntry, CheckpointIndex, TrainingStatus } from "../state/types";
 
@@ -324,10 +324,55 @@ export function TrainingPanel({
   const canResume = !busy && resumeAvailable && (resumeRemainingEpisodes ?? 0) > 0;
   const effectiveAutoPromoteThreshold = autoPromoteThreshold ?? PROMOTE_THRESHOLD;
   const hasAutoPromoteGate = autoPromoteGate != null;
+
+  const [showAutoPromotePopover, setShowAutoPromotePopover] = useState(false);
+
+  const stageTargetPct = useMemo(() => {
+    if (autoPromoteGate?.success_threshold != null) {
+      return Math.round(autoPromoteGate.success_threshold * 100);
+    }
+    if (autoPromoteThreshold != null) {
+      return Math.round(autoPromoteThreshold * 100);
+    }
+    return curriculumStage <= 1 ? 80 : 90;
+  }, [autoPromoteGate?.success_threshold, autoPromoteThreshold, curriculumStage]);
+
+  const popoverEvalsAvailable = autoPromoteGate?.formal_evaluations_available ?? (autoPromoteGate?.recent_checkpoints_considered ?? 0);
+  const popoverEvalsRequired = autoPromoteGate?.formal_evaluations_required ?? (autoPromoteGate?.minimum_required_evaluations ?? 6);
+  const popoverQualifiedEvals = autoPromoteGate?.qualified_evaluations ?? (autoPromoteGate?.recent_qualifying_checkpoints ?? 0);
+  const popoverQualifiedRequired = autoPromoteGate?.qualified_evaluations_required ?? (autoPromoteGate?.min_qualified_streak ?? 5);
+  const popoverRecentAvg = autoPromoteGate?.recent_average_success ?? autoPromoteGate?.aggregate_success_rate ?? null;
+  const popoverRecentAvgPct = popoverRecentAvg != null ? Math.round(popoverRecentAvg * 100) : 0;
+  const popoverPersistentSeed = Boolean(autoPromoteGate?.persistent_seed_failure);
+  const popoverBlockingSeed = autoPromoteGate?.blocking_seed ?? (autoPromoteGate?.blocking_seeds?.[0] ?? null);
+  const popoverBlockingFails = autoPromoteGate?.blocking_seed_consecutive_failures ?? 3;
+
+  const popoverStatus = useMemo(() => {
+    if (popoverEvalsAvailable < popoverEvalsRequired) {
+      return {
+        tone: "pending" as const,
+        label: "COLLECTING EVIDENCE",
+        detail: `${popoverEvalsAvailable} formal evaluations available; minimum ${popoverEvalsRequired} required.`
+      };
+    }
+    if (autoPromoteGate?.ready || autoPromoteGate?.decision === "promote_ready") {
+      return {
+        tone: "ready" as const,
+        label: "READY TO PROMOTE",
+        detail: "All formal evaluation criteria met."
+      };
+    }
+    return {
+      tone: "not-ready" as const,
+      label: "NOT READY",
+      detail: autoPromoteGate?.reason || autoPromoteGate?.blocking_reasons?.[0] || "Criteria not satisfied"
+    };
+  }, [popoverEvalsAvailable, popoverEvalsRequired, autoPromoteGate]);
+
   const decisionToneClass =
-    autoPromoteGate?.decision === "promote"
+    autoPromoteGate?.ready || autoPromoteGate?.decision === "promote_ready" || autoPromoteGate?.decision === "promote"
       ? "gate-pill gate-pill--pass"
-      : autoPromoteGate?.decision === "hold"
+      : autoPromoteGate?.decision === "hold" || autoPromoteGate?.decision === "blocked"
         ? "gate-pill gate-pill--fail"
         : "gate-pill gate-pill--pending";
   const gateToneClass = (ok: boolean): string =>
@@ -1036,19 +1081,78 @@ export function TrainingPanel({
           {/* Auto-promotion controls */}
           <div style={{ background: "rgba(148, 163, 184, 0.04)", border: "1px solid var(--panel-border)", borderRadius: "0.6rem", padding: "0.75rem", display: "flex", flexDirection: "column", gap: "0.5rem" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <label style={{ display: "flex", alignItems: "center", gap: "0.45rem", cursor: "pointer", fontSize: "0.78rem" }}>
-                <input
-                  type="checkbox"
-                  checked={autoPromote}
-                  onChange={(event) => onAutoPromoteChange(event.target.checked)}
-                  disabled={busy}
-                />
-                <strong>Auto-promote stages</strong>
-              </label>
+              <div
+                className="auto-promote-popover-anchor"
+                onMouseEnter={() => setShowAutoPromotePopover(true)}
+                onMouseLeave={() => setShowAutoPromotePopover(false)}
+              >
+                <label style={{ display: "flex", alignItems: "center", gap: "0.45rem", cursor: "pointer", fontSize: "0.78rem" }}>
+                  <input
+                    type="checkbox"
+                    checked={autoPromote}
+                    onChange={(event) => onAutoPromoteChange(event.target.checked)}
+                    disabled={busy}
+                  />
+                  <strong style={{ textDecoration: "underline dotted rgba(148, 163, 184, 0.4)", textUnderlineOffset: "3px" }}>Auto-promote stages</strong>
+                </label>
+
+                {showAutoPromotePopover && (
+                  <div className="auto-promote-popover" role="tooltip" data-testid="auto-promote-popover">
+                    <div className="auto-promote-popover__header">
+                      <span className="auto-promote-popover__title">Auto Promotion Criteria</span>
+                      <span className="auto-promote-popover__badge" style={{ background: "rgba(59, 130, 246, 0.18)", color: "#60a5fa" }}>
+                        Stage target: {stageTargetPct}% success
+                      </span>
+                    </div>
+
+                    <div className="auto-promote-popover__rules">
+                      <div className="auto-promote-popover__rule">• Minimum 6 recent formal evaluations</div>
+                      <div className="auto-promote-popover__rule">• At least 75% of recent evaluations must meet {stageTargetPct}%</div>
+                      <div className="auto-promote-popover__rule">• Recent evaluation average must be at least {stageTargetPct}%</div>
+                      <div className="auto-promote-popover__rule">• No deterministic seed may fail 3 formal evaluations in a row</div>
+                    </div>
+
+                    <div className="auto-promote-popover__divider" />
+
+                    <div className="auto-promote-popover__status-section">
+                      <div className="auto-promote-popover__section-title">Current status</div>
+                      <div className="auto-promote-popover__stat-row">
+                        <span>Formal evaluations:</span>
+                        <strong>{popoverEvalsAvailable}</strong>
+                      </div>
+                      <div className="auto-promote-popover__stat-row">
+                        <span>Qualified:</span>
+                        <strong>{popoverQualifiedEvals} / {popoverQualifiedRequired} required</strong>
+                      </div>
+                      <div className="auto-promote-popover__stat-row">
+                        <span>Recent average:</span>
+                        <strong>{popoverRecentAvgPct}%</strong>
+                      </div>
+                      <div className="auto-promote-popover__stat-row">
+                        <span>Persistent seed failures:</span>
+                        <strong>
+                          {popoverPersistentSeed
+                            ? `Seed ${popoverBlockingSeed} — ${popoverBlockingFails} consecutive failures`
+                            : "None"}
+                        </strong>
+                      </div>
+                    </div>
+
+                    <div className={`auto-promote-popover__status-banner auto-promote-popover__status-banner--${popoverStatus.tone}`}>
+                      <div className="auto-promote-popover__status-label">Status: {popoverStatus.label}</div>
+                      {popoverStatus.detail && (
+                        <div className="auto-promote-popover__status-detail">{popoverStatus.detail}</div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
               <button
                 type="button"
                 onClick={() => navigateToHelp("auto-promote")}
                 style={{ background: "transparent", border: "none", color: "var(--accent)", cursor: "pointer", padding: 0, fontSize: "0.78rem" }}
+                aria-label="Auto-promote documentation"
               >
                 ❓
               </button>
@@ -1063,25 +1167,31 @@ export function TrainingPanel({
                   <div style={{ display: "flex", justifyContent: "space-between" }}>
                     <span>Verdict</span>
                     <strong className={decisionToneClass} style={{ padding: "0.05rem 0.35rem", borderRadius: "3px" }}>
-                      {(autoPromoteGate.decision ?? "PENDING").toUpperCase()}
+                      {(autoPromoteGate.status_text || autoPromoteGate.decision || "PENDING").toUpperCase()}
                     </strong>
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between" }}>
-                    <span>Success Gate</span>
-                    <strong className={gateToneClass(Boolean(autoPromoteGate.aggregate_success_rate != null ? (autoPromoteGate.aggregate_success_rate >= 0.9) : autoPromoteGate.success_rate_ok))}>
-                      {autoPromoteGate.aggregate_success_rate != null ? `${(autoPromoteGate.aggregate_success_rate * 100).toFixed(0)}% (min 90%)` : autoPromoteGate.success_rate_ok ? "PASS" : "FAIL"}
+                    <span>Formal Evals</span>
+                    <strong className={gateToneClass(popoverEvalsAvailable >= popoverEvalsRequired)}>
+                      {popoverEvalsAvailable}/{popoverEvalsRequired}
                     </strong>
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between" }}>
-                    <span>Seed progress</span>
-                    <strong className={gateToneClass(Boolean(autoPromoteGate.seed_consistency_passed ?? autoPromoteGate.seed_gate_target_met))}>
-                      {autoPromoteGate.total_seed_trials != null ? `${autoPromoteGate.total_successes}/${autoPromoteGate.total_seed_trials}` : `${autoPromoteGate.seed_gate_hits ?? 0}/${autoPromoteGate.min_seed_gate_hits ?? 0}`}
+                    <span>Consistency</span>
+                    <strong className={gateToneClass(popoverQualifiedEvals >= popoverQualifiedRequired)}>
+                      {popoverQualifiedEvals}/{popoverQualifiedRequired} (min {stageTargetPct}%)
                     </strong>
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between" }}>
-                    <span>Recent CPs</span>
-                    <strong className={gateToneClass(Boolean((autoPromoteGate.recent_qualifying_checkpoints ?? autoPromoteGate.qualified_streak ?? 0) >= 2))}>
-                      {autoPromoteGate.recent_qualifying_checkpoints != null ? `${autoPromoteGate.recent_qualifying_checkpoints}/3 qualifying` : `${autoPromoteGate.qualified_streak ?? 0}/${autoPromoteGate.min_qualified_streak ?? 3}`}
+                    <span>Recent Average</span>
+                    <strong className={gateToneClass(popoverRecentAvgPct >= stageTargetPct)}>
+                      {popoverRecentAvgPct}% (target ≥ {stageTargetPct}%)
+                    </strong>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between" }}>
+                    <span>Seed Guard</span>
+                    <strong className={gateToneClass(!popoverPersistentSeed)}>
+                      {popoverPersistentSeed ? `Seed ${popoverBlockingSeed} (FAIL)` : "PASS"}
                     </strong>
                   </div>
                 </div>
