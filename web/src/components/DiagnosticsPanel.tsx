@@ -330,6 +330,11 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
 
   if (hoveredPoint.bucket) {
     const b = hoveredPoint.bucket;
+    const stageNum = b.episodes && b.episodes[0] ? b.episodes[0].curriculum_stage : 1;
+    const threshPct = Math.round(getSuccessThreshold(stageNum) * 100);
+    const thisPasses = b.successRate >= threshPct;
+    const headerDate = formatDate(b.endTimestamp || b.startTimestamp);
+
     return createPortal(
       <div
         ref={tooltipRef}
@@ -340,10 +345,17 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
         aria-live="polite"
         data-testid="chart-tooltip"
       >
-        <div className="chart-tooltip__header">
-          <span className="chart-tooltip__episode">
-            {b.episodeCount === 1 ? `Episode ${b.firstEpisode}` : `Episodes ${b.firstEpisode}–${b.lastEpisode}`}
-          </span>
+        <div className="chart-tooltip__header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem", marginBottom: "0.4rem" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            <span className="chart-tooltip__episode">
+              {b.episodeCount === 1 ? `Episode ${b.firstEpisode}` : `Episodes ${b.firstEpisode}–${b.lastEpisode}`}
+            </span>
+          </div>
+          {headerDate && (
+            <span style={{ fontSize: "0.85rem", fontWeight: "700", color: "#f8fafc", background: "rgba(255,255,255,0.12)", padding: "2px 8px", borderRadius: "4px", whiteSpace: "nowrap" }}>
+              {headerDate}
+            </span>
+          )}
         </div>
         <div className="chart-tooltip__section-title">
           {b.episodeCount === 1 ? "1 Episode Rollout" : `${b.episodeCount} Non-Overlapping Episodes`}
@@ -366,11 +378,29 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
           <span className="chart-tooltip__metric-value">{b.avgSheepPenned.toFixed(1)}</span>
           <span></span>
         </div>
-        {formatDate(b.startTimestamp) && formatDate(b.endTimestamp) && (
-          <div className="chart-tooltip__time">
-            {formatDate(b.startTimestamp)} – {formatDate(b.endTimestamp)}
+
+        {/* Stage Completion Criteria Section */}
+        <div className="chart-tooltip__promo-section" style={{ marginTop: "0.6rem", paddingTop: "0.6rem", borderTop: "1px solid rgba(255,255,255,0.12)" }}>
+          <div className="chart-tooltip__section-title" style={{ marginTop: 0, color: "#93c5fd" }}>
+            🎯 Stage Completion Criteria (Target: Stage {stageNum} ≥ {threshPct}%)
           </div>
-        )}
+
+          <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 10px", fontSize: "0.78rem", marginTop: "6px" }}>
+            <span style={{ color: "rgba(148,163,184,0.9)", fontWeight: "600" }}>This Item:</span>
+            <span>
+              {thisPasses ? (
+                <span style={{ color: "#4ade80", fontWeight: "bold" }}>PASS ✓ ({b.successRate.toFixed(1)}% ≥ {threshPct}% target)</span>
+              ) : (
+                <span style={{ color: "#fb923c", fontWeight: "bold" }}>FAIL ✗ ({b.successRate.toFixed(1)}% &lt; {threshPct}% target)</span>
+              )}
+            </span>
+
+            <span style={{ color: "rgba(148,163,184,0.9)", fontWeight: "600" }}>Set Status:</span>
+            <span style={{ color: thisPasses ? "#4ade80" : "#cbd5e1", fontWeight: "600" }}>
+              {b.successCount} of {b.episodeCount} rollouts pass in this bucket
+            </span>
+          </div>
+        </div>
       </div>,
       document.body
     );
@@ -378,6 +408,11 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
 
   if (hoveredPoint.rawEpisode) {
     const ep = hoveredPoint.rawEpisode;
+    const stageNum = ep.curriculum_stage;
+    const threshPct = Math.round(getSuccessThreshold(stageNum) * 100);
+    const thisPasses = ep.result === "SUCCESS" || ep.success === true;
+    const headerDate = formatDate(ep.completed_at);
+
     return createPortal(
       <div
         ref={tooltipRef}
@@ -388,11 +423,18 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
         aria-live="polite"
         data-testid="chart-tooltip"
       >
-        <div className="chart-tooltip__header">
-          <span className="chart-tooltip__episode">Training Ep {ep.global_environment_episode}</span>
-          <span className="chart-tooltip__stage-pill" style={{ background: stageColor(ep.curriculum_stage) }}>
-            Stage {ep.curriculum_stage}
-          </span>
+        <div className="chart-tooltip__header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem", marginBottom: "0.4rem" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            <span className="chart-tooltip__episode">Training Ep {ep.global_environment_episode}</span>
+            <span className="chart-tooltip__stage-pill" style={{ background: stageColor(ep.curriculum_stage) }}>
+              Stage {ep.curriculum_stage}
+            </span>
+          </div>
+          {headerDate && (
+            <span style={{ fontSize: "0.85rem", fontWeight: "700", color: "#f8fafc", background: "rgba(255,255,255,0.12)", padding: "2px 8px", borderRadius: "4px", whiteSpace: "nowrap" }}>
+              {headerDate}
+            </span>
+          )}
         </div>
         <div className="chart-tooltip__section-title">Raw Rollout Episode</div>
         <div className="chart-tooltip__grid">
@@ -416,9 +458,24 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
             </>
           )}
         </div>
-        {formatDate(ep.completed_at) && (
-          <div className="chart-tooltip__time">{formatDate(ep.completed_at)}</div>
-        )}
+
+        {/* Stage Completion Criteria Section */}
+        <div className="chart-tooltip__promo-section" style={{ marginTop: "0.6rem", paddingTop: "0.6rem", borderTop: "1px solid rgba(255,255,255,0.12)" }}>
+          <div className="chart-tooltip__section-title" style={{ marginTop: 0, color: "#93c5fd" }}>
+            🎯 Stage Completion Criteria (Target: Stage {stageNum} ≥ {threshPct}%)
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 10px", fontSize: "0.78rem", marginTop: "6px" }}>
+            <span style={{ color: "rgba(148,163,184,0.9)", fontWeight: "600" }}>This Episode:</span>
+            <span>
+              {thisPasses ? (
+                <span style={{ color: "#4ade80", fontWeight: "bold" }}>PASS ✓ (100% penned)</span>
+              ) : (
+                <span style={{ color: "#fb923c", fontWeight: "bold" }}>FAIL ✗ ({ep.result})</span>
+              )}
+            </span>
+          </div>
+        </div>
       </div>,
       document.body
     );
@@ -487,7 +544,10 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
 
   const cStage = getCheckpointStage(checkpoint);
   const thresh = getSuccessThreshold(cStage);
+  const threshPct = Math.round(thresh * 100);
   const gate = checkpoint.promotion_gate;
+  const thisPasses = checkpoint.success_rate >= thresh;
+  const headerDate = formatDate(checkpoint.recorded_at);
 
   return createPortal(
     <div
@@ -499,14 +559,21 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
       aria-live="polite"
       data-testid="chart-tooltip"
     >
-      <div className="chart-tooltip__header">
-        <span className="chart-tooltip__episode">Episode {checkpoint.checkpoint_episode}</span>
-        <span
-          className="chart-tooltip__stage-pill"
-          style={{ background: stageColor(cStage) }}
-        >
-          Stage {cStage === -1 ? "Legacy" : cStage}
-        </span>
+      <div className="chart-tooltip__header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem", marginBottom: "0.4rem" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+          <span className="chart-tooltip__episode">Episode {checkpoint.checkpoint_episode}</span>
+          <span
+            className="chart-tooltip__stage-pill"
+            style={{ background: stageColor(cStage) }}
+          >
+            Stage {cStage === -1 ? "Legacy" : cStage}
+          </span>
+        </div>
+        {headerDate && (
+          <span style={{ fontSize: "0.85rem", fontWeight: "700", color: "#f8fafc", background: "rgba(255,255,255,0.12)", padding: "2px 8px", borderRadius: "4px", whiteSpace: "nowrap" }}>
+            {headerDate}
+          </span>
+        )}
       </div>
 
       <div className="chart-tooltip__section-title">Runtime</div>
@@ -533,7 +600,7 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
         <span className="chart-tooltip__metric-label">Current Checkpoint:</span>
         <span className="chart-tooltip__metric-value">{(checkpoint.success_rate * 100).toFixed(1)}%</span>
         <span className="chart-tooltip__metric-indicator">
-          {checkpoint.success_rate >= thresh ? (
+          {thisPasses ? (
             <span style={{ color: "#4ade80", fontWeight: "bold" }}>✓</span>
           ) : (
             <span style={{ color: "#fb923c", fontWeight: "bold" }}>✗</span>
@@ -573,63 +640,69 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
         <span></span>
       </div>
 
-      <div className="chart-tooltip__promo-section">
-        <div className="chart-tooltip__section-title" style={{ marginTop: 0 }}>Stage Gate Promotion</div>
-        {gate ? (
-          <div>
-            <div
-              className={`chart-tooltip__promo-status chart-tooltip__promo-status--${
-                gate.decision === "promote_ready"
-                  ? "qualified"
-                  : gate.decision === "pending"
-                  ? "pending"
-                  : "unqualified"
-              }`}
-            >
-              <span>
-                {gate.decision === "promote_ready"
-                  ? "🟢 Promote Ready"
-                  : gate.decision === "pending"
-                  ? "🟡 Pending Evidence"
-                  : "🔴 Gate Blocked"}
-              </span>
-              <span style={{ fontSize: "0.65rem", fontWeight: "normal", color: "rgba(148, 163, 184, 0.8)" }}>
-                (Req: {(thresh * 100).toFixed(0)}% rolling succ, ≤10% timeout)
-              </span>
-            </div>
-            <div style={{ fontSize: "0.75rem", marginTop: "4px", color: "#cbd5e1" }}>
-              <div><strong>Rolling Success:</strong> {(gate.aggregate_success_rate != null ? gate.aggregate_success_rate * 100 : checkpoint.success_rate * 100).toFixed(1)}% ({gate.total_successes ?? 0}/{gate.total_seed_trials ?? 0} seed trials across {gate.recent_checkpoints_considered ?? 0} CPs)</div>
-              <div><strong>Recent Checkpoint Consistency:</strong> {gate.recent_qualifying_checkpoints ?? 0}/3 qualifying</div>
-              <div><strong>Latest Checkpoint Floor:</strong> {(gate.latest_success_rate != null ? gate.latest_success_rate * 100 : checkpoint.success_rate * 100).toFixed(1)}% ({gate.latest_floor_passed ? "✓ ≥80%" : "✗ <80%"})</div>
-              {gate.blocking_seeds && gate.blocking_seeds.length > 0 && (
-                <div style={{ color: "#ef4444" }}><strong>Blocking Seeds:</strong> {gate.blocking_seeds.join(", ")}</div>
-              )}
-              {gate.blocking_reasons && gate.blocking_reasons.length > 0 && (
-                <div style={{ color: "#f97316", marginTop: "2px" }}>
-                  {gate.blocking_reasons.map((r, i) => (
-                    <div key={i}>• {r}</div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        ) : (
-          <div className="chart-tooltip__promo-status chart-tooltip__promo-status--unqualified">
-            <span>
-              {checkpoint.success_rate >= thresh && checkpoint.timeout_rate <= 0.1
-                ? "🟢 Checkpoint Qualified"
-                : "🟠 Checkpoint Below Target"}
-            </span>
-            <span style={{ fontSize: "0.65rem", fontWeight: "normal", color: "rgba(148, 163, 184, 0.8)" }}>
-              (Req: {(thresh * 100).toFixed(0)}% succ, ≤10% timeout)
-            </span>
-          </div>
-        )}
-      </div>
+      {/* Stage Completion Criteria Section */}
+      <div className="chart-tooltip__promo-section" style={{ marginTop: "0.6rem", paddingTop: "0.6rem", borderTop: "1px solid rgba(255,255,255,0.12)" }}>
+        <div className="chart-tooltip__section-title" style={{ marginTop: 0, color: "#93c5fd" }}>
+          🎯 Stage Completion Criteria (Stage {cStage} Target: ≥ {threshPct}%)
+        </div>
 
-      {formatDate(checkpoint.recorded_at) && (
-        <div className="chart-tooltip__time">{formatDate(checkpoint.recorded_at)}</div>
-      )}
+        <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 10px", fontSize: "0.78rem", marginTop: "6px" }}>
+          <span style={{ color: "rgba(148,163,184,0.9)", fontWeight: "600" }}>This Checkpoint:</span>
+          <span>
+            {thisPasses ? (
+              <span style={{ color: "#4ade80", fontWeight: "bold" }}>PASS ✓ ({(checkpoint.success_rate * 100).toFixed(1)}% ≥ {threshPct}% required)</span>
+            ) : (
+              <span style={{ color: "#fb923c", fontWeight: "bold" }}>FAIL ✗ ({(checkpoint.success_rate * 100).toFixed(1)}% &lt; {threshPct}% required)</span>
+            )}
+          </span>
+
+          <span style={{ color: "rgba(148,163,184,0.9)", fontWeight: "600" }}>Set Status:</span>
+          <span>
+            {gate ? (
+              <span style={{ color: gate.recent_qualifying_checkpoints != null && gate.recent_qualifying_checkpoints >= (gate.minimum_required_evaluations ?? 3) ? "#4ade80" : "#cbd5e1", fontWeight: "600" }}>
+                {gate.recent_qualifying_checkpoints ?? 0} of last {gate.recent_checkpoints_considered ?? 5} pass (Min {gate.minimum_required_evaluations ?? 3} required)
+              </span>
+            ) : (
+              <span style={{ color: thisPasses ? "#4ade80" : "#cbd5e1", fontWeight: "600" }}>
+                {thisPasses ? "Checkpoint Qualified (Accumulating streak)" : "Below promotion threshold"}
+              </span>
+            )}
+          </span>
+
+          <span style={{ color: "rgba(148,163,184,0.9)", fontWeight: "600" }}>Stage Decision:</span>
+          <div>
+            {gate ? (
+              gate.decision === "promote_ready" ? (
+                <span style={{ color: "#4ade80", fontWeight: "bold" }}>🟢 STAGE COMPLETE / PROMOTABLE</span>
+              ) : gate.decision === "pending" ? (
+                <span style={{ color: "#facc15", fontWeight: "bold" }}>🟡 PENDING EVIDENCE ({gate.recent_qualifying_checkpoints ?? 0}/{gate.minimum_required_evaluations ?? 3} pass)</span>
+              ) : (
+                <div>
+                  <span style={{ color: "#ef4444", fontWeight: "bold" }}>🔴 Gate Blocked</span>
+                  {gate.blocking_seeds && gate.blocking_seeds.length > 0 && (
+                    <div style={{ color: "#ef4444", fontSize: "0.72rem", marginTop: "2px" }}>
+                      <strong>Blocking Seeds:</strong> {gate.blocking_seeds.join(", ")}
+                    </div>
+                  )}
+                  {gate.blocking_reasons && gate.blocking_reasons.length > 0 && (
+                    <div style={{ color: "#f97316", fontSize: "0.72rem", marginTop: "2px" }}>
+                      {gate.blocking_reasons.map((r, i) => (
+                        <div key={i}>• {r}</div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )
+            ) : (
+              thisPasses ? (
+                <span style={{ color: "#4ade80", fontWeight: "bold" }}>🟢 CHECKPOINT QUALIFIED</span>
+              ) : (
+                <span style={{ color: "#fb923c", fontWeight: "bold" }}>🟠 BELOW TARGET</span>
+              )
+            )}
+          </div>
+        </div>
+      </div>
     </div>,
     document.body
   );
