@@ -206,11 +206,15 @@ interface ChartPoint {
   /** Optional secondary value (e.g. avg_completion_steps) for the right-axis overlay line. */
   secondaryY?: number | null;
   checkpoint?: CheckpointEntry;
-  rawEpisode?: TrainingEpisode;
+  rawEpisode?: CanonicalEpisodeRecord | TrainingEpisode;
   isRolling?: boolean;
   rollingWindowSize?: number;
   bucket?: EpisodeBucket;
   formalEval?: FormalEvalMarker;
+  isBlockPoint?: boolean;
+  blockIndex?: number;
+  blockStartEp?: number;
+  blockEndEp?: number;
 }
 
 interface LineChartProps {
@@ -278,14 +282,12 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
   const updatePosition = useCallback(() => {
     if (!tooltipRef.current) return;
     const tooltipNode = tooltipRef.current;
-    const tooltipRect = tooltipNode.getBoundingClientRect();
-
     const viewportWidth = window.innerWidth;
     const viewportHeight = window.innerHeight;
     const padding = 12;
 
-    const tooltipWidth = tooltipRect.width || 300;
-    const tooltipHeight = tooltipRect.height || 280;
+    const tooltipWidth = tooltipNode.offsetWidth || 320;
+    const tooltipHeight = tooltipNode.offsetHeight || 280;
 
     const targetCenterX = targetRect.left + targetRect.width / 2;
     let left = targetCenterX - tooltipWidth / 2;
@@ -304,8 +306,8 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
       position: "fixed",
       left: `${left}px`,
       top: `${top}px`,
-      maxWidth: `calc(100vw - 16px)`,
-      maxHeight: `calc(100vh - 16px)`,
+      maxWidth: `calc(100vw - 24px)`,
+      maxHeight: `calc(100vh - 24px)`,
       overflowY: "auto",
       overflowWrap: "anywhere",
       opacity: 1,
@@ -316,6 +318,9 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
 
   useLayoutEffect(() => {
     updatePosition();
+    // Second measure after browser layout pass to guarantee edge alignment
+    const raf = requestAnimationFrame(updatePosition);
+    return () => cancelAnimationFrame(raf);
   }, [updatePosition]);
 
   useEffect(() => {
@@ -329,39 +334,115 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
 
   if (hoveredPoint.bucket) {
     const b = hoveredPoint.bucket;
+    const stageNum = b.episodes && b.episodes[0] ? b.episodes[0].curriculum_stage : 1;
+    const threshPct = Math.round(getSuccessThreshold(stageNum) * 100);
+    const thisPasses = b.successRate >= threshPct;
+    const headerDate = formatDate(b.endTimestamp || b.startTimestamp);
+
+    // Strict multi-factor stage recommendation logic
+    const totalStageEps = b.episodeCount;
+    const isStagnant = totalStageEps >= 100 && b.successRate < (threshPct * 0.7);
+
+    let statusType: "ready" | "progress" | "stagnant" = "progress";
+    let bannerTitle = "STAGE IN PROGRESS";
+    let bannerDesc = `Model is actively training at Stage ${stageNum} (${b.successRate.toFixed(1)}% / ${threshPct}% target). Continue training.`;
+    let bannerIcon = "⚡";
+
+    if (b.successRate >= threshPct) {
+      statusType = "ready";
+      bannerTitle = "TARGET MET";
+      bannerDesc = `Bucket performance met stage target (${b.successRate.toFixed(1)}% ≥ ${threshPct}%). Formal evaluations determine promotion.`;
+      bannerIcon = "✓";
+    } else if (isStagnant) {
+      statusType = "stagnant";
+      bannerTitle = "STAGNATION DETECTED";
+      bannerDesc = `Full stage telemetry confirms zero performance growth over ${totalStageEps} episodes. Model appears plateaued at Stage ${stageNum}.`;
+      bannerIcon = "⚠️";
+    }
+
+    const progressFillPct = Math.min(100, Math.max(0, (b.successRate / threshPct) * 100));
+
     return createPortal(
-      <div ref={tooltipRef} className="chart-tooltip" style={style} data-testid="chart-tooltip">
+      <div
+        ref={tooltipRef}
+        className="chart-tooltip"
+        style={style}
+        role="tooltip"
+        id="chart-hover-tooltip"
+        aria-live="polite"
+        data-testid="chart-tooltip"
+      >
         <div className="chart-tooltip__header">
-          <span className="chart-tooltip__episode">
-            {b.episodeCount === 1 ? `Episode ${b.firstEpisode}` : `Episodes ${b.firstEpisode}–${b.lastEpisode}`}
-          </span>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            <span className="chart-tooltip__episode">
+              {b.episodeCount === 1 ? `Episode ${b.firstEpisode}` : `Episodes ${b.firstEpisode}–${b.lastEpisode}`}
+            </span>
+            <span className="chart-tooltip__stage-pill" style={{ background: stageColor(stageNum) }}>
+              Stage {stageNum}
+            </span>
+          </div>
+          {headerDate && (
+            <span className="chart-tooltip__timestamp-badge" aria-label={`Recorded at ${headerDate}`}>
+              <span className="chart-tooltip__timestamp-icon">🕒</span>
+              <span className="chart-tooltip__timestamp-time">{headerDate}</span>
+            </span>
+          )}
         </div>
+
         <div className="chart-tooltip__section-title">
           {b.episodeCount === 1 ? "1 Episode Rollout" : `${b.episodeCount} Non-Overlapping Episodes`}
         </div>
-        <div className="chart-tooltip__grid">
-          <span className="chart-tooltip__metric-label">Success Rate:</span>
-          <span className="chart-tooltip__metric-value">
-            {b.successCount} / {b.episodeCount} ({b.successRate.toFixed(1)}%)
-          </span>
-          <span></span>
-          <span className="chart-tooltip__metric-label">Avg Successful Steps:</span>
-          <span className="chart-tooltip__metric-value">
-            {b.avgSuccessfulSteps != null ? Math.round(b.avgSuccessfulSteps) : "N/A (0 successes)"}
-          </span>
-          <span></span>
-          <span className="chart-tooltip__metric-label">Avg Reward:</span>
-          <span className="chart-tooltip__metric-value">{b.avgAllReward.toFixed(1)}</span>
-          <span></span>
-          <span className="chart-tooltip__metric-label">Avg Sheep Penned:</span>
-          <span className="chart-tooltip__metric-value">{b.avgSheepPenned.toFixed(1)}</span>
-          <span></span>
-        </div>
-        {formatDate(b.startTimestamp) && formatDate(b.endTimestamp) && (
-          <div className="chart-tooltip__time">
-            {formatDate(b.startTimestamp)} – {formatDate(b.endTimestamp)}
+
+        <div className="chart-tooltip__stat-grid" role="region" aria-label="Episode Metrics">
+          <div className="chart-tooltip__stat-card">
+            <span className="chart-tooltip__stat-label">Success Rate</span>
+            <span className="chart-tooltip__stat-value" style={{ color: thisPasses ? "#4ade80" : "#f1f5f9" }}>
+              {b.successRate.toFixed(1)}% <span style={{ fontSize: "0.72rem", fontWeight: "normal", color: "#94a3b8" }}>({b.successCount}/{b.episodeCount})</span>
+            </span>
           </div>
-        )}
+          <div className="chart-tooltip__stat-card">
+            <span className="chart-tooltip__stat-label">Avg Reward</span>
+            <span className="chart-tooltip__stat-value">{b.avgAllReward.toFixed(1)}</span>
+          </div>
+          <div className="chart-tooltip__stat-card">
+            <span className="chart-tooltip__stat-label">Avg Steps</span>
+            <span className="chart-tooltip__stat-value">
+              {b.avgSuccessfulSteps != null ? Math.round(b.avgSuccessfulSteps) : "N/A"}
+            </span>
+          </div>
+          <div className="chart-tooltip__stat-card">
+            <span className="chart-tooltip__stat-label">Avg Penned</span>
+            <span className="chart-tooltip__stat-value">{b.avgSheepPenned.toFixed(1)}</span>
+          </div>
+        </div>
+
+        <div className="chart-tooltip__progress-container">
+          <div className="chart-tooltip__progress-header">
+            <span>Stage {stageNum} Target (≥ {threshPct}%)</span>
+            <span style={{ color: thisPasses ? "#4ade80" : "#fb923c" }}>
+              {b.successRate.toFixed(1)}% / {threshPct}%
+            </span>
+          </div>
+          <div className="chart-tooltip__progress-track" role="progressbar" aria-valuenow={b.successRate} aria-valuemin={0} aria-valuemax={threshPct}>
+            <div
+              className="chart-tooltip__progress-fill"
+              style={{
+                width: `${progressFillPct}%`,
+                background: thisPasses
+                  ? "linear-gradient(90deg, #10b981, #34d399)"
+                  : "linear-gradient(90deg, #f97316, #fb923c)"
+              }}
+            />
+          </div>
+        </div>
+
+        <div className={`chart-tooltip__banner chart-tooltip__banner--${statusType}`} role="status">
+          <div className="chart-tooltip__banner-title">
+            <span>{bannerIcon}</span>
+            <span>{bannerTitle}</span>
+          </div>
+          <div className="chart-tooltip__banner-desc">{bannerDesc}</div>
+        </div>
       </div>,
       document.body
     );
@@ -369,39 +450,92 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
 
   if (hoveredPoint.rawEpisode) {
     const ep = hoveredPoint.rawEpisode;
+    const stageNum = ep.curriculum_stage;
+    const threshPct = Math.round(getSuccessThreshold(stageNum) * 100);
+    const thisPasses = ep.result === "SUCCESS" || ep.success === true;
+    const headerDate = formatDate(ep.completed_at);
+    const epRatePct = thisPasses ? 100 : 0;
+    const progressFillPct = Math.min(100, Math.max(0, (epRatePct / threshPct) * 100));
+
     return createPortal(
-      <div ref={tooltipRef} className="chart-tooltip" style={style} data-testid="chart-tooltip">
+      <div
+        ref={tooltipRef}
+        className="chart-tooltip"
+        style={style}
+        role="tooltip"
+        id="chart-hover-tooltip"
+        aria-live="polite"
+        data-testid="chart-tooltip"
+      >
         <div className="chart-tooltip__header">
-          <span className="chart-tooltip__episode">Training Ep {ep.global_environment_episode}</span>
-          <span className="chart-tooltip__stage-pill" style={{ background: stageColor(ep.curriculum_stage) }}>
-            Stage {ep.curriculum_stage}
-          </span>
-        </div>
-        <div className="chart-tooltip__section-title">Raw Rollout Episode</div>
-        <div className="chart-tooltip__grid">
-          <span className="chart-tooltip__metric-label">Result:</span>
-          <span className="chart-tooltip__metric-value">{ep.result}</span>
-          <span></span>
-          <span className="chart-tooltip__metric-label">Reward:</span>
-          <span className="chart-tooltip__metric-value">{ep.reward.toFixed(2)}</span>
-          <span></span>
-          <span className="chart-tooltip__metric-label">Penned:</span>
-          <span className="chart-tooltip__metric-value">{ep.sheep_penned} / {ep.total_sheep}</span>
-          <span></span>
-          <span className="chart-tooltip__metric-label">Steps:</span>
-          <span className="chart-tooltip__metric-value">{ep.steps}</span>
-          <span></span>
-          {ep.seed != null && (
-            <>
-              <span className="chart-tooltip__metric-label">Seed:</span>
-              <span className="chart-tooltip__metric-value">{ep.seed}</span>
-              <span></span>
-            </>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            <span className="chart-tooltip__episode">Training Ep {ep.global_environment_episode}</span>
+            <span className="chart-tooltip__stage-pill" style={{ background: stageColor(ep.curriculum_stage) }}>
+              Stage {ep.curriculum_stage}
+            </span>
+          </div>
+          {headerDate && (
+            <span className="chart-tooltip__timestamp-badge" aria-label={`Recorded at ${headerDate}`}>
+              <span className="chart-tooltip__timestamp-icon">🕒</span>
+              <span className="chart-tooltip__timestamp-time">{headerDate}</span>
+            </span>
           )}
         </div>
-        {formatDate(ep.completed_at) && (
-          <div className="chart-tooltip__time">{formatDate(ep.completed_at)}</div>
-        )}
+
+        <div className="chart-tooltip__section-title">Raw Rollout Episode</div>
+
+        <div className="chart-tooltip__stat-grid" role="region" aria-label="Episode Performance">
+          <div className="chart-tooltip__stat-card">
+            <span className="chart-tooltip__stat-label">Result</span>
+            <span className="chart-tooltip__stat-value" style={{ color: thisPasses ? "#4ade80" : "#fb923c" }}>
+              {thisPasses ? "PASS ✓" : "FAIL ✗"}
+            </span>
+          </div>
+          <div className="chart-tooltip__stat-card">
+            <span className="chart-tooltip__stat-label">Reward</span>
+            <span className="chart-tooltip__stat-value">{ep.reward.toFixed(2)}</span>
+          </div>
+          <div className="chart-tooltip__stat-card">
+            <span className="chart-tooltip__stat-label">Sheep Penned</span>
+            <span className="chart-tooltip__stat-value">{ep.sheep_penned} / {ep.total_sheep}</span>
+          </div>
+          <div className="chart-tooltip__stat-card">
+            <span className="chart-tooltip__stat-label">Steps Taken</span>
+            <span className="chart-tooltip__stat-value">{ep.steps}</span>
+          </div>
+        </div>
+
+        <div className="chart-tooltip__progress-container">
+          <div className="chart-tooltip__progress-header">
+            <span>Stage {stageNum} Target Criteria (≥ {threshPct}%)</span>
+            <span style={{ color: thisPasses ? "#4ade80" : "#fb923c" }}>
+              Episode: {thisPasses ? "100%" : "0%"}
+            </span>
+          </div>
+          <div className="chart-tooltip__progress-track" role="progressbar" aria-valuenow={epRatePct} aria-valuemin={0} aria-valuemax={threshPct}>
+            <div
+              className="chart-tooltip__progress-fill"
+              style={{
+                width: `${progressFillPct}%`,
+                background: thisPasses
+                  ? "linear-gradient(90deg, #10b981, #34d399)"
+                  : "linear-gradient(90deg, #f97316, #fb923c)"
+              }}
+            />
+          </div>
+        </div>
+
+        <div className={`chart-tooltip__banner chart-tooltip__banner--${thisPasses ? "ready" : "progress"}`} role="status">
+          <div className="chart-tooltip__banner-title">
+            <span>{thisPasses ? "✓" : "⚡"}</span>
+            <span>{thisPasses ? "EPISODE SUCCESSFUL" : "STAGE IN PROGRESS"}</span>
+          </div>
+          <div className="chart-tooltip__banner-desc">
+            {thisPasses
+              ? `Episode completed all goals (${ep.sheep_penned}/${ep.total_sheep} sheep penned in ${ep.steps} steps).`
+              : `Episode outcome: ${ep.result}. Stage training continuing.`}
+          </div>
+        </div>
       </div>,
       document.body
     );
@@ -409,7 +543,15 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
 
   if (hoveredPoint.isRolling) {
     return createPortal(
-      <div ref={tooltipRef} className="chart-tooltip" style={style} data-testid="chart-tooltip">
+      <div
+        ref={tooltipRef}
+        className="chart-tooltip"
+        style={style}
+        role="tooltip"
+        id="chart-hover-tooltip"
+        aria-live="polite"
+        data-testid="chart-tooltip"
+      >
         <div className="chart-tooltip__header">
           <span className="chart-tooltip__episode">Rolling Training Average</span>
         </div>
@@ -427,22 +569,72 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
   }
 
   const checkpoint = hoveredPoint.checkpoint;
-  if (!checkpoint) return null;
+  if (!checkpoint) {
+    return createPortal(
+      <div
+        ref={tooltipRef}
+        className="chart-tooltip"
+        style={style}
+        role="tooltip"
+        id="chart-hover-tooltip"
+        aria-live="polite"
+        data-testid="chart-tooltip"
+      >
+        <div className="chart-tooltip__header">
+          <span className="chart-tooltip__episode">
+            {hoveredPoint.labelText || `Point ${hoveredPoint.x}`}
+          </span>
+        </div>
+        <div className="chart-tooltip__grid">
+          <span className="chart-tooltip__metric-label">Value:</span>
+          <span className="chart-tooltip__metric-value">{hoveredPoint.y.toFixed(1)}</span>
+          <span></span>
+          {hoveredPoint.secondaryY != null && (
+            <>
+              <span className="chart-tooltip__metric-label">Steps:</span>
+              <span className="chart-tooltip__metric-value">{Math.round(hoveredPoint.secondaryY)}</span>
+              <span></span>
+            </>
+          )}
+        </div>
+      </div>,
+      document.body
+    );
+  }
 
   const cStage = getCheckpointStage(checkpoint);
   const thresh = getSuccessThreshold(cStage);
+  const threshPct = Math.round(thresh * 100);
   const gate = checkpoint.promotion_gate;
+  const thisPasses = checkpoint.success_rate >= thresh;
+  const headerDate = formatDate(checkpoint.recorded_at);
 
   return createPortal(
-    <div ref={tooltipRef} className="chart-tooltip" style={style} data-testid="chart-tooltip">
-      <div className="chart-tooltip__header">
-        <span className="chart-tooltip__episode">Episode {checkpoint.checkpoint_episode}</span>
-        <span
-          className="chart-tooltip__stage-pill"
-          style={{ background: stageColor(cStage) }}
-        >
-          Stage {cStage === -1 ? "Legacy" : cStage}
-        </span>
+    <div
+      ref={tooltipRef}
+      className="chart-tooltip"
+      style={style}
+      role="tooltip"
+      id="chart-hover-tooltip"
+      aria-live="polite"
+      data-testid="chart-tooltip"
+    >
+      <div className="chart-tooltip__header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem", marginBottom: "0.4rem" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+          <span className="chart-tooltip__episode">Episode {checkpoint.checkpoint_episode}</span>
+          <span
+            className="chart-tooltip__stage-pill"
+            style={{ background: stageColor(cStage) }}
+          >
+            Stage {cStage === -1 ? "Legacy" : cStage}
+          </span>
+        </div>
+        {headerDate && (
+          <span className="chart-tooltip__timestamp-badge" aria-label={`Recorded at ${headerDate}`}>
+            <span className="chart-tooltip__timestamp-icon">🕒</span>
+            <span className="chart-tooltip__timestamp-time">{headerDate}</span>
+          </span>
+        )}
       </div>
 
       <div className="chart-tooltip__section-title">Runtime</div>
@@ -469,7 +661,7 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
         <span className="chart-tooltip__metric-label">Current Checkpoint:</span>
         <span className="chart-tooltip__metric-value">{(checkpoint.success_rate * 100).toFixed(1)}%</span>
         <span className="chart-tooltip__metric-indicator">
-          {checkpoint.success_rate >= thresh ? (
+          {thisPasses ? (
             <span style={{ color: "#4ade80", fontWeight: "bold" }}>✓</span>
           ) : (
             <span style={{ color: "#fb923c", fontWeight: "bold" }}>✗</span>
@@ -509,63 +701,49 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
         <span></span>
       </div>
 
-      <div className="chart-tooltip__promo-section">
-        <div className="chart-tooltip__section-title" style={{ marginTop: 0 }}>Stage Gate Promotion</div>
-        {gate ? (
-          <div>
-            <div
-              className={`chart-tooltip__promo-status chart-tooltip__promo-status--${
-                gate.decision === "promote_ready"
-                  ? "qualified"
-                  : gate.decision === "pending"
-                  ? "pending"
-                  : "unqualified"
-              }`}
-            >
-              <span>
-                {gate.decision === "promote_ready"
-                  ? "🟢 Promote Ready"
-                  : gate.decision === "pending"
-                  ? "🟡 Pending Evidence"
-                  : "🔴 Gate Blocked"}
-              </span>
-              <span style={{ fontSize: "0.65rem", fontWeight: "normal", color: "rgba(148, 163, 184, 0.8)" }}>
-                (Req: {(thresh * 100).toFixed(0)}% rolling succ, ≤10% timeout)
-              </span>
-            </div>
-            <div style={{ fontSize: "0.75rem", marginTop: "4px", color: "#cbd5e1" }}>
-              <div><strong>Rolling Success:</strong> {(gate.aggregate_success_rate != null ? gate.aggregate_success_rate * 100 : checkpoint.success_rate * 100).toFixed(1)}% ({gate.total_successes ?? 0}/{gate.total_seed_trials ?? 0} seed trials across {gate.recent_checkpoints_considered ?? 0} CPs)</div>
-              <div><strong>Recent Checkpoint Consistency:</strong> {gate.recent_qualifying_checkpoints ?? 0}/3 qualifying</div>
-              <div><strong>Latest Checkpoint Floor:</strong> {(gate.latest_success_rate != null ? gate.latest_success_rate * 100 : checkpoint.success_rate * 100).toFixed(1)}% ({gate.latest_floor_passed ? "✓ ≥80%" : "✗ <80%"})</div>
-              {gate.blocking_seeds && gate.blocking_seeds.length > 0 && (
-                <div style={{ color: "#ef4444" }}><strong>Blocking Seeds:</strong> {gate.blocking_seeds.join(", ")}</div>
-              )}
-              {gate.blocking_reasons && gate.blocking_reasons.length > 0 && (
-                <div style={{ color: "#f97316", marginTop: "2px" }}>
-                  {gate.blocking_reasons.map((r, i) => (
-                    <div key={i}>• {r}</div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        ) : (
-          <div className="chart-tooltip__promo-status chart-tooltip__promo-status--unqualified">
-            <span>
-              {checkpoint.success_rate >= thresh && checkpoint.timeout_rate <= 0.1
-                ? "🟢 Checkpoint Qualified"
-                : "🟠 Checkpoint Below Target"}
-            </span>
-            <span style={{ fontSize: "0.65rem", fontWeight: "normal", color: "rgba(148, 163, 184, 0.8)" }}>
-              (Req: {(thresh * 100).toFixed(0)}% succ, ≤10% timeout)
-            </span>
-          </div>
-        )}
-      </div>
+      {/* Stage Completion Criteria Section */}
+      <div className="chart-tooltip__promo-section" style={{ marginTop: "0.6rem", paddingTop: "0.6rem", borderTop: "1px solid rgba(255,255,255,0.12)" }}>
+        <div className="chart-tooltip__section-title" style={{ marginTop: 0, color: "#93c5fd" }}>
+          🎯 Formal Evaluation (Stage {cStage} Target: ≥ {threshPct}%)
+        </div>
 
-      {formatDate(checkpoint.recorded_at) && (
-        <div className="chart-tooltip__time">{formatDate(checkpoint.recorded_at)}</div>
-      )}
+        <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 10px", fontSize: "0.78rem", marginTop: "6px" }}>
+          <span style={{ color: "rgba(148,163,184,0.9)", fontWeight: "600" }}>This Checkpoint:</span>
+          <span>
+            {thisPasses ? (
+              <span style={{ color: "#4ade80", fontWeight: "bold" }}>PASS ✓ ({(checkpoint.success_rate * 100).toFixed(1)}% ≥ {threshPct}% target)</span>
+            ) : (
+              <span style={{ color: "#fb923c", fontWeight: "bold" }}>FAIL ✗ ({(checkpoint.success_rate * 100).toFixed(1)}% &lt; {threshPct}% target)</span>
+            )}
+          </span>
+
+          <span style={{ color: "rgba(148,163,184,0.9)", fontWeight: "600" }}>Promotion Readiness:</span>
+          <div>
+            {gate ? (
+              gate.ready || gate.decision === "promote_ready" ? (
+                <span style={{ color: "#4ade80", fontWeight: "bold" }}>🟢 READY TO PROMOTE ({gate.qualified_evaluations ?? gate.recent_qualifying_checkpoints ?? 0}/{gate.qualified_evaluations_required ?? gate.minimum_required_evaluations ?? 5} qualified)</span>
+              ) : gate.decision === "pending" || (gate.formal_evaluations_available != null && gate.formal_evaluations_available < (gate.formal_evaluations_required ?? 6)) ? (
+                <span style={{ color: "#facc15", fontWeight: "bold" }}>🟡 COLLECTING EVIDENCE ({gate.formal_evaluations_available ?? gate.recent_checkpoints_considered ?? 0}/{gate.formal_evaluations_required ?? 6} formal evals)</span>
+              ) : (
+                <div>
+                  <span style={{ color: "#ef4444", fontWeight: "bold" }}>🔴 NOT READY ({gate.reason || "Criteria not met"})</span>
+                  {gate.blocking_seed != null && (
+                    <div style={{ color: "#ef4444", fontSize: "0.72rem", marginTop: "2px" }}>
+                      <strong>Persistent Failure:</strong> Seed {gate.blocking_seed} ({gate.blocking_seed_consecutive_failures ?? 3} consecutive fails)
+                    </div>
+                  )}
+                </div>
+              )
+            ) : (
+              thisPasses ? (
+                <span style={{ color: "#4ade80", fontWeight: "bold" }}>🟢 CHECKPOINT QUALIFIED</span>
+              ) : (
+                <span style={{ color: "#fb923c", fontWeight: "bold" }}>🟠 BELOW TARGET</span>
+              )
+            )}
+          </div>
+        </div>
+      </div>
     </div>,
     document.body
   );
@@ -576,6 +754,7 @@ function LineChart({
   rawPoints,
   rollingData,
   blockPoints,
+  formalEvalPoints,
   label,
   lineColor,
   yMin,
@@ -1039,24 +1218,46 @@ function LineChart({
         ) : null}
 
         {/* Dots — colored by stage; prev-bests get a diamond + label; best gets a ring */}
-        {showPolicySnapshots ? data.map((d, idx) => {
+        {data.map((d, idx) => {
           const cx = toSvgX(d.x, idx);
           const cy = toSvgY(d.y);
           const fill = stageColor(d.stage);
           const isBest = d.isBest ?? d.x === bestEpisode;
           const r = isBest ? bestRadius : d.isPrevBest ? prevBestRadius : baseRadius;
           const diamond = `${cx},${cy - r} ${cx + r},${cy} ${cx},${cy + r} ${cx - r},${cy}`;
+
+          let ariaLabel = `Point ${d.x}: ${Math.round(d.y)}%`;
+          if (d.bucket) {
+            const b = d.bucket;
+            ariaLabel = b.episodeCount === 1
+              ? `Episode ${b.firstEpisode}: ${b.successRate.toFixed(1)}% success rate${b.avgSuccessfulSteps != null ? `, ${Math.round(b.avgSuccessfulSteps)} steps` : ''}`
+              : `Episodes ${b.firstEpisode} to ${b.lastEpisode}: ${b.successRate.toFixed(1)}% success rate${b.avgSuccessfulSteps != null ? `, ${Math.round(b.avgSuccessfulSteps)} steps` : ''}`;
+          } else if (d.checkpoint) {
+            ariaLabel = `Checkpoint episode ${d.checkpoint.checkpoint_episode}: ${(d.checkpoint.success_rate * 100).toFixed(1)}% success rate`;
+          }
+
+          const handleActivate = (e: React.SyntheticEvent) => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            setHoveredState({ point: d, rect });
+          };
+
           return (
             <g
               key={`${d.x}-${idx}`}
-              onMouseEnter={(e) => {
-                const rect = e.currentTarget.getBoundingClientRect();
-                setHoveredState({ point: d, rect });
+              tabIndex={0}
+              role="graphics-symbol"
+              aria-label={ariaLabel}
+              aria-describedby="chart-hover-tooltip"
+              onMouseEnter={handleActivate}
+              onMouseLeave={() => setHoveredState(null)}
+              onFocus={handleActivate}
+              onBlur={() => setHoveredState(null)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  handleActivate(e);
+                }
               }}
-              onMouseLeave={() => {
-                setHoveredState(null);
-              }}
-              style={{ cursor: "pointer" }}
+              style={{ cursor: "pointer", outline: "none" }}
             >
               {/* Large invisible hit target */}
               <circle cx={cx} cy={cy} r={14} fill="transparent" />
@@ -1069,7 +1270,7 @@ function LineChart({
               ) : (
                 <circle cx={cx} cy={cy} r={r} fill={fill} stroke="rgba(8,17,27,0.7)" strokeWidth={mainDotStrokeWidth} style={{ pointerEvents: "none" }} />
               )}
-              {(d.isPrevBest || isBest) && actualShowLabels && d.labelText ? (
+              {showPolicySnapshots && (d.isPrevBest || isBest) && actualShowLabels && d.labelText ? (
                 <text
                   x={cx + 4}
                   y={cy - r - 4}
@@ -1085,7 +1286,7 @@ function LineChart({
               ) : null}
             </g>
           );
-        }) : null}
+        })}
 
         {/* No-data message */}
         {!hasAnyData ? (
@@ -1096,7 +1297,7 @@ function LineChart({
       </svg>
 
       {/* Premium Interactive Hover Tooltip via React Portal */}
-      {hoveredState && hoveredState.point.checkpoint ? (
+      {hoveredState ? (
         <ChartHoverPortal hoveredPoint={hoveredState.point} targetRect={hoveredState.rect} />
       ) : null}
     </div>
@@ -1825,7 +2026,7 @@ function detectPlateau(checkpoints: CheckpointEntry[]): PlateauInfo | null {
 
 // ── Main component ───────────────────────────────────────────────────────────
 
-export function calculateRawSuccessY(ep: Partial<TrainingEpisode>): number | null {
+export function calculateRawSuccessY(ep: Partial<CanonicalEpisodeRecord | TrainingEpisode>): number | null {
   if (ep.success === true || (ep.success as unknown) === 1) return 100;
   if (typeof ep.result === "string" && ep.result.trim().length > 0) {
     const res = ep.result.trim().toUpperCase();
@@ -1836,7 +2037,7 @@ export function calculateRawSuccessY(ep: Partial<TrainingEpisode>): number | nul
   return null;
 }
 
-export function calculateRollingSuccess(episodes: Partial<TrainingEpisode>[], windowSize = 25, minWindowSize = 1): number | null {
+export function calculateRollingSuccess(episodes: Partial<CanonicalEpisodeRecord | TrainingEpisode>[], windowSize = 25, minWindowSize = 1): number | null {
   if (episodes.length < minWindowSize) return null;
   const slice = episodes.slice(-windowSize);
   let validCount = 0;
@@ -1852,10 +2053,10 @@ export function calculateRollingSuccess(episodes: Partial<TrainingEpisode>[], wi
   return (successCount / validCount) * 100;
 }
 
-export function calculateBlockSuccessPoints(
-  episodes: TrainingEpisode[],
+export function calculateBlockSuccessPoints<T extends Partial<CanonicalEpisodeRecord | TrainingEpisode>>(
+  episodes: T[],
   blockSize: number = 25,
-  getX: (ep: TrainingEpisode) => number | null
+  getX: (ep: T) => number | null
 ): ChartPoint[] {
   const validEps = episodes.filter((ep) => getX(ep) != null);
   if (validEps.length === 0) return [];
@@ -1927,11 +2128,29 @@ export function DiagnosticsPanel({
     }
     return "current-journey";
   });
-  const [xAxisMode, setXAxisMode] = useState<XAxisMode>("timesteps");
-  const [layerRawEpisodes, setLayerRawEpisodes] = useState<boolean>(false);
-  const [layerRollingAvg, setLayerRollingAvg] = useState<boolean>(false);
-  const [layerPolicySnapshots, setLayerPolicySnapshots] = useState<boolean>(true);
-  const [layerFormalEvals, setLayerFormalEvals] = useState<boolean>(true);
+  const [xAxisMode, setXAxisMode] = useState<XAxisMode>(() => {
+    const saved = localStorage.getItem("sheepdog_insights_x_axis");
+    if (saved === "timesteps" || saved === "episode" || saved === "runtime" || saved === "calendar") {
+      return saved as XAxisMode;
+    }
+    return "timesteps";
+  });
+  const [layerRawEpisodes, setLayerRawEpisodes] = useState<boolean>(() => {
+    const saved = localStorage.getItem("sheepdog_insights_layer_raw_episodes");
+    return saved !== null ? saved === "true" : true;
+  });
+  const [layerRollingAvg, setLayerRollingAvg] = useState<boolean>(() => {
+    const saved = localStorage.getItem("sheepdog_insights_layer_rolling_avg");
+    return saved !== null ? saved === "true" : true;
+  });
+  const [layerPolicySnapshots, setLayerPolicySnapshots] = useState<boolean>(() => {
+    const saved = localStorage.getItem("sheepdog_insights_layer_policy_snapshots");
+    return saved !== null ? saved === "true" : true;
+  });
+  const [layerFormalEvals, setLayerFormalEvals] = useState<boolean>(() => {
+    const saved = localStorage.getItem("sheepdog_insights_layer_formal_evals");
+    return saved !== null ? saved === "true" : true;
+  });
 
   const targetStage = useMemo(() => {
     if (selectedStageScope === "current") return effectiveCurriculumStage;
@@ -1942,22 +2161,49 @@ export function DiagnosticsPanel({
 
   // ── Live Episode Telemetry Polling ──────────────────────────────────────
   const [trainingEpisodes, setTrainingEpisodes] = useState<TrainingEpisode[]>(() => initialEpisodes ?? []);
-  const [lastEpisodeId, setLastEpisodeId] = useState<number>(0);
+  const lastEpisodeIdRef = useRef<number>(0);
   const isFetchingEpisodesRef = useRef<boolean>(false);
   const isLiveTraining = trainingStatus?.running ?? false;
 
   const activeRunId = trainingStatus?.run_id ?? undefined;
-  const queryScopeKey = `${selectedStageScope}_${effectiveCurriculumStage}_${activeRunId ?? ""}`;
+  // Scope key intentionally excludes activeRunId: training status loads async AFTER the first episode
+  // poll fires. Including run_id here caused a reset race that wiped freshly-fetched today's data.
+  // The run_id filter is applied at query time independently via runIdFilter below.
+  const queryScopeKey = `${selectedStageScope}_${effectiveCurriculumStage}`;
   const prevQueryScopeKeyRef = useRef<string>(queryScopeKey);
 
-  // Reset episode buffer and lastEpisodeId when query scope changes (stage, effective stage, or active run_id)
+  // Reset episode buffer and lastEpisodeIdRef when the user explicitly changes stage/scope
   useEffect(() => {
     if (prevQueryScopeKeyRef.current !== queryScopeKey) {
       setTrainingEpisodes([]);
-      setLastEpisodeId(0);
+      lastEpisodeIdRef.current = 0;
       prevQueryScopeKeyRef.current = queryScopeKey;
     }
   }, [queryScopeKey]);
+
+  // ── Refs that let the stable polling effect read up-to-date values ──────
+  // WITHOUT the effect re-running (and killing in-flight requests) every time
+  // trainingStatus or activeRunId changes.
+  const pollStageFilterRef = useRef<number | undefined>(undefined);
+  const pollRunIdFilterRef = useRef<string | undefined>(undefined);
+  const pollIsLiveRef = useRef<boolean>(isLiveTraining);
+
+  // Sync refs every render so the polling closure always sees fresh values
+  useEffect(() => {
+    const sf = selectedStageScope === "all" || selectedStageScope === "current-journey"
+      ? undefined
+      : selectedStageScope === "current"
+      ? effectiveCurriculumStage
+      : typeof selectedStageScope === "number"
+      ? selectedStageScope
+      : undefined;
+    const rf = (selectedStageScope === "current-journey" || selectedStageScope === "current" || typeof selectedStageScope === "number")
+      ? activeRunId
+      : undefined;
+    pollStageFilterRef.current = sf;
+    pollRunIdFilterRef.current = rf;
+    pollIsLiveRef.current = isLiveTraining;
+  });
 
   useEffect(() => {
     let isMounted = true;
@@ -1967,50 +2213,41 @@ export function DiagnosticsPanel({
       if (isFetchingEpisodesRef.current) return;
       isFetchingEpisodesRef.current = true;
       try {
-        const stageFilter = selectedStageScope === "all" || selectedStageScope === "current-journey"
-          ? undefined
-          : selectedStageScope === "current"
-          ? effectiveCurriculumStage
-          : typeof selectedStageScope === "number"
-          ? selectedStageScope
-          : undefined;
-
-        const runIdFilter = (selectedStageScope === "current-journey" || selectedStageScope === "current" || typeof selectedStageScope === "number")
-          ? activeRunId
-          : undefined;
+        const currentLastId = lastEpisodeIdRef.current;
 
         const res = await loadTrainingEpisodes({
-          afterId: lastEpisodeId > 0 ? lastEpisodeId : undefined,
-          stage: stageFilter,
-          runId: runIdFilter,
+          afterId: currentLastId > 0 ? currentLastId : undefined,
+          stage: pollStageFilterRef.current,
+          // Only filter by run_id on incremental polls (lastId > 0).
+          // Bootstrap always fetches the most-recent stage episodes unconditionally.
+          runId: currentLastId > 0 ? pollRunIdFilterRef.current : undefined,
           limit: 1000,
-          order: lastEpisodeId === 0 ? "desc" : undefined,
+          order: currentLastId === 0 ? "desc" : undefined,
         });
 
         if (isMounted && res && res.episodes) {
           const episodesSorted = [...res.episodes].sort((a, b) => a.id - b.id);
-          if (lastEpisodeId === 0 && episodesSorted.length > 0) {
+
+          if (currentLastId === 0 && episodesSorted.length > 0) {
             setTrainingEpisodes(episodesSorted);
             const maxId = Math.max(...episodesSorted.map((e: TrainingEpisode) => e.id));
-            setLastEpisodeId(maxId);
-          } else if (res.max_id !== undefined && lastEpisodeId > 0 && res.max_id < lastEpisodeId) {
+            lastEpisodeIdRef.current = maxId;
+          } else if (res.max_id !== undefined && currentLastId > 0 && res.max_id < currentLastId) {
+            // DB was reset or cleared
             setTrainingEpisodes(episodesSorted);
             const maxId = episodesSorted.length > 0 ? Math.max(...episodesSorted.map((e: TrainingEpisode) => e.id)) : 0;
-            setLastEpisodeId(maxId);
+            lastEpisodeIdRef.current = maxId;
           } else if (episodesSorted.length > 0) {
+            // Append new episodes to buffer
             setTrainingEpisodes((prev) => {
-              const prevMaxId = prev.length > 0 ? Math.max(...prev.map((e: TrainingEpisode) => e.id)) : 0;
-              const resMinId = Math.min(...episodesSorted.map((e: TrainingEpisode) => e.id));
-              if (prevMaxId > 0 && resMinId <= prevMaxId) {
-                return episodesSorted;
-              }
               const existingIds = new Set(prev.map((e: TrainingEpisode) => e.id));
               const newEps = episodesSorted.filter((e: TrainingEpisode) => !existingIds.has(e.id));
+              if (newEps.length === 0) return prev;
               const combined = [...prev, ...newEps];
               return combined.length > 5000 ? combined.slice(-5000) : combined;
             });
             const maxId = Math.max(...episodesSorted.map((e: TrainingEpisode) => e.id));
-            setLastEpisodeId(maxId);
+            lastEpisodeIdRef.current = maxId;
           }
         }
       } catch {
@@ -2018,7 +2255,7 @@ export function DiagnosticsPanel({
       } finally {
         isFetchingEpisodesRef.current = false;
         if (isMounted) {
-          const delay = isLiveTraining ? 2000 : 10000;
+          const delay = pollIsLiveRef.current ? 500 : 2000;
           timerId = setTimeout(pollEpisodes, delay);
         }
       }
@@ -2030,13 +2267,19 @@ export function DiagnosticsPanel({
       isMounted = false;
       if (timerId) clearTimeout(timerId);
     };
-  }, [isLiveTraining, selectedStageScope, effectiveCurriculumStage, lastEpisodeId, activeRunId]);
+  // Intentionally empty: this effect is stable for the component lifetime.
+  // Scope resets are handled by the queryScopeKey effect above, which wipes
+  // trainingEpisodes and resets lastEpisodeIdRef to 0 — the next poll tick
+  // automatically re-bootstraps. Putting reactive values in deps here would
+  // tear down in-flight bootstrap requests every time trainingStatus updates.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Instantly purge live episode state if server status indicates a fresh zero-episode start
   useEffect(() => {
     if (trainingStatus && trainingStatus.total_episodes_trained === 0 && (trainingStatus.completed_episodes === 0 || trainingStatus.completed_episodes == null)) {
       setTrainingEpisodes([]);
-      setLastEpisodeId(0);
+      lastEpisodeIdRef.current = 0;
     }
   }, [trainingStatus?.total_episodes_trained, trainingStatus?.completed_episodes]);
 
@@ -2052,10 +2295,25 @@ export function DiagnosticsPanel({
     [checkpointIndex?.checkpoints],
   );
 
-  const stageScopedCheckpoints = useMemo(
-    () => checkpoints.filter((c) => getCheckpointStage(c) === targetStage),
-    [checkpoints, targetStage],
+  const hasArchivedCheckpoints = useMemo(
+    () => checkpoints.some((c) => c.journey != null && c.journey !== "current"),
+    [checkpoints],
   );
+
+  const currentJourneyCheckpoints = useMemo(
+    () => checkpoints.filter((c) => !c.journey || c.journey === "current"),
+    [checkpoints],
+  );
+
+  const archivedJourneyCheckpoints = useMemo(
+    () => checkpoints.filter((c) => c.journey != null && c.journey !== "current"),
+    [checkpoints],
+  );
+
+  const stageScopedCheckpoints = useMemo(() => {
+    const base = selectedStageScope === "all" ? checkpoints : currentJourneyCheckpoints.length > 0 ? currentJourneyCheckpoints : checkpoints;
+    return base.filter((c) => getCheckpointStage(c) === targetStage);
+  }, [checkpoints, currentJourneyCheckpoints, selectedStageScope, targetStage]);
 
   const requiredThreshold = useMemo(() => getSuccessThreshold(targetStage), [targetStage]);
 
@@ -2091,7 +2349,28 @@ export function DiagnosticsPanel({
     };
   }, [stageScopedCheckpoints, requiredThreshold]);
 
-  const episodeX = useCallback((ep: TrainingEpisode): number | null => {
+  const stageScopedViewCheckpoints = useMemo(() => {
+    if (selectedStageScope === "all") {
+      return checkpoints;
+    }
+    if (selectedStageScope === "current-journey") {
+      return currentJourneyCheckpoints.length > 0 ? currentJourneyCheckpoints : checkpoints;
+    }
+    if (selectedStageScope === "current") {
+      const base = currentJourneyCheckpoints.length > 0 ? currentJourneyCheckpoints : checkpoints;
+      const filtered = base.filter(
+        (c) => getCheckpointStage(c) === effectiveCurriculumStage,
+      );
+      if (filtered.length > 0) return filtered;
+      return base;
+    }
+    const target = Number(selectedStageScope);
+    const currentFiltered = currentJourneyCheckpoints.filter((c) => getCheckpointStage(c) === target);
+    if (currentFiltered.length > 0) return currentFiltered;
+    return checkpoints.filter((c) => getCheckpointStage(c) === target);
+  }, [checkpoints, currentJourneyCheckpoints, selectedStageScope, effectiveCurriculumStage]);
+
+  const episodeX = useCallback((ep: CanonicalEpisodeRecord | TrainingEpisode): number | null => {
     if (xAxisMode === "timesteps") {
       if (ep.global_timestep != null && ep.global_timestep >= 500000) {
         return ep.global_timestep;
@@ -2107,7 +2386,7 @@ export function DiagnosticsPanel({
       return ep.global_timestep ?? ep.global_environment_episode ?? ep.episode_in_stage ?? null;
     }
     if (xAxisMode === "episode") return ep.global_environment_episode ?? ep.episode_in_stage ?? ep.global_timestep ?? null;
-    if (xAxisMode === "runtime") return ep.active_runtime_seconds_total ?? ep.global_environment_episode ?? ep.episode_in_stage ?? null;
+    if (xAxisMode === "runtime") return (ep as any).active_runtime_seconds_total ?? ep.global_environment_episode ?? ep.episode_in_stage ?? null;
     if (xAxisMode === "calendar") {
       const ts = ep.completed_at;
       if (ts) return new Date(ts).getTime();
@@ -2117,8 +2396,8 @@ export function DiagnosticsPanel({
   }, [xAxisMode, trainingStatus]);
 
   const canonicalHistory = useMemo(() => {
-    return processCanonicalHistory(trainingEpisodes, checkpoints, selectedStageScope, activeRunId, effectiveCurriculumStage);
-  }, [trainingEpisodes, checkpoints, selectedStageScope, activeRunId, effectiveCurriculumStage]);
+    return processCanonicalHistory(trainingEpisodes, stageScopedViewCheckpoints, selectedStageScope, activeRunId, effectiveCurriculumStage);
+  }, [trainingEpisodes, stageScopedViewCheckpoints, selectedStageScope, activeRunId, effectiveCurriculumStage]);
 
   const activeEpisodeSequence = useMemo(() => {
     return selectWindowSlice(canonicalHistory, viewWindow);
@@ -2129,8 +2408,8 @@ export function DiagnosticsPanel({
   }, [activeEpisodeSequence]);
 
   const formalEvalMarkers = useMemo(() => {
-    return buildFormalEvalMarkers(checkpoints, selectedStageScope, xAxisMode, bestCheckpointEpisode, effectiveCurriculumStage);
-  }, [checkpoints, selectedStageScope, xAxisMode, bestCheckpointEpisode, effectiveCurriculumStage]);
+    return buildFormalEvalMarkers(stageScopedViewCheckpoints, selectedStageScope, xAxisMode, bestCheckpointEpisode, effectiveCurriculumStage);
+  }, [stageScopedViewCheckpoints, selectedStageScope, xAxisMode, bestCheckpointEpisode, effectiveCurriculumStage]);
 
   const filteredEpisodes = activeEpisodeSequence;
 
@@ -2209,21 +2488,6 @@ export function DiagnosticsPanel({
     };
   }, [stageScopedCheckpoints.length, stageLatestSuccessRate, requiredThreshold, qualifiedStreak, plateauInfo, isImproving, minStreak]);
 
-  const hasArchivedCheckpoints = useMemo(
-    () => checkpoints.some((c) => c.journey != null && c.journey !== "current"),
-    [checkpoints],
-  );
-
-  const currentJourneyCheckpoints = useMemo(
-    () => checkpoints.filter((c) => !c.journey || c.journey === "current"),
-    [checkpoints],
-  );
-
-  const archivedJourneyCheckpoints = useMemo(
-    () => checkpoints.filter((c) => c.journey != null && c.journey !== "current"),
-    [checkpoints],
-  );
-
   const availableStages = useMemo(
     () => [...new Set(checkpoints.map((c) => getCheckpointStage(c)))].sort((a, b) => a - b),
     [checkpoints],
@@ -2238,21 +2502,6 @@ export function DiagnosticsPanel({
     () => [...new Set(archivedJourneyCheckpoints.map((c) => getCheckpointStage(c)))].sort((a, b) => a - b),
     [archivedJourneyCheckpoints],
   );
-
-  const stageScopedViewCheckpoints = useMemo(() => {
-    if (selectedStageScope === "all") {
-      return checkpoints;
-    }
-    if (selectedStageScope === "current-journey") {
-      return currentJourneyCheckpoints.length > 0 ? currentJourneyCheckpoints : checkpoints;
-    }
-    const targetStage = selectedStageScope === "current" ? effectiveCurriculumStage : selectedStageScope;
-    const filtered = checkpoints.filter(
-      (c) => getCheckpointStage(c) === targetStage,
-    );
-    if (filtered.length > 0) return filtered;
-    return checkpoints;
-  }, [checkpoints, currentJourneyCheckpoints, selectedStageScope, effectiveCurriculumStage]);
 
   const filteredCheckpoints = useMemo(() => {
     if (viewWindow === "all") return stageScopedViewCheckpoints;
@@ -2492,12 +2741,12 @@ export function DiagnosticsPanel({
   );
   const liveStoppedCount = trainingStatus?.live_rollout_stopped_count ?? (
     trainingEpisodes.length > 0
-      ? filteredEpisodes.filter((e) => e.result === "STOPPED" || e.stopped).length
+      ? filteredEpisodes.filter((e) => e.result === "STOPPED" || (e as any).stopped).length
       : 0
   );
   const liveTimeoutCount = trainingStatus?.live_rollout_timeout_count ?? (
     trainingEpisodes.length > 0
-      ? filteredEpisodes.filter((e) => e.result === "TIMEOUT" || e.timeout).length
+      ? filteredEpisodes.filter((e) => e.result === "TIMEOUT" || (e as any).timeout).length
       : 0
   );
 
@@ -2577,6 +2826,26 @@ export function DiagnosticsPanel({
   useEffect(() => {
     localStorage.setItem("sheepdog_insights_learning_signal_smooth_window", String(learningSignalSmoothWindow));
   }, [learningSignalSmoothWindow]);
+
+  useEffect(() => {
+    localStorage.setItem("sheepdog_insights_x_axis", xAxisMode);
+  }, [xAxisMode]);
+
+  useEffect(() => {
+    localStorage.setItem("sheepdog_insights_layer_raw_episodes", String(layerRawEpisodes));
+  }, [layerRawEpisodes]);
+
+  useEffect(() => {
+    localStorage.setItem("sheepdog_insights_layer_rolling_avg", String(layerRollingAvg));
+  }, [layerRollingAvg]);
+
+  useEffect(() => {
+    localStorage.setItem("sheepdog_insights_layer_policy_snapshots", String(layerPolicySnapshots));
+  }, [layerPolicySnapshots]);
+
+  useEffect(() => {
+    localStorage.setItem("sheepdog_insights_layer_formal_evals", String(layerFormalEvals));
+  }, [layerFormalEvals]);
   const [focusedBreakthroughCheckpoint, setFocusedBreakthroughCheckpoint] = useState<number | null>(null);
   const [advisorExplainOpen, setAdvisorExplainOpen] = useState(false);
   const [breakthroughNotes, setBreakthroughNotes] = useState<Record<number, string>>({});

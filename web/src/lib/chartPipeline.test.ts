@@ -177,7 +177,7 @@ describe("Chart Pipeline Architecture & Chronology Pipeline", () => {
         curriculum_stage: 4,
         global_timesteps: 2000,
         average_completion_steps: 150,
-      },
+      } as any,
     ];
 
     const canonical = processCanonicalHistory(rawEpisodes, 4);
@@ -315,7 +315,7 @@ describe("Chart Pipeline Architecture & Chronology Pipeline", () => {
       { checkpoint_episode: 30, global_timestep: 3000, success_rate: 0.90, average_completion_steps: 95, stage: 4, recorded_at: "2026-08-13T10:00:00Z" },
     ];
 
-    const canonical = processCanonicalHistory([], checkpoints, 4);
+    const canonical = processCanonicalHistory([], checkpoints as any, 4);
     expect(canonical.length).toBe(3);
 
     const buckets = buildEpisodeBuckets(canonical, 25);

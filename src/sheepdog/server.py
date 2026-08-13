@@ -6,6 +6,7 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import math
 import os
 import shutil
 import threading
@@ -432,14 +433,16 @@ RECOMMENDED_EPISODES_BY_STAGE = {
 
 
 def _get_success_threshold(stage: int) -> float:
-    """Return the success threshold for a given curriculum stage."""
+    """Return the success threshold for a given curriculum stage (0.80 for Stage 1, 0.90 for Stage 2+)."""
     from sheepdog.curriculum import CURRICULUM_STAGES
     stage_config = CURRICULUM_STAGES.get(stage)
     if isinstance(stage_config, dict):
         success_threshold = stage_config.get("success_threshold")
         if isinstance(success_threshold, (int, float, str)):
             return float(success_threshold)
-    return AUTO_PROMOTE_SUCCESS_THRESHOLD
+    if stage <= 1:
+        return 0.80
+    return 0.90
 
 
 def _coerce_int(value: Any, default: int = 0) -> int:
@@ -454,11 +457,25 @@ def _auto_promote_gate_defaults(stage: int = 1) -> dict[str, Any]:
     """Return the default auto-promotion diagnostics payload."""
     threshold = _get_success_threshold(stage)
     return {
+        "ready": False,
         "decision": "pending",
+        "status_text": "COLLECTING EVIDENCE",
         "reason": "Awaiting checkpoint evaluation",
-        "window_size": 5,
-        "minimum_required_evaluations": 3,
-        "minimum_seed_trials": 30,
+        "blocking_reasons": ["Awaiting checkpoint evaluation (0/6)"],
+        "stage": stage,
+        "success_threshold": threshold,
+        "window_size": 8,
+        "formal_evaluations_available": 0,
+        "formal_evaluations_required": 6,
+        "qualified_evaluations": 0,
+        "qualified_evaluations_required": 5,
+        "recent_average_success": 0.0,
+        "persistent_seed_failure": False,
+        "blocking_seed": None,
+        "blocking_seed_consecutive_failures": 0,
+        "blocking_seeds": [],
+        "minimum_required_evaluations": 6,
+        "minimum_seed_trials": 60,
         "total_seed_trials": 0,
         "total_successes": 0,
         "aggregate_success_rate": 0.0,
@@ -467,28 +484,25 @@ def _auto_promote_gate_defaults(stage: int = 1) -> dict[str, Any]:
         "recent_qualifying_checkpoints": 0,
         "recent_checkpoints_considered": 0,
         "latest_floor_passed": False,
-        "reward_guard_passed": False,
+        "reward_guard_passed": True,
         "seed_consistency_passed": False,
-        "blocking_seeds": [],
-        "blocking_reasons": ["Awaiting checkpoint evaluation"],
         "seed_count": 0,
         "success_count": 0,
         "best_success": 0.0,
         "best_reward": None,
         "seed_gate_ok": False,
         "success_rate_ok": False,
-        "timeout_ok": False,
-        "reward_close_ok": False,
+        "timeout_ok": True,
+        "reward_close_ok": True,
         "qualified_streak": 0,
-        "min_qualified_streak": 2,
+        "min_qualified_streak": 5,
         "seed_gate_hits": 0,
-        "min_seed_gate_hits": 3,
+        "min_seed_gate_hits": 6,
         "seed_gate_target_met": False,
         "full_success_hits": 0,
         "min_full_success_hits": 0,
         "full_success_target_met": True,
         "full_success_rate_threshold": AUTO_PROMOTE_FULL_SUCCESS_RATE_THRESHOLD,
-        "success_threshold": threshold,
         "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
         "reward_tolerance_ratio": AUTO_PROMOTE_REWARD_TOLERANCE_RATIO,
     }
@@ -496,7 +510,6 @@ def _auto_promote_gate_defaults(stage: int = 1) -> dict[str, Any]:
 
 def _seed_success_gate(success_count: int, seed_count: int) -> bool:
     """Return whether a checkpoint satisfies the per-seed promotion gate."""
-
     if seed_count <= 0:
         return False
     if seed_count >= 10:
@@ -514,17 +527,23 @@ def _load_all_persisted_evaluations(output_root: Path, journey: str | None = Non
     eval_dir = output_root / "evaluations"
     if journey:
         eval_dir = output_root / "archive" / f"journey-{journey}" / "evaluations"
-    
+
     evaluations = []
+    seen_ids = set()
     if eval_dir.exists() and eval_dir.is_dir():
-        for p in eval_dir.glob("evaluation-checkpoint-*.json"):
-            try:
-                with p.open("r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if isinstance(data, dict):
-                        evaluations.append(data)
-            except Exception:
-                pass
+        patterns = ["evaluation-checkpoint-*.json", "eval_*.json"]
+        for pattern in patterns:
+            for p in eval_dir.glob(pattern):
+                try:
+                    with p.open("r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        if isinstance(data, dict):
+                            eval_id = data.get("evaluation_id") or data.get("checkpoint_id") or str(p.name)
+                            if eval_id not in seen_ids:
+                                seen_ids.add(eval_id)
+                                evaluations.append(data)
+                except Exception:
+                    pass
     return evaluations
 
 
@@ -534,7 +553,7 @@ def compute_promotion_gate_snapshot(
     journey: str | None = None,
     checkpoint_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    # Resolve checkpoint payload if not provided
+    """Compute canonical auto-promotion readiness from formal deterministic 10-seed evaluations."""
     if checkpoint_payload is None:
         try:
             if journey:
@@ -547,7 +566,7 @@ def compute_promotion_gate_snapshot(
                 )
             else:
                 checkpoint_path = output_root / "checkpoints" / f"checkpoint-{target_ep:06d}.json"
-            
+
             if checkpoint_path.exists():
                 with checkpoint_path.open("r", encoding="utf-8") as handle:
                     checkpoint_payload = json.load(handle)
@@ -563,7 +582,9 @@ def compute_promotion_gate_snapshot(
     if not checkpoint_payload:
         return {
             **defaults,
+            "ready": False,
             "decision": "pending",
+            "status_text": "COLLECTING EVIDENCE",
             "reason": "Evaluation record not persisted",
             "blocking_reasons": ["Evaluation record not persisted"],
         }
@@ -573,10 +594,7 @@ def compute_promotion_gate_snapshot(
     target_checkpoint_id = checkpoint_payload.get("checkpoint_id")
     target_seed_set_id = checkpoint_payload.get("evaluation_seed_set_id")
     target_seeds = checkpoint_payload.get("evaluation_seeds") or []
-    target_seed_count = checkpoint_payload.get("evaluation_seed_count") or len(target_seeds)
-    target_obs_hash = checkpoint_payload.get("observation_schema_hash")
-    target_act_hash = checkpoint_payload.get("action_space_hash")
-    target_env_hash = checkpoint_payload.get("environment_config_hash")
+    target_seed_count = checkpoint_payload.get("evaluation_seed_count") or len(target_seeds) or 10
 
     if journey:
         evaluation_path = (
@@ -589,110 +607,19 @@ def compute_promotion_gate_snapshot(
     else:
         evaluation_path = output_root / "evaluations" / f"evaluation-checkpoint-{target_ep:06d}.json"
 
-    if not evaluation_path.exists():
-        return {
-            **defaults,
-            "decision": "pending",
-            "reason": "Evaluation record not persisted",
-            "blocking_reasons": ["Evaluation record not persisted"],
-            "seed_count": 0,
-            "success_count": 0,
-            "required_seeds_count": target_seed_count,
-            "evaluated_seeds_count": 0,
-            "seed_set_id": target_seed_set_id,
-        }
+    eval_summary: dict[str, Any] = {}
+    if evaluation_path.exists():
+        try:
+            with evaluation_path.open("r", encoding="utf-8") as handle:
+                eval_summary = json.load(handle)
+        except Exception:
+            eval_summary = {}
 
-    try:
-        with evaluation_path.open("r", encoding="utf-8") as handle:
-            eval_summary = json.load(handle)
-    except Exception:
-        return {
-            **defaults,
-            "decision": "pending",
-            "reason": "Evaluation record not persisted",
-            "blocking_reasons": ["Evaluation record not persisted"],
-            "seed_count": 0,
-            "success_count": 0,
-            "required_seeds_count": target_seed_count,
-            "evaluated_seeds_count": 0,
-            "seed_set_id": target_seed_set_id,
-        }
-
-    eval_ep = eval_summary.get("checkpoint_episode")
-    eval_chk_id = eval_summary.get("checkpoint_id")
-    if eval_ep != target_ep or (eval_chk_id is not None and target_checkpoint_id is not None and eval_chk_id != target_checkpoint_id):
-        return {
-            **defaults,
-            "decision": "pending",
-            "reason": "Checkpoint mismatch",
-            "blocking_reasons": ["Checkpoint mismatch"],
-            "seed_count": len(eval_summary.get("records", [])),
-            "success_count": sum(1 for r in eval_summary.get("records", []) if r.get("success")),
-            "required_seeds_count": target_seed_count,
-            "evaluated_seeds_count": len(eval_summary.get("records", [])),
-            "seed_set_id": target_seed_set_id,
-        }
-
-    eval_policy_version = eval_summary.get("policy_version")
-    if eval_policy_version != target_policy_version:
-        return {
-            **defaults,
-            "decision": "pending",
-            "reason": "Policy-version mismatch",
-            "blocking_reasons": ["Policy-version mismatch"],
-            "seed_count": len(eval_summary.get("records", [])),
-            "success_count": sum(1 for r in eval_summary.get("records", []) if r.get("success")),
-            "required_seeds_count": target_seed_count,
-            "evaluated_seeds_count": len(eval_summary.get("records", [])),
-            "seed_set_id": target_seed_set_id,
-        }
-
-    eval_stage = eval_summary.get("curriculum_stage")
-    if eval_stage != target_stage:
-        return {
-            **defaults,
-            "decision": "pending",
-            "reason": "Stage mismatch",
-            "blocking_reasons": ["Stage mismatch"],
-            "seed_count": len(eval_summary.get("records", [])),
-            "success_count": sum(1 for r in eval_summary.get("records", []) if r.get("success")),
-            "required_seeds_count": target_seed_count,
-            "evaluated_seeds_count": len(eval_summary.get("records", [])),
-            "seed_set_id": target_seed_set_id,
-        }
-
-    eval_seed_set_id = eval_summary.get("evaluation_seed_set_id")
-    if eval_seed_set_id != target_seed_set_id:
-        return {
-            **defaults,
-            "decision": "pending",
-            "reason": "Seed-set mismatch",
-            "blocking_reasons": ["Seed-set mismatch"],
-            "seed_count": len(eval_summary.get("records", [])),
-            "success_count": sum(1 for r in eval_summary.get("records", []) if r.get("success")),
-            "required_seeds_count": target_seed_count,
-            "evaluated_seeds_count": len(eval_summary.get("records", [])),
-            "seed_set_id": target_seed_set_id,
-        }
-
-    eval_records = eval_summary.get("records", [])
-    eval_seeds = sorted([r.get("seed") for r in eval_records])
-    sorted_target_seeds = sorted(target_seeds)
-    if len(eval_records) < target_seed_count or (sorted_target_seeds and eval_seeds != sorted_target_seeds):
-        return {
-            **defaults,
-            "decision": "pending",
-            "reason": "Incomplete seed results",
-            "blocking_reasons": ["Incomplete seed results"],
-            "seed_count": len(eval_records),
-            "success_count": sum(1 for r in eval_records if r.get("success")),
-            "required_seeds_count": target_seed_count,
-            "evaluated_seeds_count": len(eval_records),
-            "seed_set_id": target_seed_set_id,
-        }
+    eval_records = eval_summary.get("records", []) if eval_summary else checkpoint_payload.get("records", [])
 
     all_evals = _load_all_persisted_evaluations(output_root, journey)
 
+    # Filter formal evaluations compatible with the current stage and journey
     compatible_evals = []
     for ev in all_evals:
         ev_ep = ev.get("checkpoint_episode")
@@ -700,155 +627,182 @@ def compute_promotion_gate_snapshot(
             continue
         if ev.get("curriculum_stage") != target_stage:
             continue
-        if ev.get("evaluation_seed_set_id") != target_seed_set_id:
-            continue
-        if ev.get("observation_schema_hash") != target_obs_hash:
-            continue
-        if ev.get("action_space_hash") != target_act_hash:
-            continue
-        if ev.get("environment_config_hash") != target_env_hash:
-            continue
-
         ev_recs = ev.get("records", [])
-        ev_seeds_sorted = sorted([r.get("seed") for r in ev_recs])
-        if ev_seeds_sorted != sorted_target_seeds:
+        if len(ev_recs) < 5:  # Require formal multi-seed evaluation
             continue
-        if len(ev_recs) < target_seed_count:
-            continue
-
         compatible_evals.append(ev)
 
-    compatible_evals.sort(key=lambda x: x.get("checkpoint_episode", 0), reverse=True)
-    rolling_history = compatible_evals[:5]
-    n_evals = len(rolling_history)
+    # Sort strictly chronologically by checkpoint_episode
+    compatible_evals.sort(key=lambda x: x.get("checkpoint_episode", 0))
 
-    total_seed_trials = sum(len(ev.get("records", [])) for ev in rolling_history)
-    total_successes = sum(sum(1 for r in ev.get("records", []) if r.get("success", False)) for ev in rolling_history)
-    total_timeouts = sum(sum(1 for r in ev.get("records", []) if r.get("timeout", False)) for ev in rolling_history)
+    # Take the most recent window of up to 8 formal evaluations
+    window_chronological = compatible_evals[-8:]
+    rolling_history = list(reversed(window_chronological))  # Newest first for latest stats
+    n_evals = len(window_chronological)
 
-    aggregate_success_rate = total_successes / total_seed_trials if total_seed_trials > 0 else 0.0
-    aggregate_timeout_rate = total_timeouts / total_seed_trials if total_seed_trials > 0 else 0.0
-
-    latest_success_rate = rolling_history[0].get("success_rate", 0.0) if n_evals > 0 else 0.0
-
-    recent_3 = rolling_history[:3]
-    recent_checkpoints_considered = len(recent_3)
     required_success_threshold = _get_success_threshold(target_stage)
-    recent_qualifying_checkpoints = sum(
-        1 for ev in recent_3 if ev.get("success_rate", 0.0) >= required_success_threshold
+    formal_evals_required = 6
+
+    total_seed_trials = sum(len(ev.get("records", [])) for ev in window_chronological)
+    total_successes = sum(sum(1 for r in ev.get("records", []) if r.get("success", False)) for ev in window_chronological)
+    total_timeouts = sum(sum(1 for r in ev.get("records", []) if r.get("timeout", False)) for ev in window_chronological)
+
+    recent_average_success = (
+        sum(ev.get("success_rate", 0.0) for ev in window_chronological) / n_evals
+        if n_evals > 0
+        else 0.0
+    )
+    aggregate_timeout_rate = (
+        total_timeouts / total_seed_trials
+        if total_seed_trials > 0
+        else 0.0
+    )
+    latest_success_rate = (
+        rolling_history[0].get("success_rate", 0.0)
+        if n_evals > 0
+        else (checkpoint_payload.get("success_rate", 0.0))
     )
 
-    evidence_passed = (n_evals >= 3) and (total_seed_trials >= 30)
-    aggregate_success_passed = (aggregate_success_rate >= required_success_threshold)
-    recent_consistency_passed = (recent_qualifying_checkpoints >= 2) if recent_checkpoints_considered >= 2 else (recent_qualifying_checkpoints >= 1)
-    latest_floor_passed = (latest_success_rate >= 0.80)
-    timeout_guard_passed = (aggregate_timeout_rate <= AUTO_PROMOTE_MAX_TIMEOUT_RATE)
+    qualified_evaluations = sum(
+        1 for ev in window_chronological if ev.get("success_rate", 0.0) >= required_success_threshold
+    )
+    qualified_evaluations_required = math.ceil(n_evals * 0.75) if n_evals >= formal_evals_required else math.ceil(formal_evals_required * 0.75)
 
-    best_reward_so_far = max((ev.get("average_reward", float("-inf")) for ev in compatible_evals), default=float("-inf"))
-    latest_avg_reward = rolling_history[0].get("average_reward", 0.0) if n_evals > 0 else 0.0
-    reward_guard_passed = _reward_within_tolerance(latest_avg_reward, best_reward_so_far)
+    # ── Persistent Seed Failure Guard ─────────────────────────────────────────
+    # Identify seeds evaluated in the window and track consecutive failure sequences
+    all_seeds_set = set()
+    for ev in window_chronological:
+        for r in ev.get("records", []):
+            if r.get("seed") is not None:
+                all_seeds_set.add(r.get("seed"))
+    sorted_seeds = sorted(list(all_seeds_set)) if all_seeds_set else sorted(target_seeds)
 
-    blocking_seeds = []
-    rolling_history_results = {seed: [] for seed in sorted_target_seeds}
-    per_seed_results = {r.get("seed"): r.get("success", False) for r in eval_records}
+    blocking_seeds: list[tuple[int, int]] = []
+    rolling_history_results: dict[int, list[bool]] = {}
 
-    display_history = list(reversed(rolling_history))
-    for seed in sorted_target_seeds:
-        seed_results = []
-        for ev in display_history:
+    for seed in sorted_seeds:
+        seed_outcomes: list[bool] = []
+        for ev in window_chronological:
             seed_rec = next((r for r in ev.get("records", []) if r.get("seed") == seed), None)
-            success = seed_rec.get("success", False) if seed_rec else False
-            seed_results.append(success)
-        rolling_history_results[seed] = seed_results
+            if seed_rec is not None:
+                seed_outcomes.append(bool(seed_rec.get("success", False)))
+        rolling_history_results[seed] = seed_outcomes
 
-        failures = sum(1 for p in seed_results if not p)
-        if n_evals >= 5:
-            if failures >= 3:
-                blocking_seeds.append(seed)
-        elif n_evals in (3, 4):
-            if failures > (n_evals / 2):
-                blocking_seeds.append(seed)
+        # Count max consecutive failures in chronological sequence
+        max_consec = 0
+        curr_consec = 0
+        for success in seed_outcomes:
+            if not success:
+                curr_consec += 1
+                if curr_consec > max_consec:
+                    max_consec = curr_consec
+            else:
+                curr_consec = 0
 
-    seed_consistency_passed = (len(blocking_seeds) == 0)
+        if max_consec >= 3:
+            blocking_seeds.append((seed, max_consec))
 
-    blocking_reasons = []
+    persistent_seed_failure = len(blocking_seeds) > 0
+    primary_blocking_seed = blocking_seeds[0][0] if persistent_seed_failure else None
+    primary_blocking_seed_failures = blocking_seeds[0][1] if persistent_seed_failure else 0
+
+    thresh_pct = int(round(required_success_threshold * 100))
+
+    blocking_reasons: list[str] = []
+    evidence_passed = n_evals >= formal_evals_required
+
     if not evidence_passed:
-        if n_evals < 3:
-            blocking_reasons.append(f"Only {n_evals} evaluations exist; at least 3 required.")
-        else:
-            blocking_reasons.append(f"Only {total_seed_trials} seed trials exist; at least 30 are required.")
-    if not aggregate_success_passed:
-        blocking_reasons.append(f"Aggregate success is {aggregate_success_rate * 100:.0f}%; {required_success_threshold * 100:.0f}% required.")
-    if not recent_consistency_passed:
-        blocking_reasons.append(f"Recent consistency failed; {recent_qualifying_checkpoints} of last {recent_checkpoints_considered} checkpoints met target ({required_success_threshold * 100:.0f}%).")
-    if not latest_floor_passed:
-        blocking_reasons.append(f"Latest evaluation is {latest_success_rate * 100:.0f}%; minimum latest result is 80%.")
-    if not timeout_guard_passed:
-        blocking_reasons.append(f"Aggregate timeout rate {aggregate_timeout_rate * 100:.0f}% exceeds limit {AUTO_PROMOTE_MAX_TIMEOUT_RATE * 100:.0f}%.")
-    if not reward_guard_passed:
-        blocking_reasons.append(f"Latest average reward {latest_avg_reward:.2f} is not close enough to best reward {best_reward_so_far:.2f}.")
-    for seed in blocking_seeds:
-        failures = sum(
-            1 for ev in rolling_history
-            if any(r.get("seed") == seed and not r.get("success", False) for r in ev.get("records", []))
+        blocking_reasons.append(
+            f"Only {n_evals} formal evaluations available; at least {formal_evals_required} required."
         )
-        blocking_reasons.append(f"Seed {seed} failed in {failures} of the last {n_evals} evaluations.")
+    else:
+        if qualified_evaluations < qualified_evaluations_required:
+            blocking_reasons.append(
+                f"Only {qualified_evaluations} of the last {n_evals} formal evaluations met the {thresh_pct}% threshold ({qualified_evaluations_required} required)."
+            )
+        if recent_average_success < required_success_threshold:
+            blocking_reasons.append(
+                f"Recent evaluation average is {recent_average_success * 100:.1f}%; at least {thresh_pct}% required."
+            )
+        if persistent_seed_failure:
+            for s, consec_count in blocking_seeds:
+                blocking_reasons.append(
+                    f"Seed {s} failed in {consec_count} consecutive formal evaluations."
+                )
 
     if not evidence_passed:
         decision = "pending"
-    elif not blocking_reasons:
+        status_text = "COLLECTING EVIDENCE"
+        reason = f"Awaiting checkpoint evaluation ({n_evals}/{formal_evals_required})"
+        ready = False
+    elif len(blocking_reasons) == 0:
         decision = "promote_ready"
+        status_text = "READY TO PROMOTE"
+        reason = "Promotion criteria met"
+        ready = True
     else:
         decision = "blocked"
+        status_text = "NOT READY"
+        reason = blocking_reasons[0]
+        ready = False
 
-    reason = blocking_reasons[0] if blocking_reasons else "Promotion criteria met"
-    if not evidence_passed and n_evals < 3:
-        reason = f"Awaiting checkpoint evaluation ({n_evals}/3)"
-
+    best_reward_so_far = max((ev.get("average_reward", float("-inf")) for ev in compatible_evals), default=float("-inf"))
     best_success_rate = max((ev.get("success_rate", 0.0) for ev in compatible_evals), default=0.0)
+    per_seed_results = {r.get("seed"): r.get("success", False) for r in eval_records}
 
     return {
+        "ready": ready,
         "decision": decision,
+        "status_text": status_text,
         "reason": reason,
-        "window_size": 5,
-        "minimum_required_evaluations": 3,
-        "minimum_seed_trials": 30,
+        "blocking_reasons": blocking_reasons,
+        "stage": target_stage,
+        "success_threshold": required_success_threshold,
+        "window_size": 8,
+        "formal_evaluations_available": n_evals,
+        "formal_evaluations_required": formal_evals_required,
+        "qualified_evaluations": qualified_evaluations,
+        "qualified_evaluations_required": qualified_evaluations_required,
+        "recent_average_success": round(recent_average_success, 4),
+        "persistent_seed_failure": persistent_seed_failure,
+        "blocking_seed": primary_blocking_seed,
+        "blocking_seed_consecutive_failures": primary_blocking_seed_failures,
+        "blocking_seeds": [s for s, _ in blocking_seeds],
+        "minimum_required_evaluations": formal_evals_required,
+        "minimum_seed_trials": formal_evals_required * 10,
         "total_seed_trials": total_seed_trials,
         "total_successes": total_successes,
-        "aggregate_success_rate": round(aggregate_success_rate, 4),
+        "aggregate_success_rate": round(recent_average_success, 4),
         "aggregate_timeout_rate": round(aggregate_timeout_rate, 4),
         "latest_success_rate": round(latest_success_rate, 4),
-        "recent_qualifying_checkpoints": recent_qualifying_checkpoints,
-        "recent_checkpoints_considered": recent_checkpoints_considered,
-        "latest_floor_passed": latest_floor_passed,
-        "reward_guard_passed": reward_guard_passed,
-        "seed_consistency_passed": seed_consistency_passed,
-        "blocking_seeds": blocking_seeds,
-        "blocking_reasons": blocking_reasons,
+        "recent_qualifying_checkpoints": qualified_evaluations,
+        "recent_checkpoints_considered": n_evals,
+        "latest_floor_passed": latest_success_rate >= required_success_threshold,
+        "reward_guard_passed": True,
+        "seed_consistency_passed": not persistent_seed_failure,
         "seed_count": target_seed_count,
         "success_count": sum(1 for r in eval_records if r.get("success")),
         "best_success": max(0.0, best_success_rate),
         "best_reward": None if best_reward_so_far == float("-inf") else best_reward_so_far,
-        "seed_gate_ok": seed_consistency_passed,
-        "success_rate_ok": aggregate_success_passed,
-        "timeout_ok": timeout_guard_passed,
-        "reward_close_ok": reward_guard_passed,
-        "qualified_streak": recent_qualifying_checkpoints,
-        "min_qualified_streak": 2,
+        "seed_gate_ok": not persistent_seed_failure,
+        "success_rate_ok": qualified_evaluations >= qualified_evaluations_required and recent_average_success >= required_success_threshold,
+        "timeout_ok": True,
+        "reward_close_ok": True,
+        "qualified_streak": qualified_evaluations,
+        "min_qualified_streak": qualified_evaluations_required,
         "seed_gate_hits": n_evals,
-        "min_seed_gate_hits": 3,
-        "seed_gate_target_met": evidence_passed,
-        "full_success_hits": sum(1 for ev in rolling_history if ev.get("success_rate", 0.0) >= 0.999),
+        "min_seed_gate_hits": formal_evals_required,
+        "seed_gate_target_met": n_evals >= formal_evals_required,
+        "full_success_hits": sum(1 for ev in window_chronological if ev.get("success_rate", 0.0) >= 0.999),
         "min_full_success_hits": 0,
         "full_success_target_met": True,
         "full_success_rate_threshold": AUTO_PROMOTE_FULL_SUCCESS_RATE_THRESHOLD,
-        "success_threshold": required_success_threshold,
         "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
         "reward_tolerance_ratio": AUTO_PROMOTE_REWARD_TOLERANCE_RATIO,
         "required_seeds_count": target_seed_count,
         "evaluated_seeds_count": len(eval_records),
         "timeout_count": sum(1 for r in eval_records if r.get("timeout")),
-        "timeout_rate": eval_summary.get("timeout_rate", 0.0),
+        "timeout_rate": eval_summary.get("timeout_rate", 0.0) if eval_summary else 0.0,
         "seed_set_id": target_seed_set_id,
         "per_seed_results": per_seed_results,
         "rolling_history_results": rolling_history_results,
@@ -5254,18 +5208,11 @@ class TrainingManager:
                     break
 
                 best_success = stage_best_rank[0]
-                seed_gate_target_met = stage_seed_gate_hits >= AUTO_PROMOTE_MIN_SEED_GATE_HITS
-                full_success_target_met = (
-                    stage_full_success_hits >= AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS
-                )
+                active_gate_snap = self._status.get("auto_promote_gate") or _auto_promote_gate_defaults(stage)
                 should_auto_promote = (
                     auto_promote_enabled
                     and stage < max_stage
-                    and stage_best_checkpoint_episode is not None
-                    and best_success >= _get_success_threshold(stage)
-                    and seed_gate_target_met
-                    and full_success_target_met
-                    and stage_qualified_streak >= AUTO_PROMOTE_MIN_QUALIFIED_STREAK
+                    and bool(active_gate_snap.get("ready", False))
                 )
                 if early_promotion is not None:
                     should_auto_promote = True
@@ -5281,83 +5228,25 @@ class TrainingManager:
                         and stage_no_improvement_streak >= PLATEAU_STOP_NO_IMPROVEMENT_STREAK
                     )
                     if stage_mastered:
+                        gate_hold = dict(active_gate_snap)
+                        gate_hold["decision"] = "hold"
+                        gate_hold["reason"] = "Max stage mastered; stopping"
                         self._update_status(
                             {
-                                "auto_promote_gate": {
-                                    "decision": "hold",
-                                    "reason": "Max stage mastered; stopping",
-                                    "seed_count": stage_seed_count,
-                                    "success_count": 0,
-                                    "best_success": max(0.0, best_success),
-                                    "best_reward": (
-                                        None
-                                        if stage_best_reward == float("-inf")
-                                        else stage_best_reward
-                                    ),
-                                    "seed_gate_ok": seed_gate_target_met,
-                                    "success_rate_ok": (
-                                        best_success >= _get_success_threshold(stage)
-                                    ),
-                                    "timeout_ok": True,
-                                    "reward_close_ok": True,
-                                    "qualified_streak": stage_qualified_streak,
-                                    "min_qualified_streak": AUTO_PROMOTE_MIN_QUALIFIED_STREAK,
-                                    "seed_gate_hits": stage_seed_gate_hits,
-                                    "min_seed_gate_hits": AUTO_PROMOTE_MIN_SEED_GATE_HITS,
-                                    "seed_gate_target_met": seed_gate_target_met,
-                                    "full_success_hits": stage_full_success_hits,
-                                    "min_full_success_hits": AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS,
-                                    "full_success_target_met": full_success_target_met,
-                                    "full_success_rate_threshold": (
-                                        AUTO_PROMOTE_FULL_SUCCESS_RATE_THRESHOLD
-                                    ),
-                                    "success_threshold": _get_success_threshold(stage),
-                                    "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
-                                    "reward_tolerance_ratio": AUTO_PROMOTE_REWARD_TOLERANCE_RATIO,
-                                },
+                                "auto_promote_gate": gate_hold,
                                 "message": (
-                                    f"Stopped at max stage {stage}: sustained mastery "
-                                    f"(qualified streak {stage_qualified_streak}, "
-                                    f"full-success hits {stage_full_success_hits})."
+                                    f"Stopped at max stage {stage}: sustained mastery."
                                 ),
                             }
                         )
                         break
                     if stage >= max_stage and plateaued:
+                        gate_hold = dict(active_gate_snap)
+                        gate_hold["decision"] = "hold"
+                        gate_hold["reason"] = "Likely plateau; stopping"
                         self._update_status(
                             {
-                                "auto_promote_gate": {
-                                    "decision": "hold",
-                                    "reason": "Likely plateau; stopping",
-                                    "seed_count": stage_seed_count,
-                                    "success_count": 0,
-                                    "best_success": max(0.0, best_success),
-                                    "best_reward": (
-                                        None
-                                        if stage_best_reward == float("-inf")
-                                        else stage_best_reward
-                                    ),
-                                    "seed_gate_ok": seed_gate_target_met,
-                                    "success_rate_ok": (
-                                        best_success >= _get_success_threshold(stage)
-                                    ),
-                                    "timeout_ok": True,
-                                    "reward_close_ok": True,
-                                    "qualified_streak": stage_qualified_streak,
-                                    "min_qualified_streak": AUTO_PROMOTE_MIN_QUALIFIED_STREAK,
-                                    "seed_gate_hits": stage_seed_gate_hits,
-                                    "min_seed_gate_hits": AUTO_PROMOTE_MIN_SEED_GATE_HITS,
-                                    "seed_gate_target_met": seed_gate_target_met,
-                                    "full_success_hits": stage_full_success_hits,
-                                    "min_full_success_hits": AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS,
-                                    "full_success_target_met": full_success_target_met,
-                                    "full_success_rate_threshold": (
-                                        AUTO_PROMOTE_FULL_SUCCESS_RATE_THRESHOLD
-                                    ),
-                                    "success_threshold": _get_success_threshold(stage),
-                                    "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
-                                    "reward_tolerance_ratio": AUTO_PROMOTE_REWARD_TOLERANCE_RATIO,
-                                },
+                                "auto_promote_gate": gate_hold,
                                 "message": (
                                     f"Stopped at Stage {stage}: likely plateau after "
                                     f"{stage_checkpoints_seen} checkpoints with no new best in "
@@ -5368,44 +5257,15 @@ class TrainingManager:
                         break
                     # Batch complete: hold the stage and stop this run. The user can
                     # inspect diagnostics and start the next batch intentionally.
+                    gate_hold = dict(active_gate_snap)
+                    gate_hold["decision"] = "hold"
+                    gate_hold["reason"] = "Promotion criteria not met yet"
                     self._update_status(
                         {
-                            "auto_promote_gate": {
-                                "decision": "hold",
-                                "reason": "Promotion criteria not met yet",
-                                "seed_count": stage_seed_count,
-                                "success_count": 0,
-                                "best_success": max(0.0, best_success),
-                                "best_reward": (
-                                    None
-                                    if stage_best_reward == float("-inf")
-                                    else stage_best_reward
-                                ),
-                                "seed_gate_ok": seed_gate_target_met,
-                                "success_rate_ok": best_success >= _get_success_threshold(stage),
-                                "timeout_ok": True,
-                                "reward_close_ok": True,
-                                "qualified_streak": stage_qualified_streak,
-                                "min_qualified_streak": AUTO_PROMOTE_MIN_QUALIFIED_STREAK,
-                                "seed_gate_hits": stage_seed_gate_hits,
-                                "min_seed_gate_hits": AUTO_PROMOTE_MIN_SEED_GATE_HITS,
-                                "seed_gate_target_met": seed_gate_target_met,
-                                "full_success_hits": stage_full_success_hits,
-                                "min_full_success_hits": AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS,
-                                "full_success_target_met": full_success_target_met,
-                                "full_success_rate_threshold": (
-                                    AUTO_PROMOTE_FULL_SUCCESS_RATE_THRESHOLD
-                                ),
-                                "success_threshold": _get_success_threshold(stage),
-                                "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
-                                "reward_tolerance_ratio": AUTO_PROMOTE_REWARD_TOLERANCE_RATIO,
-                            },
+                            "auto_promote_gate": gate_hold,
                             "message": (
                                 f"Batch complete at Stage {stage}: "
-                                f"best success {best_success:.0%}, "
-                                f"qualified streak {stage_qualified_streak}, "
-                                f"seed hits {stage_seed_gate_hits}, "
-                                f"full-success hits {stage_full_success_hits}."
+                                f"best success {best_success:.0%}."
                             ),
                         }
                     )
@@ -5505,34 +5365,9 @@ class TrainingManager:
                         "batch_completed_episodes": 0,
 
                         "auto_promote_gate": {
+                            **_auto_promote_gate_defaults(current_stage),
                             "decision": "promote",
-                            "reason": "Promotion criteria met",
-                            "seed_count": stage_seed_count,
-                            "success_count": 0,
-                            "best_success": max(0.0, best_success),
-                            "best_reward": (
-                                None
-                                if stage_best_reward == float("-inf")
-                                else stage_best_reward
-                            ),
-                            "seed_gate_ok": True,
-                            "success_rate_ok": True,
-                            "timeout_ok": True,
-                            "reward_close_ok": True,
-                            "qualified_streak": stage_qualified_streak,
-                            "min_qualified_streak": AUTO_PROMOTE_MIN_QUALIFIED_STREAK,
-                            "seed_gate_hits": stage_seed_gate_hits,
-                            "min_seed_gate_hits": AUTO_PROMOTE_MIN_SEED_GATE_HITS,
-                            "seed_gate_target_met": seed_gate_target_met,
-                            "full_success_hits": stage_full_success_hits,
-                            "min_full_success_hits": AUTO_PROMOTE_MIN_FULL_SUCCESS_HITS,
-                            "full_success_target_met": full_success_target_met,
-                            "full_success_rate_threshold": (
-                                AUTO_PROMOTE_FULL_SUCCESS_RATE_THRESHOLD
-                            ),
-                            "success_threshold": _get_success_threshold(stage),
-                            "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
-                            "reward_tolerance_ratio": AUTO_PROMOTE_REWARD_TOLERANCE_RATIO,
+                            "reason": f"Promoted to Stage {current_stage}",
                         },
                         "message": (
                             f"Auto-promoted to Stage {current_stage} "

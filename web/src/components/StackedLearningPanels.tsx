@@ -1,11 +1,12 @@
 import React, { useMemo, useState } from "react";
 import type { CheckpointEntry, TrainingEpisode } from "../state/types";
+import type { CanonicalEpisodeRecord } from "../lib/chartPipeline";
 
 export type SmoothingWindow = 1 | 10 | 25 | 50;
 export type XAxisMode = "stage_ep" | "global_ep" | "timesteps";
 
 interface StackedLearningPanelsProps {
-  episodes: TrainingEpisode[];
+  episodes: CanonicalEpisodeRecord[] | TrainingEpisode[];
   checkpoints: CheckpointEntry[];
   curriculumStage: number;
   smoothingWindow: SmoothingWindow;
@@ -84,13 +85,14 @@ export function StackedLearningPanels({
       const avgReward = slice.reduce((sum, e) => sum + e.reward, 0) / slice.length;
 
       // Component Breakdowns (if recorded)
-      const episodesWithBreakdown = slice.filter((e) => e.reward_breakdown != null && typeof e.reward_breakdown === "object");
+      const episodesWithBreakdown = slice.filter((e) => (e as any).reward_breakdown != null && typeof (e as any).reward_breakdown === "object");
       let breakdownAvg: Record<string, number> | null = null;
       if (episodesWithBreakdown.length > 0) {
         const componentTotals: Record<string, number> = {};
         for (const e of episodesWithBreakdown) {
-          if (e.reward_breakdown) {
-            for (const [k, v] of Object.entries(e.reward_breakdown)) {
+          const breakdown = (e as any).reward_breakdown;
+          if (breakdown) {
+            for (const [k, v] of Object.entries(breakdown)) {
               componentTotals[k] = (componentTotals[k] || 0) + (typeof v === "number" ? v : 0);
             }
           }
@@ -255,7 +257,7 @@ export function StackedLearningPanels({
             flexWrap: "wrap",
             gap: "1rem",
             alignItems: "center",
-            justify: "space-between",
+            justifyContent: "space-between",
           }}
         >
           <div>

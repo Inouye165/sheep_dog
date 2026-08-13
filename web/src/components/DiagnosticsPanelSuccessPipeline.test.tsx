@@ -30,7 +30,7 @@ const mockIndexWithCheckpoint: CheckpointIndex = {
   latest: null,
 };
 
-const mockTrainingStatus: TrainingStatus = {
+const mockTrainingStatus: any = {
   running: true,
   fast_mode: true,
   trainer_type: "maskable_ppo",

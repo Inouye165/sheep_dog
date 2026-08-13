@@ -246,37 +246,28 @@ describe("DiagnosticsPanel Live Insights & Telemetry", () => {
     vi.unstubAllGlobals();
   });
 
-  it("6. Current Journey scope passes active run_id to loadTrainingEpisodes", async () => {
+  it("6. Current Journey scope: bootstrap call omits runId to always seed latest data; runId applied on incremental polls", async () => {
     const api = await import("../lib/api");
+    const calls: any[] = [];
     const loadEpisodesSpy = vi.spyOn(api, "loadTrainingEpisodes").mockImplementation(async (options) => {
-      if (options?.runId === "run_active_123") {
-        return {
-          episodes: Array.from({ length: 25 }, (_, i) => ({
-            id: 100 + i,
-            run_id: "run_active_123",
-            global_environment_episode: 100 + i,
-            curriculum_stage: 8,
-            reward: 180.0,
-            result: "SUCCESS",
-            success: true,
-            global_timestep: (100 + i) * 100,
-          })),
-          latest_id: 124,
-          next_after_id: 124,
-          has_more: false,
-          max_id: 124,
-          oldest_available_timestamp: null,
-          total_matching: 25,
-        };
-      }
+      calls.push(options);
       return {
-        episodes: [],
-        latest_id: 0,
-        next_after_id: 0,
+        episodes: Array.from({ length: 25 }, (_, i) => ({
+          id: 100 + i,
+          run_id: "run_active_123",
+          global_environment_episode: 100 + i,
+          curriculum_stage: 8,
+          reward: 180.0,
+          result: "SUCCESS",
+          success: true,
+          global_timestep: (100 + i) * 500,
+        })) as any,
+        latest_id: 124,
+        next_after_id: 124,
         has_more: false,
-        max_id: 0,
+        max_id: 124,
         oldest_available_timestamp: null,
-        total_matching: 0,
+        total_matching: 25,
       };
     });
 
@@ -295,11 +286,13 @@ describe("DiagnosticsPanel Live Insights & Telemetry", () => {
       />
     );
 
-    expect(loadEpisodesSpy).toHaveBeenCalledWith(
-      expect.objectContaining({
-        runId: "run_active_123",
-      })
-    );
+    // Bootstrap call (lastEpisodeId === 0) deliberately omits runId so today's data
+    // is always fetched regardless of when trainingStatus loads.
+    const bootstrapCall = calls[0];
+    expect(bootstrapCall).toBeDefined();
+    expect(bootstrapCall.runId).toBeUndefined();
+    expect(bootstrapCall.order).toBe("desc");
+    expect(bootstrapCall.afterId).toBeUndefined();
     loadEpisodesSpy.mockRestore();
   });
 
@@ -319,7 +312,7 @@ describe("DiagnosticsPanel Live Insights & Telemetry", () => {
               success: true,
               global_timestep: 20100,
             },
-          ],
+          ] as any,
           latest_id: 201,
           next_after_id: 201,
           has_more: false,
@@ -364,11 +357,12 @@ describe("DiagnosticsPanel Live Insights & Telemetry", () => {
       />
     );
 
-    // Verify loadTrainingEpisodes requested stage 2
+    // Bootstrap call omits runId but must include the stage filter.
+    // runId isolation is handled client-side by processCanonicalHistory.
     expect(loadEpisodesSpy).toHaveBeenCalledWith(
       expect.objectContaining({
         stage: 2,
-        runId: "run_active_123",
+        runId: undefined,
       })
     );
 
@@ -432,7 +426,7 @@ describe("DiagnosticsPanel Live Insights & Telemetry", () => {
               success: true,
               global_timestep: 50000,
             },
-          ],
+          ] as any,
           latest_id: 500,
           next_after_id: 500,
           has_more: false,
@@ -468,10 +462,12 @@ describe("DiagnosticsPanel Live Insights & Telemetry", () => {
       />
     );
 
+    // Bootstrap call omits runId but must include the stage filter.
+    // runId isolation for Current Journey view is enforced by processCanonicalHistory.
     expect(loadEpisodesSpy).toHaveBeenCalledWith(
       expect.objectContaining({
-        runId: "run_active_123",
         stage: 2,
+        runId: undefined,
       })
     );
 
@@ -511,7 +507,7 @@ describe("DiagnosticsPanel Live Insights & Telemetry", () => {
       };
     });
 
-    const points = calculateBlockSuccessPoints(episodes as any, 25, (ep) => ep.global_environment_episode);
+    const points = calculateBlockSuccessPoints(episodes as any, 25, (ep) => ep.global_environment_episode ?? null);
     expect(points.length).toBe(4);
 
     expect(points[0].x).toBe(25);
@@ -554,7 +550,7 @@ describe("DiagnosticsPanel Live Insights & Telemetry", () => {
     const loadEpisodesSpy = vi.spyOn(api, "loadTrainingEpisodes").mockImplementation(async (options) => {
       if (options?.runId === "run_active_123") {
         return {
-          episodes: activeRunEpisodes,
+          episodes: activeRunEpisodes as any,
           latest_id: 150,
           next_after_id: 150,
           has_more: false,
@@ -564,7 +560,7 @@ describe("DiagnosticsPanel Live Insights & Telemetry", () => {
         };
       }
       return {
-        episodes: [...oldRunEpisodes, ...activeRunEpisodes],
+        episodes: [...oldRunEpisodes, ...activeRunEpisodes] as any,
         latest_id: 150,
         next_after_id: 150,
         has_more: false,
@@ -590,10 +586,13 @@ describe("DiagnosticsPanel Live Insights & Telemetry", () => {
       />
     );
 
+    // Bootstrap call omits runId. The mock returns mixed old+active episodes when
+    // runId is undefined. processCanonicalHistory's in-memory run_id filter then
+    // ensures only active-run records appear in the chart.
     expect(loadEpisodesSpy).toHaveBeenCalledWith(
       expect.objectContaining({
-        runId: "run_active_123",
         stage: 1,
+        runId: undefined,
       })
     );
 

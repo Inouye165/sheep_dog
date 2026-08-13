@@ -63,8 +63,8 @@ describe("ChartHoverPortal Tooltip Positioning & Content", () => {
     const tooltip = screen.getByTestId("chart-tooltip");
     expect(tooltip).toBeInTheDocument();
     expect(tooltip.style.position).toBe("fixed");
-    expect(tooltip.style.maxWidth).toBe("calc(100vw - 16px)");
-    expect(tooltip.style.maxHeight).toBe("calc(100vh - 16px)");
+    expect(tooltip.style.maxWidth).toBe("calc(100vw - 24px)");
+    expect(tooltip.style.maxHeight).toBe("calc(100vh - 24px)");
     expect(tooltip.style.overflowWrap).toBe("anywhere");
   });
 
@@ -140,10 +140,9 @@ describe("ChartHoverPortal Tooltip Positioning & Content", () => {
 
     render(<ChartHoverPortal hoveredPoint={{ x: 100, y: 0.9, stage: 1, checkpoint: mockCheckpoint }} targetRect={targetRect} />);
 
-    expect(screen.getByText(/🔴 Gate Blocked/i)).toBeInTheDocument();
+    expect(screen.getByText(/🔴 NOT READY/i)).toBeInTheDocument();
     expect(screen.getByText(/Aggregate success is 88%; 90% required./i)).toBeInTheDocument();
     expect(screen.getByText(/Seed 41 failed in 3 of the last 5 evaluations./i)).toBeInTheDocument();
-    expect(screen.getByText(/Blocking Seeds:/i)).toBeInTheDocument();
     expect(screen.getAllByText(/41/i).length).toBeGreaterThan(0);
   });
 
@@ -166,5 +165,88 @@ describe("ChartHoverPortal Tooltip Positioning & Content", () => {
 
     const tooltip = screen.getByTestId("chart-tooltip");
     expect(tooltip).toBeInTheDocument();
+  });
+
+  it("renders redesigned bucket tooltip with TARGET MET banner when rate >= target", () => {
+    const targetRect = { left: 500, right: 520, top: 400, bottom: 420, width: 20, height: 20 } as DOMRect;
+    const mockBucket = {
+      firstEpisode: 3364,
+      lastEpisode: 3364,
+      startTimestep: 1,
+      endTimestep: 1,
+      startTimestampMs: 1,
+      endTimestampMs: 1,
+      failureCount: 0,
+      episodeCount: 1,
+      successCount: 1,
+      successRate: 90.0,
+      avgSuccessfulSteps: 115,
+      avgAllReward: 194.2,
+      avgSheepPenned: 1.8,
+      startTimestamp: "2026-08-12T14:45:51Z",
+      endTimestamp: "2026-08-12T14:45:51Z",
+      episodes: [{ curriculum_stage: 1 }] as any,
+    };
+
+    render(<ChartHoverPortal hoveredPoint={{ x: 3364, y: 90.0, stage: 1, bucket: mockBucket }} targetRect={targetRect} />);
+
+    expect(screen.getByText(/Episode 3364/i)).toBeInTheDocument();
+    expect(screen.getByText(/TARGET MET/i)).toBeInTheDocument();
+    expect(screen.getByText(/Bucket performance met stage target/i)).toBeInTheDocument();
+    expect(screen.getByRole("progressbar")).toBeInTheDocument();
+  });
+
+  it("renders STAGE IN PROGRESS banner when target is not yet met and no stagnation", () => {
+    const targetRect = { left: 500, right: 520, top: 400, bottom: 420, width: 20, height: 20 } as DOMRect;
+    const mockBucket = {
+      firstEpisode: 100,
+      lastEpisode: 105,
+      startTimestep: 1,
+      endTimestep: 1,
+      startTimestampMs: 1,
+      endTimestampMs: 1,
+      failureCount: 3,
+      episodeCount: 5,
+      successCount: 2,
+      successRate: 40.0,
+      avgSuccessfulSteps: 80,
+      avgAllReward: 85.0,
+      avgSheepPenned: 1.2,
+      startTimestamp: "2026-08-12T14:45:51Z",
+      endTimestamp: "2026-08-12T14:45:51Z",
+      episodes: [{ curriculum_stage: 1 }] as any,
+    };
+
+    render(<ChartHoverPortal hoveredPoint={{ x: 105, y: 40.0, stage: 1, bucket: mockBucket }} targetRect={targetRect} />);
+
+    expect(screen.getByText(/STAGE IN PROGRESS/i)).toBeInTheDocument();
+    expect(screen.getByText(/Model is actively training at Stage 1/i)).toBeInTheDocument();
+  });
+
+  it("renders STAGNATION DETECTED banner ONLY when multi-factor gauntlet is satisfied", () => {
+    const targetRect = { left: 500, right: 520, top: 400, bottom: 420, width: 20, height: 20 } as DOMRect;
+    const mockBucket = {
+      firstEpisode: 1,
+      lastEpisode: 120,
+      startTimestep: 1,
+      endTimestep: 1,
+      startTimestampMs: 1,
+      endTimestampMs: 1,
+      failureCount: 100,
+      episodeCount: 120,
+      successCount: 20,
+      successRate: 16.6,
+      avgSuccessfulSteps: 50,
+      avgAllReward: 20.0,
+      avgSheepPenned: 0.3,
+      startTimestamp: "2026-08-12T14:45:51Z",
+      endTimestamp: "2026-08-12T14:45:51Z",
+      episodes: [{ curriculum_stage: 1 }] as any,
+    };
+
+    render(<ChartHoverPortal hoveredPoint={{ x: 120, y: 16.6, stage: 1, bucket: mockBucket }} targetRect={targetRect} />);
+
+    expect(screen.getByText(/STAGNATION DETECTED/i)).toBeInTheDocument();
+    expect(screen.getByText(/Full stage telemetry confirms zero performance growth over 120 episodes/i)).toBeInTheDocument();
   });
 });
