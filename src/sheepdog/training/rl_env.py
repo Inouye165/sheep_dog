@@ -358,6 +358,7 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
                     "replay_source": "training-diagnostic" if should_capture else None,
                     "capture_reason": capture_reason if should_capture else "not_requested",
                     "capture_status": "queued" if should_capture else "not_requested",
+                    "reward_breakdown": dict(getattr(self._environment, "_episode_reward_breakdown", {})),
                 }
 
                 if self._current_episode_similarity_match is not None:

@@ -6,6 +6,7 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import os
 import shutil
 import threading
 import time
@@ -2009,8 +2010,14 @@ class TrainingManager:
         if db_path.exists():
             try:
                 from sheepdog.training.episode_store import get_episode_store
+
+                active_run_id = status.get("run_id")
                 store = get_episode_store(db_path)
-                t_summary = store.get_telemetry_summary(stage=stg, after_env_ep=latest_conf_env_ep)
+                t_summary = store.get_telemetry_summary(
+                    stage=stg,
+                    after_env_ep=latest_conf_env_ep,
+                    run_id=active_run_id,
+                )
             except Exception as exc:
                 logger.warning("Failed to retrieve episode store telemetry summary: %s", exc)
 
@@ -2397,6 +2404,33 @@ class TrainingManager:
                     validation_errors.append(f"Policy mode {self._status.get('policy_mode')} is not neural_policy")
 
                 model_path_str = self._status.get("active_model_path")
+                if not model_path_str:
+                    output_root = resolve_workspace_path(LabConfig().training.output_dir)
+                    chk_id = self._status.get("active_checkpoint_id")
+                    if chk_id:
+                        import re
+                        m = re.search(r"ts_(\d+)", str(chk_id))
+                        if m:
+                            ts_num = int(m.group(1))
+                            candidate = output_root / "models" / f"maskable-ppo-{ts_num:08d}.zip"
+                            if candidate.exists():
+                                model_path_str = str(candidate)
+                                self._status["active_model_path"] = model_path_str
+                    if not model_path_str:
+                        for candidate_name in ("best-model.zip", "model.zip"):
+                            cand = output_root / candidate_name
+                            if cand.exists():
+                                model_path_str = str(cand)
+                                self._status["active_model_path"] = model_path_str
+                                break
+                    if not model_path_str:
+                        models_dir = output_root / "models"
+                        if models_dir.exists():
+                            zips = sorted(models_dir.glob("*.zip"), key=lambda p: p.stat().mtime)
+                            if zips:
+                                model_path_str = str(zips[-1])
+                                self._status["active_model_path"] = model_path_str
+
                 if not model_path_str:
                     validation_errors.append("No active model loaded")
                 else:
@@ -4573,6 +4607,7 @@ class TrainingManager:
                                 replay_source=payload.get("replay_source"),
                                 capture_reason=payload.get("capture_reason"),
                                 capture_status=payload.get("capture_status"),
+                                reward_breakdown=payload.get("reward_breakdown"),
                             )
                         except Exception:
                             pass
@@ -4711,19 +4746,16 @@ class TrainingManager:
                         )
 
                         if best_success_rate_ever >= 0.9 and last_50_success_rate < 0.5:
-                            self._control_request = "paused"
+                            recent_count = len(recent_evals) if recent_evals else 1
                             update["message"] = (
-                                f"Training paused: Policy collapse detected. "
-                                f"Success rate fell from best of {best_success_rate_ever:.0%} "
-                                f"to last-50 avg of {last_50_success_rate:.0%}. "
-                                f"Recommended action: Fork from best checkpoint. "
-                                f"Try lowering entropy_coef to 0.003 or 0.001."
+                                f"Possible policy collapse detected (best deterministic eval: {best_success_rate_ever:.0%}, "
+                                f"recent eval avg: {last_50_success_rate:.0%} over {recent_count} checkpoints) — continuing training."
                             )
                             update["anti_collapse_warning"] = {
                                 "triggered": True,
                                 "message": (
-                                    f"Policy collapse detected (best: {best_success_rate_ever:.0%}, "
-                                    f"last-50: {last_50_success_rate:.0%})."
+                                    f"Possible policy collapse detected (best: {best_success_rate_ever:.0%}, "
+                                    f"recent avg: {last_50_success_rate:.0%}) — continuing training."
                                 ),
                                 "recommendation": "Try lowering entropy_coef to 0.003 or 0.001 instead of 0.01.",
                             }
@@ -4857,6 +4889,21 @@ class TrainingManager:
                                 f"Avg Reward: {average_reward:.2f} | Penned: {avg_penned:.1f}",
                                 flush=True,
                             )
+                            eval_records = summary.get("records", []) if isinstance(summary, dict) else []
+                            if eval_records:
+                                for rec in eval_records:
+                                    if isinstance(rec, dict):
+                                        e_seed = rec.get("seed", "N/A")
+                                        e_succ = rec.get("success", False)
+                                        e_reason = rec.get("stop_reason", "completed")
+                                        e_penned = rec.get("sheep_penned", 0)
+                                        e_rew = rec.get("reward_total", 0.0)
+                                        res_str = "SUCCESS" if e_succ else f"FAILED ({e_reason})"
+                                        print(
+                                            f"[Sheepdog]   └─ [EVAL] Seed: {e_seed} | Penned: {e_penned} | "
+                                            f"Reward: {e_rew:.2f} | Result: {res_str}",
+                                            flush=True,
+                                        )
 
                     if phase == "starting" and payload.get("seed_episode") is not None:
                         update["seed_episode"] = payload.get("seed_episode")
@@ -4872,25 +4919,12 @@ class TrainingManager:
                             and success_rate < 0.35
                             and last_healthy_checkpoint_episode is not None
                         ):
-                            target_stage = max(1, current_stage - 1)
                             update["message"] = (
-                                f"Success rate ({success_rate:.0%}) plummeted below 35% after promotion; "
-                                f"rolling back to Stage {target_stage} and reloading checkpoint ep {last_healthy_checkpoint_episode}"
+                                f"Regression warning: Success rate ({success_rate:.0%}) dropped below 35% on checkpoint evaluation — continuing training."
                             )
                             print(
-                                f"[Sheepdog] ROLLBACK: Stage {current_stage} -> Stage {target_stage} "
-                                f"(reloading checkpoint ep {last_healthy_checkpoint_episode})",
+                                f"[Sheepdog] DIAGNOSTIC: Success rate ({success_rate:.0%}) below 35% on Stage {current_stage} evaluation — continuing training",
                                 flush=True,
-                            )
-                            self._update_status(update)
-                            self._persist_training_session(
-                                state="running",
-                                status=dict(self._status),
-                                request=self._active_start_request,
-                            )
-                            raise _RollbackSignal(
-                                target_stage=target_stage,
-                                healthy_checkpoint=last_healthy_checkpoint_episode,
                             )
 
                         # Log telemetry at checkpoint evaluation
@@ -4961,8 +4995,7 @@ class TrainingManager:
                         update["auto_promote_gate"] = gate_snap
                         if should_auto_promote_now and promotion_checkpoint_episode is not None:
                             update["message"] = (
-                                f"Stage {stage} mastered at checkpoint "
-                                f"ep {promotion_checkpoint_episode}; promoting now"
+                                f"Checkpoint Evaluation: {success_rate:.0%} — Promotion criteria satisfied. Advancing to Stage {stage + 1}."
                             )
                             print(
                                 f"[Sheepdog] PROMOTION: Stage {stage} -> Stage {stage + 1} "
@@ -4975,6 +5008,10 @@ class TrainingManager:
                                 qualified_streak=stage_qualified_streak,
                                 seed_gate_hits=stage_seed_gate_hits,
                                 full_success_hits=stage_full_success_hits,
+                            )
+                        elif phase == "checkpoint" and not update.get("anti_collapse_warning"):
+                            update["message"] = (
+                                f"Checkpoint Evaluation: {success_rate:.0%} — Not ready for promotion. Training continues."
                             )
                     self._update_status(update)
 
@@ -5175,67 +5212,6 @@ class TrainingManager:
                 except _EarlyPromotionSignal as signal:
                     early_promotion = signal
                     stage_best_checkpoint_episode = signal.checkpoint_episode
-                except _RollbackSignal as signal:
-                    rollback_signal = signal
-
-                if rollback_signal is not None:
-                    promoted_stages = max(0, promoted_stages - 1)
-                    current_stage = rollback_signal.target_stage
-                    resume_checkpoint_episode = rollback_signal.healthy_checkpoint
-                    stage_best_checkpoint_episode = None
-                    stage_best_rank = (-1.0, float("-inf"), float("-inf"), float("-inf"))
-                    stage_best_reward = float("-inf")
-                    stage_qualified_streak = 0
-                    stage_seed_gate_hits = 0
-                    stage_full_success_hits = 0
-                    stage_seed_count = 0
-                    stage_checkpoints_seen = 0
-                    stage_no_improvement_streak = 0
-                    stage_batch_completed_episodes = 0
-                    
-                    batch_episodes = RECOMMENDED_EPISODES_BY_STAGE.get(current_stage, 100)
-                    total_episodes = batch_episodes
-
-                    self._update_status(
-                        {
-                            "curriculum_stage": current_stage,
-                            "auto_promote_stages_completed": promoted_stages,
-                            "requested_episodes": total_episodes,
-                            "batch_total_episodes": batch_episodes,
-                            "batch_completed_episodes": 0,
-                            "completed_episodes": 0,
-                            "estimated_equivalent_episodes": 0.0,
-                            "message": (
-                                f"Curriculum rolled back to Stage {current_stage} after post-promotion collapse. "
-                                f"Resuming from checkpoint ep {resume_checkpoint_episode}."
-                            ),
-                        }
-                    )
-
-                    # Log rollback event to promotion-history.json
-                    import uuid
-                    _append_promotion_history(
-                        output_root,
-                        {
-                            "event_type": "rollback",
-                            "promotion_event_id": f"evt_rollback_{uuid.uuid4().hex[:12]}",
-                            "run_id": self._status.get("run_id"),
-                            "from_stage": current_stage + 1,
-                            "to_stage": current_stage,
-                            "promoted_at": datetime.datetime.now(datetime.UTC).isoformat(),
-                            "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
-                            "trigger_checkpoint_id": f"chk_rollback_to_ep_{resume_checkpoint_episode}",
-                            "trigger_checkpoint_episode": resume_checkpoint_episode,
-                        }
-                    )
-
-                    # Persist back to training-settings.json
-                    settings_path = output_root / TRAINING_SETTINGS_FILENAME
-                    persisted_settings = _read_persisted_settings(output_root)
-                    persisted_settings["curriculum_stage"] = current_stage
-                    persisted_settings["updated_at"] = datetime.datetime.now(datetime.UTC).isoformat()
-                    settings_path.write_text(json.dumps(persisted_settings, indent=2), encoding="utf-8")
-                    continue
 
                 control_request = self._control_request
 
@@ -5649,7 +5625,10 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: Any) -> None:
         """Suppress routine HTTP access log messages to keep terminal clean."""
-        pass
+        msg = format % args if args else format
+        if " 200 -" in msg and any(p in msg for p in ("/api/training/status", "/api/training/history", "/api/health", "/api/insights")):
+            return
+        super().log_message(format, *args)
 
     def _json_response(self, payload: Any, status: int = HTTPStatus.OK) -> None:
         try:
@@ -7412,7 +7391,10 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: Any) -> None:
         """Suppress routine HTTP access log messages to keep terminal clean."""
-        pass
+        msg = format % args if args else format
+        if " 200 -" in msg and any(p in msg for p in ("/api/training/status", "/api/training/history", "/api/health", "/api/insights")):
+            return
+        super().log_message(format, *args)
 
     def do_OPTIONS(self) -> None:  # noqa: N802  # pylint: disable=invalid-name
         """Handle HTTP OPTIONS (CORS preflight) requests."""

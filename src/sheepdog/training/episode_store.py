@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import atexit
 import datetime
+import json
 import logging
 import os
 import queue
@@ -97,6 +98,8 @@ class EpisodeStore:
             conn.execute("ALTER TABLE training_episodes ADD COLUMN capture_status TEXT DEFAULT 'not_requested';")
         if "replay_schema_version" not in columns:
             conn.execute("ALTER TABLE training_episodes ADD COLUMN replay_schema_version INTEGER DEFAULT 1;")
+        if "reward_breakdown" not in columns:
+            conn.execute("ALTER TABLE training_episodes ADD COLUMN reward_breakdown TEXT;")
 
         indexes = [
             "CREATE INDEX IF NOT EXISTS idx_episodes_id ON training_episodes(id);",
@@ -163,7 +166,8 @@ class EpisodeStore:
             success, timeout, stopped, sheep_penned, total_sheep,
             steps, seed, checkpoint_id, created_at,
             replay_available, replay_id, replay_path, replay_source,
-            capture_reason, capture_status, replay_schema_version
+            capture_reason, capture_status, replay_schema_version,
+            reward_breakdown
         ) VALUES (
             ?, ?, ?, ?,
             ?, ?, ?, ?,
@@ -171,7 +175,7 @@ class EpisodeStore:
             ?, ?, ?, ?, ?,
             ?, ?, ?, ?,
             ?, ?, ?, ?,
-            ?, ?, ?
+            ?, ?, ?, ?
         )
         """
         now_iso = datetime.datetime.now(datetime.UTC).isoformat()
@@ -212,6 +216,14 @@ class EpisodeStore:
             cap_status = r.get("capture_status", "not_requested")
             schema_ver = int(r.get("replay_schema_version", 1))
 
+            raw_breakdown = r.get("reward_breakdown")
+            if isinstance(raw_breakdown, dict):
+                breakdown_str = json.dumps(raw_breakdown)
+            elif isinstance(raw_breakdown, str):
+                breakdown_str = raw_breakdown
+            else:
+                breakdown_str = None
+
             params_list.append((
                 event_key, run_id, session_id, global_ep,
                 ep_in_stage, stage, global_ts, policy_ver,
@@ -219,7 +231,8 @@ class EpisodeStore:
                 success, timeout, stopped, penned, total_sheep,
                 steps, seed, checkpoint_id, created_at,
                 replay_avail, replay_id, replay_path, replay_src,
-                cap_reason, cap_status, schema_ver
+                cap_reason, cap_status, schema_ver,
+                breakdown_str
             ))
 
         try:
@@ -658,12 +671,22 @@ class EpisodeStore:
         latest_id = max((r["id"] for r in result_rows), default=(after_id or 0))
         next_after_id = latest_id
 
-        # Convert integers back to boolean for frontend
+        # Convert integers back to boolean & parse reward_breakdown JSON for frontend
         for r in result_rows:
             r["success"] = bool(r["success"])
             r["timeout"] = bool(r["timeout"])
             r["stopped"] = bool(r["stopped"])
             r["replay_available"] = bool(r.get("replay_available"))
+            raw_rb = r.get("reward_breakdown")
+            if isinstance(raw_rb, str) and raw_rb.strip():
+                try:
+                    r["reward_breakdown"] = json.loads(raw_rb)
+                except Exception:
+                    r["reward_breakdown"] = None
+            elif isinstance(raw_rb, dict):
+                r["reward_breakdown"] = raw_rb
+            else:
+                r["reward_breakdown"] = None
 
         return {
             "episodes": result_rows,

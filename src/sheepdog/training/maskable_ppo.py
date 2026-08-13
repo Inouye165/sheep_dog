@@ -123,6 +123,7 @@ class _TrainingProgressCallback(BaseCallback):
                                 "replay_source": ep_info.get("replay_source"),
                                 "capture_reason": ep_info.get("capture_reason"),
                                 "capture_status": ep_info.get("capture_status"),
+                                "reward_breakdown": ep_info.get("reward_breakdown"),
                             }
                         )
 

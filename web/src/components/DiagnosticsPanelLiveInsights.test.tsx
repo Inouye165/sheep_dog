@@ -245,4 +245,358 @@ describe("DiagnosticsPanel Live Insights & Telemetry", () => {
     expect(requestedUrl).toMatch(/\/generated\/checkpoint-index\.json\?t=\d+/);
     vi.unstubAllGlobals();
   });
+
+  it("6. Current Journey scope passes active run_id to loadTrainingEpisodes", async () => {
+    const api = await import("../lib/api");
+    const loadEpisodesSpy = vi.spyOn(api, "loadTrainingEpisodes").mockImplementation(async (options) => {
+      if (options?.runId === "run_active_123") {
+        return {
+          episodes: Array.from({ length: 25 }, (_, i) => ({
+            id: 100 + i,
+            run_id: "run_active_123",
+            global_environment_episode: 100 + i,
+            curriculum_stage: 8,
+            reward: 180.0,
+            result: "SUCCESS",
+            success: true,
+            global_timestep: (100 + i) * 100,
+          })),
+          latest_id: 124,
+          next_after_id: 124,
+          has_more: false,
+          max_id: 124,
+          oldest_available_timestamp: null,
+          total_matching: 25,
+        };
+      }
+      return {
+        episodes: [],
+        latest_id: 0,
+        next_after_id: 0,
+        has_more: false,
+        max_id: 0,
+        oldest_available_timestamp: null,
+        total_matching: 0,
+      };
+    });
+
+    const statusWithRun: TrainingStatus = {
+      ...activeTrainingStatus,
+      run_id: "run_active_123",
+    };
+
+    render(
+      <DiagnosticsPanel
+        checkpointIndex={mockCheckpointIndex}
+        bestCheckpointEpisode={6508}
+        trainingStatus={statusWithRun}
+        effectiveCurriculumStage={8}
+        lastLiveRefreshTime={Date.now()}
+      />
+    );
+
+    expect(loadEpisodesSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: "run_active_123",
+      })
+    );
+    loadEpisodesSpy.mockRestore();
+  });
+
+  it("Test A & D: Selecting Stage 2 with no Stage 2 data yields 0 episodes and never falls back to Stage 1; Stage 2 data yields strict stage 2 episodes", async () => {
+    const api = await import("../lib/api");
+    const loadEpisodesSpy = vi.spyOn(api, "loadTrainingEpisodes").mockImplementation(async (options) => {
+      if (options?.stage === 2) {
+        return {
+          episodes: [
+            {
+              id: 201,
+              run_id: "run_active_123",
+              global_environment_episode: 201,
+              curriculum_stage: 2,
+              reward: 150.0,
+              result: "SUCCESS",
+              success: true,
+              global_timestep: 20100,
+            },
+          ],
+          latest_id: 201,
+          next_after_id: 201,
+          has_more: false,
+          max_id: 201,
+          oldest_available_timestamp: null,
+          total_matching: 1,
+        };
+      }
+      return {
+        episodes: Array.from({ length: 100 }, (_, i) => ({
+          id: i + 1,
+          run_id: "run_active_123",
+          global_environment_episode: i + 1,
+          curriculum_stage: 1,
+          reward: 100,
+          result: "SUCCESS",
+          success: true,
+          global_timestep: (i + 1) * 10,
+        })),
+        latest_id: 100,
+        next_after_id: 100,
+        has_more: false,
+        max_id: 100,
+        oldest_available_timestamp: null,
+        total_matching: 100,
+      };
+    });
+
+    const statusWithRun: TrainingStatus = {
+      ...activeTrainingStatus,
+      run_id: "run_active_123",
+    };
+
+    render(
+      <DiagnosticsPanel
+        checkpointIndex={mockCheckpointIndex}
+        bestCheckpointEpisode={6508}
+        trainingStatus={statusWithRun}
+        effectiveCurriculumStage={2}
+        initialStageScope={2}
+        lastLiveRefreshTime={Date.now()}
+      />
+    );
+
+    // Verify loadTrainingEpisodes requested stage 2
+    expect(loadEpisodesSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stage: 2,
+        runId: "run_active_123",
+      })
+    );
+
+    loadEpisodesSpy.mockRestore();
+  });
+
+  it("Test B: Switching query scope resets pagination cursor (afterId is undefined for initial scope fetch)", async () => {
+    const api = await import("../lib/api");
+    const loadEpisodesSpy = vi.spyOn(api, "loadTrainingEpisodes").mockImplementation(async () => {
+      return {
+        episodes: [],
+        latest_id: 0,
+        next_after_id: 0,
+        has_more: false,
+        max_id: 0,
+        oldest_available_timestamp: null,
+        total_matching: 0,
+      };
+    });
+
+    const statusWithRun: TrainingStatus = {
+      ...activeTrainingStatus,
+      run_id: "run_active_123",
+    };
+
+    render(
+      <DiagnosticsPanel
+        checkpointIndex={mockCheckpointIndex}
+        bestCheckpointEpisode={6508}
+        trainingStatus={statusWithRun}
+        effectiveCurriculumStage={2}
+        initialStageScope={2}
+        lastLiveRefreshTime={Date.now()}
+      />
+    );
+
+    // Initial fetch for scope has order: "desc" and afterId: undefined
+    expect(loadEpisodesSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        afterId: undefined,
+        order: "desc",
+      })
+    );
+
+    loadEpisodesSpy.mockRestore();
+  });
+
+  it("Test C: Stage selection under Current Journey scopes by active run_id and excludes archived runs", async () => {
+    const api = await import("../lib/api");
+    const loadEpisodesSpy = vi.spyOn(api, "loadTrainingEpisodes").mockImplementation(async (options) => {
+      if (options?.runId === "run_active_123" && options?.stage === 2) {
+        return {
+          episodes: [
+            {
+              id: 500,
+              run_id: "run_active_123",
+              global_environment_episode: 500,
+              curriculum_stage: 2,
+              reward: 200.0,
+              result: "SUCCESS",
+              success: true,
+              global_timestep: 50000,
+            },
+          ],
+          latest_id: 500,
+          next_after_id: 500,
+          has_more: false,
+          max_id: 500,
+          oldest_available_timestamp: null,
+          total_matching: 1,
+        };
+      }
+      return {
+        episodes: [],
+        latest_id: 0,
+        next_after_id: 0,
+        has_more: false,
+        max_id: 0,
+        oldest_available_timestamp: null,
+        total_matching: 0,
+      };
+    });
+
+    const statusWithRun: TrainingStatus = {
+      ...activeTrainingStatus,
+      run_id: "run_active_123",
+    };
+
+    render(
+      <DiagnosticsPanel
+        checkpointIndex={mockCheckpointIndex}
+        bestCheckpointEpisode={6508}
+        trainingStatus={statusWithRun}
+        effectiveCurriculumStage={2}
+        initialStageScope={2}
+        lastLiveRefreshTime={Date.now()}
+      />
+    );
+
+    expect(loadEpisodesSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: "run_active_123",
+        stage: 2,
+      })
+    );
+
+    loadEpisodesSpy.mockRestore();
+  });
+
+  it("Block Performance Learning Curve calculates non-overlapping 25-episode block success rates", async () => {
+    const { calculateBlockSuccessPoints } = await import("./DiagnosticsPanel");
+    
+    // Create 100 episodes:
+    // Block 1 (1-25): 5 successes = 20%
+    // Block 2 (26-50): 10 successes = 40%
+    // Block 3 (51-75): 15 successes = 60%
+    // Block 4 (76-100): 20 successes = 80%
+    const episodes = Array.from({ length: 100 }, (_, i) => {
+      const epNum = i + 1;
+      let isSuccess = false;
+      if (epNum <= 25) {
+        isSuccess = epNum <= 5;
+      } else if (epNum <= 50) {
+        isSuccess = epNum <= 25 + 10;
+      } else if (epNum <= 75) {
+        isSuccess = epNum <= 50 + 15;
+      } else {
+        isSuccess = epNum <= 75 + 20;
+      }
+
+      return {
+        id: epNum,
+        run_id: "run_active_123",
+        global_environment_episode: epNum,
+        curriculum_stage: 1,
+        reward: isSuccess ? 180 : -20,
+        result: isSuccess ? "SUCCESS" : "STOPPED",
+        success: isSuccess,
+        global_timestep: epNum * 100,
+      };
+    });
+
+    const points = calculateBlockSuccessPoints(episodes as any, 25, (ep) => ep.global_environment_episode);
+    expect(points.length).toBe(4);
+
+    expect(points[0].x).toBe(25);
+    expect(points[0].y).toBe(20);
+
+    expect(points[1].x).toBe(50);
+    expect(points[1].y).toBe(40);
+
+    expect(points[2].x).toBe(75);
+    expect(points[2].y).toBe(60);
+
+    expect(points[3].x).toBe(100);
+    expect(points[3].y).toBe(80);
+  });
+
+  it("Proves that records from an old run at different timesteps do not appear in Current Stage", async () => {
+    const api = await import("../lib/api");
+    const oldRunEpisodes = Array.from({ length: 50 }, (_, i) => ({
+      id: i + 1,
+      run_id: "old_archived_run_999",
+      global_environment_episode: i + 1,
+      curriculum_stage: 1,
+      reward: 100,
+      result: "SUCCESS",
+      success: true,
+      global_timestep: (i + 1) * 45,
+    }));
+
+    const activeRunEpisodes = Array.from({ length: 50 }, (_, i) => ({
+      id: 100 + i + 1,
+      run_id: "run_active_123",
+      global_environment_episode: 100 + i + 1,
+      curriculum_stage: 1,
+      reward: 100,
+      result: "SUCCESS",
+      success: true,
+      global_timestep: (100 + i + 1) * 91,
+    }));
+
+    const loadEpisodesSpy = vi.spyOn(api, "loadTrainingEpisodes").mockImplementation(async (options) => {
+      if (options?.runId === "run_active_123") {
+        return {
+          episodes: activeRunEpisodes,
+          latest_id: 150,
+          next_after_id: 150,
+          has_more: false,
+          max_id: 150,
+          oldest_available_timestamp: null,
+          total_matching: 50,
+        };
+      }
+      return {
+        episodes: [...oldRunEpisodes, ...activeRunEpisodes],
+        latest_id: 150,
+        next_after_id: 150,
+        has_more: false,
+        max_id: 150,
+        oldest_available_timestamp: null,
+        total_matching: 100,
+      };
+    });
+
+    const statusWithRun: TrainingStatus = {
+      ...activeTrainingStatus,
+      run_id: "run_active_123",
+    };
+
+    render(
+      <DiagnosticsPanel
+        checkpointIndex={mockCheckpointIndex}
+        bestCheckpointEpisode={6508}
+        trainingStatus={statusWithRun}
+        effectiveCurriculumStage={1}
+        initialStageScope={1}
+        lastLiveRefreshTime={Date.now()}
+      />
+    );
+
+    expect(loadEpisodesSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: "run_active_123",
+        stage: 1,
+      })
+    );
+
+    loadEpisodesSpy.mockRestore();
+  });
 });

@@ -858,6 +858,7 @@ export interface TrainingEpisode {
   replay_source?: string | null;
   capture_reason?: string | null;
   capture_status?: string | null;
+  reward_breakdown?: Record<string, number> | null;
 }
 
 export interface CapturePolicyConfig {
