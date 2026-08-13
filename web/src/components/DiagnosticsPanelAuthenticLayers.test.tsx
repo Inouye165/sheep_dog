@@ -199,13 +199,13 @@ describe("DiagnosticsPanel Authentic Telemetry & 4-Layer Controls", () => {
     const rawCheckbox = screen.getByLabelText(/Raw Episodes/i) as HTMLInputElement;
     const rollingCheckbox = screen.getByLabelText(/25-Episode Rolling Avg/i) as HTMLInputElement;
 
-    expect(rawCheckbox.checked).toBe(true);
-    expect(rollingCheckbox.checked).toBe(true);
+    expect(rawCheckbox.checked).toBe(false);
+    expect(rollingCheckbox.checked).toBe(false);
 
     fireEvent.click(rawCheckbox);
-    expect(rawCheckbox.checked).toBe(false);
+    expect(rawCheckbox.checked).toBe(true);
 
     fireEvent.click(rollingCheckbox);
-    expect(rollingCheckbox.checked).toBe(false);
+    expect(rollingCheckbox.checked).toBe(true);
   });
 });

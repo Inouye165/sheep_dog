@@ -586,7 +586,7 @@ export function TrainingPanel({
               gap: "4px"
             }}>
               <strong style={{ display: "flex", alignItems: "center", gap: "6px", color: "#f87171" }}>
-                ⚠️ POLICY COLLAPSE DETECTED
+                ⚠️ POLICY COLLAPSE WARNING (ADVISORY)
               </strong>
               <span>{antiCollapseWarning.message}</span>
               {antiCollapseWarning.recommendation && (

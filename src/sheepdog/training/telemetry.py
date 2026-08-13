@@ -159,6 +159,7 @@ class CurriculumTelemetryManager:
         replay_source: str | None = None,
         capture_reason: str | None = None,
         capture_status: str | None = None,
+        reward_breakdown: dict[str, float] | None = None,
     ) -> None:
         """Log per-episode metrics to Weights & Biases and local SQLite history."""
         try:
@@ -188,6 +189,7 @@ class CurriculumTelemetryManager:
                 "replay_source": replay_source,
                 "capture_reason": capture_reason,
                 "capture_status": capture_status,
+                "reward_breakdown": reward_breakdown,
             })
         except Exception as exc:
             logger.error("Failed to log episode to SQLite store: %s", exc)

@@ -3,6 +3,17 @@ import { createPortal } from "react-dom";
 import type { CheckpointEntry, CheckpointIndex, TrainingStatus, TrainingEpisode } from "../state/types";
 import { loadTrainingEpisodes } from "../lib/api";
 import { CopyAgentDataButton } from "./CopyAgentDataButton";
+import { StackedLearningPanels, SmoothingWindow as StackedSmoothingWindow } from "./StackedLearningPanels";
+import {
+  processCanonicalHistory,
+  selectWindowSlice,
+  buildEpisodeBuckets,
+  buildFormalEvalMarkers,
+  assertMonotonicX,
+  type EpisodeBucket,
+  type FormalEvalMarker,
+  type CanonicalEpisodeRecord,
+} from "../lib/chartPipeline";
 
 /** Number of most-recent checkpoints to watch for a plateau. */
 const PLATEAU_WINDOW = 5;
@@ -198,12 +209,16 @@ interface ChartPoint {
   rawEpisode?: TrainingEpisode;
   isRolling?: boolean;
   rollingWindowSize?: number;
+  bucket?: EpisodeBucket;
+  formalEval?: FormalEvalMarker;
 }
 
 interface LineChartProps {
   data: ChartPoint[];
   rawPoints?: ChartPoint[];
   rollingData?: ChartPoint[];
+  blockPoints?: ChartPoint[];
+  formalEvalPoints?: FormalEvalMarker[];
   label?: string;
   lineColor: string;
   yMin: number;
@@ -311,6 +326,46 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
       window.removeEventListener("scroll", updatePosition, true);
     };
   }, [updatePosition]);
+
+  if (hoveredPoint.bucket) {
+    const b = hoveredPoint.bucket;
+    return createPortal(
+      <div ref={tooltipRef} className="chart-tooltip" style={style} data-testid="chart-tooltip">
+        <div className="chart-tooltip__header">
+          <span className="chart-tooltip__episode">
+            {b.episodeCount === 1 ? `Episode ${b.firstEpisode}` : `Episodes ${b.firstEpisode}–${b.lastEpisode}`}
+          </span>
+        </div>
+        <div className="chart-tooltip__section-title">
+          {b.episodeCount === 1 ? "1 Episode Rollout" : `${b.episodeCount} Non-Overlapping Episodes`}
+        </div>
+        <div className="chart-tooltip__grid">
+          <span className="chart-tooltip__metric-label">Success Rate:</span>
+          <span className="chart-tooltip__metric-value">
+            {b.successCount} / {b.episodeCount} ({b.successRate.toFixed(1)}%)
+          </span>
+          <span></span>
+          <span className="chart-tooltip__metric-label">Avg Successful Steps:</span>
+          <span className="chart-tooltip__metric-value">
+            {b.avgSuccessfulSteps != null ? Math.round(b.avgSuccessfulSteps) : "N/A (0 successes)"}
+          </span>
+          <span></span>
+          <span className="chart-tooltip__metric-label">Avg Reward:</span>
+          <span className="chart-tooltip__metric-value">{b.avgAllReward.toFixed(1)}</span>
+          <span></span>
+          <span className="chart-tooltip__metric-label">Avg Sheep Penned:</span>
+          <span className="chart-tooltip__metric-value">{b.avgSheepPenned.toFixed(1)}</span>
+          <span></span>
+        </div>
+        {formatDate(b.startTimestamp) && formatDate(b.endTimestamp) && (
+          <div className="chart-tooltip__time">
+            {formatDate(b.startTimestamp)} – {formatDate(b.endTimestamp)}
+          </div>
+        )}
+      </div>,
+      document.body
+    );
+  }
 
   if (hoveredPoint.rawEpisode) {
     const ep = hoveredPoint.rawEpisode;
@@ -520,6 +575,7 @@ function LineChart({
   data,
   rawPoints,
   rollingData,
+  blockPoints,
   label,
   lineColor,
   yMin,
@@ -620,6 +676,7 @@ function LineChart({
     ...data.map((p) => p.x),
     ...(rawPoints ? rawPoints.map((p) => p.x) : []),
     ...(rollingData ? rollingData.map((p) => p.x) : []),
+    ...(blockPoints ? blockPoints.map((p) => p.x) : []),
   ];
 
   const yRange = yMax - yMin || 1;
@@ -639,7 +696,7 @@ function LineChart({
   const secTicks = hasSecondary ? [secYMax, (secYMax + secYMin) / 2, secYMin] : [];
 
   function toSvgX(x: number, index?: number): number {
-    if (useSequentialX && !rawPoints && !rollingData) {
+    if (useSequentialX && !rawPoints && !rollingData && !blockPoints) {
       if (data.length <= 1) return PAD.left + plotW / 2;
       const idx = index !== undefined ? index : data.findIndex((d) => d.x === x);
       return PAD.left + (idx / (data.length - 1)) * plotW;
@@ -666,10 +723,19 @@ function LineChart({
     ? rollingData.map((d) => `${toSvgX(d.x).toFixed(1)},${toSvgY(d.y).toFixed(1)}`).join(" ")
     : "";
 
+  const blockPolyline = blockPoints && blockPoints.length >= 2
+    ? blockPoints.map((d) => `${toSvgX(d.x).toFixed(1)},${toSvgY(d.y).toFixed(1)}`).join(" ")
+    : "";
+
   // Y-axis tick values
   const yTicks = [yMin, yMin + yRange * 0.25, yMin + yRange * 0.5, yMin + yRange * 0.75, yMax];
 
-  const hasAnyData = data.length > 0 || (rawPoints && rawPoints.length > 0) || (rollingData && rollingData.length > 0);
+  const hasAnyData =
+    data.length > 0 ||
+    (rawPoints && rawPoints.length > 0) ||
+    (rollingData && rollingData.length > 0) ||
+    (blockPoints && blockPoints.length > 0) ||
+    (formalEvalPoints && formalEvalPoints.length > 0);
 
   // X-axis labels — pick up to 5 evenly spaced
   const xLabels: Array<{ x: number; label: string }> = useMemo(() => {
@@ -844,6 +910,56 @@ function LineChart({
           />
         ) : null}
 
+        {/* Primary 25-episode Block Performance Line & Markers */}
+        {blockPolyline ? (
+          <g>
+            <polyline
+              points={blockPolyline}
+              fill="none"
+              stroke="#38bdf8"
+              strokeWidth={3}
+              strokeLinejoin="round"
+              strokeLinecap="round"
+            />
+            {blockPoints && blockPoints.map((pt, i) => {
+              const cx = toSvgX(pt.x);
+              const cy = toSvgY(pt.y);
+              return (
+                <g
+                  key={`block-marker-${pt.x}-${i}`}
+                  onMouseEnter={(e) => {
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    setHoveredState({ point: pt, rect });
+                  }}
+                  onMouseLeave={() => setHoveredState(null)}
+                  style={{ cursor: "pointer" }}
+                >
+                  <circle cx={cx} cy={cy} r={12} fill="transparent" />
+                  <circle
+                    cx={cx}
+                    cy={cy}
+                    r={5.5}
+                    fill="#38bdf8"
+                    stroke="rgba(8,17,27,0.9)"
+                    strokeWidth={1.5}
+                  />
+                  <text
+                    x={cx}
+                    y={cy - 9}
+                    textAnchor="middle"
+                    fontSize={10}
+                    fontWeight="700"
+                    fill="#38bdf8"
+                    style={{ pointerEvents: "none" }}
+                  >
+                    {`${Math.round(pt.y)}%`}
+                  </text>
+                </g>
+              );
+            })}
+          </g>
+        ) : null}
+
         {/* Formal Checkpoint Evaluation Area Gradient & Line */}
         {hasData && showFormalEvals ? (
           <g>
@@ -990,7 +1106,7 @@ function LineChart({
 
 // ── Chart sub-tab types & legend ───────────────────────────────────────────
 
-type ChartTab = "health" | "success" | "reward" | "sheep" | "history" | "learningSignal";
+type ChartTab = "stacked" | "success" | "reward" | "sheep" | "history" | "health" | "learningSignal";
 type ViewWindow = "all" | 25 | 50 | 100;
 type XAxisMode = "episode" | "timesteps" | "runtime" | "calendar";
 
@@ -1720,8 +1836,8 @@ export function calculateRawSuccessY(ep: Partial<TrainingEpisode>): number | nul
   return null;
 }
 
-export function calculateRollingSuccess(episodes: Partial<TrainingEpisode>[], windowSize = 25): number | null {
-  if (episodes.length === 0) return null;
+export function calculateRollingSuccess(episodes: Partial<TrainingEpisode>[], windowSize = 25, minWindowSize = 1): number | null {
+  if (episodes.length < minWindowSize) return null;
   const slice = episodes.slice(-windowSize);
   let validCount = 0;
   let successCount = 0;
@@ -1732,17 +1848,53 @@ export function calculateRollingSuccess(episodes: Partial<TrainingEpisode>[], wi
       if (y === 100) successCount++;
     }
   }
-  if (validCount === 0) return null;
+  if (validCount < minWindowSize) return null;
   return (successCount / validCount) * 100;
 }
 
-interface DiagnosticsPanelProps {
+export function calculateBlockSuccessPoints(
+  episodes: TrainingEpisode[],
+  blockSize: number = 25,
+  getX: (ep: TrainingEpisode) => number | null
+): ChartPoint[] {
+  const validEps = episodes.filter((ep) => getX(ep) != null);
+  if (validEps.length === 0) return [];
+
+  const points: ChartPoint[] = [];
+  const numBlocks = Math.floor(validEps.length / blockSize);
+
+  for (let b = 0; b < numBlocks; b++) {
+    const block = validEps.slice(b * blockSize, (b + 1) * blockSize);
+    const endEp = block[block.length - 1];
+    const xVal = getX(endEp);
+    if (xVal == null) continue;
+
+    const successes = block.filter((ep) => calculateRawSuccessY(ep) === 100).length;
+    const rate = (successes / block.length) * 100;
+
+    points.push({
+      x: xVal,
+      y: rate,
+      stage: endEp.curriculum_stage,
+      isBlockPoint: true,
+      blockIndex: b + 1,
+      blockStartEp: b * blockSize + 1,
+      blockEndEp: (b + 1) * blockSize,
+      labelText: `${rate.toFixed(0)}% (ep ${b * blockSize + 1}–${(b + 1) * blockSize})`,
+    });
+  }
+
+  return points;
+}
+
+export interface DiagnosticsPanelProps {
   checkpointIndex: CheckpointIndex | null;
   bestCheckpointEpisode: number | null;
   trainingStatus: TrainingStatus | null;
   effectiveCurriculumStage: number;
   lastLiveRefreshTime?: number | null;
   initialEpisodes?: TrainingEpisode[];
+  initialStageScope?: StageScope;
 }
 
 /** Diagnostics / Learning-Curve tab. */
@@ -1753,6 +1905,7 @@ export function DiagnosticsPanel({
   effectiveCurriculumStage,
   lastLiveRefreshTime,
   initialEpisodes,
+  initialStageScope,
 }: DiagnosticsPanelProps) {
   const [viewWindow, setViewWindow] = useState<ViewWindow>(() => {
     const saved = localStorage.getItem("sheepdog_insights_view_window");
@@ -1763,6 +1916,7 @@ export function DiagnosticsPanel({
     return "all";
   });
   const [selectedStageScope, setSelectedStageScope] = useState<StageScope>(() => {
+    if (initialStageScope !== undefined) return initialStageScope;
     const saved = localStorage.getItem("sheepdog_insights_stage_scope");
     if (saved === "all" || saved === "current" || saved === "current-journey") {
       return saved;
@@ -1774,8 +1928,8 @@ export function DiagnosticsPanel({
     return "current-journey";
   });
   const [xAxisMode, setXAxisMode] = useState<XAxisMode>("timesteps");
-  const [layerRawEpisodes, setLayerRawEpisodes] = useState<boolean>(true);
-  const [layerRollingAvg, setLayerRollingAvg] = useState<boolean>(true);
+  const [layerRawEpisodes, setLayerRawEpisodes] = useState<boolean>(false);
+  const [layerRollingAvg, setLayerRollingAvg] = useState<boolean>(false);
   const [layerPolicySnapshots, setLayerPolicySnapshots] = useState<boolean>(true);
   const [layerFormalEvals, setLayerFormalEvals] = useState<boolean>(true);
 
@@ -1791,6 +1945,19 @@ export function DiagnosticsPanel({
   const [lastEpisodeId, setLastEpisodeId] = useState<number>(0);
   const isFetchingEpisodesRef = useRef<boolean>(false);
   const isLiveTraining = trainingStatus?.running ?? false;
+
+  const activeRunId = trainingStatus?.run_id ?? undefined;
+  const queryScopeKey = `${selectedStageScope}_${effectiveCurriculumStage}_${activeRunId ?? ""}`;
+  const prevQueryScopeKeyRef = useRef<string>(queryScopeKey);
+
+  // Reset episode buffer and lastEpisodeId when query scope changes (stage, effective stage, or active run_id)
+  useEffect(() => {
+    if (prevQueryScopeKeyRef.current !== queryScopeKey) {
+      setTrainingEpisodes([]);
+      setLastEpisodeId(0);
+      prevQueryScopeKeyRef.current = queryScopeKey;
+    }
+  }, [queryScopeKey]);
 
   useEffect(() => {
     let isMounted = true;
@@ -1808,9 +1975,14 @@ export function DiagnosticsPanel({
           ? selectedStageScope
           : undefined;
 
+        const runIdFilter = (selectedStageScope === "current-journey" || selectedStageScope === "current" || typeof selectedStageScope === "number")
+          ? activeRunId
+          : undefined;
+
         const res = await loadTrainingEpisodes({
           afterId: lastEpisodeId > 0 ? lastEpisodeId : undefined,
           stage: stageFilter,
+          runId: runIdFilter,
           limit: 1000,
           order: lastEpisodeId === 0 ? "desc" : undefined,
         });
@@ -1858,7 +2030,7 @@ export function DiagnosticsPanel({
       isMounted = false;
       if (timerId) clearTimeout(timerId);
     };
-  }, [isLiveTraining, selectedStageScope, effectiveCurriculumStage, lastEpisodeId]);
+  }, [isLiveTraining, selectedStageScope, effectiveCurriculumStage, lastEpisodeId, activeRunId]);
 
   // Instantly purge live episode state if server status indicates a fresh zero-episode start
   useEffect(() => {
@@ -1944,35 +2116,39 @@ export function DiagnosticsPanel({
     return ep.global_timestep ?? ep.global_environment_episode ?? ep.episode_in_stage ?? null;
   }, [xAxisMode, trainingStatus]);
 
-  const filteredEpisodes = useMemo(() => {
-    let list = trainingEpisodes;
-    if (selectedStageScope !== "all" && selectedStageScope !== "current-journey") {
-      const stageNum = selectedStageScope === "current" ? effectiveCurriculumStage : Number(selectedStageScope);
-      const stageList = list.filter((e) => e.curriculum_stage === stageNum);
-      if (stageList.length > 0) list = stageList;
-    }
-    if (viewWindow !== "all") {
-      list = list.slice(-viewWindow);
-    }
-    return list;
-  }, [trainingEpisodes, selectedStageScope, effectiveCurriculumStage, viewWindow]);
+  const canonicalHistory = useMemo(() => {
+    return processCanonicalHistory(trainingEpisodes, checkpoints, selectedStageScope, activeRunId, effectiveCurriculumStage);
+  }, [trainingEpisodes, checkpoints, selectedStageScope, activeRunId, effectiveCurriculumStage]);
+
+  const activeEpisodeSequence = useMemo(() => {
+    return selectWindowSlice(canonicalHistory, viewWindow);
+  }, [canonicalHistory, viewWindow]);
+
+  const episodeBuckets = useMemo(() => {
+    return buildEpisodeBuckets(activeEpisodeSequence, 25);
+  }, [activeEpisodeSequence]);
+
+  const formalEvalMarkers = useMemo(() => {
+    return buildFormalEvalMarkers(checkpoints, selectedStageScope, xAxisMode, bestCheckpointEpisode, effectiveCurriculumStage);
+  }, [checkpoints, selectedStageScope, xAxisMode, bestCheckpointEpisode, effectiveCurriculumStage]);
+
+  const filteredEpisodes = activeEpisodeSequence;
 
   const liveMetrics = useMemo(() => {
-    if (filteredEpisodes.length === 0) return null;
-    const recent = filteredEpisodes.slice(-25);
+    if (activeEpisodeSequence.length === 0) return null;
+    const recent = activeEpisodeSequence.slice(-25);
     const successes = recent.filter((e) => e.success).length;
     const successRate = successes / recent.length;
     const rewards = recent.map((e) => e.reward);
     const avgReward = rewards.reduce((a, b) => a + b, 0) / recent.length;
-    const lastEp = filteredEpisodes[filteredEpisodes.length - 1];
-    const latestEpNum = lastEp.global_environment_episode ?? lastEp.episode_in_stage;
+    const lastEp = activeEpisodeSequence[activeEpisodeSequence.length - 1];
     return {
       successRate,
       avgReward,
-      episodeCount: filteredEpisodes.length,
-      latestEpNum,
+      episodeCount: activeEpisodeSequence.length,
+      latestEpNum: lastEp.global_environment_episode,
     };
-  }, [filteredEpisodes]);
+  }, [activeEpisodeSequence]);
 
   const plateauInfo = useMemo(
     () => detectPlateau(stageScopedCheckpoints),
@@ -2088,26 +2264,6 @@ export function DiagnosticsPanel({
     [filteredCheckpoints],
   );
 
-  const checkpointX = (checkpoint: CheckpointEntry): number | null => {
-    if (xAxisMode === "timesteps") {
-      return checkpoint.global_timestep ?? checkpoint.global_timesteps ?? checkpoint.checkpoint_episode ?? null;
-    }
-    if (xAxisMode === "episode") {
-      return checkpoint.total_training_episodes ?? checkpoint.cumulative_environment_episodes ?? checkpoint.checkpoint_episode ?? checkpoint.global_timestep ?? null;
-    }
-    if (xAxisMode === "runtime") {
-      return checkpoint.active_runtime_seconds_total ?? checkpoint.checkpoint_episode ?? null;
-    }
-    const timestamp = checkpoint.recorded_at ?? checkpoint.created_timestamp ?? checkpoint.evaluation_timestamp;
-    if (timestamp) return new Date(timestamp).getTime();
-    return checkpoint.total_training_episodes ?? checkpoint.checkpoint_episode ?? null;
-  };
-
-  const chartCheckpoints = filteredCheckpoints.filter((checkpoint) => {
-    const value = checkpointX(checkpoint);
-    return value != null && Number.isFinite(value);
-  });
-
   const formatChartX = (value: number): string => {
     if (xAxisMode === "runtime") return formatDuration(value);
     if (xAxisMode === "calendar") {
@@ -2121,77 +2277,55 @@ export function DiagnosticsPanel({
   };
 
   const successData: ChartPoint[] = useMemo(() => {
-    let runningMaxRate = -Infinity;
-    let runningMinSteps = Infinity;
-    return chartCheckpoints
-      .map((c): ChartPoint | null => {
-        const rawRate = c.success_rate;
-        if (rawRate == null || typeof rawRate !== "number" || isNaN(rawRate)) {
-          return null;
-        }
-        const rate = rawRate <= 1.0 ? rawRate * 100 : rawRate;
-        const steps = c.average_completion_steps ?? Infinity;
-        const betterRate = rate > runningMaxRate;
-        const betterSteps = rate === runningMaxRate && steps < runningMinSteps;
-        const isPrevBest = betterRate || betterSteps;
-        if (isPrevBest) {
-          if (betterRate) {
-            runningMaxRate = rate;
-            runningMinSteps = steps;
-          } else {
-            runningMinSteps = steps;
-          }
-        }
-        const labelText =
-          (isPrevBest || c.checkpoint_episode === bestCheckpointEpisode) &&
-          c.average_completion_steps != null
-            ? String(Math.round(c.average_completion_steps))
-            : undefined;
-        return {
-          x: checkpointX(c) ?? c.checkpoint_episode,
-          y: rate,
-          stage: getCheckpointStage(c),
-          isBest: c.checkpoint_episode === bestCheckpointEpisode,
-          isPrevBest,
-          labelText,
-          secondaryY: c.average_completion_steps ?? null,
-          checkpoint: c,
-        };
-      })
-      .filter((pt): pt is ChartPoint => pt !== null);
-  }, [chartCheckpoints, bestCheckpointEpisode, xAxisMode]);
+    const points = episodeBuckets.map((b): ChartPoint => {
+      let xVal = b.endTimestep;
+      if (xAxisMode === "episode") xVal = b.lastEpisode;
+      if (xAxisMode === "calendar") xVal = b.endTimestampMs;
+      return {
+        x: xVal,
+        y: b.successRate,
+        secondaryY: b.avgSuccessfulSteps,
+        bucket: b,
+        labelText: `${Math.round(b.successRate)}%`,
+      };
+    });
+    assertMonotonicX(points, "Success Rate Series");
+    return points;
+  }, [episodeBuckets, xAxisMode]);
 
-  const rewardData: ChartPoint[] = useMemo(
-    () =>
-      chartCheckpoints.map((c) => ({
-        x: checkpointX(c) ?? c.checkpoint_episode,
-        y: c.average_reward,
-        stage: getCheckpointStage(c),
-        isBest: c.checkpoint_episode === bestCheckpointEpisode,
-        checkpoint: c,
-      })),
-    [chartCheckpoints, bestCheckpointEpisode, xAxisMode],
-  );
+  const rewardData: ChartPoint[] = useMemo(() => {
+    const points = episodeBuckets.map((b): ChartPoint => {
+      let xVal = b.endTimestep;
+      if (xAxisMode === "episode") xVal = b.lastEpisode;
+      if (xAxisMode === "calendar") xVal = b.endTimestampMs;
+      return {
+        x: xVal,
+        y: b.avgAllReward,
+        bucket: b,
+      };
+    });
+    assertMonotonicX(points, "Reward Series");
+    return points;
+  }, [episodeBuckets, xAxisMode]);
 
-  const sheepData: ChartPoint[] = useMemo(
-    () =>
-      chartCheckpoints.map((c) => ({
-        x: checkpointX(c) ?? c.checkpoint_episode,
-        y: c.average_sheep_penned,
-        stage: getCheckpointStage(c),
-        isBest: c.checkpoint_episode === bestCheckpointEpisode,
-        checkpoint: c,
-      })),
-    [chartCheckpoints, bestCheckpointEpisode, xAxisMode],
-  );
-
-
-
-
+  const sheepData: ChartPoint[] = useMemo(() => {
+    const points = episodeBuckets.map((b): ChartPoint => {
+      let xVal = b.endTimestep;
+      if (xAxisMode === "episode") xVal = b.lastEpisode;
+      if (xAxisMode === "calendar") xVal = b.endTimestampMs;
+      return {
+        x: xVal,
+        y: b.avgSheepPenned,
+        bucket: b,
+      };
+    });
+    assertMonotonicX(points, "Sheep Penned Series");
+    return points;
+  }, [episodeBuckets, xAxisMode]);
 
   const hasOmittedLegacyRows = useMemo(() => {
-    return xAxisMode === "timesteps" && filteredEpisodes.some((ep) => ep.global_timestep == null);
-  }, [filteredEpisodes, xAxisMode]);
+    return xAxisMode === "timesteps" && trainingEpisodes.some((ep) => ep.global_timestep == null);
+  }, [trainingEpisodes, xAxisMode]);
 
   const rawSuccessPoints: ChartPoint[] = useMemo(() => {
     const validEps = filteredEpisodes.filter((ep) => episodeX(ep) != null);
@@ -2210,15 +2344,21 @@ export function DiagnosticsPanel({
       .filter((pt): pt is ChartPoint => pt !== null);
   }, [filteredEpisodes, episodeX]);
 
+  const blockSuccessData: ChartPoint[] = useMemo(() => {
+    return calculateBlockSuccessPoints(filteredEpisodes, 25, episodeX);
+  }, [filteredEpisodes, episodeX]);
+
   const rollingSuccessData: ChartPoint[] = useMemo(() => {
     const validEps = filteredEpisodes.filter((ep) => episodeX(ep) != null);
-    if (validEps.length < 2) return [];
+    if (validEps.length < 5) return [];
     const windowSize = 25;
+    const minWindowSize = 5;
     return validEps
       .map((ep, i): ChartPoint | null => {
         const start = Math.max(0, i - windowSize + 1);
         const slice = validEps.slice(start, i + 1);
-        const avgSuccess = calculateRollingSuccess(slice, windowSize);
+        if (slice.length < minWindowSize) return null;
+        const avgSuccess = calculateRollingSuccess(slice, windowSize, minWindowSize);
         if (avgSuccess === null) return null;
         const xVal = episodeX(ep)!;
         return {
@@ -2248,22 +2388,26 @@ export function DiagnosticsPanel({
 
   const rollingRewardData: ChartPoint[] = useMemo(() => {
     const validEps = filteredEpisodes.filter((ep) => episodeX(ep) != null);
-    if (validEps.length < 2) return [];
+    if (validEps.length < 5) return [];
     const windowSize = 25;
-    return validEps.map((ep, i) => {
-      const start = Math.max(0, i - windowSize + 1);
-      const slice = validEps.slice(start, i + 1);
-      const avgReward = slice.reduce((sum, e) => sum + e.reward, 0) / slice.length;
-      const xVal = episodeX(ep)!;
-      return {
-        x: xVal,
-        y: avgReward,
-        stage: ep.curriculum_stage,
-        isRolling: true,
-        rollingWindowSize: slice.length,
-        labelText: `Avg reward ${avgReward.toFixed(1)} (rolling ${slice.length} eps)`,
-      };
-    });
+    const minWindowSize = 5;
+    return validEps
+      .map((ep, i): ChartPoint | null => {
+        const start = Math.max(0, i - windowSize + 1);
+        const slice = validEps.slice(start, i + 1);
+        if (slice.length < minWindowSize) return null;
+        const avgReward = slice.reduce((sum, e) => sum + e.reward, 0) / slice.length;
+        const xVal = episodeX(ep)!;
+        return {
+          x: xVal,
+          y: avgReward,
+          stage: ep.curriculum_stage,
+          isRolling: true,
+          rollingWindowSize: slice.length,
+          labelText: `Avg reward ${avgReward.toFixed(1)} (rolling ${slice.length} eps)`,
+        };
+      })
+      .filter((pt): pt is ChartPoint => pt !== null);
   }, [filteredEpisodes, episodeX]);
 
   const rawSheepPoints: ChartPoint[] = useMemo(() => {
@@ -2280,23 +2424,28 @@ export function DiagnosticsPanel({
   }, [filteredEpisodes, episodeX]);
 
   const rollingSheepData: ChartPoint[] = useMemo(() => {
-    if (filteredEpisodes.length < 2) return [];
+    if (filteredEpisodes.length < 5) return [];
     const windowSize = 25;
-    return filteredEpisodes.map((ep, i) => {
-      const start = Math.max(0, i - windowSize + 1);
-      const slice = filteredEpisodes.slice(start, i + 1);
-      const avgSheep = slice.reduce((sum, e) => sum + e.sheep_penned, 0) / slice.length;
-      const xVal = episodeX(ep) ?? ep.global_environment_episode;
-      return {
-        x: xVal,
-        y: avgSheep,
-        stage: ep.curriculum_stage,
-        isRolling: true,
-        rollingWindowSize: slice.length,
-        labelText: `Avg sheep ${avgSheep.toFixed(1)} (rolling ${slice.length} eps)`,
-      };
-    });
-  }, [filteredEpisodes, xAxisMode]);
+    const minWindowSize = 5;
+    return filteredEpisodes
+      .map((ep, i): ChartPoint | null => {
+        const start = Math.max(0, i - windowSize + 1);
+        const slice = filteredEpisodes.slice(start, i + 1);
+        if (slice.length < minWindowSize) return null;
+        const avgSheep = slice.reduce((sum, e) => sum + e.sheep_penned, 0) / slice.length;
+        const xVal = episodeX(ep) ?? ep.global_environment_episode;
+        if (xVal == null) return null;
+        return {
+          x: xVal,
+          y: avgSheep,
+          stage: ep.curriculum_stage,
+          isRolling: true,
+          rollingWindowSize: slice.length,
+          labelText: `Avg sheep ${avgSheep.toFixed(1)} (rolling ${slice.length} eps)`,
+        };
+      })
+      .filter((pt): pt is ChartPoint => pt !== null);
+  }, [filteredEpisodes, episodeX]);
 
   const rewardRange = useMemo(() => {
     if (!rewardData.length && !rawRewardPoints.length) return { min: 0, max: 1 };
@@ -2313,15 +2462,15 @@ export function DiagnosticsPanel({
   }, [sheepData, rawSheepPoints]);
 
   const stepsRange = useMemo(() => {
-    const vals = filteredCheckpoints
-      .map((c) => c.average_completion_steps)
-      .filter((v): v is number => v != null && v > 0);
+    const vals = episodeBuckets
+      .map((b) => b.avgSuccessfulSteps)
+      .filter((v): v is number => v != null && !isNaN(v) && v > 0);
     if (!vals.length) return { min: 0, max: 500 };
     const minV = Math.min(...vals);
     const maxV = Math.max(...vals);
     const pad = (maxV - minV) * 0.15 || 30;
-    return { min: Math.max(0, minV - pad), max: maxV + pad };
-  }, [filteredCheckpoints]);
+    return { min: Math.max(0, Math.floor(minV - pad)), max: Math.ceil(maxV + pad) };
+  }, [episodeBuckets]);
 
   // Reverse-order rows for the table (newest first)
   const tableRows = useMemo(() => [...filteredCheckpoints].reverse(), [filteredCheckpoints]);
@@ -2387,11 +2536,11 @@ export function DiagnosticsPanel({
   const uniqueStages = useMemo(() => [...new Set(stages)].sort((a, b) => a - b), [stages]);
   const [activeChart, setActiveChart] = useState<ChartTab>(() => {
     const saved = localStorage.getItem("sheepdog_insights_active_chart") as ChartTab | null;
-    const validCharts: ChartTab[] = ["health", "success", "reward", "sheep", "history", "learningSignal"];
+    const validCharts: ChartTab[] = ["stacked", "health", "success", "reward", "sheep", "history", "learningSignal"];
     if (saved && validCharts.includes(saved)) {
       return saved;
     }
-    return "success";
+    return "stacked";
   });
   const [learningSignalWindow, setLearningSignalWindow] = useState<ViewWindow>(() => {
     const saved = localStorage.getItem("sheepdog_insights_learning_signal_window");
@@ -2927,8 +3076,9 @@ export function DiagnosticsPanel({
 
       {/* Chart sub-tabs */}
       <div className="chart-tabs" role="tablist">
-        {(["success", "reward", "sheep", "history", "health", "learningSignal"] as ChartTab[]).map((id) => {
+        {(["stacked", "success", "reward", "sheep", "history", "health", "learningSignal"] as ChartTab[]).map((id) => {
           const labels: Record<ChartTab, string> = {
+            stacked: "Stacked Learning Curve",
             success: "Success Rate",
             reward: "Avg Reward",
             sheep: "Sheep Penned",
@@ -3288,6 +3438,23 @@ export function DiagnosticsPanel({
         </div>
       )}
 
+      {activeChart === "stacked" && (
+        <div className="chart-view">
+          <StackedLearningPanels
+            episodes={filteredEpisodes}
+            checkpoints={filteredCheckpoints}
+            curriculumStage={effectiveCurriculumStage}
+            smoothingWindow={25}
+            xAxisMode={xAxisMode === "timesteps" ? "timesteps" : xAxisMode === "episode" ? "global_ep" : "stage_ep"}
+            showRawEpisodes={layerRawEpisodes}
+            showRollingAvg={layerRollingAvg}
+            showFormalEvals={layerFormalEvals}
+            showPolicySnapshots={layerPolicySnapshots}
+            bestCheckpointEpisode={bestCheckpointEpisode}
+          />
+        </div>
+      )}
+
       {activeChart === "success" && (
         <div className="chart-view">
           {trainingEpisodes.length === 0 && (
@@ -3299,6 +3466,7 @@ export function DiagnosticsPanel({
             data={successData}
             rawPoints={layerRawEpisodes ? rawSuccessPoints : []}
             rollingData={layerRollingAvg ? rollingSuccessData : []}
+            blockPoints={blockSuccessData}
             showPolicySnapshots={layerPolicySnapshots}
             showFormalEvals={layerFormalEvals}
             formatX={formatChartX}
