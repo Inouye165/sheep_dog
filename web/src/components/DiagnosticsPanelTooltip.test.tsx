@@ -63,8 +63,8 @@ describe("ChartHoverPortal Tooltip Positioning & Content", () => {
     const tooltip = screen.getByTestId("chart-tooltip");
     expect(tooltip).toBeInTheDocument();
     expect(tooltip.style.position).toBe("fixed");
-    expect(tooltip.style.maxWidth).toBe("calc(100vw - 16px)");
-    expect(tooltip.style.maxHeight).toBe("calc(100vh - 16px)");
+    expect(tooltip.style.maxWidth).toBe("calc(100vw - 24px)");
+    expect(tooltip.style.maxHeight).toBe("calc(100vh - 24px)");
     expect(tooltip.style.overflowWrap).toBe("anywhere");
   });
 

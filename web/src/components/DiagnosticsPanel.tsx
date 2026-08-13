@@ -278,14 +278,12 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
   const updatePosition = useCallback(() => {
     if (!tooltipRef.current) return;
     const tooltipNode = tooltipRef.current;
-    const tooltipRect = tooltipNode.getBoundingClientRect();
-
     const viewportWidth = window.innerWidth;
     const viewportHeight = window.innerHeight;
     const padding = 12;
 
-    const tooltipWidth = tooltipRect.width || 300;
-    const tooltipHeight = tooltipRect.height || 280;
+    const tooltipWidth = tooltipNode.offsetWidth || 320;
+    const tooltipHeight = tooltipNode.offsetHeight || 280;
 
     const targetCenterX = targetRect.left + targetRect.width / 2;
     let left = targetCenterX - tooltipWidth / 2;
@@ -304,8 +302,8 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
       position: "fixed",
       left: `${left}px`,
       top: `${top}px`,
-      maxWidth: `calc(100vw - 16px)`,
-      maxHeight: `calc(100vh - 16px)`,
+      maxWidth: `calc(100vw - 24px)`,
+      maxHeight: `calc(100vh - 24px)`,
       overflowY: "auto",
       overflowWrap: "anywhere",
       opacity: 1,
@@ -316,6 +314,9 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
 
   useLayoutEffect(() => {
     updatePosition();
+    // Second measure after browser layout pass to guarantee edge alignment
+    const raf = requestAnimationFrame(updatePosition);
+    return () => cancelAnimationFrame(raf);
   }, [updatePosition]);
 
   useEffect(() => {
@@ -330,7 +331,15 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
   if (hoveredPoint.bucket) {
     const b = hoveredPoint.bucket;
     return createPortal(
-      <div ref={tooltipRef} className="chart-tooltip" style={style} data-testid="chart-tooltip">
+      <div
+        ref={tooltipRef}
+        className="chart-tooltip"
+        style={style}
+        role="tooltip"
+        id="chart-hover-tooltip"
+        aria-live="polite"
+        data-testid="chart-tooltip"
+      >
         <div className="chart-tooltip__header">
           <span className="chart-tooltip__episode">
             {b.episodeCount === 1 ? `Episode ${b.firstEpisode}` : `Episodes ${b.firstEpisode}–${b.lastEpisode}`}
@@ -370,7 +379,15 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
   if (hoveredPoint.rawEpisode) {
     const ep = hoveredPoint.rawEpisode;
     return createPortal(
-      <div ref={tooltipRef} className="chart-tooltip" style={style} data-testid="chart-tooltip">
+      <div
+        ref={tooltipRef}
+        className="chart-tooltip"
+        style={style}
+        role="tooltip"
+        id="chart-hover-tooltip"
+        aria-live="polite"
+        data-testid="chart-tooltip"
+      >
         <div className="chart-tooltip__header">
           <span className="chart-tooltip__episode">Training Ep {ep.global_environment_episode}</span>
           <span className="chart-tooltip__stage-pill" style={{ background: stageColor(ep.curriculum_stage) }}>
@@ -409,7 +426,15 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
 
   if (hoveredPoint.isRolling) {
     return createPortal(
-      <div ref={tooltipRef} className="chart-tooltip" style={style} data-testid="chart-tooltip">
+      <div
+        ref={tooltipRef}
+        className="chart-tooltip"
+        style={style}
+        role="tooltip"
+        id="chart-hover-tooltip"
+        aria-live="polite"
+        data-testid="chart-tooltip"
+      >
         <div className="chart-tooltip__header">
           <span className="chart-tooltip__episode">Rolling Training Average</span>
         </div>
@@ -427,14 +452,53 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
   }
 
   const checkpoint = hoveredPoint.checkpoint;
-  if (!checkpoint) return null;
+  if (!checkpoint) {
+    return createPortal(
+      <div
+        ref={tooltipRef}
+        className="chart-tooltip"
+        style={style}
+        role="tooltip"
+        id="chart-hover-tooltip"
+        aria-live="polite"
+        data-testid="chart-tooltip"
+      >
+        <div className="chart-tooltip__header">
+          <span className="chart-tooltip__episode">
+            {hoveredPoint.labelText || `Point ${hoveredPoint.x}`}
+          </span>
+        </div>
+        <div className="chart-tooltip__grid">
+          <span className="chart-tooltip__metric-label">Value:</span>
+          <span className="chart-tooltip__metric-value">{hoveredPoint.y.toFixed(1)}</span>
+          <span></span>
+          {hoveredPoint.secondaryY != null && (
+            <>
+              <span className="chart-tooltip__metric-label">Steps:</span>
+              <span className="chart-tooltip__metric-value">{Math.round(hoveredPoint.secondaryY)}</span>
+              <span></span>
+            </>
+          )}
+        </div>
+      </div>,
+      document.body
+    );
+  }
 
   const cStage = getCheckpointStage(checkpoint);
   const thresh = getSuccessThreshold(cStage);
   const gate = checkpoint.promotion_gate;
 
   return createPortal(
-    <div ref={tooltipRef} className="chart-tooltip" style={style} data-testid="chart-tooltip">
+    <div
+      ref={tooltipRef}
+      className="chart-tooltip"
+      style={style}
+      role="tooltip"
+      id="chart-hover-tooltip"
+      aria-live="polite"
+      data-testid="chart-tooltip"
+    >
       <div className="chart-tooltip__header">
         <span className="chart-tooltip__episode">Episode {checkpoint.checkpoint_episode}</span>
         <span
@@ -1039,24 +1103,46 @@ function LineChart({
         ) : null}
 
         {/* Dots — colored by stage; prev-bests get a diamond + label; best gets a ring */}
-        {showPolicySnapshots ? data.map((d, idx) => {
+        {data.map((d, idx) => {
           const cx = toSvgX(d.x, idx);
           const cy = toSvgY(d.y);
           const fill = stageColor(d.stage);
           const isBest = d.isBest ?? d.x === bestEpisode;
           const r = isBest ? bestRadius : d.isPrevBest ? prevBestRadius : baseRadius;
           const diamond = `${cx},${cy - r} ${cx + r},${cy} ${cx},${cy + r} ${cx - r},${cy}`;
+
+          let ariaLabel = `Point ${d.x}: ${Math.round(d.y)}%`;
+          if (d.bucket) {
+            const b = d.bucket;
+            ariaLabel = b.episodeCount === 1
+              ? `Episode ${b.firstEpisode}: ${b.successRate.toFixed(1)}% success rate${b.avgSuccessfulSteps != null ? `, ${Math.round(b.avgSuccessfulSteps)} steps` : ''}`
+              : `Episodes ${b.firstEpisode} to ${b.lastEpisode}: ${b.successRate.toFixed(1)}% success rate${b.avgSuccessfulSteps != null ? `, ${Math.round(b.avgSuccessfulSteps)} steps` : ''}`;
+          } else if (d.checkpoint) {
+            ariaLabel = `Checkpoint episode ${d.checkpoint.checkpoint_episode}: ${(d.checkpoint.success_rate * 100).toFixed(1)}% success rate`;
+          }
+
+          const handleActivate = (e: React.SyntheticEvent) => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            setHoveredState({ point: d, rect });
+          };
+
           return (
             <g
               key={`${d.x}-${idx}`}
-              onMouseEnter={(e) => {
-                const rect = e.currentTarget.getBoundingClientRect();
-                setHoveredState({ point: d, rect });
+              tabIndex={0}
+              role="graphics-symbol"
+              aria-label={ariaLabel}
+              aria-describedby="chart-hover-tooltip"
+              onMouseEnter={handleActivate}
+              onMouseLeave={() => setHoveredState(null)}
+              onFocus={handleActivate}
+              onBlur={() => setHoveredState(null)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  handleActivate(e);
+                }
               }}
-              onMouseLeave={() => {
-                setHoveredState(null);
-              }}
-              style={{ cursor: "pointer" }}
+              style={{ cursor: "pointer", outline: "none" }}
             >
               {/* Large invisible hit target */}
               <circle cx={cx} cy={cy} r={14} fill="transparent" />
@@ -1069,7 +1155,7 @@ function LineChart({
               ) : (
                 <circle cx={cx} cy={cy} r={r} fill={fill} stroke="rgba(8,17,27,0.7)" strokeWidth={mainDotStrokeWidth} style={{ pointerEvents: "none" }} />
               )}
-              {(d.isPrevBest || isBest) && actualShowLabels && d.labelText ? (
+              {showPolicySnapshots && (d.isPrevBest || isBest) && actualShowLabels && d.labelText ? (
                 <text
                   x={cx + 4}
                   y={cy - r - 4}
@@ -1085,7 +1171,7 @@ function LineChart({
               ) : null}
             </g>
           );
-        }) : null}
+        })}
 
         {/* No-data message */}
         {!hasAnyData ? (
@@ -1096,7 +1182,7 @@ function LineChart({
       </svg>
 
       {/* Premium Interactive Hover Tooltip via React Portal */}
-      {hoveredState && hoveredState.point.checkpoint ? (
+      {hoveredState ? (
         <ChartHoverPortal hoveredPoint={hoveredState.point} targetRect={hoveredState.rect} />
       ) : null}
     </div>
