@@ -247,6 +247,10 @@ class TrainingConfig:
     invalid_action_masking: bool = True
     output_dir: str = "artifacts"
     web_export_dir: str = "web/public/generated"
+    backup_enabled: bool = True
+    backup_dir: str = "artifacts/backups"
+    hourly_backup_interval_seconds: int = 3600
+    max_hourly_backups_per_stage: int = 24
     # Scenario-based training: enable to mix difficult starting scenarios
     # with normal random starts for robustness training.
     scenario_training_enabled: bool = False

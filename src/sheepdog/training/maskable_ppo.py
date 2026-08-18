@@ -1046,6 +1046,26 @@ class MaskablePPOTrainer(Trainer):
                     logging.getLogger(__name__).warning(
                         "Optional summary/web asset export failed: %s", exc, exc_info=True
                     )
+            if getattr(self.config.training, "backup_enabled", True):
+                try:
+                    from sheepdog.training.backup import TrainingBackupManager
+                    backup_mgr = TrainingBackupManager(self.config.training.backup_dir)
+                    active_sec = (
+                        self.runtime_tracker.active_seconds_total
+                        if self.runtime_tracker is not None
+                        else None
+                    )
+                    backup_mgr.backup_hourly_snapshot(
+                        stage=active_stage,
+                        model_path=saved_model_path,
+                        training_state=intermediate_state,
+                        checkpoint_payload=checkpoint_payload,
+                        active_runtime_seconds=active_sec,
+                        interval_seconds=float(getattr(self.config.training, "hourly_backup_interval_seconds", 3600.0)),
+                        max_snapshots_per_stage=int(getattr(self.config.training, "max_hourly_backups_per_stage", 24)),
+                    )
+                except Exception as backup_exc:
+                    logger.warning("Periodic backup snapshot failed: %s", backup_exc)
             if self.should_evaluate_saved_scenarios(
                 completed_checkpoints, n_checkpoints
             ):

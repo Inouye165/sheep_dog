@@ -1,6 +1,7 @@
 import type { CheckpointEntry, TrainingEpisode } from "../state/types";
 
 export type ViewWindow = "all" | 25 | 50 | 100;
+export type SmoothingWindow = 25 | 50 | 100;
 export type StageScope = "all" | "current" | "current-journey" | number;
 export type XAxisMode = "timesteps" | "episode" | "runtime" | "calendar";
 
@@ -20,41 +21,158 @@ export interface CanonicalEpisodeRecord {
   reward: number;
   sheep_penned: number;
   total_sheep: number;
-  isCheckpointFallback?: boolean;
-  checkpointSuccessRate?: number;
 }
 
-export interface EpisodeBucket {
-  bucketIndex?: number;
-  firstEpisode: number;
-  lastEpisode: number;
-  startTimestep: number;
-  endTimestep: number;
-  startTimestamp: string;
-  endTimestamp: string;
-  startTimestampMs: number;
-  endTimestampMs: number;
-  episodeCount: number;
+export interface RollingTrainingPoint extends CanonicalEpisodeRecord {
+  rollingSuccessRate: number; // 0 to 100
+  rollingSuccessfulSteps: number | null; // average steps among successes in window
+  rollingAllSteps: number;
+  rollingReward: number;
+  rollingSheepPenned: number;
+  windowCount: number;
+}
+
+export interface CheckpointEfficiencyMetrics {
+  successRatePct: number;
   successCount: number;
-  failureCount: number;
-  successRate: number; // 0 to 100
-  avgSuccessfulSteps: number | null; // Average steps among successes, or null if 0 successes
-  avgAllReward: number;
-  avgSheepPenned: number;
-  episodes?: CanonicalEpisodeRecord[];
-  isCheckpointFallback?: boolean;
+  totalSeeds: number;
+  medianSuccessfulSteps: number | null;
+  meanSuccessfulSteps: number | null;
+  worstSuccessfulSteps: number | null;
+  failedSeeds: number[];
 }
 
 export interface FormalEvalMarker {
   checkpoint: CheckpointEntry;
   xVal: number;
   successRatePct: number;
-  avgSteps: number | null;
+  successCount: number;
+  totalSeeds: number;
+  medianSuccessfulSteps: number | null;
+  meanSuccessfulSteps: number | null;
+  worstSuccessfulSteps: number | null;
+  failedSeeds: number[];
   avgReward: number | null;
   avgSheepPenned: number | null;
   stage: number;
   isBest: boolean;
   label: string;
+}
+
+export type EfficiencyTrendStatus = "improving" | "stable" | "regressing" | "collecting_evidence";
+
+export interface EfficiencyTrendAnalysis {
+  status: EfficiencyTrendStatus;
+  statusLabel: string;
+  recentMedian: number | null;
+  priorMedian: number | null;
+  percentageImprovement: number | null; // positive = faster/improved (fewer steps)
+  evaluationsCount: number;
+  evaluationsRequired: number;
+  summaryText: string;
+}
+
+export type SeedReliabilityStatus = "reliable" | "normal_variance" | "blind_spot" | "inefficient";
+
+export interface SeedReliabilitySummary {
+  seed: number;
+  totalTrials: number;
+  successCount: number;
+  failureCount: number;
+  recentSuccessRate: number; // 0 to 100
+  consecutiveFailures: number;
+  typicalSuccessfulSteps: number | null;
+  worstSuccessfulSteps: number | null;
+  status: SeedReliabilityStatus;
+  statusText: string;
+  isBlindSpot: boolean;
+  isInefficient: boolean;
+}
+
+export interface StagePerSeedAnalysis {
+  seeds: SeedReliabilitySummary[];
+  overallMedianSuccessfulSteps: number | null;
+  blindSpotCount: number;
+  inefficientCount: number;
+  blindSpotSeeds: number[];
+  inefficientSeeds: number[];
+}
+
+export interface EpisodeBucket {
+  firstEpisode: number;
+  lastEpisode: number;
+  firstTimestep?: number;
+  startTimestep?: number;
+  endTimestep: number;
+  startTimestampMs: number;
+  endTimestampMs: number;
+  startTimestamp?: string;
+  endTimestamp?: string;
+  episodeCount: number;
+  successCount: number;
+  failureCount: number;
+  successRate: number; // 0-100
+  avgSuccessfulSteps: number | null;
+  avgAllSteps?: number;
+  avgAllReward: number;
+  avgSheepPenned: number;
+  episodes: CanonicalEpisodeRecord[];
+}
+
+export function buildEpisodeBuckets(
+  episodes: CanonicalEpisodeRecord[],
+  bucketSize: number = 25
+): EpisodeBucket[] {
+  if (!episodes || episodes.length === 0) return [];
+  const buckets: EpisodeBucket[] = [];
+  const safeBucketSize = Math.max(1, bucketSize);
+
+  for (let i = 0; i < episodes.length; i += safeBucketSize) {
+    const chunk = episodes.slice(i, i + safeBucketSize);
+    if (chunk.length === 0) continue;
+
+    const first = chunk[0];
+    const last = chunk[chunk.length - 1];
+
+    const successes = chunk.filter((e) => e.success);
+    const failures = chunk.filter((e) => !e.success);
+
+    const successCount = successes.length;
+    const failureCount = failures.length;
+    const successRate = (successCount / chunk.length) * 100;
+
+    const avgSuccessfulSteps =
+      successCount > 0
+        ? successes.reduce((sum, e) => sum + e.steps, 0) / successCount
+        : null;
+
+    const avgAllSteps = chunk.reduce((sum, e) => sum + e.steps, 0) / chunk.length;
+    const avgAllReward = chunk.reduce((sum, e) => sum + e.reward, 0) / chunk.length;
+    const avgSheepPenned = chunk.reduce((sum, e) => sum + e.sheep_penned, 0) / chunk.length;
+
+    buckets.push({
+      firstEpisode: first.episode_in_stage ?? first.global_environment_episode,
+      lastEpisode: last.episode_in_stage ?? last.global_environment_episode,
+      firstTimestep: first.global_timestep,
+      startTimestep: first.global_timestep,
+      endTimestep: last.global_timestep,
+      startTimestampMs: first.timestamp_ms,
+      endTimestampMs: last.timestamp_ms,
+      startTimestamp: first.completed_at,
+      endTimestamp: last.completed_at,
+      episodeCount: chunk.length,
+      successCount,
+      failureCount,
+      successRate,
+      avgSuccessfulSteps,
+      avgAllSteps,
+      avgAllReward,
+      avgSheepPenned,
+      episodes: chunk,
+    });
+  }
+
+  return buckets;
 }
 
 /**
@@ -73,7 +191,7 @@ export function normalizeEpisodeRecord(raw: Partial<TrainingEpisode>, indexFallb
     : globalEp;
   const globalTs = typeof raw.global_timestep === "number" && !isNaN(raw.global_timestep)
     ? raw.global_timestep
-    : globalEp * 500; // fallback deterministic scale
+    : globalEp * 500;
 
   let success = false;
   if (raw.success === true || (raw.success as unknown) === 1) {
@@ -116,58 +234,21 @@ export function normalizeEpisodeRecord(raw: Partial<TrainingEpisode>, indexFallb
 export function getCheckpointStage(c: Partial<CheckpointEntry>): number {
   if ((c as any).stage != null && typeof (c as any).stage === "number" && !isNaN((c as any).stage)) return (c as any).stage;
   if (c.curriculum_stage != null && typeof c.curriculum_stage === "number" && !isNaN(c.curriculum_stage)) return c.curriculum_stage;
+  if (c.reward_config?.instincts?.curriculum_stage != null && !isNaN(c.reward_config.instincts.curriculum_stage)) {
+    return c.reward_config.instincts.curriculum_stage;
+  }
+  if (c.environment_config?.curriculum_stage != null && !isNaN(c.environment_config.curriculum_stage)) {
+    return c.environment_config.curriculum_stage;
+  }
   return 1;
-}
-
-export function normalizeCheckpointToCanonical(
-  c: CheckpointEntry,
-  indexFallback: number
-): CanonicalEpisodeRecord {
-  const rawRate = c.success_rate;
-  let successRate = 0;
-  if (rawRate != null && typeof rawRate === "number" && !isNaN(rawRate)) {
-    successRate = rawRate <= 1.0 ? rawRate * 100 : rawRate;
-  }
-
-  const steps = c.average_completion_steps ?? c.average_completion_seconds ?? 600;
-  const global_timestep = c.global_timestep ?? c.global_timesteps ?? c.checkpoint_episode ?? (indexFallback * 1000);
-  const stage = getCheckpointStage(c);
-
-  let timestamp_ms = 1700000000000 + indexFallback * 1000;
-  const rawTs = c.recorded_at ?? c.created_timestamp ?? c.evaluation_timestamp;
-  if (rawTs) {
-    const parsed = new Date(rawTs).getTime();
-    if (!isNaN(parsed)) timestamp_ms = parsed;
-  }
-
-  const episodeNum = c.checkpoint_episode ?? indexFallback;
-
-  return {
-    id: episodeNum,
-    run_id: c.journey || c.session_id || "current",
-    session_id: c.session_id ?? undefined,
-    curriculum_stage: stage,
-    global_environment_episode: episodeNum,
-    episode_in_stage: episodeNum,
-    global_timestep,
-    completed_at: rawTs ?? new Date(timestamp_ms).toISOString(),
-    timestamp_ms,
-    steps,
-    success: successRate >= 50,
-    result: successRate >= 50 ? "SUCCESS" : "TIMEOUT",
-    reward: c.average_reward ?? 0,
-    sheep_penned: c.average_sheep_penned ?? 0,
-    total_sheep: 10,
-    isCheckpointFallback: true,
-    checkpointSuccessRate: successRate,
-  };
 }
 
 /**
  * Strict, immutable canonical ordering comparator.
  * Primary key: global_timestep ASC
- * Secondary key: timestamp_ms ASC
- * Tertiary key: id ASC
+ * Secondary key: global_environment_episode ASC
+ * Tertiary key: timestamp_ms ASC
+ * Quaternary key: id ASC
  */
 export function compareCanonicalEpisodes(a: CanonicalEpisodeRecord, b: CanonicalEpisodeRecord): number {
   if (a.global_timestep !== b.global_timestep) {
@@ -184,38 +265,31 @@ export function compareCanonicalEpisodes(a: CanonicalEpisodeRecord, b: Canonical
 
 /**
  * Single source of truth pipeline step 1-4:
- * 1. Normalize records
+ * 1. Normalize actual raw rollout records
  * 2. Deduplicate by unique id
  * 3. Filter by stage and run_id
  * 4. Sort strictly chronologically via compareCanonicalEpisodes
  * 
- * If rawEpisodes is empty or yields no matches, falls back seamlessly to checkpoints.
+ * IMPORTANT INVARIANT: Zero raw rollout episodes returns empty array ([]).
+ * Checkpoints are NEVER converted into fake pseudo training episodes.
  */
 export function processCanonicalHistory(
   rawEpisodes: Partial<TrainingEpisode>[],
-  arg2?: CheckpointEntry[] | StageScope,
-  arg3?: StageScope | string,
-  arg4?: string | number,
-  arg5?: number
+  stageScope: StageScope = "current-journey",
+  activeRunId?: string,
+  effectiveStage: number = 1
 ): CanonicalEpisodeRecord[] {
-  let checkpoints: CheckpointEntry[] = [];
-  let stageScope: StageScope = "current-journey";
-  let activeRunId: string | undefined = undefined;
-  let effectiveStage: number = 1;
-
-  if (Array.isArray(arg2)) {
-    checkpoints = arg2;
-    stageScope = (arg3 as StageScope) ?? "current-journey";
-    activeRunId = arg4 as string | undefined;
-    effectiveStage = (arg5 as number) ?? 1;
-  } else {
-    checkpoints = [];
-    stageScope = (arg2 as StageScope) ?? "current-journey";
-    activeRunId = arg3 as string | undefined;
-    effectiveStage = (arg4 as number) ?? 1;
+  if (!rawEpisodes || rawEpisodes.length === 0) {
+    return [];
   }
 
-  // Helper to filter canonical records by stage scope
+  const normalized = rawEpisodes.map((raw, idx) => normalizeEpisodeRecord(raw, idx + 1));
+  const map = new Map<number, CanonicalEpisodeRecord>();
+  for (const ep of normalized) {
+    map.set(ep.id, ep);
+  }
+  const allDeduped = Array.from(map.values());
+
   const applyFilters = (records: CanonicalEpisodeRecord[]): CanonicalEpisodeRecord[] => {
     if (stageScope === "current-journey") {
       let filtered = records.filter((e) => !e.run_id || e.run_id === "current" || !e.run_id.startsWith("journey-"));
@@ -229,7 +303,6 @@ export function processCanonicalHistory(
     }
     if (stageScope === "current") {
       let filtered = records.filter((e) => e.curriculum_stage === effectiveStage);
-      // For "current" stage, strictly exclude archived journeys
       filtered = filtered.filter((e) => !e.run_id || e.run_id === "current" || !e.run_id.startsWith("journey-") || e.run_id === activeRunId);
       if (activeRunId && filtered.some((e) => e.run_id === activeRunId)) {
         filtered = filtered.filter((e) => e.run_id === activeRunId);
@@ -251,157 +324,164 @@ export function processCanonicalHistory(
     return records;
   };
 
-  // 1. Process raw rollout episodes if present
-  if (rawEpisodes && rawEpisodes.length > 0) {
-    const normalized = rawEpisodes.map((raw, idx) => normalizeEpisodeRecord(raw, idx + 1));
-    const map = new Map<number, CanonicalEpisodeRecord>();
-    for (const ep of normalized) {
-      map.set(ep.id, ep);
-    }
-    const allDeduped = Array.from(map.values());
-    const filtered = applyFilters(allDeduped);
-
-    if (filtered.length > 0) {
-      return filtered.sort(compareCanonicalEpisodes);
-    }
-
-    // We have raw episodes but the run_id sub-filter eliminated all of them
-    // (e.g. activeRunId not yet loaded or from a previous run).
-    // Do NOT fall back to checkpoints — return the stage-filtered episodes WITHOUT
-    // the run_id sub-filter so today's data is always visible.
-    const stageOnlyFiltered = ((): CanonicalEpisodeRecord[] => {
-      if (stageScope === "all" || stageScope === "current-journey") return allDeduped;
-      const targetStage = stageScope === "current" ? effectiveStage : Number(stageScope);
-      if (!isNaN(targetStage)) return allDeduped.filter((e) => e.curriculum_stage === targetStage);
-      return allDeduped;
-    })();
-
-    if (stageOnlyFiltered.length > 0) {
-      return stageOnlyFiltered.sort(compareCanonicalEpisodes);
-    }
+  const filtered = applyFilters(allDeduped);
+  if (filtered.length > 0) {
+    return filtered.sort(compareCanonicalEpisodes);
   }
 
-  // 2. Fallback to checkpoints ONLY when we have zero raw rollout episodes at all
-  if (checkpoints && checkpoints.length > 0) {
-    const normalizedCkpts = checkpoints.map((c, idx) => normalizeCheckpointToCanonical(c, idx + 1));
-    const filteredCkpts = applyFilters(normalizedCkpts);
-    return filteredCkpts.sort(compareCanonicalEpisodes);
-  }
+  // If filtered by run_id resulted in 0, fallback to stage-only filter so recent episodes are visible
+  const stageOnlyFiltered = ((): CanonicalEpisodeRecord[] => {
+    if (stageScope === "all" || stageScope === "current-journey") return allDeduped;
+    const targetStage = stageScope === "current" ? effectiveStage : Number(stageScope);
+    if (!isNaN(targetStage)) return allDeduped.filter((e) => e.curriculum_stage === targetStage);
+    return allDeduped;
+  })();
 
-  return [];
+  return stageOnlyFiltered.sort(compareCanonicalEpisodes);
 }
 
 /**
- * Single source of truth pipeline step 5:
- * Select requested view window slice.
+ * Computes rolling training statistics across the FULL canonical stage history FIRST.
+ * Slicing for display window must only occur AFTER this computation.
+ */
+export function computeRollingTrainingSeries(
+  fullCanonicalHistory: CanonicalEpisodeRecord[],
+  windowSize: number = 50
+): RollingTrainingPoint[] {
+  if (fullCanonicalHistory.length === 0) return [];
+
+  const w = Math.max(1, windowSize);
+  return fullCanonicalHistory.map((ep, idx) => {
+    const start = Math.max(0, idx - w + 1);
+    const slice = fullCanonicalHistory.slice(start, idx + 1);
+    const sliceLen = slice.length;
+
+    const successes = slice.filter((e) => e.success);
+    const rollingSuccessRate = (successes.length / sliceLen) * 100;
+
+    let rollingSuccessfulSteps: number | null = null;
+    if (successes.length > 0) {
+      const sumSteps = successes.reduce((acc, e) => acc + e.steps, 0);
+      rollingSuccessfulSteps = sumSteps / successes.length;
+    }
+
+    const rollingAllSteps = slice.reduce((acc, e) => acc + e.steps, 0) / sliceLen;
+    const rollingReward = slice.reduce((acc, e) => acc + e.reward, 0) / sliceLen;
+    const rollingSheepPenned = slice.reduce((acc, e) => acc + e.sheep_penned, 0) / sliceLen;
+
+    return {
+      id: ep.id,
+      run_id: ep.run_id,
+      session_id: ep.session_id,
+      global_timestep: ep.global_timestep,
+      global_environment_episode: ep.global_environment_episode,
+      episode_in_stage: ep.episode_in_stage,
+      completed_at: ep.completed_at,
+      timestamp_ms: ep.timestamp_ms,
+      curriculum_stage: ep.curriculum_stage,
+      success: ep.success,
+      result: ep.result,
+      steps: ep.steps,
+      reward: ep.reward,
+      sheep_penned: ep.sheep_penned,
+      total_sheep: ep.total_sheep,
+      rollingSuccessRate,
+      rollingSuccessfulSteps,
+      rollingAllSteps,
+      rollingReward,
+      rollingSheepPenned,
+      windowCount: sliceLen,
+    };
+  });
+}
+
+/**
+ * Single source of truth pipeline: Select requested view window slice.
  * GUARANTEES tail-subset invariant: Last 25 === All.slice(-25), Last 50 === All.slice(-50), etc.
  */
-export function selectWindowSlice(
-  canonicalHistory: CanonicalEpisodeRecord[],
+export function selectWindowSlice<T>(
+  canonicalHistory: T[],
   window: ViewWindow
-): CanonicalEpisodeRecord[] {
+): T[] {
   if (window === "all") return canonicalHistory;
   return canonicalHistory.slice(-window);
 }
 
 /**
- * Single source of truth pipeline step 6 & 7:
- * Group active episode sequence into explicit, non-overlapping contiguous buckets.
- * Calculate success rate and average steps TOGETHER from the exact same bucket episodes.
+ * Computes exact formal evaluation metrics from CheckpointEntry per-seed records.
+ * Failed seeds/timeouts are strictly excluded from successful completion step statistics.
  */
-export function buildEpisodeBuckets(
-  episodes: CanonicalEpisodeRecord[],
-  targetBucketSize: number = 25
-): EpisodeBucket[] {
-  if (episodes.length === 0) return [];
-
-  // Checkpoint fallback mode: each checkpoint represents a pre-aggregated evaluation point
-  if (episodes[0].isCheckpointFallback) {
-    return episodes.map((ep) => ({
-      firstEpisode: ep.episode_in_stage,
-      lastEpisode: ep.episode_in_stage,
-      startTimestep: ep.global_timestep,
-      endTimestep: ep.global_timestep,
-      startTimestamp: ep.completed_at,
-      endTimestamp: ep.completed_at,
-      startTimestampMs: ep.timestamp_ms,
-      endTimestampMs: ep.timestamp_ms,
-      episodeCount: 1,
-      successCount: ep.checkpointSuccessRate != null && ep.checkpointSuccessRate > 0 ? 1 : 0,
-      failureCount: ep.checkpointSuccessRate != null && ep.checkpointSuccessRate > 0 ? 0 : 1,
-      successRate: ep.checkpointSuccessRate ?? (ep.success ? 100 : 0),
-      avgSuccessfulSteps: ep.steps > 0 ? ep.steps : null,
-      avgAllReward: ep.reward,
-      avgSheepPenned: ep.sheep_penned,
-      isCheckpointFallback: true,
-      episodes: [ep],
-    }));
+export function computeCheckpointEfficiency(c: CheckpointEntry): CheckpointEfficiencyMetrics {
+  const records = c.records ?? [];
+  const rawRate = c.success_rate;
+  let successRatePct = 0;
+  if (rawRate != null && typeof rawRate === "number" && !isNaN(rawRate)) {
+    successRatePct = rawRate <= 1.0 ? rawRate * 100 : rawRate;
   }
 
-  const bucketSize = Math.max(1, targetBucketSize);
-  const buckets: EpisodeBucket[] = [];
-  const totalBuckets = Math.ceil(episodes.length / bucketSize);
+  if (records.length > 0) {
+    const succ = records.filter((r) => r.success);
+    const fail = records.filter((r) => !r.success);
+    const totalSeeds = records.length;
+    const successCount = succ.length;
+    const rateFromRecords = (successCount / totalSeeds) * 100;
+    const finalRate = !isNaN(rateFromRecords) ? rateFromRecords : successRatePct;
 
-  for (let b = 0; b < totalBuckets; b++) {
-    const slice = episodes.slice(b * bucketSize, (b + 1) * bucketSize);
-    if (slice.length === 0) continue;
-
-    const firstEp = slice[0];
-    const lastEp = slice[slice.length - 1];
-
-    const successes = slice.filter((e) => e.success);
-    const failureCount = slice.length - successes.length;
-    const successRate = (successes.length / slice.length) * 100;
-
-    let avgSuccessfulSteps: number | null = null;
-    if (successes.length > 0) {
-      const totalSuccSteps = successes.reduce((sum, e) => sum + e.steps, 0);
-      avgSuccessfulSteps = totalSuccSteps / successes.length;
+    if (succ.length > 0) {
+      const sortedSteps = succ
+        .map((r) => r.steps)
+        .filter((s) => typeof s === "number" && !isNaN(s))
+        .sort((a, b) => a - b);
+      let medianSteps: number | null = null;
+      if (sortedSteps.length > 0) {
+        const mid = Math.floor(sortedSteps.length / 2);
+        medianSteps = sortedSteps.length % 2 !== 0
+          ? sortedSteps[mid]
+          : (sortedSteps[mid - 1] + sortedSteps[mid]) / 2;
+      }
+      const meanSteps = sortedSteps.length > 0 ? sortedSteps.reduce((a, b) => a + b, 0) / sortedSteps.length : null;
+      const worstSteps = sortedSteps.length > 0 ? sortedSteps[sortedSteps.length - 1] : null;
+      return {
+        successRatePct: finalRate,
+        successCount,
+        totalSeeds,
+        medianSuccessfulSteps: medianSteps != null ? Math.round(medianSteps * 10) / 10 : null,
+        meanSuccessfulSteps: meanSteps != null ? Math.round(meanSteps * 10) / 10 : null,
+        worstSuccessfulSteps: worstSteps,
+        failedSeeds: fail.map((r) => r.seed),
+      };
     }
 
-    const avgAllReward = slice.reduce((sum, e) => sum + e.reward, 0) / slice.length;
-    const avgSheepPenned = slice.reduce((sum, e) => sum + e.sheep_penned, 0) / slice.length;
-
-    buckets.push({
-      bucketIndex: b + 1,
-      firstEpisode: firstEp.episode_in_stage,
-      lastEpisode: lastEp.episode_in_stage,
-      startTimestep: firstEp.global_timestep,
-      endTimestep: lastEp.global_timestep,
-      startTimestamp: firstEp.completed_at,
-      endTimestamp: lastEp.completed_at,
-      startTimestampMs: firstEp.timestamp_ms,
-      endTimestampMs: lastEp.timestamp_ms,
-      episodeCount: slice.length,
-      successCount: successes.length,
-      failureCount,
-      successRate,
-      avgSuccessfulSteps,
-      avgAllReward,
-      avgSheepPenned,
-      episodes: slice,
-    });
+    return {
+      successRatePct: finalRate,
+      successCount: 0,
+      totalSeeds,
+      medianSuccessfulSteps: null,
+      meanSuccessfulSteps: null,
+      worstSuccessfulSteps: null,
+      failedSeeds: fail.map((r) => r.seed),
+    };
   }
 
-  return buckets;
+  // Fallback for checkpoints without per-seed records (e.g. pruned older checkpoints)
+  const totalSeeds = c.evaluation_seed_count ?? (c.evaluation_seeds ? c.evaluation_seeds.length : 10);
+  const successCount = Math.round((successRatePct / 100) * totalSeeds);
+  const avgSteps = c.average_completion_steps ?? null;
+
+  return {
+    successRatePct,
+    successCount,
+    totalSeeds,
+    medianSuccessfulSteps: avgSteps,
+    meanSuccessfulSteps: avgSteps,
+    worstSuccessfulSteps: null,
+    failedSeeds: [],
+  };
 }
 
 /**
- * Asserts programmatically that X coordinates in a rendered series are strictly non-decreasing.
- */
-export function assertMonotonicX(points: Array<{ x: number }>, seriesLabel: string = "Series"): void {
-  for (let i = 0; i < points.length - 1; i++) {
-    if (points[i].x > points[i + 1].x) {
-      const msg = `[Chart Chronology Violation] ${seriesLabel} point index ${i} (x=${points[i].x}) > index ${i + 1} (x=${points[i + 1].x})`;
-      console.error(msg);
-      throw new Error(msg);
-    }
-  }
-}
-
-/**
- * Builds landmark formal 10-seed evaluation markers from checkpoint index.
- * Positioned strictly at their exact X coordinate (global_timestep or timestamp).
+ * Builds landmark formal evaluation markers from checkpoint index.
+ * Positioned strictly at their exact X coordinate (global_timestep, episode, or timestamp).
  */
 export function buildFormalEvalMarkers(
   checkpoints: CheckpointEntry[],
@@ -420,21 +500,18 @@ export function buildFormalEvalMarkers(
 
   let filtered = checkpoints;
   if (targetStage !== null && !isNaN(targetStage)) {
-    filtered = checkpoints.filter((c) => {
-      const cStage = c.reward_config?.instincts?.curriculum_stage ?? c.environment_config?.curriculum_stage ?? c.curriculum_stage ?? -1;
-      return cStage === targetStage;
-    });
+    filtered = checkpoints.filter((c) => getCheckpointStage(c) === targetStage);
   }
 
   const markers: FormalEvalMarker[] = [];
   for (const c of filtered) {
     let xVal: number | null = null;
     if (xAxisMode === "timesteps") {
-      xVal = c.global_timesteps ?? c.checkpoint_episode ?? null;
+      xVal = c.global_timesteps ?? c.global_timestep ?? (c.checkpoint_episode != null ? c.checkpoint_episode * 500 : null);
     } else if (xAxisMode === "episode") {
       xVal = c.total_training_episodes ?? c.cumulative_environment_episodes ?? c.checkpoint_episode ?? null;
     } else if (xAxisMode === "runtime") {
-      xVal = c.checkpoint_episode ?? null;
+      xVal = c.active_runtime_seconds_total ?? c.checkpoint_episode ?? null;
     } else if (xAxisMode === "calendar") {
       const ts = c.recorded_at ?? c.evaluation_timestamp ?? c.created_timestamp;
       xVal = ts ? new Date(ts).getTime() : c.checkpoint_episode ?? null;
@@ -442,21 +519,270 @@ export function buildFormalEvalMarkers(
 
     if (xVal == null || isNaN(xVal)) continue;
 
-    const rawRate = c.success_rate;
-    const ratePct = rawRate <= 1.0 ? rawRate * 100 : rawRate;
+    const eff = computeCheckpointEfficiency(c);
 
     markers.push({
       checkpoint: c,
       xVal,
-      successRatePct: ratePct,
-      avgSteps: c.average_completion_steps ?? null,
+      successRatePct: eff.successRatePct,
+      successCount: eff.successCount,
+      totalSeeds: eff.totalSeeds,
+      medianSuccessfulSteps: eff.medianSuccessfulSteps,
+      meanSuccessfulSteps: eff.meanSuccessfulSteps,
+      worstSuccessfulSteps: eff.worstSuccessfulSteps,
+      failedSeeds: eff.failedSeeds,
       avgReward: c.average_reward ?? null,
       avgSheepPenned: c.average_sheep_penned ?? null,
-      stage: c.curriculum_stage ?? 1,
+      stage: getCheckpointStage(c),
       isBest: c.checkpoint_episode === bestCheckpointEpisode,
-      label: `Formal Benchmark: ${Math.round(ratePct)}% (${c.evaluation_seed_count ?? 10}-seed test at ep ${c.checkpoint_episode})`,
+      label: `Formal ${eff.totalSeeds}-Seed Evaluation: ${Math.round(eff.successRatePct)}% (${eff.successCount}/${eff.totalSeeds} seeds at ep ${c.checkpoint_episode})`,
     });
   }
 
   return markers.sort((a, b) => a.xVal - b.xVal);
+}
+
+/**
+ * Computes an observational efficiency trend comparing recent vs prior formal evaluation medians.
+ * Lower steps = positive improvement percentage.
+ */
+export function calculateEfficiencyTrend(
+  checkpoints: CheckpointEntry[],
+  targetStage?: number
+): EfficiencyTrendAnalysis {
+  const filtered = targetStage != null
+    ? checkpoints.filter((c) => getCheckpointStage(c) === targetStage)
+    : checkpoints;
+
+  const validEvals: Array<{ checkpoint_episode: number; medianSteps: number }> = [];
+  for (const c of filtered) {
+    const eff = computeCheckpointEfficiency(c);
+    if (eff.medianSuccessfulSteps != null && eff.medianSuccessfulSteps > 0 && eff.successCount > 0) {
+      validEvals.push({
+        checkpoint_episode: c.checkpoint_episode,
+        medianSteps: eff.medianSuccessfulSteps,
+      });
+    }
+  }
+
+  const count = validEvals.length;
+  if (count < 2) {
+    return {
+      status: "collecting_evidence",
+      statusLabel: "COLLECTING EVIDENCE",
+      recentMedian: count === 1 ? validEvals[0].medianSteps : null,
+      priorMedian: null,
+      percentageImprovement: null,
+      evaluationsCount: count,
+      evaluationsRequired: 6,
+      summaryText: `Collecting evidence (${count}/6 formal evaluations with successes).`,
+    };
+  }
+
+  const medianOf = (vals: number[]): number => {
+    const sorted = [...vals].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  };
+
+  let recentMedian: number;
+  let priorMedian: number;
+
+  if (count >= 6) {
+    const recent3 = validEvals.slice(-3).map((e) => e.medianSteps);
+    const prior3 = validEvals.slice(-6, -3).map((e) => e.medianSteps);
+    recentMedian = medianOf(recent3);
+    priorMedian = medianOf(prior3);
+  } else {
+    const half = Math.floor(count / 2);
+    const priorSlice = validEvals.slice(0, half).map((e) => e.medianSteps);
+    const recentSlice = validEvals.slice(half).map((e) => e.medianSteps);
+    recentMedian = medianOf(recentSlice);
+    priorMedian = medianOf(priorSlice);
+  }
+
+  const pctImprovement = priorMedian > 0
+    ? ((priorMedian - recentMedian) / priorMedian) * 100
+    : 0;
+
+  let status: EfficiencyTrendStatus;
+  let statusLabel: string;
+  if (pctImprovement >= 4.0) {
+    status = "improving";
+    statusLabel = `IMPROVING (+${pctImprovement.toFixed(1)}% faster)`;
+  } else if (pctImprovement <= -4.0) {
+    status = "regressing";
+    statusLabel = `REGRESSING (${pctImprovement.toFixed(1)}% slower)`;
+  } else {
+    status = "stable";
+    statusLabel = `STABLE (${pctImprovement >= 0 ? "+" : ""}${pctImprovement.toFixed(1)}%)`;
+  }
+
+  const roundedRecent = Math.round(recentMedian);
+  const roundedPrior = Math.round(priorMedian);
+
+  const summaryText = count >= 6
+    ? `Recent 3 evals median (${roundedRecent} steps) vs prior 3 evals median (${roundedPrior} steps): ${statusLabel}`
+    : `Recent evals median (${roundedRecent} steps) vs earlier evals (${roundedPrior} steps): ${statusLabel} (${count}/6 evals)`;
+
+  return {
+    status,
+    statusLabel,
+    recentMedian: Math.round(recentMedian * 10) / 10,
+    priorMedian: Math.round(priorMedian * 10) / 10,
+    percentageImprovement: Math.round(pctImprovement * 10) / 10,
+    evaluationsCount: count,
+    evaluationsRequired: 6,
+    summaryText,
+  };
+}
+
+/**
+ * Aggregates deterministic benchmark seeds across recent formal evaluations.
+ * Detects persistent blind spots (repeated failures) and inefficient scenarios (slow but successful).
+ */
+export function analyzePerSeedReliability(
+  checkpoints: CheckpointEntry[],
+  targetStage?: number,
+  recentEvaluationsWindow: number = 10
+): StagePerSeedAnalysis {
+  const filtered = targetStage != null
+    ? checkpoints.filter((c) => getCheckpointStage(c) === targetStage)
+    : checkpoints;
+
+  const recentWithRecords = filtered.filter((c) => c.records && c.records.length > 0).slice(-recentEvaluationsWindow);
+
+  if (recentWithRecords.length === 0) {
+    return {
+      seeds: [],
+      overallMedianSuccessfulSteps: null,
+      blindSpotCount: 0,
+      inefficientCount: 0,
+      blindSpotSeeds: [],
+      inefficientSeeds: [],
+    };
+  }
+
+  const allSuccessfulSteps: number[] = [];
+  const seedTrialMap = new Map<number, Array<{ success: boolean; steps: number; stop_reason?: string }>>();
+
+  for (const c of recentWithRecords) {
+    for (const record of c.records!) {
+      if (!seedTrialMap.has(record.seed)) {
+        seedTrialMap.set(record.seed, []);
+      }
+      seedTrialMap.get(record.seed)!.push({
+        success: record.success,
+        steps: record.steps,
+        stop_reason: record.stop_reason,
+      });
+      if (record.success && record.steps > 0) {
+        allSuccessfulSteps.push(record.steps);
+      }
+    }
+  }
+
+  let overallMedian: number | null = null;
+  if (allSuccessfulSteps.length > 0) {
+    allSuccessfulSteps.sort((a, b) => a - b);
+    const mid = Math.floor(allSuccessfulSteps.length / 2);
+    overallMedian = allSuccessfulSteps.length % 2 !== 0
+      ? allSuccessfulSteps[mid]
+      : (allSuccessfulSteps[mid - 1] + allSuccessfulSteps[mid]) / 2;
+  }
+
+  const summaries: SeedReliabilitySummary[] = [];
+
+  for (const [seed, trials] of seedTrialMap.entries()) {
+    const totalTrials = trials.length;
+    const successes = trials.filter((t) => t.success);
+    const successCount = successes.length;
+    const failureCount = totalTrials - successCount;
+    const recentSuccessRate = (successCount / totalTrials) * 100;
+
+    let consecutiveFailures = 0;
+    for (let i = trials.length - 1; i >= 0; i--) {
+      if (!trials[i].success) {
+        consecutiveFailures++;
+      } else {
+        break;
+      }
+    }
+
+    const succSteps = successes.map((t) => t.steps).sort((a, b) => a - b);
+    let typicalSteps: number | null = null;
+    let worstSteps: number | null = null;
+    if (succSteps.length > 0) {
+      const mid = Math.floor(succSteps.length / 2);
+      typicalSteps = succSteps.length % 2 !== 0
+        ? succSteps[mid]
+        : (succSteps[mid - 1] + succSteps[mid]) / 2;
+      worstSteps = succSteps[succSteps.length - 1];
+    }
+
+    const isBlindSpot = consecutiveFailures >= 2 || (totalTrials >= 3 && recentSuccessRate <= 40);
+    const isInefficient = !isBlindSpot &&
+      successCount >= 2 &&
+      overallMedian != null &&
+      typicalSteps != null &&
+      typicalSteps >= overallMedian * 1.4 &&
+      (typicalSteps - overallMedian) >= 30;
+
+    let status: SeedReliabilityStatus = "reliable";
+    let statusText = "Reliable";
+    if (isBlindSpot) {
+      status = "blind_spot";
+      statusText = consecutiveFailures >= 2
+        ? `Blind Spot (${consecutiveFailures} consecutive fails)`
+        : `Blind Spot (${Math.round(recentSuccessRate)}% success)`;
+    } else if (isInefficient) {
+      status = "inefficient";
+      statusText = `Inefficient (~${Math.round(typicalSteps!)} steps vs ~${Math.round(overallMedian!)} median)`;
+    } else if (failureCount > 0) {
+      status = "normal_variance";
+      statusText = `Occasional Failure (${successCount}/${totalTrials})`;
+    }
+
+    summaries.push({
+      seed,
+      totalTrials,
+      successCount,
+      failureCount,
+      recentSuccessRate: Math.round(recentSuccessRate),
+      consecutiveFailures,
+      typicalSuccessfulSteps: typicalSteps != null ? Math.round(typicalSteps) : null,
+      worstSuccessfulSteps: worstSteps != null ? Math.round(worstSteps) : null,
+      status,
+      statusText,
+      isBlindSpot,
+      isInefficient,
+    });
+  }
+
+  summaries.sort((a, b) => a.seed - b.seed);
+
+  const blindSpotSeeds = summaries.filter((s) => s.isBlindSpot).map((s) => s.seed);
+  const inefficientSeeds = summaries.filter((s) => s.isInefficient).map((s) => s.seed);
+
+  return {
+    seeds: summaries,
+    overallMedianSuccessfulSteps: overallMedian != null ? Math.round(overallMedian) : null,
+    blindSpotCount: blindSpotSeeds.length,
+    inefficientCount: inefficientSeeds.length,
+    blindSpotSeeds,
+    inefficientSeeds,
+  };
+}
+
+/**
+ * Asserts programmatically that X coordinates in a rendered series are strictly non-decreasing.
+ */
+export function assertMonotonicX(points: Array<{ x: number }>, seriesLabel: string = "Series"): void {
+  for (let i = 0; i < points.length - 1; i++) {
+    if (points[i].x > points[i + 1].x) {
+      const msg = `[Chart Chronology Violation] ${seriesLabel} point index ${i} (x=${points[i].x}) > index ${i + 1} (x=${points[i + 1].x})`;
+      console.error(msg);
+      throw new Error(msg);
+    }
+  }
 }

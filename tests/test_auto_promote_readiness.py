@@ -16,6 +16,7 @@ def _make_eval_payload(
     success_rate: float,
     failed_seeds: list[int] | None = None,
     seeds: list[int] | None = None,
+    steps: int | float = 200,
 ) -> dict:
     all_seeds = seeds or [11, 23, 37, 41, 53, 59, 61, 67, 71, 73]
     failures = set(failed_seeds or [])
@@ -26,7 +27,7 @@ def _make_eval_payload(
             "success": s not in failures,
             "timeout": False,
             "stopped": False,
-            "steps": 200,
+            "steps": steps,
         })
     return {
         "checkpoint_episode": episode,
@@ -35,6 +36,7 @@ def _make_eval_payload(
         "policy_version": 1,
         "success_rate": success_rate,
         "average_reward": 200.0,
+        "average_completion_steps": float(steps),
         "timeout_rate": 0.0,
         "evaluation_seeds": all_seeds,
         "evaluation_seed_count": len(all_seeds),
@@ -237,3 +239,64 @@ def test_history_window_truncation_to_latest_eight(tmp_path: Path):
     assert res["formal_evaluations_available"] == 8
     assert res["recent_average_success"] == 1.0
     assert res["persistent_seed_failure"] is False
+
+
+def test_step_efficiency_improving_holds_promotion_despite_100_percent_success(tmp_path: Path):
+    """Auto-promotion holds off when the model is actively improving completion steps despite 100% success."""
+    evals = [
+        _make_eval_payload(10, stage=3, success_rate=1.0, steps=300),
+        _make_eval_payload(20, stage=3, success_rate=1.0, steps=260),
+        _make_eval_payload(30, stage=3, success_rate=1.0, steps=220),
+        _make_eval_payload(40, stage=3, success_rate=1.0, steps=190),
+        _make_eval_payload(50, stage=3, success_rate=1.0, steps=150),
+        _make_eval_payload(60, stage=3, success_rate=1.0, steps=120),  # Actively improving (150 -> 120, -20%)
+    ]
+    _setup_eval_dir(tmp_path, evals)
+    res = compute_promotion_gate_snapshot(tmp_path, target_ep=60)
+    assert res["ready"] is False
+    assert res["decision"] == "hold"
+    assert res["status_text"] == "OPTIMIZING STEPS"
+    assert res["step_efficiency_improving"] is True
+    assert res["step_improvement_plateaued"] is False
+    assert "Step efficiency is actively improving" in res["reason"]
+    assert any("Step efficiency is actively improving" in r for r in res["blocking_reasons"])
+
+
+def test_step_efficiency_plateau_allows_promotion(tmp_path: Path):
+    """Auto-promotion is permitted once step improvements plateau/stabilize."""
+    evals = [
+        _make_eval_payload(10, stage=3, success_rate=1.0, steps=200),
+        _make_eval_payload(20, stage=3, success_rate=1.0, steps=160),
+        _make_eval_payload(30, stage=3, success_rate=1.0, steps=130),
+        _make_eval_payload(40, stage=3, success_rate=1.0, steps=122),
+        _make_eval_payload(50, stage=3, success_rate=1.0, steps=120),
+        _make_eval_payload(60, stage=3, success_rate=1.0, steps=119),  # Plateaued (< 1% delta)
+    ]
+    _setup_eval_dir(tmp_path, evals)
+    res = compute_promotion_gate_snapshot(tmp_path, target_ep=60)
+    assert res["ready"] is True
+    assert res["decision"] == "promote_ready"
+    assert res["status_text"] == "READY TO PROMOTE"
+    assert res["step_efficiency_improving"] is False
+    assert res["step_improvement_plateaued"] is True
+    assert res["reason"] == "Promotion criteria met"
+
+
+def test_safety_cap_on_step_hold(tmp_path: Path):
+    """After 8 consecutive qualifying evaluations, the safety cap allows promotion even if minor improvements continue."""
+    evals = [
+        _make_eval_payload(10, stage=3, success_rate=1.0, steps=300),
+        _make_eval_payload(20, stage=3, success_rate=1.0, steps=270),
+        _make_eval_payload(30, stage=3, success_rate=1.0, steps=240),
+        _make_eval_payload(40, stage=3, success_rate=1.0, steps=210),
+        _make_eval_payload(50, stage=3, success_rate=1.0, steps=180),
+        _make_eval_payload(60, stage=3, success_rate=1.0, steps=150),
+        _make_eval_payload(70, stage=3, success_rate=1.0, steps=120),
+        _make_eval_payload(80, stage=3, success_rate=1.0, steps=95),  # 8th qualifying evaluation
+    ]
+    _setup_eval_dir(tmp_path, evals)
+    res = compute_promotion_gate_snapshot(tmp_path, target_ep=80)
+    assert res["ready"] is True
+    assert res["decision"] == "promote_ready"
+    assert res["status_text"] == "READY TO PROMOTE"
+

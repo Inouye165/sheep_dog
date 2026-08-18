@@ -53,10 +53,9 @@ describe("StackedLearningPanels — Canonical Data Semantics", () => {
       />
     );
 
-    expect(screen.getByText("PANEL 1 — SUCCESS RATE (%)")).toBeInTheDocument();
-    expect(screen.getByText("PANEL 2 — STEPS / EFFICIENCY (FEWER IS FASTER)")).toBeInTheDocument();
-    expect(screen.getByText("PANEL 3 — TOTAL REWARD")).toBeInTheDocument();
-    expect(screen.getByText("PANEL 4 — REWARDS & PENALTIES BREAKDOWN")).toBeInTheDocument();
+    expect(screen.getByText("1. SUCCESS / RELIABILITY (%)")).toBeInTheDocument();
+    expect(screen.getByText("2. SUCCESSFUL COMPLETION EFFICIENCY (STEPS)")).toBeInTheDocument();
+    expect(screen.getByText("3. TOTAL REWARD")).toBeInTheDocument();
   });
 
   it("calculates 25-episode rolling metrics cleanly where Episode 135 uses exactly Episodes 111-135", () => {
@@ -131,8 +130,8 @@ describe("StackedLearningPanels — Canonical Data Semantics", () => {
       />
     );
 
-    // Verify all 4 panels render without thrown error or broken alignment
-    expect(screen.getByText("PANEL 1 — SUCCESS RATE (%)")).toBeInTheDocument();
+    // Verify all panels render without thrown error or broken alignment
+    expect(screen.getByText("1. SUCCESS / RELIABILITY (%)")).toBeInTheDocument();
     expect(screen.getAllByText(/Ep 101/).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/Ep 102/).length).toBeGreaterThan(0);
   });

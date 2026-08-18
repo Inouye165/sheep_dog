@@ -362,6 +362,13 @@ export function TrainingPanel({
         detail: "All formal evaluation criteria met."
       };
     }
+    if (autoPromoteGate?.decision === "hold" && autoPromoteGate?.step_efficiency_improving) {
+      return {
+        tone: "pending" as const,
+        label: "OPTIMIZING EFFICIENCY",
+        detail: autoPromoteGate?.reason || "Target success achieved; holding promotion while completion steps actively improve."
+      };
+    }
     return {
       tone: "not-ready" as const,
       label: "NOT READY",
@@ -1110,6 +1117,7 @@ export function TrainingPanel({
                       <div className="auto-promote-popover__rule">• At least 75% of recent evaluations must meet {stageTargetPct}%</div>
                       <div className="auto-promote-popover__rule">• Recent evaluation average must be at least {stageTargetPct}%</div>
                       <div className="auto-promote-popover__rule">• No deterministic seed may fail 3 formal evaluations in a row</div>
+                      <div className="auto-promote-popover__rule">• Step efficiency must be stabilized (holds while steps improve)</div>
                     </div>
 
                     <div className="auto-promote-popover__divider" />
@@ -1134,6 +1142,16 @@ export function TrainingPanel({
                           {popoverPersistentSeed
                             ? `Seed ${popoverBlockingSeed} — ${popoverBlockingFails} consecutive failures`
                             : "None"}
+                        </strong>
+                      </div>
+                      <div className="auto-promote-popover__stat-row">
+                        <span>Step efficiency:</span>
+                        <strong style={{ color: autoPromoteGate?.step_efficiency_improving ? "#38bdf8" : undefined }}>
+                          {autoPromoteGate?.step_efficiency_improving
+                            ? `Optimizing (${autoPromoteGate?.step_efficiency_delta_pct != null ? `${(Math.abs(autoPromoteGate.step_efficiency_delta_pct) * 100).toFixed(1)}%` : ""} faster)`
+                            : autoPromoteGate?.recent_avg_steps != null
+                            ? `${Math.round(autoPromoteGate.recent_avg_steps)} avg steps (stabilized)`
+                            : "Stabilized"}
                         </strong>
                       </div>
                     </div>
