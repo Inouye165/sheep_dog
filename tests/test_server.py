@@ -1331,5 +1331,52 @@ def test_worker_exception_handling_unexpected_vs_deliberate_shutdown(tmp_path: P
         assert "KeyboardInterrupt" in snap["error_type"]
 
 
+def test_start_discovers_latest_model_zip_using_st_mtime(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    generated = tmp_path / "web" / "public" / "generated"
+    models_dir = artifacts / "models"
+    models_dir.mkdir(parents=True)
+    generated.mkdir(parents=True)
+
+    # Create dummy model zips with valid zip headers
+    zip1 = models_dir / "model_step_100.zip"
+    zip2 = models_dir / "model_step_200.zip"
+    zip1.write_bytes(b"PK\x03\x04dummy1")
+    zip2.write_bytes(b"PK\x03\x04dummy2")
+
+    config = LabConfig(
+        training=TrainingConfig(
+            episodes=10,
+            output_dir=str(artifacts),
+            web_export_dir=str(generated),
+        )
+    )
+
+    class DummyTrainer:
+        total_episodes_trained = 0
+        def train(self, progress_callback=None, should_stop=None):
+            pass
+
+    with (
+        patch("sheepdog.server.LabConfig", return_value=config),
+        patch("sheepdog.server.create_trainer", return_value=DummyTrainer()),
+        patch("sb3_contrib.MaskablePPO.load", return_value=SimpleNamespace(action_space=SimpleNamespace(n=5), policy=SimpleNamespace(action_net=SimpleNamespace(out_features=5)))),
+        patch("threading.Thread") as mock_thread,
+    ):
+        mock_thread.return_value.start = lambda: None
+        manager = TrainingManager()
+        # Set stage 8 neural mode to trigger model validation
+        manager._status["curriculum_stage"] = 8
+        manager._status["policy_type"] = "neural"
+        manager._status["policy_mode"] = "neural_policy"
+        manager._status["trainer_type"] = "maskable_ppo"
+        manager._status["active_model_path"] = None
+        # Calling start should find the latest zip in models_dir using st_mtime without AttributeError
+        response = manager.start(requested_episodes=5, resume=True, curriculum_stage=8)
+        assert response.get("ok") is True or manager._status.get("running") is True
+        assert manager._status.get("active_model_path") == str(zip2)
+
+
+
 
 

@@ -333,6 +333,10 @@ export interface AutoPromoteGateDiagnostics {
   latest_floor_passed?: boolean;
   reward_guard_passed?: boolean;
   seed_consistency_passed?: boolean;
+  step_efficiency_improving?: boolean;
+  step_efficiency_delta_pct?: number | null;
+  recent_avg_steps?: number | null;
+  step_improvement_plateaued?: boolean;
   [key: string]: any;
 }
 

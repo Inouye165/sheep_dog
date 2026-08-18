@@ -60,6 +60,7 @@ from sheepdog.policies.base import Policy, PolicyMode
 from sheepdog.policies.factory import load_playable_policy
 from sheepdog.policies.heuristic import InstinctOnlyPolicy
 from sheepdog.training.factory import create_trainer
+from sheepdog.training.backup import TrainingBackupManager
 from sheepdog.training.runtime import TrainingRuntimeTracker
 from sheepdog.training.telemetry import CurriculumTelemetryManager
 from sheepdog.training.trainer import Trainer
@@ -505,6 +506,10 @@ def _auto_promote_gate_defaults(stage: int = 1) -> dict[str, Any]:
         "full_success_rate_threshold": AUTO_PROMOTE_FULL_SUCCESS_RATE_THRESHOLD,
         "max_timeout_rate": AUTO_PROMOTE_MAX_TIMEOUT_RATE,
         "reward_tolerance_ratio": AUTO_PROMOTE_REWARD_TOLERANCE_RATIO,
+        "step_efficiency_improving": False,
+        "step_efficiency_delta_pct": None,
+        "recent_avg_steps": None,
+        "step_improvement_plateaued": True,
     }
 
 
@@ -668,6 +673,52 @@ def compute_promotion_gate_snapshot(
     )
     qualified_evaluations_required = math.ceil(n_evals * 0.75) if n_evals >= formal_evals_required else math.ceil(formal_evals_required * 0.75)
 
+    # ── Step Efficiency Optimization Guard ────────────────────────────────────
+    def _extract_eval_steps(ev: dict[str, Any]) -> float | None:
+        steps = ev.get("average_completion_steps")
+        if steps is not None and isinstance(steps, (int, float)) and not math.isnan(steps) and steps > 0:
+            return float(steps)
+        recs = ev.get("records", [])
+        if recs:
+            s_list = [r.get("steps") for r in recs if r.get("steps") is not None and isinstance(r.get("steps"), (int, float)) and r.get("steps") > 0]
+            if s_list:
+                return float(sum(s_list) / len(s_list))
+        return None
+
+    eval_steps_list = [_extract_eval_steps(ev) for ev in window_chronological]
+    valid_steps = [s for s in eval_steps_list if s is not None]
+
+    step_efficiency_improving = False
+    recent_steps_improvement_pct = None
+    latest_avg_steps = valid_steps[-1] if valid_steps else None
+
+    if len(valid_steps) >= 3:
+        s_prev2 = valid_steps[-3]
+        s_prev1 = valid_steps[-2]
+        s_curr = valid_steps[-1]
+
+        improvement_from_prev2 = (s_prev2 - s_curr) / s_prev2 if s_prev2 > 0 else 0.0
+        improvement_from_prev1 = (s_prev1 - s_curr) / s_prev1 if s_prev1 > 0 else 0.0
+        recent_steps_improvement_pct = improvement_from_prev1
+
+        # Check if steps are consistently improving (trending downward):
+        # 1) Monotonically dropping across last 3 evals with >= 5% total drop and >= 5 steps
+        # 2) Or latest evaluation improved by >= 5% and >= 5 steps over previous eval
+        if (
+            (s_prev2 >= s_prev1 and s_prev1 >= s_curr and improvement_from_prev2 >= 0.05 and (s_prev2 - s_curr) >= 5.0)
+            or (improvement_from_prev1 >= 0.05 and (s_prev1 - s_curr) >= 5.0)
+        ):
+            # Cap hold if qualified evaluations exceed 8
+            if qualified_evaluations < 8:
+                step_efficiency_improving = True
+    elif len(valid_steps) == 2:
+        s_prev1 = valid_steps[-2]
+        s_curr = valid_steps[-1]
+        improvement_from_prev1 = (s_prev1 - s_curr) / s_prev1 if s_prev1 > 0 else 0.0
+        recent_steps_improvement_pct = improvement_from_prev1
+        if improvement_from_prev1 >= 0.05 and (s_prev1 - s_curr) >= 5.0 and qualified_evaluations < 8:
+            step_efficiency_improving = True
+
     # ── Persistent Seed Failure Guard ─────────────────────────────────────────
     # Identify seeds evaluated in the window and track consecutive failure sequences
     all_seeds_set = set()
@@ -735,16 +786,23 @@ def compute_promotion_gate_snapshot(
         status_text = "COLLECTING EVIDENCE"
         reason = f"Awaiting checkpoint evaluation ({n_evals}/{formal_evals_required})"
         ready = False
-    elif len(blocking_reasons) == 0:
-        decision = "promote_ready"
-        status_text = "READY TO PROMOTE"
-        reason = "Promotion criteria met"
-        ready = True
-    else:
+    elif len(blocking_reasons) > 0:
         decision = "blocked"
         status_text = "NOT READY"
         reason = blocking_reasons[0]
         ready = False
+    elif step_efficiency_improving:
+        decision = "hold"
+        status_text = "OPTIMIZING STEPS"
+        pct_str = f"{abs(recent_steps_improvement_pct or 0.0) * 100:.1f}%"
+        reason = f"Step efficiency is actively improving (-{pct_str} steps); holding promotion to allow speed optimization."
+        blocking_reasons.append(reason)
+        ready = False
+    else:
+        decision = "promote_ready"
+        status_text = "READY TO PROMOTE"
+        reason = "Promotion criteria met"
+        ready = True
 
     best_reward_so_far = max((ev.get("average_reward", float("-inf")) for ev in compatible_evals), default=float("-inf"))
     best_success_rate = max((ev.get("success_rate", 0.0) for ev in compatible_evals), default=0.0)
@@ -805,7 +863,10 @@ def compute_promotion_gate_snapshot(
         "timeout_rate": eval_summary.get("timeout_rate", 0.0) if eval_summary else 0.0,
         "seed_set_id": target_seed_set_id,
         "per_seed_results": per_seed_results,
-        "rolling_history_results": rolling_history_results,
+        "step_efficiency_improving": step_efficiency_improving,
+        "step_efficiency_delta_pct": round(recent_steps_improvement_pct, 4) if recent_steps_improvement_pct is not None else None,
+        "recent_avg_steps": round(latest_avg_steps, 2) if latest_avg_steps is not None else None,
+        "step_improvement_plateaued": not step_efficiency_improving,
     }
 
 
@@ -1214,6 +1275,7 @@ class TrainingManager:
         self._active_start_request: dict[str, Any] | None = None
         self.telemetry_manager = CurriculumTelemetryManager(LabConfig().training.output_dir)
         runtime_config = LabConfig().training
+        self.backup_manager = TrainingBackupManager(runtime_config.backup_dir)
         self.runtime_tracker = TrainingRuntimeTracker(
             Path(runtime_config.output_dir) / "training-runtime.json",
             heartbeat_seconds=runtime_config.runtime_heartbeat_seconds,
@@ -1520,7 +1582,7 @@ class TrainingManager:
                         f"Action space mismatch: expected {act_hash}, got {act_hash_in_data}"
                     )
                 
-                model_path_str = data.get("active_model_path")
+                model_path_str = data.get("active_model_path") or data.get("policy_state_path")
                 if model_path_str:
                     p = Path(model_path_str)
                     if not p.is_absolute():
@@ -1529,7 +1591,23 @@ class TrainingManager:
                         else:
                             p = output_root / p
                     if not p.exists():
-                        raise RestoreCompatibilityError(f"Active model file does not exist: {model_path_str}")
+                        archive_candidates = sorted(
+                            (output_root / "archive").glob(f"*/models/{p.name}"),
+                            key=lambda path_cand: path_cand.stat().st_mtime,
+                            reverse=True,
+                        )
+                        if archive_candidates and archive_candidates[0].exists():
+                            dest_models_dir = output_root / "models"
+                            dest_models_dir.mkdir(parents=True, exist_ok=True)
+                            recovered_p = dest_models_dir / p.name
+                            shutil.copy2(archive_candidates[0], recovered_p)
+                            p = recovered_p
+                        elif (output_root / "models" / "best-model.zip").exists():
+                            p = output_root / "models" / "best-model.zip"
+                        elif (output_root / "best-model.zip").exists():
+                            p = output_root / "best-model.zip"
+                        else:
+                            raise RestoreCompatibilityError(f"Active model file does not exist: {model_path_str}")
                     
                     if data.get("policy_type") == "neural":
                         try:
@@ -2357,9 +2435,27 @@ class TrainingManager:
                 if self._status.get("policy_mode") != "neural_policy":
                     validation_errors.append(f"Policy mode {self._status.get('policy_mode')} is not neural_policy")
 
+                output_root = resolve_workspace_path(LabConfig().training.output_dir)
                 model_path_str = self._status.get("active_model_path")
+
+                if model_path_str and not Path(model_path_str).exists():
+                    p_orig = Path(model_path_str)
+                    archive_candidates = sorted(
+                        (output_root / "archive").glob(f"*/models/{p_orig.name}"),
+                        key=lambda p_cand: p_cand.stat().st_mtime,
+                        reverse=True,
+                    )
+                    if archive_candidates and archive_candidates[0].exists():
+                        dest_models_dir = output_root / "models"
+                        dest_models_dir.mkdir(parents=True, exist_ok=True)
+                        recovered_dest = dest_models_dir / p_orig.name
+                        shutil.copy2(archive_candidates[0], recovered_dest)
+                        model_path_str = str(recovered_dest)
+                        self._status["active_model_path"] = model_path_str
+                    else:
+                        model_path_str = None
+
                 if not model_path_str:
-                    output_root = resolve_workspace_path(LabConfig().training.output_dir)
                     chk_id = self._status.get("active_checkpoint_id")
                     if chk_id:
                         import re
@@ -2372,7 +2468,11 @@ class TrainingManager:
                                 self._status["active_model_path"] = model_path_str
                     if not model_path_str:
                         for candidate_name in ("best-model.zip", "model.zip"):
-                            cand = output_root / candidate_name
+                            cand = (
+                                (output_root / "models" / candidate_name)
+                                if (output_root / "models" / candidate_name).exists()
+                                else (output_root / candidate_name)
+                            )
                             if cand.exists():
                                 model_path_str = str(cand)
                                 self._status["active_model_path"] = model_path_str
@@ -2380,7 +2480,7 @@ class TrainingManager:
                     if not model_path_str:
                         models_dir = output_root / "models"
                         if models_dir.exists():
-                            zips = sorted(models_dir.glob("*.zip"), key=lambda p: p.stat().mtime)
+                            zips = sorted(models_dir.glob("*.zip"), key=lambda p: p.stat().st_mtime)
                             if zips:
                                 model_path_str = str(zips[-1])
                                 self._status["active_model_path"] = model_path_str
@@ -3705,6 +3805,7 @@ class TrainingManager:
                 "run_id": new_run_id,
                 "parent_run_id": parent_run_id,
                 "parent_checkpoint_id": parent_checkpoint_id,
+                "policy_state_path": str(active_model_zip),
                 "active_model_path": str(active_model_zip),
                 "active_model_source": model_source_name,
                 "source_stage": source_stage,
@@ -4049,6 +4150,18 @@ class TrainingManager:
             ),
             encoding="utf-8",
         )
+        if getattr(config.training, "backup_enabled", True):
+            try:
+                self.backup_manager.backup_completed_stage(
+                    stage=1,
+                    model_path=None,
+                    checkpoint_payload=checkpoint_payload,
+                    evaluation_payload=summary.to_dict() if hasattr(summary, "to_dict") else None,
+                    config_dict=config.to_dict() if hasattr(config, "to_dict") else asdict(config),
+                    metrics={"success_rate": summary.success_rate, "average_reward": summary.average_reward},
+                )
+            except Exception as backup_exc:
+                logger.warning("Baseline stage 1 milestone backup failed: %s", backup_exc)
         state_path = Path(config.training.output_dir) / Trainer.STATE_FILENAME
         state_path.write_text(
             json.dumps(
@@ -4065,6 +4178,15 @@ class TrainingManager:
     def _remove_path(self, path: Path) -> None:
         if not path.exists():
             return
+        # Protect backup directory from any automated or accidental deletion
+        try:
+            resolved_p = path.resolve()
+            backup_root = Path(LabConfig().training.backup_dir).resolve()
+            if resolved_p == backup_root or backup_root in resolved_p.parents:
+                logger.info("Preserving protected backup path during cleanup: %s", path)
+                return
+        except Exception:
+            pass
         if path.is_dir():
             def _on_error(func: Any, path_str: str, exc: Any) -> None:
                 try:
@@ -4413,7 +4535,11 @@ class TrainingManager:
                 if not resuming_policy:
                     training_state = _load_json(output_root / Trainer.STATE_FILENAME)
                     if isinstance(training_state, dict):
-                        policy_state_path = training_state.get("policy_state_path")
+                        policy_state_path = (
+                            training_state.get("policy_state_path")
+                            or training_state.get("active_model_path")
+                            or training_state.get("best_model_path")
+                        )
                         resuming_policy = bool(policy_state_path)
 
                 summary_path = output_root / "training-summary.json"
@@ -5343,6 +5469,30 @@ class TrainingManager:
                         ),
                     },
                 )
+                if getattr(job_config.training, "backup_enabled", True):
+                    try:
+                        best_model_path = output_root / "models" / "best-model.zip"
+                        if not best_model_path.exists():
+                            best_model_path = output_root / "best-model.zip"
+                        self.backup_manager.backup_completed_stage(
+                            stage=stage,
+                            model_path=best_model_path if best_model_path.exists() else None,
+                            checkpoint_payload={
+                                "checkpoint_id": trigger_checkpoint_id,
+                                "checkpoint_episode": stage_best_checkpoint_episode,
+                                "policy_version": trigger_policy_version,
+                                "success_rate": max(0.0, best_success),
+                                "run_id": self._status.get("run_id"),
+                            },
+                            config_dict=job_config.to_dict() if hasattr(job_config, "to_dict") else asdict(job_config),
+                            metrics={
+                                "success_rate": max(0.0, best_success),
+                                "best_reward": None if stage_best_reward == float("-inf") else stage_best_reward,
+                                "qualified_streak": stage_qualified_streak,
+                            },
+                        )
+                    except Exception as backup_err:
+                        logger.warning("Stage milestone automated backup failed: %s", backup_err)
                 batch_episodes = RECOMMENDED_EPISODES_BY_STAGE.get(current_stage, 100)
                 total_episodes = batch_episodes
                 resume_checkpoint_episode = stage_best_checkpoint_episode
@@ -6740,6 +6890,9 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         if request_path in ("/health", "/api/health"):
             self._json_response({"status": "ok", "service": "sheepdog-api"})
             return
+        if request_path == "/api/training/backups":
+            self._json_response(self.manager.backup_manager.list_backups())
+            return
         if request_path == "/api/config":
             self._json_response(self.manager.get_config())
             return
@@ -6933,6 +7086,24 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         if self.path == "/api/training/archive-active":
             payload, status = self.manager.archive_active_run()
             self._json_response(payload, status=status)
+            return
+        if self.path == "/api/training/backups/restore":
+            body = self._read_json()
+            stage = body.get("stage")
+            snapshot_id = body.get("snapshot_id")
+            try:
+                if stage is not None:
+                    res = self.manager.backup_manager.restore_stage_milestone(int(stage))
+                    self.manager.restore_active_run_state()
+                    self._json_response(res)
+                elif snapshot_id is not None:
+                    res = self.manager.backup_manager.restore_hourly_snapshot(str(snapshot_id))
+                    self.manager.restore_active_run_state()
+                    self._json_response(res)
+                else:
+                    self._json_response({"error": "Either stage or snapshot_id is required"}, status=HTTPStatus.BAD_REQUEST)
+            except Exception as exc:
+                self._json_response({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
             return
 
         if self.path in {"/api/training/remediation", "/api/training/remediation-fork"}:

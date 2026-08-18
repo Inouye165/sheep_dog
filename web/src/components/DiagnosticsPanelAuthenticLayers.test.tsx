@@ -208,4 +208,51 @@ describe("DiagnosticsPanel Authentic Telemetry & 4-Layer Controls", () => {
     fireEvent.click(rollingCheckbox);
     expect(rollingCheckbox.checked).toBe(false);
   });
+
+  it("renders Completion Steps tab with raw rollout and rolling average legends", () => {
+    render(
+      <DiagnosticsPanel
+        checkpointIndex={mockIndexWithCheckpoints}
+        bestCheckpointEpisode={5}
+        trainingStatus={mockTrainingStatus}
+        effectiveCurriculumStage={1}
+        initialEpisodes={mockMixedEpisodes}
+      />
+    );
+
+    const stepsTab = screen.getByRole("tab", { name: /Completion Steps/i });
+    fireEvent.click(stepsTab);
+
+    expect(screen.getByText("Training rollout steps")).toBeInTheDocument();
+    expect(screen.getByText(/Rolling \d+ rollout steps/i)).toBeInTheDocument();
+    expect(screen.getByText("Formal eval avg steps")).toBeInTheDocument();
+  });
+
+  it("displays Optimizing Steps in Card 1 when auto-promotion holds for step efficiency improvement", () => {
+    const statusWithStepHold = {
+      ...mockTrainingStatus,
+      auto_promote_gate: {
+        ready: false,
+        decision: "hold",
+        status_text: "OPTIMIZING STEPS",
+        reason: "Step efficiency is actively improving (-15.2% steps); holding promotion to allow speed optimization.",
+        step_efficiency_improving: true,
+        step_efficiency_delta_pct: -0.152,
+        recent_avg_steps: 125.4,
+      },
+    } as unknown as TrainingStatus;
+
+    render(
+      <DiagnosticsPanel
+        checkpointIndex={mockIndexWithCheckpoints}
+        bestCheckpointEpisode={5}
+        trainingStatus={statusWithStepHold}
+        effectiveCurriculumStage={1}
+        initialEpisodes={mockMixedEpisodes}
+      />
+    );
+
+    expect(screen.getByText("Optimizing Steps")).toBeInTheDocument();
+    expect(screen.getByText(/Target Met · Optimizing Speed/i)).toBeInTheDocument();
+  });
 });
