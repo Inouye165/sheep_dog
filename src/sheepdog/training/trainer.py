@@ -27,6 +27,7 @@ from sheepdog.evaluation.evaluator import EvaluationSummary, Evaluator
 from sheepdog.evaluation.scenario_evaluator import evaluate_checkpoint_on_scenarios
 from sheepdog.policies.trainable import PolicyWeights, TrainableLinearPolicy
 from sheepdog.rewards import REWARD_SCHEMA_VERSION
+from sheepdog.training.adaptive_learning import AdaptiveStepController
 from sheepdog.training.runtime import TrainingRuntimeTracker
 
 
@@ -348,6 +349,13 @@ class Trainer:
                 "message": f"Resuming from {starting_total} episodes",
             }
         )
+        current_stage = self.config.rewards.instincts.curriculum_stage
+        adaptive_controller = AdaptiveStepController(
+            base_learning_rate=train_config.learning_rate,
+            base_mutation_scale=train_config.mutation_scale,
+            initial_curriculum_stage=current_stage,
+        )
+        adaptive_state = adaptive_controller.get_state()
 
         checkpoint_ordinals = {
             checkpoint_episode: ordinal
@@ -361,9 +369,14 @@ class Trainer:
                 break
             cumulative_episode = starting_total + episode
             if episode > 0:
+                current_mutation_scale = (
+                    adaptive_state.effective_mutation_scale
+                    if getattr(train_config, "enable_adaptive_learning", True)
+                    else train_config.mutation_scale
+                )
                 candidate_policies = [
                     TrainableLinearPolicy(
-                        weights=best_policy.weights.mutated(rng, train_config.mutation_scale)
+                        weights=best_policy.weights.mutated(rng, current_mutation_scale)
                     )
                     for _ in range(candidate_pool_size)
                 ]
@@ -406,6 +419,14 @@ class Trainer:
                 )
                 representative_replay_path = Path(summary.records[0].replay_path)
 
+                if getattr(train_config, "enable_adaptive_learning", True):
+                    adaptive_state = adaptive_controller.update(
+                        eval_success_rate=summary.success_rate,
+                        current_curriculum_stage=active_stage,
+                    )
+                else:
+                    adaptive_state = adaptive_controller.get_state()
+
                 metadata = CheckpointMetadata(
                     checkpoint_episode=cumulative_episode,
                     total_training_episodes=cumulative_episode,
@@ -442,6 +463,12 @@ class Trainer:
                     ),
                     evaluation_timestamp=recorded_time,
                     policy_version=None,
+                    adaptive_lr_stage=adaptive_state.stage,
+                    adaptive_lr_stage_max=adaptive_state.max_stages,
+                    adaptive_lr_stage_label=adaptive_state.label,
+                    adaptive_lr_multiplier=adaptive_state.multiplier,
+                    effective_learning_rate=adaptive_state.effective_learning_rate,
+                    effective_mutation_scale=adaptive_state.effective_mutation_scale,
                 )
                 checkpoint_path = self.checkpoint_store.write(metadata)
                 checkpoint_payload = {
@@ -469,6 +496,12 @@ class Trainer:
                     "records": [record.to_dict() for record in summary.records],
                     "run_id": run_id,
                     "checkpoint_id": chk_id,
+                    "adaptive_lr_stage": adaptive_state.stage,
+                    "adaptive_lr_stage_max": adaptive_state.max_stages,
+                    "adaptive_lr_stage_label": adaptive_state.label,
+                    "adaptive_lr_multiplier": adaptive_state.multiplier,
+                    "effective_learning_rate": adaptive_state.effective_learning_rate,
+                    "effective_mutation_scale": adaptive_state.effective_mutation_scale,
                     "parent_run_id": parent_run_id,
                     "parent_checkpoint_id": parent_checkpoint_id,
                     "global_timestep": None,
