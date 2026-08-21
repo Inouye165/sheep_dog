@@ -70,6 +70,12 @@ class CheckpointMetadata:
     promotion_gate: dict[str, Any] | None = None
     policy_hidden_layers: list[int] | None = None
     value_hidden_layers: list[int] | None = None
+    adaptive_lr_stage: int | None = None
+    adaptive_lr_stage_max: int | None = None
+    adaptive_lr_stage_label: str | None = None
+    adaptive_lr_multiplier: float | None = None
+    effective_learning_rate: float | None = None
+    effective_mutation_scale: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -13,7 +13,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -1222,10 +1222,13 @@ def test_log_message_suppresses_routine_polling_noise() -> None:
         logged_messages.append(format % args if args else format)
 
     with patch.object(BaseHTTPRequestHandler, "log_message", side_effect=mock_super_log):
-        # 1. Routine 200 OK polling GET logs should be suppressed
+        # 1. Routine 200 OK polling GET/OPTIONS logs should be suppressed
         handler.log_message('"GET /api/training/status HTTP/1.1" 200 -')
         handler.log_message('"GET /api/training/history HTTP/1.1" 200 -')
         handler.log_message('"GET /api/health HTTP/1.1" 200 -')
+        handler.log_message('"GET /generated/checkpoint-index.json?t=1787091519150 HTTP/1.1" 200 -')
+        handler.log_message('"GET /api/scenarios HTTP/1.1" 200 -')
+        handler.log_message('"OPTIONS /api/training/status HTTP/1.1" 204 -')
         assert len(logged_messages) == 0
 
         # 2. Error logs or non-polling logs should still be emitted
@@ -1357,10 +1360,14 @@ def test_start_discovers_latest_model_zip_using_st_mtime(tmp_path: Path) -> None
         def train(self, progress_callback=None, should_stop=None):
             pass
 
+    mock_sb3 = MagicMock()
+    mock_sb3.MaskablePPO.load.return_value = SimpleNamespace(
+        action_space=SimpleNamespace(n=5), policy=SimpleNamespace(action_net=SimpleNamespace(out_features=5))
+    )
     with (
+        patch.dict("sys.modules", {"sb3_contrib": mock_sb3}),
         patch("sheepdog.server.LabConfig", return_value=config),
         patch("sheepdog.server.create_trainer", return_value=DummyTrainer()),
-        patch("sb3_contrib.MaskablePPO.load", return_value=SimpleNamespace(action_space=SimpleNamespace(n=5), policy=SimpleNamespace(action_net=SimpleNamespace(out_features=5)))),
         patch("threading.Thread") as mock_thread,
     ):
         mock_thread.return_value.start = lambda: None

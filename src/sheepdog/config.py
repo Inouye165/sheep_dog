@@ -268,6 +268,8 @@ class TrainingConfig:
     observation_mode: str = "guided"
     # Weights & Biases telemetry tracking integration toggle.
     wandb_enabled: bool = False
+    # Adaptive step-size / learning rate controller toggle.
+    enable_adaptive_learning: bool = True
 
 
 @dataclass(frozen=True, slots=True)

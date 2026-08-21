@@ -255,4 +255,30 @@ describe("DiagnosticsPanel Authentic Telemetry & 4-Layer Controls", () => {
     expect(screen.getByText("Optimizing Steps")).toBeInTheDocument();
     expect(screen.getByText(/Target Met · Optimizing Speed/i)).toBeInTheDocument();
   });
+
+  it("renders Adaptive Step Stage KPI card showing stage 1 of 4 initially and modified stages when active", () => {
+    const statusWithAdaptive = {
+      ...mockTrainingStatus,
+      adaptive_lr_stage: 2,
+      adaptive_lr_stage_max: 4,
+      adaptive_lr_stage_label: "Stage 2 of 4 (0.80x • Stabilizing)",
+      adaptive_lr_multiplier: 0.80,
+      effective_learning_rate: 8e-5,
+    } as unknown as TrainingStatus;
+
+    render(
+      <DiagnosticsPanel
+        checkpointIndex={mockIndexWithCheckpoints}
+        bestCheckpointEpisode={5}
+        trainingStatus={statusWithAdaptive}
+        effectiveCurriculumStage={1}
+        initialEpisodes={mockMixedEpisodes}
+      />
+    );
+
+    expect(screen.getByText("Adaptive Step Stage:")).toBeInTheDocument();
+    expect(screen.getByText("Stage 2 of 4")).toBeInTheDocument();
+    expect(screen.getByText(/0.80x · Resets on stage promo/i)).toBeInTheDocument();
+  });
 });
+

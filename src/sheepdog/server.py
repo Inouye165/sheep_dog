@@ -1960,6 +1960,12 @@ class TrainingManager:
             "policy_version": 0,
             "policy_hidden_layers": [128, 128, 128],
             "value_hidden_layers": [128, 128, 128],
+            "adaptive_lr_stage": 1,
+            "adaptive_lr_stage_max": 4,
+            "adaptive_lr_stage_label": "Stage 1 of 4 (1.00x • Base Exploration) [No modification]",
+            "adaptive_lr_multiplier": 1.0,
+            "effective_learning_rate": None,
+            "effective_mutation_scale": None,
         }
 
         try:
@@ -1970,9 +1976,19 @@ class TrainingManager:
                     if isinstance(state_data, dict):
                         for key in ("run_id", "parent_run_id", "parent_checkpoint_id", "active_model_source",
                                     "active_checkpoint_id", "training_start_time", "last_policy_update_time",
-                                    "last_evaluation_time", "policy_version"):
+                                    "last_evaluation_time", "policy_version",
+                                    "adaptive_lr_stage", "adaptive_lr_stage_max", "adaptive_lr_stage_label",
+                                    "adaptive_lr_multiplier", "effective_learning_rate", "effective_mutation_scale"):
                             if key in state_data:
                                 status[key] = state_data[key]
+                        adaptive_step_state = state_data.get("adaptive_step_state")
+                        if isinstance(adaptive_step_state, dict):
+                            status["adaptive_lr_stage"] = adaptive_step_state.get("stage", status.get("adaptive_lr_stage", 1))
+                            status["adaptive_lr_stage_max"] = adaptive_step_state.get("max_stages", status.get("adaptive_lr_stage_max", 4))
+                            status["adaptive_lr_stage_label"] = adaptive_step_state.get("label", status.get("adaptive_lr_stage_label"))
+                            status["adaptive_lr_multiplier"] = adaptive_step_state.get("multiplier", status.get("adaptive_lr_multiplier", 1.0))
+                            status["effective_learning_rate"] = adaptive_step_state.get("effective_learning_rate")
+                            status["effective_mutation_scale"] = adaptive_step_state.get("effective_mutation_scale")
         except Exception:
             pass
 
@@ -4194,7 +4210,10 @@ class TrainingManager:
                     func(path_str)
                 except Exception:
                     pass
-            shutil.rmtree(path, onexc=_on_error)
+            try:
+                shutil.rmtree(path, onerror=_on_error)
+            except TypeError:
+                shutil.rmtree(path, onexc=_on_error)
             if path.exists():
                 try:
                     shutil.rmtree(path, ignore_errors=True)
@@ -5611,7 +5630,13 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         """Suppress routine HTTP access log messages to keep terminal clean."""
         msg = format % args if args else format
-        if " 200 -" in msg and any(p in msg for p in ("/api/training/status", "/api/training/history", "/api/health", "/api/insights")):
+        if any(verb in msg for verb in ('"GET ', '"OPTIONS ', '"HEAD ')) and any(
+            code in msg for code in (" 200 -", " 204 -", " 304 -")
+        ):
+            try:
+                logger.debug("%s", msg)
+            except Exception:
+                pass
             return
         super().log_message(format, *args)
 
@@ -7395,12 +7420,6 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             return
         self._json_response(response)
 
-    def log_message(self, format: str, *args: Any) -> None:
-        """Suppress routine HTTP access log messages to keep terminal clean."""
-        msg = format % args if args else format
-        if " 200 -" in msg and any(p in msg for p in ("/api/training/status", "/api/training/history", "/api/health", "/api/insights")):
-            return
-        super().log_message(format, *args)
 
     def do_OPTIONS(self) -> None:  # noqa: N802  # pylint: disable=invalid-name
         """Handle HTTP OPTIONS (CORS preflight) requests."""

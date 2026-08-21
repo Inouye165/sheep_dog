@@ -24,6 +24,7 @@ from sheepdog.checkpoints.store import (
 from sheepdog.environment import ACTION_ORDER, ENV_CONFIG_VERSION
 from sheepdog.policies.neural import NeuralPolicy, tensorboard_available
 from sheepdog.rewards import REWARD_SCHEMA_VERSION
+from sheepdog.training.adaptive_learning import AdaptiveStepController
 from sheepdog.training.trainer import Trainer
 
 logger = logging.getLogger(__name__)
@@ -470,6 +471,13 @@ class MaskablePPOTrainer(Trainer):
             else self.config.rewards.instincts.curriculum_stage
         )
 
+        active_curriculum_stage = int(self.config.rewards.instincts.curriculum_stage)
+        adaptive_controller = AdaptiveStepController(
+            base_learning_rate=train_config.learning_rate,
+            base_mutation_scale=train_config.mutation_scale,
+            initial_curriculum_stage=active_curriculum_stage,
+        )
+
         def emit(payload: dict[str, Any]) -> None:
             if progress_callback is None:
                 return
@@ -595,20 +603,29 @@ class MaskablePPOTrainer(Trainer):
 
             callback_list = CallbackList(callbacks_to_use)
 
-            # Linear LR annealing across the batch: full LR at segment 0,
-            # learning_rate_final at the last segment.  This keeps updates
-            # aggressive early (fast cliff recovery) and conservative late
-            # (prevents policy collapse near the end of a run).
-            _batch_done = completed_checkpoints - skip_segments - 1
-            _batch_span = max(1, n_checkpoints - skip_segments - 1)
-            _batch_progress = _batch_done / _batch_span
-            
-            # Enforce 5e-5 floor on learning rate annealing
-            policy.model.learning_rate = max(
-                5e-5,
-                train_config.learning_rate
-                + (train_config.learning_rate_final - train_config.learning_rate) * _batch_progress
-            )
+            # Adaptive learning rate controller with conservative staging and automatic curriculum reset
+            if getattr(train_config, "enable_adaptive_learning", True):
+                adaptive_state = adaptive_controller.get_state()
+                effective_lr = adaptive_state.effective_learning_rate
+                policy.model.learning_rate = effective_lr
+                policy.model.lr_schedule = lambda _: effective_lr
+                if hasattr(policy.model, "policy") and hasattr(policy.model.policy, "optimizer"):
+                    for param_group in policy.model.policy.optimizer.param_groups:
+                        param_group["lr"] = effective_lr
+            else:
+                # Fallback: Linear LR annealing across the batch
+                _batch_done = completed_checkpoints - skip_segments - 1
+                _batch_span = max(1, n_checkpoints - skip_segments - 1)
+                _batch_progress = _batch_done / _batch_span
+                
+                # Enforce 5e-5 floor on learning rate annealing
+                policy.model.learning_rate = max(
+                    5e-5,
+                    train_config.learning_rate
+                    + (train_config.learning_rate_final - train_config.learning_rate) * _batch_progress
+                )
+                adaptive_state = adaptive_controller.get_state()
+
             # Apply training overrides for exploration and advantage estimation
             policy.model.ent_coef = train_config.entropy_coef
             policy.model.gae_lambda = train_config.gae_lambda
@@ -809,6 +826,14 @@ class MaskablePPOTrainer(Trainer):
                     summary = quick_summary
 
             current_stage = self.config.rewards.instincts.curriculum_stage
+            if getattr(train_config, "enable_adaptive_learning", True):
+                adaptive_state = adaptive_controller.update(
+                    eval_success_rate=summary.success_rate,
+                    current_curriculum_stage=current_stage,
+                )
+            else:
+                adaptive_state = adaptive_controller.get_state()
+
             is_new_best = summary.promotion_eligible and (
                 current_stage > best_model_curriculum_stage
                 or (
@@ -909,6 +934,12 @@ class MaskablePPOTrainer(Trainer):
                 evaluation_id=summary.evaluation_id,
                 evaluation_mode=summary.evaluation_mode,
                 promotion_eligible=summary.promotion_eligible,
+                adaptive_lr_stage=adaptive_state.stage,
+                adaptive_lr_stage_max=adaptive_state.max_stages,
+                adaptive_lr_stage_label=adaptive_state.label,
+                adaptive_lr_multiplier=adaptive_state.multiplier,
+                effective_learning_rate=adaptive_state.effective_learning_rate,
+                effective_mutation_scale=adaptive_state.effective_mutation_scale,
                 **runtime_snapshot,
             )
             if is_new_best:
@@ -955,6 +986,12 @@ class MaskablePPOTrainer(Trainer):
                 "records": [record.to_dict() for record in summary.records],
                 "run_id": run_id,
                 "checkpoint_id": chk_id,
+                "adaptive_lr_stage": adaptive_state.stage,
+                "adaptive_lr_stage_max": adaptive_state.max_stages,
+                "adaptive_lr_stage_label": adaptive_state.label,
+                "adaptive_lr_multiplier": adaptive_state.multiplier,
+                "effective_learning_rate": adaptive_state.effective_learning_rate,
+                "effective_mutation_scale": adaptive_state.effective_mutation_scale,
                 "environment_episodes_total": environment_episodes_total,
                 "environment_episodes_since_run_start": environment_episodes_since_run_start,
                 "parent_run_id": self._loaded_state.get("parent_run_id"),
@@ -1004,6 +1041,7 @@ class MaskablePPOTrainer(Trainer):
                 "best_success_rate": best_success_rate,
                 "best_average_reward": best_average_reward,
                 "best_completion_steps": best_completion_steps,
+                "adaptive_step_state": adaptive_state.to_dict(),
                 "policy_config": policy.config.to_dict(),
                 "training_signature": self._training_signature(),
                 "incomplete_batch": {

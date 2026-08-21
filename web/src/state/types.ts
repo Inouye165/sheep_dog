@@ -238,6 +238,12 @@ export interface TrainingStatus {
   total_timesteps?: number;
   checkpoint_save_interval?: number;
   active_policy_identity?: string;
+  adaptive_lr_stage?: number;
+  adaptive_lr_stage_max?: number;
+  adaptive_lr_stage_label?: string;
+  adaptive_lr_multiplier?: number;
+  effective_learning_rate?: number;
+  effective_mutation_scale?: number;
 
   // Explicit Live Telemetry Fields
   current_stage_environment_episode?: number;
@@ -498,6 +504,12 @@ export interface CheckpointEntry {
   curriculum_stage?: number;
   promotion_gate?: AutoPromoteGateDiagnostics | null;
   evaluation_timestamp?: string | null;
+  adaptive_lr_stage?: number;
+  adaptive_lr_stage_max?: number;
+  adaptive_lr_stage_label?: string;
+  adaptive_lr_multiplier?: number;
+  effective_learning_rate?: number;
+  effective_mutation_scale?: number;
 }
 
 export interface EvaluationSummary {

@@ -743,6 +743,37 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
           </div>
         </div>
       </div>
+
+      {/* Adaptive Learning Rate / Step-Size Section */}
+      {(checkpoint.adaptive_lr_stage != null || checkpoint.effective_learning_rate != null || checkpoint.effective_mutation_scale != null) && (
+        <div className="chart-tooltip__promo-section" style={{ marginTop: "0.6rem", paddingTop: "0.6rem", borderTop: "1px solid rgba(255,255,255,0.12)" }}>
+          <div className="chart-tooltip__section-title" style={{ marginTop: 0, color: "#a7f3d0" }}>
+            ⚡ Adaptive Step-Size (Stage {checkpoint.adaptive_lr_stage ?? 1} of {checkpoint.adaptive_lr_stage_max ?? 4})
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 10px", fontSize: "0.78rem", marginTop: "6px" }}>
+            <span style={{ color: "rgba(148,163,184,0.9)", fontWeight: "600" }}>Adjustment:</span>
+            <span style={{ color: (checkpoint.adaptive_lr_stage ?? 1) > 1 ? "#34d399" : "#94a3b8", fontWeight: "bold" }}>
+              {checkpoint.adaptive_lr_stage_label || `Stage ${checkpoint.adaptive_lr_stage ?? 1} of ${checkpoint.adaptive_lr_stage_max ?? 4} (${(checkpoint.adaptive_lr_multiplier ?? 1.0).toFixed(2)}x)`}
+            </span>
+            {checkpoint.effective_learning_rate != null && (
+              <>
+                <span style={{ color: "rgba(148,163,184,0.9)", fontWeight: "600" }}>Active LR:</span>
+                <span style={{ color: "#f8fafc", fontFamily: "monospace" }}>
+                  {checkpoint.effective_learning_rate.toExponential(2)}
+                </span>
+              </>
+            )}
+            {checkpoint.effective_mutation_scale != null && (
+              <>
+                <span style={{ color: "rgba(148,163,184,0.9)", fontWeight: "600" }}>Mutation Scale:</span>
+                <span style={{ color: "#f8fafc", fontFamily: "monospace" }}>
+                  {checkpoint.effective_mutation_scale.toFixed(4)}
+                </span>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>,
     document.body
   );
@@ -3357,6 +3388,26 @@ export function DiagnosticsPanel({
             </span>
             <span className="kpi-card__sub">
               Global Timestep: <strong>{currentGlobalTimestep.toLocaleString()}</strong> (Snap: {trainingStatus?.policy_version ?? 0})
+            </span>
+          </div>
+        </div>
+
+        {/* Card 6: Adaptive LR / Step-Size Stage */}
+        <div className="kpi-card" data-testid="adaptive-lr-card">
+          <span className="kpi-card__label">Adaptive Step Stage:</span>
+          <div className="kpi-card__main">
+            <span
+              className="kpi-card__value"
+              style={{
+                color: (trainingStatus?.adaptive_lr_stage ?? stageLatestCheckpoint?.adaptive_lr_stage ?? 1) > 1 ? "#34d399" : "#e2e8f0",
+              }}
+            >
+              Stage {trainingStatus?.adaptive_lr_stage ?? stageLatestCheckpoint?.adaptive_lr_stage ?? 1} of {trainingStatus?.adaptive_lr_stage_max ?? stageLatestCheckpoint?.adaptive_lr_stage_max ?? 4}
+            </span>
+            <span className="kpi-card__sub">
+              {(trainingStatus?.adaptive_lr_stage ?? stageLatestCheckpoint?.adaptive_lr_stage ?? 1) === 1
+                ? "1.00x · Base (No modification)"
+                : `${(trainingStatus?.adaptive_lr_multiplier ?? stageLatestCheckpoint?.adaptive_lr_multiplier ?? 1.0).toFixed(2)}x · Resets on stage promo`}
             </span>
           </div>
         </div>
