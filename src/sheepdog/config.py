@@ -262,6 +262,12 @@ class TrainingConfig:
             "corner_huddle": 0.15,
         }
     )
+    # Failure-directed training: dynamically increase exposure to hard scenario
+    # classes identified by standardized evaluation failures, with anti-forgetting decay.
+    failure_directed_training_enabled: bool = False
+    failure_directed_target_ratio: float = 0.25
+    failure_directed_decay_rate: float = 0.60
+    failure_directed_min_weight: float = 0.05
     # Observation mode: "guided" (default) includes scripted role labels and
     # strategy targets; "emergent" strips roles/targets so the model must learn
     # herding purely from raw observations and reward signal.

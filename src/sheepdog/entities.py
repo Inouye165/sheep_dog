@@ -198,6 +198,17 @@ class EpisodeStats:
     num_invalid_actions: int = 0
     most_frequent_action: str = ""
     oscillation_detected: bool = False
+    pen_zone: str = ""
+    initial_sheep_zone: str = ""
+    final_sheep_zone: str = ""
+    corner_steps_total: int = 0
+    corner_time_pct: float = 0.0
+    wall_steps_total: int = 0
+    wall_time_pct: float = 0.0
+    corner_stuck_at_end: bool = False
+    corner_entered: bool = False
+    corner_extracted: bool = False
+    spatial_metrics: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict."""

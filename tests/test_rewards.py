@@ -259,3 +259,123 @@ def test_stray_approach_reward_for_isolated_stray() -> None:
 
     assert breakdown_closer.stray_ignore_penalty > breakdown_further.stray_ignore_penalty
 
+
+def test_stray_approach_reward_for_single_remaining_unpenned_sheep() -> None:
+    config = RewardConfig(stray_ignore_penalty_scale=0.01)
+    computer = RewardComputer(config)
+
+    # When 3 sheep are penned and only 1 remains far from pen and dogs
+    lone_sheep = (40.0, 10.0)
+    target = (0.0, 10.0)
+
+    # Dog moves closer to the lone sheep
+    closer_inputs = RewardInputs(
+        previous_average_distance=40.0,
+        current_average_distance=40.0,
+        previous_flock_spread=0.0,
+        current_flock_spread=0.0,
+        newly_penned=0,
+        no_progress_step=False,
+        touched_wall=False,
+        waited_without_reason=False,
+        terminated=False,
+        timeout=False,
+        success=False,
+        current_farthest_distance=40.0,
+        previous_farthest_distance=40.0,
+        flock_centroid=lone_sheep,
+        target_position=target,
+        sheep_positions=(lone_sheep,),
+        previous_dog_positions=((10.0, 10.0),),
+        dog_positions=((15.0, 10.0),),
+    )
+
+    # Dog moves away from the lone sheep
+    further_inputs = RewardInputs(
+        previous_average_distance=40.0,
+        current_average_distance=40.0,
+        previous_flock_spread=0.0,
+        current_flock_spread=0.0,
+        newly_penned=0,
+        no_progress_step=False,
+        touched_wall=False,
+        waited_without_reason=False,
+        terminated=False,
+        timeout=False,
+        success=False,
+        current_farthest_distance=40.0,
+        previous_farthest_distance=40.0,
+        flock_centroid=lone_sheep,
+        target_position=target,
+        sheep_positions=(lone_sheep,),
+        previous_dog_positions=((15.0, 10.0),),
+        dog_positions=((10.0, 10.0),),
+    )
+
+    breakdown_closer = computer.compute(closer_inputs)
+    breakdown_further = computer.compute(further_inputs)
+
+    assert breakdown_closer.stray_ignore_penalty > breakdown_further.stray_ignore_penalty
+
+
+def test_stray_approach_reward_for_multi_sheep_unpenned_cluster() -> None:
+    config = RewardConfig(stray_ignore_penalty_scale=0.01)
+    computer = RewardComputer(config)
+
+    # When 2 sheep are unpenned and together across the arena (e.g. at (52, 35) and (58, 35)),
+    # target/pen is at (0, 0), and dogs are near the pen at (5, 5).
+    target = (0.0, 0.0)
+    sheep1 = (52.0, 35.0)
+    sheep2 = (58.0, 35.0)
+    flock_centroid = (55.0, 35.0)  # dist_to_centroid is 3.0 (<8.0, not a single outlier), but max_dist is ~67.8 (>10.0)
+
+    # Dog moves from (5.0, 5.0) to (10.0, 10.0) towards the sheep
+    closer_inputs = RewardInputs(
+        previous_average_distance=60.0,
+        current_average_distance=60.0,
+        previous_flock_spread=3.0,
+        current_flock_spread=3.0,
+        newly_penned=0,
+        no_progress_step=False,
+        touched_wall=False,
+        waited_without_reason=False,
+        terminated=False,
+        timeout=False,
+        success=False,
+        current_farthest_distance=67.8,
+        previous_farthest_distance=67.8,
+        flock_centroid=flock_centroid,
+        target_position=target,
+        sheep_positions=(sheep1, sheep2),
+        previous_dog_positions=((5.0, 5.0),),
+        dog_positions=((10.0, 10.0),),
+    )
+
+    # Dog moves from (10.0, 10.0) to (5.0, 5.0) away from the sheep (e.g. retreating to pen)
+    further_inputs = RewardInputs(
+        previous_average_distance=60.0,
+        current_average_distance=60.0,
+        previous_flock_spread=3.0,
+        current_flock_spread=3.0,
+        newly_penned=0,
+        no_progress_step=False,
+        touched_wall=False,
+        waited_without_reason=False,
+        terminated=False,
+        timeout=False,
+        success=False,
+        current_farthest_distance=67.8,
+        previous_farthest_distance=67.8,
+        flock_centroid=flock_centroid,
+        target_position=target,
+        sheep_positions=(sheep1, sheep2),
+        previous_dog_positions=((10.0, 10.0),),
+        dog_positions=((5.0, 5.0),),
+    )
+
+    breakdown_closer = computer.compute(closer_inputs)
+    breakdown_further = computer.compute(further_inputs)
+
+    assert breakdown_closer.stray_ignore_penalty > breakdown_further.stray_ignore_penalty
+
+

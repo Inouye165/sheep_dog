@@ -160,6 +160,14 @@ class CurriculumTelemetryManager:
         capture_reason: str | None = None,
         capture_status: str | None = None,
         reward_breakdown: dict[str, float] | None = None,
+        pen_zone: str | None = None,
+        spawn_mode: str | None = None,
+        initial_sheep_zone: str | None = None,
+        final_sheep_zone: str | None = None,
+        corner_time_pct: float | None = None,
+        wall_time_pct: float | None = None,
+        corner_stuck_at_end: bool | int | None = None,
+        spatial_metrics: dict[str, Any] | None = None,
     ) -> None:
         """Log per-episode metrics to Weights & Biases and local SQLite history."""
         try:
@@ -190,6 +198,14 @@ class CurriculumTelemetryManager:
                 "capture_reason": capture_reason,
                 "capture_status": capture_status,
                 "reward_breakdown": reward_breakdown,
+                "pen_zone": pen_zone,
+                "spawn_mode": spawn_mode,
+                "initial_sheep_zone": initial_sheep_zone,
+                "final_sheep_zone": final_sheep_zone,
+                "corner_time_pct": corner_time_pct,
+                "wall_time_pct": wall_time_pct,
+                "corner_stuck_at_end": corner_stuck_at_end,
+                "spatial_metrics": spatial_metrics,
             })
         except Exception as exc:
             logger.error("Failed to log episode to SQLite store: %s", exc)

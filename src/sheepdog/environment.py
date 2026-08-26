@@ -38,6 +38,7 @@ from sheepdog.observations import (
 from sheepdog.policies.base import Action, Policy, PolicyMode
 from sheepdog.rewards import RewardBreakdown, RewardComputer, RewardInputs
 from sheepdog.team_strategy import RoleAssignment, StrategySnapshot, TeamStrategy
+from sheepdog.training.spatial_analytics import SpatialEpisodeTracker
 
 ENV_CONFIG_VERSION = "1.0"
 
@@ -174,6 +175,10 @@ class SheepdogEnvironment:
         self._stop_reason = ""
         self._history: list[StepRecord] = []
         self._stats = EpisodeStats()
+        self._spatial_tracker = SpatialEpisodeTracker(
+            field_width=float(self.env_config.width),
+            field_height=float(self.env_config.height),
+        )
         self._team_strategy = TeamStrategy(
             self.env_config.width,
             self.env_config.height,
@@ -305,6 +310,14 @@ class SheepdogEnvironment:
             self._record_position_history(dog.recent_positions, dog.position)
         for sheep in self._sheep:
             self._record_position_history(sheep.recent_positions, sheep.position)
+        self._spatial_tracker.field_width = float(self.env_config.width)
+        self._spatial_tracker.field_height = float(self.env_config.height)
+        self._spatial_tracker.initialize(
+            sheep_positions=[s.position for s in self._sheep],
+            dog_positions=[d.position for d in self._dogs],
+            pen=self._pen,
+            spawn_mode=self._spawn_mode,
+        )
         self._initial_sheep_distance_to_pen = self._average_distance_to_pen()
         self._min_sheep_distance_to_pen = self._initial_sheep_distance_to_pen
         self._num_waits = 0
@@ -394,6 +407,14 @@ class SheepdogEnvironment:
             self._record_position_history(dog.recent_positions, dog.position)
         for sheep in self._sheep:
             self._record_position_history(sheep.recent_positions, sheep.position)
+        self._spatial_tracker.field_width = float(scenario.width)
+        self._spatial_tracker.field_height = float(scenario.height)
+        self._spatial_tracker.initialize(
+            sheep_positions=[s.position for s in self._sheep],
+            dog_positions=[d.position for d in self._dogs],
+            pen=self._pen,
+            spawn_mode=self._spawn_mode,
+        )
         self._initial_sheep_distance_to_pen = self._average_distance_to_pen()
         self._min_sheep_distance_to_pen = self._initial_sheep_distance_to_pen
         self._num_waits = 0
@@ -986,6 +1007,14 @@ class SheepdogEnvironment:
         if current_dist < self._min_sheep_distance_to_pen:
             self._min_sheep_distance_to_pen = current_dist
 
+        unpenned_sheep = [s.position for s in self._sheep if not s.penned] or [s.position for s in self._sheep]
+        self._spatial_tracker.record_step(unpenned_sheep)
+        spatial_summary = self._spatial_tracker.get_summary(
+            success=self._success,
+            timeout=self._timeout,
+            stopped=self._stopped,
+        )
+
         self._stats = EpisodeStats(
             steps=self._step_count,
             simulated_seconds=self._simulated_seconds,
@@ -1032,6 +1061,17 @@ class SheepdogEnvironment:
                 else ""
             ),
             oscillation_detected=any(self._in_two_position_loop(d.recent_positions) for d in self._dogs),
+            pen_zone=spatial_summary["pen_zone"],
+            initial_sheep_zone=spatial_summary["initial_sheep_zone"],
+            final_sheep_zone=spatial_summary["final_sheep_zone"],
+            corner_steps_total=spatial_summary["corner_steps_total"],
+            corner_time_pct=spatial_summary["corner_time_pct"],
+            wall_steps_total=spatial_summary["wall_steps_total"],
+            wall_time_pct=spatial_summary["wall_time_pct"],
+            corner_stuck_at_end=spatial_summary["corner_stuck_at_end"],
+            corner_entered=spatial_summary["corner_entered"],
+            corner_extracted=spatial_summary["corner_extracted"],
+            spatial_metrics=spatial_summary,
         )
 
         if capture_replay:

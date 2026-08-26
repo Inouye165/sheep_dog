@@ -2315,6 +2315,54 @@ class TrainingManager:
             session_state["status"] = dict(self._status)
             _write_training_session_state(output_root, session_state)
 
+    def get_stage_diagnostics(self, stage: int | None = None, run_id: str | None = None) -> dict[str, Any]:
+        """Aggregate full historical spatial telemetry and bottleneck metrics for a curriculum stage."""
+        from sheepdog.training.episode_store import get_episode_store
+        output_root = Path(LabConfig().training.output_dir)
+        db_path = output_root / "training-telemetry.sqlite"
+        store = get_episode_store(db_path)
+        if stage is None:
+            stage = int(self.snapshot().get("curriculum_stage", 1))
+        return store.get_stage_diagnostics(stage=stage, run_id=run_id)
+
+    def get_recent_evaluations(
+        self, limit: int = 5, stage: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Retrieve recent formal evaluation summaries with per-seed episode records."""
+        output_root = Path(LabConfig().training.output_dir)
+        evals_dir = output_root / "evaluations"
+        if not evals_dir.exists():
+            return []
+
+        eval_files = [f for f in evals_dir.glob("eval_*.json") if f.is_file()]
+        eval_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+        results: list[dict[str, Any]] = []
+        seen_eval_ids: set[str] = set()
+
+        for fpath in eval_files:
+            if len(results) >= limit:
+                break
+            try:
+                with fpath.open("r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                if not isinstance(data, dict) or "records" not in data:
+                    continue
+                eval_id = data.get("evaluation_id") or fpath.stem
+                if eval_id in seen_eval_ids:
+                    continue
+                if stage is not None:
+                    eval_stage = data.get("curriculum_stage")
+                    if eval_stage is not None and int(eval_stage) != stage:
+                        continue
+                seen_eval_ids.add(eval_id)
+                results.append(data)
+            except Exception as exc:
+                logger.warning("Failed to load evaluation file %s: %s", fpath, exc)
+                continue
+
+        return results
+
     def _clear_training_session(self) -> None:
         """Clear any persisted pause/stop marker."""
 
@@ -4707,6 +4755,14 @@ class TrainingManager:
                                 capture_reason=payload.get("capture_reason"),
                                 capture_status=payload.get("capture_status"),
                                 reward_breakdown=payload.get("reward_breakdown"),
+                                pen_zone=payload.get("pen_zone"),
+                                spawn_mode=payload.get("spawn_mode"),
+                                initial_sheep_zone=payload.get("initial_sheep_zone"),
+                                final_sheep_zone=payload.get("final_sheep_zone"),
+                                corner_time_pct=payload.get("corner_time_pct"),
+                                wall_time_pct=payload.get("wall_time_pct"),
+                                corner_stuck_at_end=payload.get("corner_stuck_at_end"),
+                                spatial_metrics=payload.get("spatial_metrics"),
                             )
                         except Exception:
                             pass
@@ -6911,6 +6967,37 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             store = get_episode_store(db_path)
             res = store.get_recent_failed_episodes_with_replays(limit=limit)
             self._json_response({"episodes": res})
+            return
+        if request_path in ("/api/stage-diagnostics", "/api/insights/stage-diagnostics"):
+            query = urlsplit(self.path).query
+            from urllib.parse import parse_qs
+
+            params = parse_qs(query)
+            try:
+                stage = int(params["stage"][0]) if "stage" in params else int(self.manager.snapshot().get("curriculum_stage", 1))
+            except (ValueError, IndexError):
+                stage = 1
+            run_id = params["run_id"][0] if "run_id" in params else None
+
+            res = self.manager.get_stage_diagnostics(stage=stage, run_id=run_id)
+            self._json_response(res)
+            return
+        if request_path in ("/api/insights/evaluations", "/api/evaluations/recent"):
+            query = urlsplit(self.path).query
+            from urllib.parse import parse_qs
+
+            params = parse_qs(query)
+            try:
+                limit = int(params["limit"][0]) if "limit" in params else 5
+            except (ValueError, IndexError):
+                limit = 5
+            try:
+                stage = int(params["stage"][0]) if "stage" in params else None
+            except (ValueError, IndexError):
+                stage = None
+
+            evals = self.manager.get_recent_evaluations(limit=limit, stage=stage)
+            self._json_response({"evaluations": evals})
             return
         if request_path in ("/health", "/api/health"):
             self._json_response({"status": "ok", "service": "sheepdog-api"})

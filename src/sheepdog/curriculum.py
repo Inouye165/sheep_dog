@@ -135,7 +135,7 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "dog_speed": 1.95,
         "sheep_speed": 1,
         "max_steps": 980,
-        "no_progress_window": 240,
+        "no_progress_window": 300,
         "no_progress_distance_delta": 0.16,
         "sheep_personality_strength": 0.25,
         "curriculum_stage": 7,
@@ -796,8 +796,8 @@ CURRICULUM_REWARD_OVERRIDES: dict[int, dict[str, object]] = {
         "no_progress_penalty": 0.028,
         "flock_cohesion_scale": 0.72,
         "scatter_penalty_scale": 0.28,
-        "farthest_sheep_progress_scale": 0.35,
-        "stray_ignore_penalty_scale": 0.0035,
+        "farthest_sheep_progress_scale": 0.55,
+        "stray_ignore_penalty_scale": 0.0045,
         "sheep_penned_reward": 10.0,
         "terminal_success_reward": 76.0,
     },
@@ -1115,6 +1115,14 @@ CURRICULUM_REWARD_OVERRIDES: dict[int, dict[str, object]] = {
 
 # Hyperparameter overrides for transitional/challenging stages to boost exploration
 CURRICULUM_TRAINING_OVERRIDES: dict[int, dict[str, object]] = {
+    # Stage 7 multi-straggler remediation & exploration (entropy boosted to 0.014, LR to 8.0e-5, failure-directed enabled)
+    7: {
+        "entropy_coef": 0.014,
+        "learning_rate": 8.0e-5,
+        "learning_rate_final": 2.5e-5,
+        "gae_lambda": 0.98,
+        "failure_directed_training_enabled": True,
+    },
     # transitional 5-sheep stages (boost entropy, set slightly higher learning rates, GAE lambda=0.98)
     10: {"entropy_coef": 0.015, "learning_rate": 1.2e-4, "learning_rate_final": 5e-5, "gae_lambda": 0.98},
     11: {"entropy_coef": 0.015, "learning_rate": 1.2e-4, "learning_rate_final": 5e-5, "gae_lambda": 0.98},

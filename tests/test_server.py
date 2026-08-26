@@ -1384,6 +1384,45 @@ def test_start_discovers_latest_model_zip_using_st_mtime(tmp_path: Path) -> None
         assert manager._status.get("active_model_path") == str(zip2)
 
 
+def test_stage_diagnostics_endpoint(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir(parents=True)
+    config = LabConfig(
+        training=TrainingConfig(
+            output_dir=str(artifacts),
+            web_export_dir=str(tmp_path / "web"),
+        )
+    )
+    from sheepdog.training.episode_store import get_episode_store
+    db_file = artifacts / "training-telemetry.sqlite"
+    store = get_episode_store(db_file)
+    store.add_episode({
+        "global_environment_episode": 1,
+        "curriculum_stage": 4,
+        "reward": 25.0,
+        "penned": 1,
+        "total_sheep": 1,
+        "success": True,
+        "status": "SUCCESS",
+        "seed": 42,
+        "initial_sheep_zone": "top_left",
+        "pen_zone": "top_right",
+        "spawn_mode": "fixed_easy",
+    })
+    store.flush()
+
+    with patch("sheepdog.server.LabConfig", return_value=config):
+        manager = TrainingManager()
+        diagnostics = manager.get_stage_diagnostics(stage=4)
+        assert diagnostics["curriculum_stage"] == 4
+        assert diagnostics["total_episodes"] == 1
+        assert diagnostics["success_count"] == 1
+        assert "zone_stats" in diagnostics
+        assert "top_left" in diagnostics["zone_stats"]
+        assert diagnostics["zone_stats"]["top_left"]["wins"] == 1
+
+
+
 
 
 

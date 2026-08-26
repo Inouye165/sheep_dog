@@ -4394,5 +4394,440 @@ select {
   to { transform: translateY(0); opacity: 1; }
 }
 
+/* ── Evaluation Episodes Tab (Benchmark Inspector) ── */
+.eval-episodes-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  padding: 0.25rem;
+}
+
+.eval-episodes-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.eval-refresh-btn {
+  background: rgba(30, 41, 59, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  color: #94a3b8;
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 0.35rem 0.75rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.eval-refresh-btn:hover:not(:disabled) {
+  background: rgba(51, 65, 85, 0.9);
+  color: #f8fafc;
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.eval-timeline-selector {
+  display: flex;
+  gap: 0.5rem;
+  overflow-x: auto;
+  padding-bottom: 0.25rem;
+}
+
+.eval-select-card {
+  flex: 1;
+  min-width: 145px;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.eval-select-card:hover {
+  background: rgba(30, 41, 59, 0.7);
+  border-color: rgba(255, 255, 255, 0.2);
+  transform: translateY(-1px);
+}
+
+.eval-select-card--active {
+  background: rgba(30, 58, 138, 0.35) !important;
+  border-color: #3b82f6 !important;
+  box-shadow: 0 0 12px rgba(59, 130, 246, 0.25);
+}
+
+.eval-select-card__top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.eval-select-card__ep {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #f1f5f9;
+}
+
+.eval-pill {
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.12rem 0.4rem;
+  border-radius: 9999px;
+}
+
+.eval-pill--good {
+  background: rgba(16, 185, 129, 0.2);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.4);
+}
+
+.eval-pill--warn {
+  background: rgba(244, 63, 94, 0.2);
+  color: #f87171;
+  border: 1px solid rgba(244, 63, 94, 0.4);
+}
+
+.eval-select-card__meta {
+  font-size: 0.72rem;
+  color: #94a3b8;
+  display: flex;
+  gap: 0.3rem;
+  flex-wrap: wrap;
+}
+
+.eval-kpi-banner {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 0.5rem;
+  background: rgba(15, 23, 42, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 0.65rem 0.85rem;
+}
+
+.eval-kpi-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.eval-kpi-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #64748b;
+  font-weight: 600;
+}
+
+.eval-kpi-val {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: #f8fafc;
+  line-height: 1.2;
+}
+
+.eval-kpi-sub {
+  font-size: 0.72rem;
+  color: #94a3b8;
+}
+
+.eval-episodes-content-grid {
+  display: grid;
+  grid-template-columns: 340px 1fr;
+  gap: 0.85rem;
+  min-height: 480px;
+}
+
+@media (max-width: 900px) {
+  .eval-episodes-content-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.eval-episodes-list-col {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  background: rgba(15, 23, 42, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 0.75rem;
+}
+
+.eval-episodes-list-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.eval-filter-chips {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.eval-filter-chip {
+  background: rgba(30, 41, 59, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  color: #94a3b8;
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.2rem 0.5rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.eval-filter-chip:hover {
+  background: rgba(51, 65, 85, 0.8);
+  color: #f1f5f9;
+}
+
+.eval-filter-chip--active {
+  background: #2563eb !important;
+  border-color: #3b82f6 !important;
+  color: #ffffff !important;
+}
+
+.eval-episodes-scroll-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  overflow-y: auto;
+  max-height: 520px;
+  padding-right: 0.2rem;
+}
+
+.eval-record-card {
+  background: rgba(15, 23, 42, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 6px;
+  padding: 0.55rem 0.7rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.eval-record-card:hover {
+  background: rgba(30, 41, 59, 0.8);
+  border-color: rgba(255, 255, 255, 0.18);
+  transform: translateX(2px);
+}
+
+.eval-record-card--selected {
+  border-color: #38bdf8 !important;
+  background: rgba(14, 116, 144, 0.25) !important;
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.2);
+}
+
+.eval-record-card--pass {
+  border-left: 3px solid #10b981;
+}
+
+.eval-record-card--fail {
+  border-left: 3px solid #f43f5e;
+}
+
+.eval-record-card__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.eval-status-badge {
+  font-size: 0.68rem;
+  font-weight: 700;
+  padding: 0.12rem 0.4rem;
+  border-radius: 3px;
+  letter-spacing: 0.03em;
+}
+
+.eval-status-badge--pass {
+  background: rgba(16, 185, 129, 0.25);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.4);
+}
+
+.eval-status-badge--fail {
+  background: rgba(244, 63, 94, 0.25);
+  color: #f87171;
+  border: 1px solid rgba(244, 63, 94, 0.4);
+}
+
+.eval-record-seed {
+  font-size: 0.84rem;
+  color: #f1f5f9;
+}
+
+.eval-record-steps {
+  font-size: 0.74rem;
+  color: #94a3b8;
+}
+
+.eval-record-card__body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.8rem;
+  font-size: 0.72rem;
+}
+
+.eval-record-metric {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.eval-metric-label {
+  color: #64748b;
+}
+
+.eval-metric-val {
+  color: #cbd5e1;
+  font-weight: 600;
+}
+
+.eval-record-card__selected-indicator {
+  font-size: 0.68rem;
+  color: #38bdf8;
+  font-weight: 600;
+  text-align: right;
+  margin-top: -0.2rem;
+}
+
+.eval-replay-col {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  background: rgba(15, 23, 42, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 0.75rem;
+}
+
+.eval-replay-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.eval-field-wrap {
+  position: relative;
+  background: #020617;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  overflow: hidden;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 380px;
+}
+
+.eval-replay-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 6px;
+  padding: 0.6rem 0.75rem;
+}
+
+.eval-scrubber-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.eval-scrubber-slider {
+  flex: 1;
+  accent-color: #38bdf8;
+  height: 5px;
+  cursor: pointer;
+}
+
+.eval-playback-button-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.eval-ctrl-btn {
+  background: rgba(30, 41, 59, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  color: #e2e8f0;
+  font-size: 0.8rem;
+  padding: 0.3rem 0.6rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.eval-ctrl-btn:hover:not(:disabled) {
+  background: rgba(51, 65, 85, 0.9);
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.eval-ctrl-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.eval-ctrl-btn--primary {
+  background: #1e40af;
+  border-color: #3b82f6;
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.eval-ctrl-btn--playing {
+  background: #b91c1c !important;
+  border-color: #ef4444 !important;
+}
+
+.eval-speed-btn {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  color: #94a3b8;
+  font-size: 0.7rem;
+  padding: 0.15rem 0.35rem;
+  cursor: pointer;
+}
+
+.eval-speed-btn:hover {
+  color: #f8fafc;
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.eval-speed-btn--active {
+  background: rgba(56, 189, 248, 0.2);
+  border-color: #38bdf8;
+  color: #38bdf8;
+  font-weight: 700;
+}
+
+.eval-frame-diagnostics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  font-size: 0.74rem;
+  color: #94a3b8;
+  padding-top: 0.3rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
 
 

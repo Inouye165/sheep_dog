@@ -4,6 +4,8 @@ import type { CheckpointEntry, CheckpointIndex, TrainingStatus, TrainingEpisode 
 import { loadTrainingEpisodes } from "../lib/api";
 import { CopyAgentDataButton } from "./CopyAgentDataButton";
 import { StackedLearningPanels } from "./StackedLearningPanels";
+import { StageBottlenecksPanel } from "./StageBottlenecksPanel";
+import { EvaluationEpisodesTab } from "./EvaluationEpisodesTab";
 import {
   processCanonicalHistory,
   selectWindowSlice,
@@ -1322,7 +1324,7 @@ function LineChart({
 
 // ── Chart sub-tab types & legend ───────────────────────────────────────────
 
-export type ChartTab = "stacked" | "success" | "steps" | "reward" | "sheep" | "history" | "health" | "learningSignal" | "seedReliability";
+export type ChartTab = "stacked" | "success" | "steps" | "reward" | "sheep" | "learningSignal" | "seedReliability" | "evaluations" | "health" | "history";
 
 function formatDuration(seconds: number | null | undefined): string {
   if (seconds == null || !Number.isFinite(seconds)) return "—";
@@ -2985,7 +2987,7 @@ export function DiagnosticsPanel({
 
   const [activeChart, setActiveChart] = useState<ChartTab>(() => {
     const saved = localStorage.getItem("sheepdog_insights_active_chart") as ChartTab | null;
-    const validCharts: ChartTab[] = ["stacked", "success", "steps", "reward", "sheep", "history", "health", "learningSignal", "seedReliability"];
+    const validCharts: ChartTab[] = ["stacked", "success", "steps", "reward", "sheep", "learningSignal", "seedReliability", "evaluations", "health", "history"];
     if (saved && validCharts.includes(saved)) {
       return saved;
     }
@@ -3500,6 +3502,7 @@ export function DiagnosticsPanel({
             { id: "sheep", label: "Sheep Penned" },
             { id: "learningSignal", label: "Learning Signal" },
             { id: "seedReliability", label: "Seed Reliability" },
+            { id: "evaluations", label: "Evaluation Episodes" },
             { id: "health", label: "Health" },
             { id: "history", label: "History" },
           ] as Array<{ id: ChartTab; label: string }>).map(({ id, label }) => (
@@ -4073,6 +4076,16 @@ export function DiagnosticsPanel({
           </div>
         )}
 
+        {/* Tab: Evaluation Episodes Benchmark Inspector */}
+        {activeChart === "evaluations" && (
+          <div className="chart-view">
+            <EvaluationEpisodesTab
+              currentStage={effectiveCurriculumStage}
+              runId={trainingStatus?.run_id}
+            />
+          </div>
+        )}
+
         {/* Tab 9: History Table */}
         {activeChart === "history" && (
           <div className="chart-view">
@@ -4151,6 +4164,12 @@ export function DiagnosticsPanel({
             />
           </div>
         )}
+
+        {/* ── Stage Bottlenecks & Spatial Heatmap Section ── */}
+        <StageBottlenecksPanel
+          currentStage={effectiveCurriculumStage || 1}
+          runId={trainingStatus?.run_id}
+        />
       </div>
 
       {/* ── Help Slide-Over Panel ── */}
