@@ -14,6 +14,14 @@ import time
 from pathlib import Path
 from typing import Any
 
+from sheepdog.training.spatial_analytics import (
+    ALL_ZONES,
+    CORNER_ZONES,
+    WALL_ZONES,
+    ZONE_CENTER,
+    diagnose_stage_bottlenecks,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -100,6 +108,22 @@ class EpisodeStore:
             conn.execute("ALTER TABLE training_episodes ADD COLUMN replay_schema_version INTEGER DEFAULT 1;")
         if "reward_breakdown" not in columns:
             conn.execute("ALTER TABLE training_episodes ADD COLUMN reward_breakdown TEXT;")
+        if "pen_zone" not in columns:
+            conn.execute("ALTER TABLE training_episodes ADD COLUMN pen_zone TEXT;")
+        if "spawn_mode" not in columns:
+            conn.execute("ALTER TABLE training_episodes ADD COLUMN spawn_mode TEXT;")
+        if "initial_sheep_zone" not in columns:
+            conn.execute("ALTER TABLE training_episodes ADD COLUMN initial_sheep_zone TEXT;")
+        if "final_sheep_zone" not in columns:
+            conn.execute("ALTER TABLE training_episodes ADD COLUMN final_sheep_zone TEXT;")
+        if "corner_time_pct" not in columns:
+            conn.execute("ALTER TABLE training_episodes ADD COLUMN corner_time_pct REAL DEFAULT 0.0;")
+        if "wall_time_pct" not in columns:
+            conn.execute("ALTER TABLE training_episodes ADD COLUMN wall_time_pct REAL DEFAULT 0.0;")
+        if "corner_stuck_at_end" not in columns:
+            conn.execute("ALTER TABLE training_episodes ADD COLUMN corner_stuck_at_end INTEGER DEFAULT 0;")
+        if "spatial_metrics" not in columns:
+            conn.execute("ALTER TABLE training_episodes ADD COLUMN spatial_metrics TEXT;")
 
         indexes = [
             "CREATE INDEX IF NOT EXISTS idx_episodes_id ON training_episodes(id);",
@@ -110,6 +134,8 @@ class EpisodeStore:
             "CREATE INDEX IF NOT EXISTS idx_episodes_completed_at ON training_episodes(completed_at);",
             "CREATE INDEX IF NOT EXISTS idx_episodes_replay_id ON training_episodes(replay_id);",
             "CREATE INDEX IF NOT EXISTS idx_episodes_replay_avail ON training_episodes(replay_available);",
+            "CREATE INDEX IF NOT EXISTS idx_episodes_init_zone ON training_episodes(initial_sheep_zone);",
+            "CREATE INDEX IF NOT EXISTS idx_episodes_pen_zone ON training_episodes(pen_zone);",
         ]
         for idx_sql in indexes:
             try:
@@ -167,13 +193,18 @@ class EpisodeStore:
             steps, seed, checkpoint_id, created_at,
             replay_available, replay_id, replay_path, replay_source,
             capture_reason, capture_status, replay_schema_version,
-            reward_breakdown
+            reward_breakdown,
+            pen_zone, spawn_mode, initial_sheep_zone, final_sheep_zone,
+            corner_time_pct, wall_time_pct, corner_stuck_at_end, spatial_metrics
         ) VALUES (
             ?, ?, ?, ?,
             ?, ?, ?, ?,
             ?, ?, ?, ?,
             ?, ?, ?, ?, ?,
             ?, ?, ?, ?,
+            ?, ?, ?, ?,
+            ?, ?, ?,
+            ?,
             ?, ?, ?, ?,
             ?, ?, ?, ?
         )
@@ -224,6 +255,22 @@ class EpisodeStore:
             else:
                 breakdown_str = None
 
+            pen_zone = r.get("pen_zone")
+            spawn_mode = r.get("spawn_mode")
+            initial_sheep_zone = r.get("initial_sheep_zone")
+            final_sheep_zone = r.get("final_sheep_zone")
+            corner_time_pct = float(r.get("corner_time_pct", 0.0) or 0.0)
+            wall_time_pct = float(r.get("wall_time_pct", 0.0) or 0.0)
+            corner_stuck_at_end = 1 if r.get("corner_stuck_at_end") else 0
+
+            raw_spatial = r.get("spatial_metrics")
+            if isinstance(raw_spatial, dict):
+                spatial_str = json.dumps(raw_spatial)
+            elif isinstance(raw_spatial, str):
+                spatial_str = raw_spatial
+            else:
+                spatial_str = None
+
             params_list.append((
                 event_key, run_id, session_id, global_ep,
                 ep_in_stage, stage, global_ts, policy_ver,
@@ -232,7 +279,9 @@ class EpisodeStore:
                 steps, seed, checkpoint_id, created_at,
                 replay_avail, replay_id, replay_path, replay_src,
                 cap_reason, cap_status, schema_ver,
-                breakdown_str
+                breakdown_str,
+                pen_zone, spawn_mode, initial_sheep_zone, final_sheep_zone,
+                corner_time_pct, wall_time_pct, corner_stuck_at_end, spatial_str
             ))
 
         try:
@@ -671,12 +720,13 @@ class EpisodeStore:
         latest_id = max((r["id"] for r in result_rows), default=(after_id or 0))
         next_after_id = latest_id
 
-        # Convert integers back to boolean & parse reward_breakdown JSON for frontend
+        # Convert integers back to boolean & parse reward_breakdown and spatial_metrics JSON for frontend
         for r in result_rows:
             r["success"] = bool(r["success"])
             r["timeout"] = bool(r["timeout"])
             r["stopped"] = bool(r["stopped"])
             r["replay_available"] = bool(r.get("replay_available"))
+            r["corner_stuck_at_end"] = bool(r.get("corner_stuck_at_end"))
             raw_rb = r.get("reward_breakdown")
             if isinstance(raw_rb, str) and raw_rb.strip():
                 try:
@@ -687,6 +737,17 @@ class EpisodeStore:
                 r["reward_breakdown"] = raw_rb
             else:
                 r["reward_breakdown"] = None
+
+            raw_sp = r.get("spatial_metrics")
+            if isinstance(raw_sp, str) and raw_sp.strip():
+                try:
+                    r["spatial_metrics"] = json.loads(raw_sp)
+                except Exception:
+                    r["spatial_metrics"] = None
+            elif isinstance(raw_sp, dict):
+                r["spatial_metrics"] = raw_sp
+            else:
+                r["spatial_metrics"] = None
 
         return {
             "episodes": result_rows,
@@ -802,6 +863,206 @@ class EpisodeStore:
             "latest_episode_result": latest_result,
             "dropped_count": self.dropped_count,
             "error_count": self.error_count,
+        }
+
+    def get_stage_diagnostics(
+        self,
+        stage: int,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Aggregate full historical spatial telemetry and bottleneck metrics for a curriculum stage."""
+        self.flush()
+        conditions = ["curriculum_stage = ?"]
+        params: list[Any] = [stage]
+        if run_id:
+            conditions.append("run_id = ?")
+            params.append(run_id)
+
+        where_clause = "WHERE " + " AND ".join(conditions)
+
+        try:
+            with self._get_connection() as conn:
+                # 1. Overall stage counts
+                summary_sql = f"""
+                SELECT
+                    COUNT(*) as total_episodes,
+                    SUM(CASE WHEN success = 1 OR result = 'SUCCESS' THEN 1 ELSE 0 END) as success_count,
+                    SUM(CASE WHEN timeout = 1 OR result = 'TIMEOUT' THEN 1 ELSE 0 END) as timeout_count,
+                    SUM(CASE WHEN stopped = 1 OR result = 'STOPPED' THEN 1 ELSE 0 END) as stopped_count,
+                    AVG(steps) as avg_steps,
+                    AVG(corner_time_pct) as avg_corner_time_pct,
+                    AVG(wall_time_pct) as avg_wall_time_pct,
+                    SUM(CASE WHEN corner_stuck_at_end = 1 THEN 1 ELSE 0 END) as corner_stuck_count,
+                    MIN(completed_at) as earliest_time,
+                    MAX(completed_at) as latest_time
+                FROM training_episodes
+                {where_clause}
+                """
+                summary_row = dict(conn.execute(summary_sql, params).fetchone() or {})
+                total_episodes = summary_row.get("total_episodes") or 0
+                success_count = summary_row.get("success_count") or 0
+                overall_success_rate = (success_count / total_episodes) if total_episodes > 0 else 0.0
+
+                # 2. Zone matrix by initial_sheep_zone
+                zone_sql = f"""
+                SELECT
+                    COALESCE(initial_sheep_zone, 'center') as zone,
+                    COUNT(*) as total,
+                    SUM(CASE WHEN success = 1 OR result = 'SUCCESS' THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN timeout = 1 OR result = 'TIMEOUT' THEN 1 ELSE 0 END) as timeouts,
+                    SUM(CASE WHEN stopped = 1 OR result = 'STOPPED' THEN 1 ELSE 0 END) as stopped,
+                    SUM(CASE WHEN corner_stuck_at_end = 1 THEN 1 ELSE 0 END) as trapped_at_end,
+                    AVG(steps) as avg_steps,
+                    AVG(corner_time_pct) as avg_corner_pct,
+                    AVG(wall_time_pct) as avg_wall_pct
+                FROM training_episodes
+                {where_clause}
+                GROUP BY COALESCE(initial_sheep_zone, 'center')
+                """
+                zone_rows = [dict(r) for r in conn.execute(zone_sql, params).fetchall()]
+                zone_stats: dict[str, dict[str, Any]] = {}
+                for z in ALL_ZONES:
+                    zone_stats[z] = {
+                        "zone": z,
+                        "total": 0,
+                        "wins": 0,
+                        "win_rate": 0.0,
+                        "timeouts": 0,
+                        "stopped": 0,
+                        "trapped_at_end": 0,
+                        "avg_steps": 0.0,
+                        "avg_corner_pct": 0.0,
+                        "avg_wall_pct": 0.0,
+                        "is_corner": z in CORNER_ZONES,
+                        "is_wall": z in WALL_ZONES,
+                    }
+                for r in zone_rows:
+                    z = r["zone"]
+                    tot = r["total"]
+                    wins = r["wins"]
+                    rate = (wins / tot) if tot > 0 else 0.0
+                    zone_stats[z] = {
+                        "zone": z,
+                        "total": tot,
+                        "wins": wins,
+                        "win_rate": round(rate, 4),
+                        "timeouts": r["timeouts"],
+                        "stopped": r["stopped"],
+                        "trapped_at_end": r["trapped_at_end"],
+                        "avg_steps": round(r["avg_steps"] or 0.0, 1),
+                        "avg_corner_pct": round(r["avg_corner_pct"] or 0.0, 4),
+                        "avg_wall_pct": round(r["avg_wall_pct"] or 0.0, 4),
+                        "is_corner": z in CORNER_ZONES,
+                        "is_wall": z in WALL_ZONES,
+                    }
+
+                # 3. Pen placement breakdown
+                pen_sql = f"""
+                SELECT
+                    COALESCE(pen_zone, 'unknown') as placement,
+                    COUNT(*) as total,
+                    SUM(CASE WHEN success = 1 OR result = 'SUCCESS' THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN timeout = 1 OR result = 'TIMEOUT' THEN 1 ELSE 0 END) as timeouts,
+                    AVG(steps) as avg_steps
+                FROM training_episodes
+                {where_clause}
+                GROUP BY COALESCE(pen_zone, 'unknown')
+                """
+                pen_rows = [dict(r) for r in conn.execute(pen_sql, params).fetchall()]
+                pen_stats: dict[str, dict[str, Any]] = {}
+                for r in pen_rows:
+                    tot = r["total"]
+                    wins = r["wins"]
+                    pen_stats[r["placement"]] = {
+                        "placement": r["placement"],
+                        "total": tot,
+                        "wins": wins,
+                        "win_rate": round((wins / tot) if tot > 0 else 0.0, 4),
+                        "timeouts": r["timeouts"],
+                        "avg_steps": round(r["avg_steps"] or 0.0, 1),
+                    }
+
+                # 4. Setup / spawn mode breakdown
+                setup_sql = f"""
+                SELECT
+                    COALESCE(spawn_mode, 'default') as setup,
+                    COUNT(*) as total,
+                    SUM(CASE WHEN success = 1 OR result = 'SUCCESS' THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN timeout = 1 OR result = 'TIMEOUT' THEN 1 ELSE 0 END) as timeouts,
+                    AVG(steps) as avg_steps
+                FROM training_episodes
+                {where_clause}
+                GROUP BY COALESCE(spawn_mode, 'default')
+                """
+                setup_rows = [dict(r) for r in conn.execute(setup_sql, params).fetchall()]
+                setup_stats: dict[str, dict[str, Any]] = {}
+                for r in setup_rows:
+                    tot = r["total"]
+                    wins = r["wins"]
+                    setup_stats[r["setup"]] = {
+                        "setup": r["setup"],
+                        "total": tot,
+                        "wins": wins,
+                        "win_rate": round((wins / tot) if tot > 0 else 0.0, 4),
+                        "timeouts": r["timeouts"],
+                        "avg_steps": round(r["avg_steps"] or 0.0, 1),
+                    }
+
+                # 5. Terminal failure locations
+                term_sql = f"""
+                SELECT
+                    COALESCE(final_sheep_zone, 'center') as final_zone,
+                    COUNT(*) as failure_count
+                FROM training_episodes
+                {where_clause} AND (success = 0 AND result != 'SUCCESS')
+                GROUP BY COALESCE(final_sheep_zone, 'center')
+                """
+                term_rows = [dict(r) for r in conn.execute(term_sql, params).fetchall()]
+                terminal_failure_heatmap = {r["final_zone"]: r["failure_count"] for r in term_rows}
+
+        except Exception as exc:
+            self.error_count += 1
+            self.last_error = str(exc)
+            logger.error("Failed to aggregate stage diagnostics from SQLite: %s", exc)
+            return {
+                "curriculum_stage": stage,
+                "total_episodes": 0,
+                "success_count": 0,
+                "overall_success_rate": 0.0,
+                "zone_stats": {},
+                "pen_stats": {},
+                "setup_stats": {},
+                "terminal_failure_heatmap": {},
+                "insights": [],
+                "error": str(exc),
+            }
+
+        insights = diagnose_stage_bottlenecks(
+            stage=stage,
+            total_episodes=total_episodes,
+            zone_stats=zone_stats,
+            pen_stats=pen_stats,
+            setup_stats=setup_stats,
+        )
+
+        return {
+            "curriculum_stage": stage,
+            "total_episodes": total_episodes,
+            "success_count": success_count,
+            "timeout_count": summary_row.get("timeout_count") or 0,
+            "stopped_count": summary_row.get("stopped_count") or 0,
+            "corner_stuck_count": summary_row.get("corner_stuck_count") or 0,
+            "overall_success_rate": round(overall_success_rate, 4),
+            "avg_steps": round(summary_row.get("avg_steps") or 0.0, 1),
+            "avg_corner_time_pct": round(summary_row.get("avg_corner_time_pct") or 0.0, 4),
+            "avg_wall_time_pct": round(summary_row.get("avg_wall_time_pct") or 0.0, 4),
+            "earliest_timestamp": summary_row.get("earliest_time"),
+            "latest_timestamp": summary_row.get("latest_time"),
+            "zone_stats": zone_stats,
+            "pen_stats": pen_stats,
+            "setup_stats": setup_stats,
+            "terminal_failure_heatmap": terminal_failure_heatmap,
+            "insights": insights,
         }
 
     def clear_store(self) -> None:

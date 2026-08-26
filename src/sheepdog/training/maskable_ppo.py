@@ -516,6 +516,16 @@ class MaskablePPOTrainer(Trainer):
         else:
             policy = NeuralPolicy.initialize(self.config)
 
+        if getattr(train_config, "failure_directed_training_enabled", False):
+            saved_fw = self._loaded_state.get("failure_directed_weights")
+            if isinstance(saved_fw, dict) and hasattr(policy.model, "get_env") and policy.model.get_env() is not None:
+                venv = policy.model.get_env()
+                try:
+                    if hasattr(venv, "env_method"):
+                        venv.env_method("update_failure_weights", saved_fw)
+                except Exception:
+                    pass
+
         checkpoint_payloads: list[dict[str, Any]] = (
             list(self._load_summary_checkpoints()) if resuming_policy else []
         )
@@ -826,6 +836,27 @@ class MaskablePPOTrainer(Trainer):
                     summary = quick_summary
 
             current_stage = self.config.rewards.instincts.curriculum_stage
+            # Failure-directed training weight update from evaluation
+            failure_telemetry: dict[str, Any] = {}
+            failure_weights: dict[str, float] = {}
+            if getattr(train_config, "failure_directed_training_enabled", False):
+                if not hasattr(self, "_failure_sampler"):
+                    from sheepdog.training.scenario_sampler import ScenarioSampler
+                    self._failure_sampler = ScenarioSampler(train_config, self.config.environment)
+                    saved_fw = self._loaded_state.get("failure_directed_weights")
+                    if isinstance(saved_fw, dict):
+                        self._failure_sampler.set_failure_weights(saved_fw)
+                failure_weights = self._failure_sampler.update_from_evaluation(summary.records)
+                # Propagate to vectorized environment workers
+                if hasattr(policy.model, "get_env") and policy.model.get_env() is not None:
+                    venv = policy.model.get_env()
+                    try:
+                        if hasattr(venv, "env_method"):
+                            venv.env_method("update_failure_weights", failure_weights)
+                    except Exception:
+                        pass
+                failure_telemetry = self._failure_sampler.get_usage_summary()
+
             if getattr(train_config, "enable_adaptive_learning", True):
                 adaptive_state = adaptive_controller.update(
                     eval_success_rate=summary.success_rate,
@@ -1023,6 +1054,8 @@ class MaskablePPOTrainer(Trainer):
                 "evaluation_id": summary.evaluation_id,
                 "evaluation_mode": summary.evaluation_mode,
                 "promotion_eligible": summary.promotion_eligible,
+                "failure_directed_weights": failure_weights if getattr(train_config, "failure_directed_training_enabled", False) else None,
+                "failure_directed_telemetry": failure_telemetry if getattr(train_config, "failure_directed_training_enabled", False) else None,
                 **runtime_snapshot,
             }
             checkpoint_payloads = self._merge_checkpoint(checkpoint_payloads, checkpoint_payload)
@@ -1056,6 +1089,8 @@ class MaskablePPOTrainer(Trainer):
                 "parent_checkpoint_id": self._loaded_state.get("parent_checkpoint_id"),
                 "policy_version": policy_version,
                 "training_scenario_coverage": curr_coverage,
+                "failure_directed_weights": failure_weights if getattr(train_config, "failure_directed_training_enabled", False) else None,
+                "failure_directed_telemetry": failure_telemetry if getattr(train_config, "failure_directed_training_enabled", False) else None,
             }
             state_export_phase = (
                 self.runtime_tracker.phase("checkpoint_save")

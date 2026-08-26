@@ -105,6 +105,14 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
             "similarity_successes": self._similarity_successes,
         }
 
+    def update_failure_weights(self, weights: dict[str, float]) -> None:
+        """Update failure scenario weights on the underlying scenario sampler."""
+        self._scenario_sampler.set_failure_weights(weights)
+
+    def get_scenario_sampler_summary(self) -> dict[str, Any]:
+        """Return the scenario sampler usage and telemetry summary."""
+        return self._scenario_sampler.get_usage_summary()
+
     def _next_seed(self) -> int:
         if self.fixed_seed_sequence:
             seed = self.fixed_seed_sequence[self._fixed_seed_index % len(self.fixed_seed_sequence)]
@@ -128,8 +136,8 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
         self._episode_reward = 0.0
         self._active_trajectory_buffer = []
 
-        # Use scenario sampler if scenario training is enabled
-        if self.config.training.scenario_training_enabled:
+        # Use scenario sampler if scenario training or failure-directed training is enabled
+        if self.config.training.scenario_training_enabled or getattr(self.config.training, "failure_directed_training_enabled", False):
             selection = self._scenario_sampler.sample(self._episode_counter)
             if selection.scenario is not None:
                 self._environment.reset_from_scenario(selection.scenario)
@@ -343,6 +351,7 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
                     else:
                         parts.append(f"Pen: ({pen_ox},{pen_oy})")
                 field_setup_str = " | ".join(parts)
+                env_stats = getattr(self._environment, "_stats", None)
                 info["episode"] = {
                     "r": float(self._episode_reward),
                     "l": int(getattr(snapshot, "step", 0)),
@@ -359,6 +368,14 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
                     "capture_reason": capture_reason if should_capture else "not_requested",
                     "capture_status": "queued" if should_capture else "not_requested",
                     "reward_breakdown": dict(getattr(self._environment, "_episode_reward_breakdown", {})),
+                    "pen_zone": getattr(env_stats, "pen_zone", ""),
+                    "spawn_mode": getattr(env_stats, "spawn_mode", spawn_mode),
+                    "initial_sheep_zone": getattr(env_stats, "initial_sheep_zone", ""),
+                    "final_sheep_zone": getattr(env_stats, "final_sheep_zone", ""),
+                    "corner_time_pct": getattr(env_stats, "corner_time_pct", 0.0),
+                    "wall_time_pct": getattr(env_stats, "wall_time_pct", 0.0),
+                    "corner_stuck_at_end": getattr(env_stats, "corner_stuck_at_end", False),
+                    "spatial_metrics": getattr(env_stats, "spatial_metrics", {}),
                 }
 
                 if self._current_episode_similarity_match is not None:

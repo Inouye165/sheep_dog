@@ -276,3 +276,29 @@ def test_spawn_mode_nearby_stray_places_separated_sheep() -> None:
             stray_found = True
             break
     assert stray_found, "Stage 9 should include at least one nearby stray layout"
+
+
+def test_stage_seven_curriculum_and_training_overrides() -> None:
+    base = LabConfig()
+    stage_seven = apply_curriculum_stage(base, 7)
+
+    # Environment overrides
+    assert stage_seven.environment.dogs == 2
+    assert stage_seven.environment.sheep == 4
+    assert stage_seven.environment.width == 96
+    assert stage_seven.environment.height == 72
+    assert stage_seven.environment.no_progress_window == 300
+    assert stage_seven.environment.count_collection_progress is True
+
+    # Reward overrides
+    assert stage_seven.rewards.farthest_sheep_progress_scale == 0.55
+    assert stage_seven.rewards.stray_ignore_penalty_scale == 0.0045
+
+    # Training hyperparameter overrides
+    assert stage_seven.training.entropy_coef == 0.014
+    assert stage_seven.training.learning_rate == 8.0e-5
+    assert stage_seven.training.learning_rate_final == 2.5e-5
+    assert stage_seven.training.gae_lambda == 0.98
+    assert stage_seven.training.failure_directed_training_enabled is True
+
+

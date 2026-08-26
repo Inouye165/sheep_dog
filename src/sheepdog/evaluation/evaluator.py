@@ -91,6 +91,17 @@ class EvaluationRecord:
     observation_diagnostics: dict[str, Any] | None = None
     failed_trajectory_summary: list[dict[str, Any]] | None = None
     last_actions_before_failure: list[list[str]] | None = None
+    pen_zone: str | None = None
+    initial_sheep_zone: str | None = None
+    final_sheep_zone: str | None = None
+    corner_steps_total: int | None = None
+    corner_time_pct: float | None = None
+    wall_steps_total: int | None = None
+    wall_time_pct: float | None = None
+    corner_stuck_at_end: bool | None = None
+    corner_entered: bool | None = None
+    corner_extracted: bool | None = None
+    spatial_metrics: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict."""
@@ -458,6 +469,17 @@ class Evaluator:
             observation_diagnostics=obs_diag,
             failed_trajectory_summary=failed_traj,
             last_actions_before_failure=last_actions,
+            pen_zone=getattr(result.stats, "pen_zone", None),
+            initial_sheep_zone=getattr(result.stats, "initial_sheep_zone", None),
+            final_sheep_zone=getattr(result.stats, "final_sheep_zone", None),
+            corner_steps_total=getattr(result.stats, "corner_steps_total", None),
+            corner_time_pct=getattr(result.stats, "corner_time_pct", None),
+            wall_steps_total=getattr(result.stats, "wall_steps_total", None),
+            wall_time_pct=getattr(result.stats, "wall_time_pct", None),
+            corner_stuck_at_end=getattr(result.stats, "corner_stuck_at_end", None),
+            corner_entered=getattr(result.stats, "corner_entered", None),
+            corner_extracted=getattr(result.stats, "corner_extracted", None),
+            spatial_metrics=getattr(result.stats, "spatial_metrics", None),
         )
 
     def _compute_observation_diagnostics(self, observations: tuple[tuple[Any, ...], ...]) -> dict[str, Any]:

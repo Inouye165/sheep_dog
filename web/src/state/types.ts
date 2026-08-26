@@ -913,3 +913,110 @@ export interface TrainingEpisodesResponse {
   total_matching: number;
   max_id?: number;
 }
+
+export interface ZoneMetricSummary {
+  zone: string;
+  total: number;
+  wins: number;
+  win_rate: number;
+  timeouts: number;
+  stopped: number;
+  trapped_at_end: number;
+  avg_steps: number;
+  avg_corner_pct: number;
+  avg_wall_pct: number;
+  is_corner: boolean;
+  is_wall: boolean;
+}
+
+export interface PenPlacementSummary {
+  placement: string;
+  total: number;
+  wins: number;
+  win_rate: number;
+  timeouts: number;
+  avg_steps: number;
+}
+
+export interface SetupSummary {
+  setup: string;
+  total: number;
+  wins: number;
+  win_rate: number;
+  timeouts: number;
+  avg_steps: number;
+}
+
+export interface StageBottleneckInsight {
+  severity: "critical" | "warning" | "info" | "success";
+  type: string;
+  title: string;
+  message: string;
+  metric?: string;
+}
+
+export interface StageBottleneckReport {
+  curriculum_stage: number;
+  total_episodes: number;
+  success_count: number;
+  timeout_count: number;
+  stopped_count: number;
+  corner_stuck_count: number;
+  overall_success_rate: number;
+  avg_steps: number;
+  avg_corner_time_pct: number;
+  avg_wall_time_pct: number;
+  earliest_timestamp: string | null;
+  latest_timestamp: string | null;
+  zone_stats: Record<string, ZoneMetricSummary>;
+  pen_stats: Record<string, PenPlacementSummary>;
+  setup_stats: Record<string, SetupSummary>;
+  terminal_failure_heatmap: Record<string, number>;
+  insights: StageBottleneckInsight[];
+  error?: string;
+}
+
+export interface EvaluationRecordPayload {
+  seed: number;
+  success: boolean;
+  timeout?: boolean;
+  stopped?: boolean;
+  steps: number;
+  simulated_seconds?: number;
+  sheep_penned: number;
+  stop_reason: string;
+  spawn_mode?: string;
+  reward_total: number;
+  replay_path?: string;
+  policy_version?: number | null;
+  final_sheep_distance_to_pen?: number;
+  final_flock_spread?: number;
+  final_sheep_zone?: string | null;
+  pen_zone?: string | null;
+  corner_time_pct?: number | null;
+  wall_time_pct?: number | null;
+  role_switches?: number;
+  collector_activations?: number;
+  blocker_activations?: number;
+  dog_role_occupancy?: Record<string, Record<string, number>>;
+  reward_breakdown?: Record<string, number>;
+}
+
+export interface EvaluationSummaryPayload {
+  checkpoint_episode: number;
+  policy_name?: string;
+  records: EvaluationRecordPayload[];
+  success_rate: number;
+  timeout_rate: number;
+  average_completion_steps: number;
+  average_sheep_penned: number;
+  average_reward: number;
+  curriculum_stage?: number;
+  run_id?: string | null;
+  checkpoint_id?: string | null;
+  policy_version?: number | null;
+  evaluation_timestamp?: string | null;
+  evaluation_id?: string | null;
+  evaluation_mode?: string;
+}
+

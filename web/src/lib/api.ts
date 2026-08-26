@@ -16,6 +16,9 @@ import type {
   TrainingEpisodesResponse,
   TrainingEpisode,
   CapturePolicyConfig,
+  StageBottleneckReport,
+  EvaluationSummaryPayload,
+  EvaluationRecordPayload,
 } from "../state/types";
 
 export const API_BASE_URL = "http://127.0.0.1:8000";
@@ -185,6 +188,31 @@ export async function loadFailedEpisodes(limit: number = 25): Promise<TrainingEp
   }
 }
 
+export async function loadRecentEvaluations(
+  limit: number = 5,
+  stage?: number
+): Promise<EvaluationSummaryPayload[] | null> {
+  if (backendOfflineState) {
+    return null;
+  }
+  const query = new URLSearchParams();
+  query.set("limit", String(limit));
+  if (stage !== undefined) {
+    query.set("stage", String(stage));
+  }
+  const path = `/api/insights/evaluations?${query.toString()}`;
+  try {
+    const res = await fetchJson<{ evaluations: EvaluationSummaryPayload[] }>(path, undefined, API_BASE_URL);
+    return res?.evaluations ?? [];
+  } catch (error) {
+    const fetchErr = error as ApiError;
+    if (fetchErr.isNetworkError || fetchErr.status === 0 || !fetchErr.status || error instanceof TypeError) {
+      backendOfflineState = true;
+    }
+    return null;
+  }
+}
+
 export async function loadReplay(path: string): Promise<ReplayBundle> {
   if (!path || !path.trim()) {
     throw new Error("No replay path specified.");
@@ -328,6 +356,8 @@ export async function runReplay(request: ReplayRunRequest): Promise<ReplayBundle
     body: JSON.stringify(request),
   }, API_BASE_URL);
 }
+
+export const runLiveReplay = runReplay;
 
 export async function loadEffectiveConfig(): Promise<Record<string, unknown>> {
   return fetchJson<Record<string, unknown>>("/api/config", undefined, API_BASE_URL);
@@ -503,3 +533,24 @@ export async function loadConfigActive(): Promise<Record<string, unknown>> {
 export async function loadConfigNextRun(): Promise<Record<string, unknown>> {
   return fetchJson<Record<string, unknown>>("/api/config/next-run", undefined, API_BASE_URL);
 }
+
+export async function loadStageDiagnostics(
+  stage?: number,
+  runId?: string,
+): Promise<StageBottleneckReport | null> {
+  const queryParts: string[] = [];
+  if (stage !== undefined && stage !== null) {
+    queryParts.push(`stage=${stage}`);
+  }
+  if (runId) {
+    queryParts.push(`run_id=${encodeURIComponent(runId)}`);
+  }
+  const query = queryParts.length > 0 ? `?${queryParts.join("&")}` : "";
+  try {
+    return await fetchJson<StageBottleneckReport>(`/api/stage-diagnostics${query}`, undefined, API_BASE_URL);
+  } catch (err) {
+    console.warn("[Sheepdog API] Failed to load stage diagnostics:", err);
+    return null;
+  }
+}
+

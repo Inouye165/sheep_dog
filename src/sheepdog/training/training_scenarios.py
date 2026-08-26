@@ -341,6 +341,219 @@ def create_partial_pen_with_stray_scenario(
     )
 
 
+def create_subpen_flock_scenario(
+    *,
+    seed: int,
+    config: EnvironmentConfig,
+) -> Scenario:
+    """Create a scenario with sheep spawned in the sub-pen zone (below the pen).
+
+    Models the geometry of Seed 11: sheep spawn beneath the top-right corner pen,
+    and dogs approach from the left. Tests split prevention and lone-straggler recovery.
+    """
+    width = config.width
+    height = config.height
+    sheep_count = config.sheep
+    dog_count = config.dogs
+    rng = Random(seed + config.seed_offset)
+
+    pen_origin_x = width - config.pen_width
+    pen_origin_y = 1
+    pen = PenLayout(
+        origin_x=pen_origin_x,
+        origin_y=pen_origin_y,
+        width=config.pen_width,
+        height=config.pen_height,
+        opening=config.pen_opening,
+    )
+
+    # Subpen zone: beneath the corner pen (x in [0.70W, 0.85W], y in [0.30H, 0.48H])
+    center_x = min(width - config.pen_width - 2, max(10, int(width * 0.78))) + rng.randint(-3, 3)
+    center_y = max(config.pen_height + 4, min(height - 10, int(height * 0.38))) + rng.randint(-3, 3)
+
+    sheep: list[AgentLayout] = []
+    occupied: set[tuple[int, int]] = set()
+    for i in range(sheep_count):
+        placed = False
+        for _ in range(50):
+            sx = max(2, min(width - 3, center_x + rng.randint(-3, 3)))
+            sy = max(2, min(height - 3, center_y + rng.randint(-3, 3)))
+            if (sx, sy) not in occupied:
+                occupied.add((sx, sy))
+                sheep.append(AgentLayout(index=i, x=sx, y=sy))
+                placed = True
+                break
+        if not placed:
+            sheep.append(AgentLayout(index=i, x=center_x + i, y=center_y))
+
+    # Standard left-side dogs
+    dogs: list[AgentLayout] = []
+    for i in range(dog_count):
+        dx = 2 + i * 2
+        dy = max(2, min(height - 3, (height // 2) + rng.randint(-2, 2)))
+        dogs.append(AgentLayout(index=i, x=dx, y=dy))
+
+    return Scenario(
+        id=f"subpen_flock_{seed}",
+        name="subpen_flock",
+        created_at="",
+        seed=seed,
+        width=width,
+        height=height,
+        dogs=tuple(dogs),
+        sheep=tuple(sheep),
+        pen=pen,
+        sheep_personality_strength=config.sheep_personality_strength,
+        sheep_personality_seed_offset=config.sheep_personality_seed_offset,
+        seed_offset=config.seed_offset,
+        description="Flock spawned in sub-pen region beneath pen entrance (Seed-11-like archetype)",
+    )
+
+
+def create_gate_wall_flock_scenario(
+    *,
+    seed: int,
+    config: EnvironmentConfig,
+) -> Scenario:
+    """Create a scenario with sheep along the top wall adjacent to the pen entrance.
+
+    Models the geometry of Seed 53: sheep spawn near the top perimeter wall to the left
+    of the pen opening, testing gate-corridor entry and preventing hovering standoff.
+    """
+    width = config.width
+    height = config.height
+    sheep_count = config.sheep
+    dog_count = config.dogs
+    rng = Random(seed + config.seed_offset)
+
+    pen_origin_x = width - config.pen_width
+    pen_origin_y = 1
+    pen = PenLayout(
+        origin_x=pen_origin_x,
+        origin_y=pen_origin_y,
+        width=config.pen_width,
+        height=config.pen_height,
+        opening=config.pen_opening,
+    )
+
+    # Top-wall gate flank zone: x in [0.55W, 0.70W], y in [3, 8]
+    center_x = max(10, min(pen_origin_x - 10, int(width * 0.62))) + rng.randint(-3, 3)
+    center_y = rng.randint(3, 7)
+
+    sheep: list[AgentLayout] = []
+    occupied: set[tuple[int, int]] = set()
+    for i in range(sheep_count):
+        placed = False
+        for _ in range(50):
+            sx = max(2, min(pen_origin_x - 2, center_x + rng.randint(-3, 3)))
+            sy = max(2, min(10, center_y + rng.randint(-2, 2)))
+            if (sx, sy) not in occupied:
+                occupied.add((sx, sy))
+                sheep.append(AgentLayout(index=i, x=sx, y=sy))
+                placed = True
+                break
+        if not placed:
+            sheep.append(AgentLayout(index=i, x=center_x + i, y=center_y))
+
+    # Standard left-side dogs
+    dogs: list[AgentLayout] = []
+    for i in range(dog_count):
+        dx = 2 + i * 2
+        dy = max(2, min(height - 3, (height // 2) + rng.randint(-2, 2)))
+        dogs.append(AgentLayout(index=i, x=dx, y=dy))
+
+    return Scenario(
+        id=f"gate_wall_flock_{seed}",
+        name="gate_wall_flock",
+        created_at="",
+        seed=seed,
+        width=width,
+        height=height,
+        dogs=tuple(dogs),
+        sheep=tuple(sheep),
+        pen=pen,
+        sheep_personality_strength=config.sheep_personality_strength,
+        sheep_personality_seed_offset=config.sheep_personality_seed_offset,
+        seed_offset=config.seed_offset,
+        description="Flock along top wall adjacent to pen entrance corridor (Seed-53-like archetype)",
+    )
+
+
+def create_isolated_stray_scenario(
+    *,
+    seed: int,
+    config: EnvironmentConfig,
+) -> Scenario:
+    """Create a scenario with a main flock and one separated stray.
+
+    Models the geometry of Seed 41/37: an isolated stray separated from the main flock.
+    """
+    width = config.width
+    height = config.height
+    sheep_count = config.sheep
+    dog_count = config.dogs
+    rng = Random(seed + config.seed_offset)
+
+    pen_origin_x = width - config.pen_width
+    pen_origin_y = 1
+    pen = PenLayout(
+        origin_x=pen_origin_x,
+        origin_y=pen_origin_y,
+        width=config.pen_width,
+        height=config.pen_height,
+        opening=config.pen_opening,
+    )
+
+    main_count = max(1, sheep_count - 1)
+    center_x = rng.randint(width // 3, width // 2)
+    center_y = rng.randint(height // 4, 3 * height // 4)
+
+    sheep: list[AgentLayout] = []
+    occupied: set[tuple[int, int]] = set()
+    for i in range(main_count):
+        placed = False
+        for _ in range(50):
+            sx = max(2, min(width - 3, center_x + rng.randint(-2, 2)))
+            sy = max(2, min(height - 3, center_y + rng.randint(-2, 2)))
+            if (sx, sy) not in occupied:
+                occupied.add((sx, sy))
+                sheep.append(AgentLayout(index=i, x=sx, y=sy))
+                placed = True
+                break
+        if not placed:
+            sheep.append(AgentLayout(index=i, x=center_x + i, y=center_y))
+
+    # Isolated stray: displaced 8 to 14 units away from center
+    stray_offset_x = rng.choice([-1, 1]) * rng.randint(8, 14)
+    stray_offset_y = rng.choice([-1, 1]) * rng.randint(6, 12)
+    stray_x = max(2, min(width - 3, center_x + stray_offset_x))
+    stray_y = max(2, min(height - 3, center_y + stray_offset_y))
+    sheep.append(AgentLayout(index=main_count, x=stray_x, y=stray_y))
+
+    # Standard left-side dogs
+    dogs: list[AgentLayout] = []
+    for i in range(dog_count):
+        dx = 2 + i * 2
+        dy = max(2, min(height - 3, (height // 2) + rng.randint(-2, 2)))
+        dogs.append(AgentLayout(index=i, x=dx, y=dy))
+
+    return Scenario(
+        id=f"isolated_stray_{seed}",
+        name="isolated_stray",
+        created_at="",
+        seed=seed,
+        width=width,
+        height=height,
+        dogs=tuple(dogs),
+        sheep=tuple(sheep),
+        pen=pen,
+        sheep_personality_strength=config.sheep_personality_strength,
+        sheep_personality_seed_offset=config.sheep_personality_seed_offset,
+        seed_offset=config.seed_offset,
+        description="Main flock with one separated stray (Seed-41/37-like archetype)",
+    )
+
+
 # Scenario type registry
 SCENARIO_BUILDERS: dict[str, callable] = {
     "scattered_sheep": create_scattered_sheep_scenario,
@@ -348,6 +561,9 @@ SCENARIO_BUILDERS: dict[str, callable] = {
     "corner_huddle": create_corner_huddle_scenario,
     "normal_random": create_normal_random_scenario,
     "partial_pen_with_stray": create_partial_pen_with_stray_scenario,
+    "subpen_flock": create_subpen_flock_scenario,
+    "gate_wall_flock": create_gate_wall_flock_scenario,
+    "isolated_stray": create_isolated_stray_scenario,
 }
 
 

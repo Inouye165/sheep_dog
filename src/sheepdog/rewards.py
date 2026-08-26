@@ -388,26 +388,28 @@ class RewardComputer:
                 
                 if farthest_sheep is not None:
                     dist_to_centroid = _distance(farthest_sheep, inputs.flock_centroid)
-                    # A sheep is isolated if it's more than 8.0 cells from the flock centroid
-                    if dist_to_centroid > 8.0:
+                    # A sheep/cluster requires approach incentive if it's separated from the flock centroid (>8.0),
+                    # or if unpenned sheep remain far from the pen target (>10.0)
+                    is_isolated = (dist_to_centroid > 8.0) or (max_dist > 10.0)
+                    if is_isolated:
                         min_dog_dist = min(_distance(dog, farthest_sheep) for dog in inputs.dog_positions)
                         # Dense approach penalty: 10x the stray ignore scale to provide a clear gradient
                         effective_min_dog_dist = min(12.0, min_dog_dist)
                         stray_penalty -= effective_min_dog_dist * (si_scale * 10.0)
 
                         # Dense approach progress reward: localized distance-based multiplier
-                        # when moving toward isolated farther_stray sheep.
+                        # when moving toward isolated farther_stray sheep or distant unpenned cluster.
                         if inputs.previous_dog_positions:
                             prev_min_dog_dist = min(_distance(dog, farthest_sheep) for dog in inputs.previous_dog_positions)
                             progress = prev_min_dog_dist - min_dog_dist
-                            # Localized distance-based multiplier: increases as the sheep is more isolated
-                            isolation_multiplier = max(1.0, dist_to_centroid / 8.0)
+                            # Localized distance-based multiplier: increases as the sheep is more isolated or distant
+                            isolation_multiplier = max(1.0, dist_to_centroid / 8.0) if dist_to_centroid > 8.0 else max(1.0, max_dist / 10.0)
                             # Progress reward is scaled by the stray ignore penalty scale
                             stray_approach_reward = progress * (si_scale * 20.0) * isolation_multiplier
                             stray_penalty += stray_approach_reward
             
             # Cap the overall stray penalty to avoid catastrophic policy updates
-            stray_penalty = max(-25.0, stray_penalty)
+            stray_penalty = max(-15.0, stray_penalty)
 
         return farthest_progress, stray_penalty
 

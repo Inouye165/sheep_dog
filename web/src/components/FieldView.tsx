@@ -21,11 +21,12 @@ const ACTIVE_SHEEP_STROKE = "#cbd5e1";
 
 function fenceSegments(snapshot: ReplaySnapshot): Array<{ side: Side; x1: number; y1: number; x2: number; y2: number }> {
   const { pen } = snapshot;
+  if (!pen || !pen.origin) return [];
   const opening = pen.opening ?? "left";
-  const ox = pen.origin.x;
-  const oy = pen.origin.y;
-  const right = ox + pen.width;
-  const bottom = oy + pen.height;
+  const ox = pen.origin.x ?? 0;
+  const oy = pen.origin.y ?? 0;
+  const right = ox + (pen.width ?? 10);
+  const bottom = oy + (pen.height ?? 10);
   const all: Array<{ side: Side; x1: number; y1: number; x2: number; y2: number }> = [
     { side: "top", x1: ox, y1: oy, x2: right, y2: oy },
     { side: "bottom", x1: ox, y1: bottom, x2: right, y2: bottom },
@@ -67,8 +68,10 @@ export function FieldView({ snapshot }: FieldViewProps) {
         </div>
         {snapshot ? (
           <div className="field-card__meta">
-            <span>Step {snapshot.step}</span>
-            <span>{snapshot.simulated_seconds.toFixed(0)}s simulated</span>
+            <span>Step {snapshot.step ?? 0}</span>
+            {snapshot.simulated_seconds !== undefined && snapshot.simulated_seconds !== null ? (
+              <span>{snapshot.simulated_seconds.toFixed(0)}s simulated</span>
+            ) : null}
           </div>
         ) : null}
       </div>
