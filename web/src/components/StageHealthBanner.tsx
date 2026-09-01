@@ -273,28 +273,33 @@ export function StageHealthBanner({
   const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
   const [copied, setCopied] = useState<boolean>(false);
 
-  const fetchHealth = useCallback(async (force = false) => {
-    try {
-      setLoading(true);
-      const data = await loadStageHealth(curriculumStage, force);
-      if (data && data.total_stage_checkpoints > 0) {
-        setHealthData(data);
-      } else {
-        const fallback = buildClientFallbackHealth(curriculumStage, checkpoints, trainingStatus);
-        if (fallback) setHealthData(fallback);
-      }
-    } catch (err) {
-      console.warn("[StageHealthBanner] Endpoint fallback to client aggregation:", err);
-      const fallback = buildClientFallbackHealth(curriculumStage, checkpoints, trainingStatus);
-      if (fallback) setHealthData(fallback);
-    } finally {
-      setLoading(false);
-    }
-  }, [curriculumStage, checkpoints, trainingStatus]);
-
   useEffect(() => {
-    fetchHealth();
-  }, [fetchHealth, lastLiveRefreshTime]);
+    let isMounted = true;
+    const load = async () => {
+      try {
+        setLoading(true);
+        const data = await loadStageHealth(curriculumStage, false);
+        if (!isMounted) return;
+        if (data && data.total_stage_checkpoints > 0) {
+          setHealthData(data);
+        } else {
+          const fallback = buildClientFallbackHealth(curriculumStage, checkpoints, trainingStatus);
+          if (fallback && isMounted) setHealthData(fallback);
+        }
+      } catch (err) {
+        console.warn("[StageHealthBanner] Endpoint fallback to client aggregation:", err);
+        if (!isMounted) return;
+        const fallback = buildClientFallbackHealth(curriculumStage, checkpoints, trainingStatus);
+        if (fallback && isMounted) setHealthData(fallback);
+      } finally {
+        if (isMounted) setLoading(false);
+      }
+    };
+    load();
+    return () => {
+      isMounted = false;
+    };
+  }, [curriculumStage, checkpoints, trainingStatus, lastLiveRefreshTime]);
 
 
   const handleCopySummary = () => {

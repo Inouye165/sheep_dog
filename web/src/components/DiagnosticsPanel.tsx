@@ -3640,7 +3640,6 @@ export function DiagnosticsPanel({
               data={successData}
               rawPoints={layerRawEpisodes ? rawSuccessPoints : []}
               rollingData={layerRollingAvg ? rollingSuccessData : []}
-              blockPoints={blockSuccessData}
               showPolicySnapshots={layerPolicySnapshots}
               showFormalEvals={layerFormalEvals}
               formatX={formatChartX}
@@ -3686,7 +3685,6 @@ export function DiagnosticsPanel({
               data={successData}
               rawPoints={layerRawEpisodes ? rawSuccessPoints : []}
               rollingData={layerRollingAvg ? rollingSuccessData : []}
-              blockPoints={blockSuccessData}
               showPolicySnapshots={layerPolicySnapshots}
               showFormalEvals={layerFormalEvals}
               formatX={formatChartX}
