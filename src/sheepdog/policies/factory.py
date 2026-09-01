@@ -19,6 +19,7 @@ POLICY_CHOICES: tuple[str, ...] = (
     "heuristic_expert",
     "trained_policy",
     "neural_policy",
+    "joint_team_policy",
     "shepherd_neural_dogs",
 )
 
@@ -49,6 +50,20 @@ def create_policy_from_name(
         if policy_state_path:
             return NeuralPolicy.load(policy_state_path, config, policy_config, policy_version=policy_version)
         return NeuralPolicy.initialize(config)
+    if policy_name == "joint_team_policy":
+        # pylint: disable-next=import-outside-toplevel
+        from sheepdog.policies.joint_team import JointTeamPolicy
+
+        if config is None:
+            raise ValueError("Joint-team policy creation requires config")
+        if policy_state_path:
+            return JointTeamPolicy.load(
+                policy_state_path,
+                config,
+                policy_config,
+                policy_version=policy_version,
+            )
+        return JointTeamPolicy.initialize(config)
     if policy_name == "shepherd_neural_dogs":
         # pylint: disable-next=import-outside-toplevel
         from sheepdog.policies.hierarchical import ShepherdNeuralDogPolicy
@@ -86,7 +101,10 @@ def load_playable_policy(
     policy_config: dict[str, Any] | None = None
     policy_version: int | None = None
     if checkpoint_episode is not None:
-        checkpoint_path = output_root / "checkpoints" / f"checkpoint-{checkpoint_episode:06d}.json"
+        checkpoint_root = output_root / "checkpoints"
+        if selected_mode == "joint_team_policy":
+            checkpoint_root /= "joint_team"
+        checkpoint_path = checkpoint_root / f"checkpoint-{checkpoint_episode:06d}.json"
         if not checkpoint_path.exists():
             raise FileNotFoundError(f"Checkpoint {checkpoint_episode} not found")
         payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
@@ -96,7 +114,12 @@ def load_playable_policy(
         policy_version = payload.get("policy_version")
         selected_mode = payload.get("policy_name", selected_mode)
     else:
-        state_path = output_root / Trainer.STATE_FILENAME
+        state_filename = (
+            "joint-team-training-state.json"
+            if selected_mode == "joint_team_policy"
+            else Trainer.STATE_FILENAME
+        )
+        state_path = output_root / state_filename
         if state_path.exists():
             payload = json.loads(state_path.read_text(encoding="utf-8"))
             weights_payload = payload.get("weights")

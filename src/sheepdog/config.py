@@ -276,6 +276,11 @@ class TrainingConfig:
     wandb_enabled: bool = False
     # Adaptive step-size / learning rate controller toggle.
     enable_adaptive_learning: bool = True
+    # PPO Target KL Divergence threshold for early stopping update mini-batches.
+    target_kl: float | None = 0.03
+    # Automatic rollback safeguard against catastrophic policy collapse during late-stage training.
+    auto_rollback_on_collapse: bool = True
+    collapse_threshold_success: float = 0.35
 
 
 @dataclass(frozen=True, slots=True)

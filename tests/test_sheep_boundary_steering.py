@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from sheepdog.config import LabConfig, EnvironmentConfig
-from sheepdog.entities import DogRole, DogState, Pen, Point, SheepState
+from sheepdog.config import EnvironmentConfig, LabConfig
+from sheepdog.entities import DogState, Pen, Point, SheepState
 from sheepdog.environment import SheepdogEnvironment
 from sheepdog.team_strategy import TeamStrategy
 

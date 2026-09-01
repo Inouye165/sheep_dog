@@ -1,14 +1,11 @@
 """Tests for 3-layer neural network architecture [128, 128, 128] and training reset integrity."""
 
-import json
 from dataclasses import replace
-from pathlib import Path
+
 import pytest
 
 from sheepdog.config import LabConfig
 from sheepdog.policies.neural import NeuralPolicy, NeuralPolicyConfig
-from sheepdog.policies.hierarchical import ShepherdNeuralDogPolicy, HierarchicalNeuralPolicyConfig
-from sheepdog.checkpoints.store import CheckpointMetadata
 from sheepdog.server import TrainingManager
 
 
@@ -64,11 +61,11 @@ def test_7_old_two_layer_checkpoints_rejected_as_incompatible(tmp_path):
     config = LabConfig()
     old_config_dict = {"hidden_sizes": [128, 128], "observation_size": 54}
     fake_zip_path = tmp_path / "old_2layer_model.zip"
-    
+
     policy_2layer = NeuralPolicy.initialize(config)
     policy_2layer.config = NeuralPolicyConfig(hidden_sizes=(128, 128), observation_size=54)
     saved_path = policy_2layer.save(fake_zip_path)
-    
+
     with pytest.raises((ValueError, RuntimeError), match="Incompatible model architecture"):
         NeuralPolicy.load(saved_path, config, policy_config=old_config_dict)
 
@@ -77,7 +74,7 @@ def test_8_cleared_training_storage_initializes_correctly(tmp_path):
     manager = TrainingManager()
     cfg = LabConfig()
     custom_cfg = replace(cfg, training=replace(cfg.training, output_dir=str(tmp_path / "artifacts"), web_export_dir=str(tmp_path / "web/public/generated")))
-    
+
     manager._clear_training_outputs(custom_cfg)
     assert not (tmp_path / "artifacts" / "checkpoints").exists()
     assert not (tmp_path / "artifacts" / "training-summary.json").exists()

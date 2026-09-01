@@ -2,27 +2,26 @@
 
 import hashlib
 import json
-import zipfile
-from pathlib import Path
-import pytest
 from http import HTTPStatus
+from pathlib import Path
 
-from sheepdog.config import LabConfig
-from sheepdog.curriculum import apply_curriculum_stage
-from sheepdog.environment import SheepdogEnvironment, ACTION_ORDER
-from sheepdog.policies.neural import NeuralPolicy
-from sheepdog.server import TrainingManager, RestoreCompatibilityError, resolve_workspace_path
-from sheepdog.checkpoints.store import (
-    get_observation_schema_hash,
-    get_action_space_hash,
-    verify_checkpoint_compatibility,
-)
+import pytest
+
 from sheepdog.checkpoints.sidecar import (
     compute_file_sha256,
     create_sidecar_metadata,
-    load_and_verify_sidecar,
     get_sidecar_path_for_model,
+    load_and_verify_sidecar,
 )
+from sheepdog.checkpoints.store import (
+    get_action_space_hash,
+    verify_checkpoint_compatibility,
+)
+from sheepdog.config import LabConfig
+from sheepdog.curriculum import apply_curriculum_stage
+from sheepdog.environment import ACTION_ORDER, SheepdogEnvironment
+from sheepdog.policies.neural import NeuralPolicy
+from sheepdog.server import RestoreCompatibilityError, TrainingManager
 
 
 def ppo_hash(model) -> str:

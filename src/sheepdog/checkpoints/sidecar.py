@@ -57,7 +57,7 @@ def create_sidecar_metadata(
         "action_count": len(ACTION_ORDER),
         "policy_architecture": policy_architecture,
         "source_checkpoint_sha256": model_sha256,
-        "migration_timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "migration_timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
         "migration_method": migration_method,
         "verified_legacy_schema": True,
     }

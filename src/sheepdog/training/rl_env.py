@@ -180,7 +180,7 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
                 self._similarity_successes[ev_s] = 0
 
         self._stage_unique_seeds.add(self._latest_seed)
-        
+
         # Hash initial positions configuration
         dogs = self._environment.dogs
         sheep = self._environment.sheep
@@ -198,7 +198,7 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
             for item in sheep
         ]
         avg_sheep_to_pen = float(np.mean(sheep_dists)) if sheep_dists else 0.0
-        
+
         dog_dists = []
         for dog in dogs:
             for item in sheep:
@@ -209,8 +209,10 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
 
         # Update stats
         def _update_stat_dict(d, val):
-            if val < d["min"]: d["min"] = val
-            if val > d["max"]: d["max"] = val
+            if val < d["min"]:
+                d["min"] = val
+            if val > d["max"]:
+                d["max"] = val
             d["sum"] += val
             d["count"] += 1
 
@@ -241,7 +243,7 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
 
     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
         action_name = ACTION_ORDER[int(action)]
-        mask = self.action_masks()
+        mask = self._current_dog_action_mask()
         if not bool(mask[int(action)]):
             action_name = "wait"
         self._pending_actions.append(action_name)
@@ -266,7 +268,6 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
                 "reward": breakdown.to_dict(),
             })
 
-            team_actions = list(self._pending_actions)
             self._pending_actions = []
             self._current_dog_index = 0
 
@@ -277,12 +278,12 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
                 status_str = "SUCCESS" if snapshot.success else ("TIMEOUT" if snapshot.timeout else "STOPPED")
                 stage = self.config.rewards.instincts.curriculum_stage
 
+                from sheepdog.training.episode_store import get_episode_store
                 from sheepdog.training.replay_writer import (
+                    ReplayWriteJob,
                     get_global_capture_policy,
                     get_replay_writer,
-                    ReplayWriteJob,
                 )
-                from sheepdog.training.episode_store import get_episode_store
 
                 policy = get_global_capture_policy()
                 should_capture, capture_reason = policy.should_capture(
@@ -307,7 +308,12 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
                     output_path = output_dir / f"{replay_id}.json.gz"
                     replay_path_str = str(output_path)
 
-                    stats_dict = self._environment._stats.to_dict() if hasattr(self._environment, "_stats") else {}
+                    environment_stats = getattr(self._environment, "_stats", None)
+                    stats_dict = (
+                        environment_stats.to_dict()
+                        if environment_stats is not None
+                        else {}
+                    )
 
                     payload = {
                         "seed": seed_val,
@@ -403,6 +409,10 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
 
     def action_masks(self) -> np.ndarray:
         """Return a boolean mask for the current dog's legal actions."""
+        return self._current_dog_action_mask()
+
+    def _current_dog_action_mask(self) -> np.ndarray:
+        """Return the legal-action mask for the active dog."""
         mask_map = self._environment.action_mask_for_dog(
             self._current_dog_index,
             reserved_positions={

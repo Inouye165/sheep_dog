@@ -1,2 +1,8 @@
 [MAIN]
 py-version=3.11
+
+[MESSAGES CONTROL]
+# Ruff owns style, imports, unused code, and modernization. Keep VS Code's
+# Problems panel focused on Pylint findings that indicate invalid behavior.
+disable=all
+enable=F,E

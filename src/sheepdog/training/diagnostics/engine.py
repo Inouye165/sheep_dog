@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import math
 from collections import Counter
+from collections.abc import Sequence
 from statistics import fmean, variance
-from typing import Any, Sequence
+from typing import Any
 
 from sheepdog.curriculum import CURRICULUM_STAGES
 from sheepdog.training.diagnostics.config import DeterministicDiagnosticsConfig
@@ -143,7 +144,10 @@ class DeterministicDiagnosticsEngine:
         x_vals = list(range(n_unique_cps))
         x_mean = fmean(x_vals)
         y_mean = rolling_success
-        numerator = sum((x - x_mean) * (y - y_mean) for x, y in zip(x_vals, cp_success_rates))
+        numerator = sum(
+            (x - x_mean) * (y - y_mean)
+            for x, y in zip(x_vals, cp_success_rates, strict=True)
+        )
         denominator = sum((x - x_mean) ** 2 for x in x_vals)
         slope = (numerator / denominator) if denominator > 0 else 0.0
 
@@ -366,7 +370,9 @@ class DeterministicDiagnosticsEngine:
 
         no_prog = [max(0.0, float(r.get("no_progress_steps", 0) or 0)) for r in failed_records]
         steps = [max(1.0, float(r.get("steps", 1) or 1)) for r in failed_records]
-        stagnant_ratios = [min(1.0, np / st) for np, st in zip(no_prog, steps)]
+        stagnant_ratios = [
+            min(1.0, np / st) for np, st in zip(no_prog, steps, strict=True)
+        ]
 
         avg_penned = fmean(penned_counts) if penned_counts else 0.0
         avg_ratio = fmean(ratios) if ratios else 0.0

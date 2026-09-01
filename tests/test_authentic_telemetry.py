@@ -1,10 +1,8 @@
 import tempfile
 from pathlib import Path
-import pytest
 from unittest.mock import MagicMock
 
 from sheepdog.training.episode_store import EpisodeStore
-from sheepdog.training.telemetry import CurriculumTelemetryManager
 from sheepdog.training.maskable_ppo import _TrainingProgressCallback
 
 
@@ -13,7 +11,7 @@ def test_authentic_global_timestep_recording():
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
         db_path = Path(tmpdir) / "test-telemetry.sqlite"
         store = EpisodeStore(db_path)
-        
+
         # Insert an episode with explicit trainer global_timestep = 45123 (distinct from episode number 5)
         store.add_episode({
             "global_environment_episode": 5,
@@ -27,7 +25,7 @@ def test_authentic_global_timestep_recording():
             "policy_version": 2,
         })
         store.flush()
-        
+
         res = store.get_episodes(stage=1)
         episodes = res.get("episodes", []) if isinstance(res, dict) else res
         assert len(episodes) == 1
@@ -43,7 +41,7 @@ def test_vector_env_multi_completion_handling():
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
         db_path = Path(tmpdir) / "test-telemetry.sqlite"
         store = EpisodeStore(db_path)
-        
+
         trainer_ts = 90240
         # Two episodes finishing on the exact same step in vector env
         for ep_num in [10, 11]:
@@ -59,7 +57,7 @@ def test_vector_env_multi_completion_handling():
                 "policy_version": 3,
             })
         store.flush()
-            
+
         res = store.get_episodes(stage=1)
         episodes = res.get("episodes", []) if isinstance(res, dict) else res
         assert len(episodes) == 2
@@ -73,7 +71,7 @@ def test_legacy_null_values_supported():
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
         db_path = Path(tmpdir) / "test-telemetry.sqlite"
         store = EpisodeStore(db_path)
-        
+
         # Legacy row with global_timestep omitted / None
         store.add_episode({
             "global_environment_episode": 1,
@@ -86,7 +84,7 @@ def test_legacy_null_values_supported():
             "global_timestep": None,
         })
         store.flush()
-        
+
         res = store.get_episodes(stage=1)
         episodes = res.get("episodes", []) if isinstance(res, dict) else res
         assert len(episodes) == 1
@@ -99,7 +97,7 @@ def test_progress_callback_emits_authentic_timestep():
     emitted = []
     def mock_emit(payload):
         emitted.append(payload)
-        
+
     cb = _TrainingProgressCallback(
         mock_emit,
         should_stop=None,
@@ -115,19 +113,19 @@ def test_progress_callback_emits_authentic_timestep():
         starting_total=10,
     )
     cb.num_timesteps = 2048
-    
+
     cb.model = MagicMock()
     cb.model._n_updates = 0
     mock_env = MagicMock()
     mock_env.get_attr.return_value = [5]
     cb.model.get_env.return_value = mock_env
-    
+
     cb.locals = {
         "dones": [True],
         "infos": [{"episode": {"r": 12.0, "l": 200, "success": True, "penned": 1, "total_sheep": 1, "status": "SUCCESS"}}],
     }
     cb._on_step()
-    
+
     ep_events = [e for e in emitted if e.get("phase") == "episode_complete"]
     assert len(ep_events) == 1
     assert ep_events[0]["global_timestep"] == 47048
@@ -139,7 +137,7 @@ def test_run_scoped_insights_pipeline():
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
         db_path = Path(tmpdir) / "test-telemetry-scoping.sqlite"
         store = EpisodeStore(db_path)
-        
+
         # Old run: 25 failures
         for i in range(1, 26):
             store.add_episode({
@@ -154,7 +152,7 @@ def test_run_scoped_insights_pipeline():
                 "run_id": "run_old_failures",
                 "global_timestep": i * 100,
             })
-            
+
         # Active run: 25 successes
         for i in range(26, 51):
             store.add_episode({
@@ -170,20 +168,20 @@ def test_run_scoped_insights_pipeline():
                 "global_timestep": i * 100,
             })
         store.flush()
-        
+
         # Query scoped to active run_id
         res_active = store.get_episodes(run_id="run_active_successes", limit=25, order="desc")
         episodes_active = res_active.get("episodes", [])
         assert len(episodes_active) == 25
         assert all(ep["run_id"] == "run_active_successes" for ep in episodes_active)
         assert all(ep["success"] is True for ep in episodes_active)
-        
+
         summary_active = store.get_telemetry_summary(run_id="run_active_successes")
         assert summary_active["window_count"] == 25
         assert summary_active["success_count"] == 25
         assert summary_active["stopped_count"] == 0
         assert summary_active["success_rate"] == 1.0
-        
+
         # Unscoped query (all journeys) contains both runs
         res_all = store.get_episodes(limit=100)
         episodes_all = res_all.get("episodes", [])

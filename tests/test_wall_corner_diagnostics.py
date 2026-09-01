@@ -13,13 +13,11 @@ Validates:
 
 from __future__ import annotations
 
-import math
-from sheepdog.config import LabConfig, EnvironmentConfig
+from sheepdog.config import EnvironmentConfig, LabConfig
 from sheepdog.entities import DogRole, DogState, Pen, Point, SheepState
-from sheepdog.environment import SheepdogEnvironment, ACTION_ORDER
+from sheepdog.environment import SheepdogEnvironment
 from sheepdog.observations import RoleAwareObservationBuilder
 from sheepdog.team_strategy import TeamStrategy
-from sheepdog.rewards import RewardComputer
 
 
 def test_raw_vs_clamped_role_targets_near_walls() -> None:

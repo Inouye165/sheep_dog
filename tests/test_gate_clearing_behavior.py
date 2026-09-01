@@ -1,8 +1,7 @@
 """Unit tests for gate clearing and corridor non-blocking logic."""
 
-import pytest
 
-from sheepdog.config import EnvironmentConfig, RewardConfig
+from sheepdog.config import RewardConfig
 from sheepdog.entities import DogRole, DogState, Pen, Point, SheepState
 from sheepdog.rewards import RewardComputer, RewardInputs
 from sheepdog.team_strategy import TeamStrategy

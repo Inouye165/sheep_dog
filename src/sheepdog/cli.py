@@ -20,7 +20,12 @@ from sheepdog.server import _load_playable_policy
 from sheepdog.training.factory import create_trainer
 
 POLICY_CHOICES = list(POLICY_CHOICES)
-TRAINER_CHOICES = ["hill_climb", "maskable_ppo", "hierarchical_maskable_ppo"]
+TRAINER_CHOICES = [
+    "hill_climb",
+    "maskable_ppo",
+    "joint_maskable_ppo",
+    "hierarchical_maskable_ppo",
+]
 POLICY_TYPE_CHOICES = ["linear", "neural"]
 
 
@@ -192,6 +197,85 @@ def benchmark_command() -> None:
                 "json": str(json_path),
                 "csv": str(csv_path),
                 "summary": str(summary_path),
+            },
+            indent=2,
+        )
+    )
+
+
+def batch_size_experiment_command() -> None:
+    """Run an isolated batch-size A/B experiment from the current best model."""
+
+    # Import lazily so other CLI commands do not require the optional RL stack.
+    from sheepdog.batch_size_experiment import (  # pylint: disable=import-outside-toplevel
+        DEFAULT_EVALUATION_SEEDS,
+        DEFAULT_EXPERIMENT_TIMESTEPS,
+        DEFAULT_TRAIN_SEEDS,
+        run_batch_size_experiment,
+    )
+
+    parser = argparse.ArgumentParser(
+        description="Compare PPO batch sizes from the same frozen baseline checkpoint."
+    )
+    parser.add_argument("--config", default=None, help="Config JSON; defaults to effective config.")
+    parser.add_argument("--baseline-dir", default="artifacts", help="Source artifact directory.")
+    parser.add_argument("--output-dir", default=None, help="New experiment artifact directory.")
+    parser.add_argument("--timesteps", type=int, default=DEFAULT_EXPERIMENT_TIMESTEPS)
+    parser.add_argument("--train-seeds", nargs="+", type=int, default=list(DEFAULT_TRAIN_SEEDS))
+    parser.add_argument("--evaluation-seeds", nargs="+", type=int, default=None)
+    parser.add_argument("--control-batch-size", type=int, default=1024)
+    parser.add_argument("--candidate-batch-size", type=int, default=512)
+    args = parser.parse_args()
+
+    baseline_root = Path(args.baseline_dir)
+    config_path = (
+        Path(args.config)
+        if args.config
+        else baseline_root / "effective-training-config.json"
+    )
+    if not config_path.exists():
+        raise SystemExit(f"Experiment config not found: {config_path}")
+    config = _load_config(str(config_path))
+
+    def report_progress(payload: dict[str, object]) -> None:
+        phase = payload.get("phase")
+        if phase == "experiment_arm_start":
+            print(
+                f"Starting seed={payload['train_seed']} batch={payload['batch_size']}...",
+                flush=True,
+            )
+        elif phase == "checkpoint":
+            print(str(payload.get("message", "Checkpoint complete")), flush=True)
+        elif phase == "experiment_arm_complete":
+            print(
+                f"Completed seed={payload['train_seed']} batch={payload['batch_size']}: "
+                f"effective_batch={payload['effective_batch_size']}, "
+                f"success={float(payload['success_rate']):.1%}, "
+                f"timeout={float(payload['timeout_rate']):.1%}, "
+                f"KL={float(payload['approx_kl']):.6f}",
+                flush=True,
+            )
+
+    result = run_batch_size_experiment(
+        config,
+        baseline_root=baseline_root,
+        output_root=args.output_dir,
+        total_timesteps=args.timesteps,
+        train_seeds=tuple(args.train_seeds),
+        evaluation_seeds=tuple(args.evaluation_seeds or DEFAULT_EVALUATION_SEEDS),
+        control_batch_size=args.control_batch_size,
+        candidate_batch_size=args.candidate_batch_size,
+        progress_callback=report_progress,
+    )
+    print(
+        json.dumps(
+            {
+                "verdict": result.verdict,
+                "reason": result.reason,
+                "success_rate_difference": result.success_rate_difference,
+                "timeout_rate_difference": result.timeout_rate_difference,
+                "paired_success_p_value": result.paired_success_p_value,
+                "report": str(Path(result.output_dir) / "comparison.md"),
             },
             indent=2,
         )

@@ -94,6 +94,7 @@ def test_parallel_ppo_environment_starts_worker_processes(tmp_path: Path) -> Non
 def test_loaded_policy_disables_unavailable_tensorboard(tmp_path: Path) -> None:
     config = make_experiment_config(tmp_path)
     model = MagicMock()
+    model.batch_size = 1024
     model.tensorboard_log = str(tmp_path / "stale-tensorboard-path")
     vec_env = SimpleNamespace(observation_space=SimpleNamespace(shape=(12,)))
 
@@ -105,6 +106,7 @@ def test_loaded_policy_disables_unavailable_tensorboard(tmp_path: Path) -> None:
         NeuralPolicy.load(tmp_path / "model.zip", config)
 
     assert model.tensorboard_log is None
+    assert model.batch_size == config.training.batch_size
 
 
 def test_wandb_cleanup_accepts_partial_module() -> None:
@@ -165,6 +167,46 @@ def test_maskable_ppo_trainer_emits_progress_updates(tmp_path: Path) -> None:
     assert "checkpoint" in phases
     assert "complete" in phases
     assert any(payload.get("checkpoint_episode") == 0 for payload in payloads)
+
+
+def test_maskable_ppo_resume_applies_saved_adaptive_stage(tmp_path: Path) -> None:
+    config = make_experiment_config(tmp_path)
+    create_trainer(config, config.training.output_dir).train()
+    state_path = Path(config.training.output_dir) / "training-state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["adaptive_step_state"] = {
+        "stage": 2,
+        "curriculum_stage": config.rewards.instincts.curriculum_stage,
+        "ema_success_rate": 0.65,
+        "consecutive_hits": 0,
+    }
+    state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+    learn_settings: list[tuple[float, float, float]] = []
+    original_load = NeuralPolicy.load
+
+    def load_and_observe(*args: object, **kwargs: object) -> NeuralPolicy:
+        policy = original_load(*args, **kwargs)
+        original_learn = policy.model.learn
+
+        def learn_and_record(*learn_args: object, **learn_kwargs: object) -> object:
+            optimizer_lr = policy.model.policy.optimizer.param_groups[0]["lr"]
+            learn_settings.append(
+                (policy.model.learning_rate, optimizer_lr, policy.model.ent_coef)
+            )
+            try:
+                return original_learn(*learn_args, **learn_kwargs)
+            finally:
+                del policy.model.learn
+
+        policy.model.learn = learn_and_record
+        return policy
+
+    with patch.object(NeuralPolicy, "load", side_effect=load_and_observe):
+        create_trainer(config, config.training.output_dir).train()
+
+    assert len(learn_settings) == 1
+    assert np.allclose(learn_settings[0], (8e-5, 8e-5, 0.008))
 
 
 def test_maskable_ppo_trainer_resets_incompatible_saved_action_space(tmp_path: Path) -> None:
@@ -282,7 +324,6 @@ def test_evaluator_is_deterministic_for_fixed_seed_neural_policy(tmp_path: Path)
 
 
 def test_maskable_ppo_trainer_compatible_across_curriculum_stages(tmp_path: Path) -> None:
-    import json
     from dataclasses import asdict
 
     from sheepdog.curriculum import apply_training_profile
@@ -372,7 +413,7 @@ def test_quick_vs_confidence_evaluation_mode_selection(tmp_path: Path) -> None:
 
     evaluate_calls: list[str] = []
 
-    def fake_evaluate(policy, seeds, **kwargs):
+    def fake_evaluate(_policy, seeds, **kwargs):
         mode = kwargs.get("evaluation_mode", "unknown")
         evaluate_calls.append(mode)
         rec = EvaluationRecord(

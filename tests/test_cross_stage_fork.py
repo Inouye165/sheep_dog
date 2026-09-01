@@ -2,15 +2,15 @@
 
 import hashlib
 import json
-import shutil
-from pathlib import Path
-import pytest
 from http import HTTPStatus
+from pathlib import Path
 
+import pytest
+
+from sheepdog.checkpoints.sidecar import compute_file_sha256, create_sidecar_metadata
 from sheepdog.config import LabConfig
 from sheepdog.curriculum import apply_curriculum_stage
 from sheepdog.policies.neural import NeuralPolicy
-from sheepdog.checkpoints.sidecar import compute_file_sha256, create_sidecar_metadata
 from sheepdog.server import TrainingManager
 
 

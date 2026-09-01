@@ -6,6 +6,7 @@ import { CopyAgentDataButton } from "./CopyAgentDataButton";
 import { StackedLearningPanels } from "./StackedLearningPanels";
 import { StageBottlenecksPanel } from "./StageBottlenecksPanel";
 import { EvaluationEpisodesTab } from "./EvaluationEpisodesTab";
+import { StageHealthBanner } from "./StageHealthBanner";
 import {
   processCanonicalHistory,
   selectWindowSlice,
@@ -3307,6 +3308,15 @@ export function DiagnosticsPanel({
         </div>
       </div>
 
+      {/* ── Real-Time Whole-Stage Learning Health Visual Banner ── */}
+      <StageHealthBanner
+        curriculumStage={effectiveCurriculumStage}
+        lastLiveRefreshTime={lastLiveRefreshTime}
+        isLiveTraining={isLiveTraining}
+        checkpoints={checkpoints}
+        trainingStatus={trainingStatus}
+      />
+
       {/* ── High-Impact 5-Card Metric Strip ── */}
       <div className="insights-kpi-grid">
         {/* Card 1: Gate & Readiness */}
@@ -3401,15 +3411,15 @@ export function DiagnosticsPanel({
             <span
               className="kpi-card__value"
               style={{
-                color: (trainingStatus?.adaptive_lr_stage ?? stageLatestCheckpoint?.adaptive_lr_stage ?? 1) > 1 ? "#34d399" : "#e2e8f0",
+                color: (stageLatestCheckpoint?.adaptive_lr_stage ?? trainingStatus?.adaptive_lr_stage ?? 1) > 1 ? "#34d399" : "#e2e8f0",
               }}
             >
-              Stage {trainingStatus?.adaptive_lr_stage ?? stageLatestCheckpoint?.adaptive_lr_stage ?? 1} of {trainingStatus?.adaptive_lr_stage_max ?? stageLatestCheckpoint?.adaptive_lr_stage_max ?? 4}
+              Stage {stageLatestCheckpoint?.adaptive_lr_stage ?? trainingStatus?.adaptive_lr_stage ?? 1} of {stageLatestCheckpoint?.adaptive_lr_stage_max ?? trainingStatus?.adaptive_lr_stage_max ?? 4}
             </span>
             <span className="kpi-card__sub">
-              {(trainingStatus?.adaptive_lr_stage ?? stageLatestCheckpoint?.adaptive_lr_stage ?? 1) === 1
+              {(stageLatestCheckpoint?.adaptive_lr_stage ?? trainingStatus?.adaptive_lr_stage ?? 1) === 1
                 ? "1.00x · Base (No modification)"
-                : `${(trainingStatus?.adaptive_lr_multiplier ?? stageLatestCheckpoint?.adaptive_lr_multiplier ?? 1.0).toFixed(2)}x · Resets on stage promo`}
+                : `${(stageLatestCheckpoint?.adaptive_lr_multiplier ?? trainingStatus?.adaptive_lr_multiplier ?? 1.0).toFixed(2)}x · Resets on stage promo`}
             </span>
           </div>
         </div>

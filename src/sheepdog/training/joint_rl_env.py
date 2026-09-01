@@ -192,7 +192,7 @@ class JointActionRLEnv(gym.Env[np.ndarray, int]):
                 self._similarity_successes[ev_s] = 0
 
         self._stage_unique_seeds.add(self._latest_seed)
-        
+
         # Hash initial positions configuration
         dogs = self._environment.dogs
         sheep = self._environment.sheep
@@ -210,7 +210,7 @@ class JointActionRLEnv(gym.Env[np.ndarray, int]):
             for item in sheep
         ]
         avg_sheep_to_pen = float(np.mean(sheep_dists)) if sheep_dists else 0.0
-        
+
         dog_dists = []
         for dog in dogs:
             for item in sheep:
@@ -221,8 +221,10 @@ class JointActionRLEnv(gym.Env[np.ndarray, int]):
 
         # Update stats
         def _update_stat_dict(d, val):
-            if val < d["min"]: d["min"] = val
-            if val > d["max"]: d["max"] = val
+            if val < d["min"]:
+                d["min"] = val
+            if val > d["max"]:
+                d["max"] = val
             d["sum"] += val
             d["count"] += 1
 

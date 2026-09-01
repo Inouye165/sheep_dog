@@ -13,6 +13,7 @@ from dataclasses import fields, replace
 
 from sheepdog.config import EnvironmentConfig, LabConfig
 
+
 def _mix(**weights: float) -> dict[str, float]:
     """Small helper to keep spawn-mixture declarations readable."""
 
@@ -1148,13 +1149,13 @@ def apply_curriculum_stage(config: LabConfig, stage: int) -> LabConfig:
     env_keys = {f.name for f in fields(EnvironmentConfig)}
     env_overrides = {k: v for k, v in overrides.items() if k in env_keys}
     new_environment = replace(config.environment, **env_overrides)
-    
+
     reward_overrides = CURRICULUM_REWARD_OVERRIDES.get(stage)
     new_rewards = replace(config.rewards, **reward_overrides) if reward_overrides else config.rewards
-    
+
     training_overrides = CURRICULUM_TRAINING_OVERRIDES.get(stage)
     new_training = replace(config.training, **training_overrides) if training_overrides else config.training
-    
+
     return replace(config, environment=new_environment, rewards=new_rewards, training=new_training)
 
 def stage_summary(stage: int) -> str:

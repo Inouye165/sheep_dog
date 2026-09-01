@@ -7,11 +7,11 @@ pen placement difficulty, and localized failure modes across stage lifecycles.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
-from typing import Any, Sequence
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from typing import Any
 
 from sheepdog.entities import Pen, Point
-
 
 ZONE_TOP_LEFT = "top_left"
 ZONE_TOP_RIGHT = "top_right"
@@ -106,7 +106,7 @@ def classify_flock_zone(
     """Classify the centroid position of a flock of sheep into a spatial zone."""
     if not positions:
         return ZONE_CENTER
-    
+
     total_x = 0.0
     total_y = 0.0
     for pos in positions:
@@ -116,7 +116,7 @@ def classify_flock_zone(
         else:
             total_x += float(pos[0])
             total_y += float(pos[1])
-            
+
     avg_x = total_x / len(positions)
     avg_y = total_y / len(positions)
     return classify_field_zone(avg_x, avg_y, width, height, corner_ratio)

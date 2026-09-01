@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import contextlib
 import gzip
 import json
 import logging
@@ -10,7 +11,7 @@ import os
 import queue
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -57,16 +58,15 @@ class CapturePolicy:
 
         # Unsuccessful episodes (TIMEOUT, STOPPED, or non-success)
         is_failure = not success or status in {"TIMEOUT", "STOPPED"}
-        if is_failure:
-            if self.mode in {"failures", "selective"}:
-                reason = (
-                    "timeout"
-                    if status == "TIMEOUT"
-                    else "stopped"
-                    if status == "STOPPED"
-                    else "unsuccessful_terminal"
-                )
-                return True, reason
+        if is_failure and self.mode in {"failures", "selective"}:
+            reason = (
+                "timeout"
+                if status == "TIMEOUT"
+                else "stopped"
+                if status == "STOPPED"
+                else "unsuccessful_terminal"
+            )
+            return True, reason
 
         # Success sampling in selective mode
         if self.mode == "selective" and success:
@@ -215,10 +215,8 @@ class AsyncReplayWriter:
             self.last_error = str(exc)
             logger.error("Failed to write replay file %s: %s", job.output_path, exc)
             if tmp_path is not None and tmp_path.exists():
-                try:
+                with contextlib.suppress(OSError):
                     tmp_path.unlink()
-                except OSError:
-                    pass
             if self.episode_store:
                 self.episode_store.update_replay_info(
                     event_key=job.event_key,
@@ -264,20 +262,16 @@ class AsyncReplayWriter:
                         self._queue.task_done()
             except queue.Empty:
                 break
-        try:
+        with contextlib.suppress(Exception):
             self._queue.join()
-        except Exception:
-            pass
         while self._busy:
             time.sleep(0.01)
 
     def close(self) -> None:
         self.flush()
         self._stop_event.set()
-        try:
+        with contextlib.suppress(queue.Full):
             self._queue.put_nowait(None)
-        except queue.Full:
-            pass
         if self._worker_thread and self._worker_thread.is_alive():
             self._worker_thread.join(timeout=2.0)
 

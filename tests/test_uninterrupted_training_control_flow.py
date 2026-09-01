@@ -9,13 +9,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock, patch
 
-import pytest
-
-from sheepdog.config import LabConfig, TrainingConfig
-from sheepdog import server as server_module
+from sheepdog.config import LabConfig
 from sheepdog.server import TrainingManager, _EarlyPromotionSignal
 
 
@@ -25,20 +20,6 @@ def test_1_evaluation_below_threshold_keeps_training_active(tmp_path: Path) -> N
     manager._status["state"] = "running"
     manager._status["phase"] = "training"
     manager._status["curriculum_stage"] = 1
-
-    # Simulate a checkpoint callback with 7/10 success rate (0.7)
-    payload = {
-        "phase": "checkpoint",
-        "checkpoint_episode": 10,
-        "summary": {
-            "success_rate": 0.7,
-            "average_reward": 140.0,
-            "average_sheep_penned": 0.7,
-            "timeout_rate": 0.3,
-            "promotion_eligible": True,
-            "records": [{"seed": 1, "success": True, "sheep_penned": 1, "reward_total": 140.0}],
-        },
-    }
 
     # Execute progress callback logic directly
     manager._status.update({
@@ -76,7 +57,7 @@ def test_2_collapse_detector_fires_advisory_warning_and_keeps_training_active() 
 
     assert manager._control_request is None
     assert manager._status["phase"] == "training"
-    assert manager._status["anti_collapse_warning"]["triggered"] is True
+    assert manager._status["anti_collapse_warning"] == warning
     assert "continuing training" in manager._status["message"]
 
 
@@ -87,7 +68,7 @@ def test_3_consecutive_failed_evaluations_keeps_training_active() -> None:
 
     for checkpoint_ep in range(10, 50, 10):
         manager._eval_success_history.append((checkpoint_ep, 0.2))
-        manager._status["message"] = f"Checkpoint Evaluation: 2/10 (20%) — Not ready for promotion. Training continues."
+        manager._status["message"] = "Checkpoint Evaluation: 2/10 (20%) — Not ready for promotion. Training continues."
         assert manager._control_request is None
         assert manager._status["phase"] == "training"
 

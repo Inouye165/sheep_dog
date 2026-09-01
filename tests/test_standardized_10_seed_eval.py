@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+
 from sheepdog.config import LabConfig, TrainingConfig
 from sheepdog.server import SheepdogEnvironment
 
@@ -27,8 +28,9 @@ def test_eval_seed_geometry_fallback_and_environment() -> None:
 
 
 def test_promotion_gate_with_10_seeds(tmp_path: Path) -> None:
-    from sheepdog.server import compute_promotion_gate_snapshot
     import json
+
+    from sheepdog.server import compute_promotion_gate_snapshot
 
     output_root = tmp_path / "artifacts"
     eval_dir = output_root / "evaluations"

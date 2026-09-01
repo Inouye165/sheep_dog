@@ -50,6 +50,7 @@ def test_phases_accumulate_without_overlap_and_flush_on_end(tmp_path) -> None:
     assert summary["training_seconds"] == 5
     assert summary["evaluation_seconds"] == 3
     assert summary["active_seconds_total"] == 8
+    assert tracker.active_seconds_total == 8
 
 
 def test_phase_context_records_exception_and_reraises(tmp_path) -> None:
@@ -141,4 +142,4 @@ def test_close_stale_session_handles_exceptions_gracefully(tmp_path) -> None:
     recovered = make_tracker(tmp_path, clock)
     session = recovered.snapshot()["sessions"][0]
     assert session["status"] == "ended"
-    assert session["end_reason"] == "crashed_or_stale"
+    assert session["end_reason"] == "crashed_or_stale"

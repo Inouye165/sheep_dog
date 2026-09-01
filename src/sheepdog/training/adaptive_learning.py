@@ -13,7 +13,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
-
 ADAPTIVE_STAGES: tuple[dict[str, Any], ...] = (
     {
         "stage": 1,
@@ -65,6 +64,7 @@ class AdaptiveStepState:
     curriculum_stage: int
     effective_learning_rate: float
     effective_mutation_scale: float
+    effective_entropy_coef: float
     ema_success_rate: float
     consecutive_hits: int
 
@@ -85,21 +85,23 @@ def _target_stage_for_success(success_rate: float) -> int:
 
 
 class AdaptiveStepController:
-    """Controller managing discrete, conservative learning rate and mutation adjustments."""
+    """Controller managing discrete, conservative learning rate, entropy, and mutation adjustments."""
 
     def __init__(
         self,
         base_learning_rate: float = 1e-4,
         base_mutation_scale: float = 0.08,
+        base_entropy_coef: float = 0.01,
         ema_alpha: float = 0.40,
         debounce_required_hits: int = 2,
         initial_curriculum_stage: int = 1,
     ) -> None:
         self.base_learning_rate = float(base_learning_rate)
         self.base_mutation_scale = float(base_mutation_scale)
+        self.base_entropy_coef = float(base_entropy_coef)
         self.ema_alpha = float(ema_alpha)
         self.debounce_required_hits = max(1, int(debounce_required_hits))
-        
+
         self.current_stage: int = 1
         self.curriculum_stage: int = int(initial_curriculum_stage)
         self.ema_success_rate: float = 0.0
@@ -113,6 +115,43 @@ class AdaptiveStepController:
         self.pending_target_stage = 1
         self.consecutive_hits = 0
         self.ema_success_rate = 0.0
+
+    def restore(
+        self,
+        payload: dict[str, Any] | None,
+        current_curriculum_stage: int,
+    ) -> AdaptiveStepState:
+        """Restore same-curriculum progress, or reset safely for a new curriculum stage."""
+        active_curriculum_stage = int(current_curriculum_stage)
+        if not payload:
+            self.reset_for_curriculum_stage(active_curriculum_stage)
+            return self.get_state()
+
+        try:
+            saved_curriculum_stage = int(payload["curriculum_stage"])
+            saved_stage = int(payload["stage"])
+            saved_ema = float(payload["ema_success_rate"])
+            saved_hits = int(payload["consecutive_hits"])
+        except (KeyError, TypeError, ValueError):
+            self.reset_for_curriculum_stage(active_curriculum_stage)
+            return self.get_state()
+
+        if saved_curriculum_stage != active_curriculum_stage:
+            self.reset_for_curriculum_stage(active_curriculum_stage)
+            return self.get_state()
+
+        self.curriculum_stage = active_curriculum_stage
+        self.current_stage = max(1, min(MAX_ADAPTIVE_STAGES, saved_stage))
+        self.ema_success_rate = max(0.0, min(1.0, saved_ema))
+        self.consecutive_hits = max(
+            0,
+            min(max(0, self.debounce_required_hits - 1), saved_hits),
+        )
+        self.pending_target_stage = min(
+            MAX_ADAPTIVE_STAGES,
+            self.current_stage + (1 if self.consecutive_hits else 0),
+        )
+        return self.get_state()
 
     def update(
         self,
@@ -181,6 +220,7 @@ class AdaptiveStepController:
 
         effective_lr = self.base_learning_rate * multiplier
         effective_mutation = self.base_mutation_scale * multiplier
+        effective_entropy = self.base_entropy_coef * multiplier
 
         return AdaptiveStepState(
             stage=self.current_stage,
@@ -192,6 +232,8 @@ class AdaptiveStepController:
             curriculum_stage=self.curriculum_stage,
             effective_learning_rate=effective_lr,
             effective_mutation_scale=effective_mutation,
+            effective_entropy_coef=effective_entropy,
             ema_success_rate=round(self.ema_success_rate, 4),
             consecutive_hits=self.consecutive_hits,
         )
+

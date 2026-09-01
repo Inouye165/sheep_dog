@@ -4,15 +4,15 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from sheepdog.config import LabConfig, TrainingConfig, EnvironmentConfig, RewardConfig
-from sheepdog.server import TrainingManager
 from sheepdog.checkpoints.store import (
     CheckpointMetadata,
     CheckpointStore,
-    get_observation_schema_hash,
     get_action_space_hash,
+    get_observation_schema_hash,
     verify_checkpoint_compatibility,
 )
+from sheepdog.config import LabConfig, TrainingConfig
+from sheepdog.server import TrainingManager
 
 
 def test_compatibility_hashing_and_verification() -> None:
@@ -185,22 +185,10 @@ def test_collapse_safety_guard_triggering(tmp_path: Path) -> None:
         for ep in range(30, 81, 10):
             manager._eval_success_history.append((ep, 0.4))
 
-        # Check latest progress_callback check
-        # We simulate the callback payload trigger
-        dummy_callback_payload = {
-            "checkpoint_episode": 80,
-            "summary": {
-                "success_rate": 0.4,
-                "average_reward": -2.0,
-                "timeout_rate": 0.6,
-                "average_sheep_penned": 1.0,
-            },
-            "replay_path": "dummy_replay_path"
-        }
-
-        # Mock self.telemetry_manager.log
-        with patch.object(manager.telemetry_manager, "log") as mock_log:
-            with patch("sheepdog.server.create_trainer") as mock_create_trainer:
+        with (
+            patch.object(manager.telemetry_manager, "log"),
+            patch("sheepdog.server.create_trainer"),
+        ):
                 # We can call the inner progress_callback logic or test it via TrainingManager
                 # Let's inspect TrainingManager progress_callback by fetching the local variable reference
                 # Wait, inside _run_training, progress_callback is an inline closure.
@@ -362,12 +350,16 @@ def test_legacy_checkpoint_compatibility() -> None:
 
 
 def test_identity_metadata_and_hard_guard() -> None:
-    from sheepdog.checkpoints.store import compute_env_config_hash, compute_seed_set_id, CheckpointMetadata
-    from sheepdog.evaluation.evaluator import EvaluationSummary
-    from sheepdog.config import LabConfig
-
     # 1. Hashing utilities
     from dataclasses import asdict
+
+    from sheepdog.checkpoints.store import (
+        CheckpointMetadata,
+        compute_env_config_hash,
+        compute_seed_set_id,
+    )
+    from sheepdog.config import LabConfig
+    from sheepdog.evaluation.evaluator import EvaluationSummary
     config = LabConfig()
     env_hash = compute_env_config_hash(asdict(config.environment))
     assert isinstance(env_hash, str)

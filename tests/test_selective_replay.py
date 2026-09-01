@@ -3,11 +3,11 @@
 import gzip
 import json
 import sqlite3
-from pathlib import Path
+
 import pytest
 
 from sheepdog.config import LabConfig
-from sheepdog.training.rl_env import SheepdogRLAdapter
+from sheepdog.training.episode_store import EpisodeStore
 from sheepdog.training.replay_writer import (
   AsyncReplayWriter,
   CapturePolicy,
@@ -15,7 +15,7 @@ from sheepdog.training.replay_writer import (
   get_global_capture_policy,
   set_global_capture_policy,
 )
-from sheepdog.training.episode_store import EpisodeStore
+from sheepdog.training.rl_env import SheepdogRLAdapter
 
 
 @pytest.fixture
@@ -318,9 +318,6 @@ def test_15_16_17_retention_pruning(temp_dir):
 
 
 def test_11_and_12_replay_endpoint_security_and_404(temp_dir):
-  from sheepdog.server import TrainingRequestHandler
-  from http.server import HTTPServer
-  import io
 
   db_path = temp_dir / "test_api.sqlite"
   store = EpisodeStore(db_path=db_path)

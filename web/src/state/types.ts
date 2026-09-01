@@ -1020,3 +1020,68 @@ export interface EvaluationSummaryPayload {
   evaluation_mode?: string;
 }
 
+export interface SeedHealthItem {
+  seed: number;
+  win_rate: number;
+  wins: number;
+  fails: number;
+  total: number;
+  status: "green" | "yellow" | "red";
+  current_consecutive_fails: number;
+}
+
+export interface FailureProgressStats {
+  total_failures: number;
+  avg_penned_on_fail: number;
+  three_penned_pct: number;
+  two_penned_pct: number;
+  one_penned_pct: number;
+  zero_penned_pct: number;
+  closeness_score: number;
+}
+
+export interface HyperparameterAuditItem {
+  parameter: string;
+  current_value: unknown;
+  recommended_value: unknown;
+  status: "ok" | "warn" | "danger";
+  note: string;
+}
+
+export interface PrescriptiveRecommendation {
+  type: string;
+  title: string;
+  description: string;
+  suggested_action: string;
+  priority: "high" | "medium" | "info";
+}
+
+export interface StageHealthSummary {
+  stage: number;
+  stage_title: string;
+  total_stage_checkpoints: number;
+  all_time_stage_success_rate: number;
+  recent_success_rate: number;
+  peak_stage_success_rate: number;
+  recent_avg_steps: number;
+  recent_avg_reward: number;
+  status: "green" | "yellow" | "red";
+  status_label: string;
+  status_explanation: string;
+  promotion_ready: boolean;
+  promotion_status_text: string;
+  failure_progress: FailureProgressStats;
+  seed_matrix: SeedHealthItem[];
+  recent_trajectory: Array<{
+    pv: number;
+    episode: number;
+    success_rate: number;
+    steps: number;
+    reward: number;
+    mode: string;
+    timestamp: string;
+  }>;
+  hyperparameter_audit: HyperparameterAuditItem[];
+  prescriptive_recommendations: PrescriptiveRecommendation[];
+}
+

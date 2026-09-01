@@ -3,8 +3,8 @@
 # pylint: disable=missing-function-docstring,missing-class-docstring,too-many-lines
 from __future__ import annotations
 
-import threading
 import json
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -17,8 +17,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from sheepdog.config import LabConfig, TrainingConfig
 from sheepdog import server as server_module
+from sheepdog.config import LabConfig, TrainingConfig
 from sheepdog.server import TrainingManager, TrainingRequestHandler
 
 
@@ -1212,7 +1212,8 @@ def test_diagnostics_endpoint_route_integration(tmp_path: Path) -> None:
 
 def test_log_message_suppresses_routine_polling_noise() -> None:
     from http.server import BaseHTTPRequestHandler
-    from unittest.mock import MagicMock, patch
+    from unittest.mock import patch
+
     from sheepdog.server import TrainingRequestHandler
 
     handler = object.__new__(TrainingRequestHandler)
@@ -1244,6 +1245,7 @@ def test_health_endpoint_routes(tmp_path: Path) -> None:
     import json
     import urllib.request
     from unittest.mock import MagicMock, patch
+
     from sheepdog.server import ThreadingHTTPServer, TrainingRequestHandler
 
     artifacts = tmp_path / "artifacts"
@@ -1313,7 +1315,7 @@ def test_worker_exception_handling_unexpected_vs_deliberate_shutdown(tmp_path: P
         snap = manager.snapshot()
         assert snap["running"] is False
         assert snap["phase"] == "error"
-        assert "Unexpected worker failure" in snap["error"]
+        assert "Unexpected worker failure" in str(snap["error"])
 
     # 2. Test deliberate shutdown exception (KeyboardInterrupt) performs cleanup & re-raises
     class FailingTrainerKeyboardInterrupt:
@@ -1331,7 +1333,7 @@ def test_worker_exception_handling_unexpected_vs_deliberate_shutdown(tmp_path: P
         snap = manager.snapshot()
         assert snap["running"] is False
         assert snap["phase"] == "error"
-        assert "KeyboardInterrupt" in snap["error_type"]
+        assert "KeyboardInterrupt" in str(snap["error_type"])
 
 
 def test_start_discovers_latest_model_zip_using_st_mtime(tmp_path: Path) -> None:

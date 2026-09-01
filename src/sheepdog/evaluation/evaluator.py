@@ -25,7 +25,11 @@ def _policy_metadata(
     normalized_trainer = trainer_type or "baseline"
     normalized_policy_type = policy_type or "instinct"
     replay_mode = "baseline"
-    if policy_name == "neural_policy" or normalized_trainer == "maskable_ppo":
+    if policy_name == "joint_team_policy" or normalized_trainer == "joint_maskable_ppo":
+        normalized_trainer = "joint_maskable_ppo"
+        normalized_policy_type = "neural"
+        replay_mode = "joint_team_ppo"
+    elif policy_name == "neural_policy" or normalized_trainer == "maskable_ppo":
         normalized_trainer = "maskable_ppo"
         normalized_policy_type = "neural"
         replay_mode = "neural_ppo"
@@ -254,11 +258,12 @@ class Evaluator:
         )
 
         import datetime
+
         from sheepdog.checkpoints.store import (
             compute_env_config_hash,
             compute_seed_set_id,
-            get_observation_schema_hash,
             get_action_space_hash,
+            get_observation_schema_hash,
         )
 
         active_curriculum_stage = curriculum_stage if curriculum_stage is not None else self.config.rewards.instincts.curriculum_stage
@@ -283,12 +288,12 @@ class Evaluator:
 
         try:
             observation_schema_hash = get_observation_schema_hash(self.config)
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             observation_schema_hash = None
 
         try:
             action_space_hash = get_action_space_hash()
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             action_space_hash = None
 
         summary = EvaluationSummary(
@@ -415,11 +420,11 @@ class Evaluator:
 
     def _record_from_result(self, result: EpisodeResult, policy_version: int | None = None) -> EvaluationRecord:
         snapshot = result.final_snapshot
-        
+
         obs_diag = None
         if hasattr(result, "observations") and result.observations:
             obs_diag = self._compute_observation_diagnostics(result.observations)
-            
+
         failed_traj = None
         last_actions = None
         if not result.stats.success:
@@ -490,7 +495,7 @@ class Evaluator:
             return {}
         feature_names = list(first_step[0].feature_names)
         num_features = len(feature_names)
-        
+
         min_vals = []
         max_vals = []
         mean_vals = []
@@ -498,16 +503,16 @@ class Evaluator:
         constant_features = []
         nan_or_inf_features = []
         saturated_features = []
-        
+
         import math
-        
+
         for i, name in enumerate(feature_names):
             values = []
             for step_obs in observations:
                 for dog_obs in step_obs:
                     if i < len(dog_obs.values):
                         values.append(dog_obs.values[i])
-            
+
             if not values:
                 min_vals.append(0.0)
                 max_vals.append(0.0)
@@ -515,12 +520,12 @@ class Evaluator:
                 std_vals.append(0.0)
                 constant_features.append(name)
                 continue
-                
+
             has_nan = any(math.isnan(v) or math.isinf(v) for v in values)
             if has_nan:
                 nan_or_inf_features.append(name)
                 values = [v for v in values if not (math.isnan(v) or math.isinf(v))]
-                
+
             if not values:
                 min_vals.append(0.0)
                 max_vals.append(0.0)
@@ -528,20 +533,20 @@ class Evaluator:
                 std_vals.append(0.0)
                 constant_features.append(name)
                 continue
-                
+
             min_v = min(values)
             max_v = max(values)
             mean_v = sum(values) / len(values)
             std_v = math.sqrt(sum((v - mean_v)**2 for v in values) / len(values))
-            
+
             min_vals.append(min_v)
             max_vals.append(max_v)
             mean_vals.append(mean_v)
             std_vals.append(std_v)
-            
+
             if std_v < 1e-6:
                 constant_features.append(name)
-                
+
             is_sat = False
             for bound in (-1.0, 0.0, 1.0):
                 if all(abs(v - bound) < 1e-4 for v in values):
@@ -549,7 +554,7 @@ class Evaluator:
                     break
             if is_sat and name not in constant_features:
                 saturated_features.append(name)
-                
+
         return {
             "feature_names": feature_names,
             "vector_length": num_features,
@@ -568,7 +573,7 @@ class Evaluator:
         if not replay:
             return []
         steps_count = len(replay)
-        
+
         min_dist_steps = set()
         running_min_dist = float("inf")
         for idx, frame in enumerate(replay):
@@ -576,22 +581,22 @@ class Evaluator:
             if dist < running_min_dist:
                 running_min_dist = dist
                 min_dist_steps.add(idx)
-                
+
         key_steps = {0, steps_count - 1} | min_dist_steps
         target_count = 20
         step_interval = max(1, steps_count // target_count)
         for idx in range(0, steps_count, step_interval):
             key_steps.add(idx)
-            
+
         sorted_steps = sorted(list(key_steps))
-        
+
         summary_rows = []
         for step_idx in sorted_steps:
             if step_idx >= steps_count:
                 continue
             frame = replay[step_idx]
             snap = frame.snapshot
-            
+
             unpenned_sheep = [s for s in snap.sheep if not s.penned]
             avg_dog_to_sheep = 0.0
             if unpenned_sheep and snap.dogs:
@@ -602,7 +607,7 @@ class Evaluator:
                     dog_d = sum(d_pos.distance_to(Point(s.x, s.y)) for s in unpenned_sheep) / len(unpenned_sheep)
                     total_d += dog_d
                 avg_dog_to_sheep = total_d / len(snap.dogs)
-                
+
             event = ""
             if step_idx == 0:
                 event = "initial"
@@ -610,7 +615,7 @@ class Evaluator:
                 event = f"termination: {snap.status or result.stats.stop_reason}"
             elif step_idx in min_dist_steps:
                 event = "new_min_distance"
-                
+
             summary_rows.append({
                 "step": frame.step,
                 "dog_positions": [(d.x, d.y) for d in snap.dogs],
@@ -623,6 +628,6 @@ class Evaluator:
                 "no_progress_counter": snap.no_progress_steps,
                 "event": event
             })
-            
+
         return summary_rows
 

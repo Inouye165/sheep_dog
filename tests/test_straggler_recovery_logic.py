@@ -33,7 +33,7 @@ def test_single_unpenned_sheep_assigned_collector_role():
     collector = collector_assignments[0]
     assert collector.target_sheep_index == 3
     assert collector.reason == "split_sheep_detected"
-    
+
     # Target should be positioned to drive sheep 3 toward pen (pen center is ~101, 8, sheep is at 16, 19)
     # Target should be behind sheep relative to pen (x < 16)
     assert collector.target.x < 16, f"Expected collector target x < 16, got {collector.target.x}"
@@ -45,7 +45,6 @@ def test_observation_prioritizes_unpenned_sheep():
     env.reset(seed=100)
 
     # Set up scenario: dogs at pen (105, 15), sheep 0-2 penned inside pen (100, 10), sheep 3 unpenned far away (16, 19)
-    pen = env._pen
     env._sheep = [
         SheepState(0, Point(100, 10), penned=True),
         SheepState(1, Point(102, 10), penned=True),
@@ -64,7 +63,7 @@ def test_observation_prioritizes_unpenned_sheep():
 
     # sheep_0 slot MUST represent the unpenned sheep (sheep 3), so sheep_0_penned MUST be 0.0
     assert feat_dict["sheep_0_penned"] == 0.0, "Expected sheep_0 to be unpenned sheep, but sheep_0_penned == 1.0"
-    
+
     # sheep_0 relative coordinates should point to (16, 19) relative to dog at (105, 15)
     # dx = (16 - 105) / field_width = -89 / 108 ~ -0.824
     assert feat_dict["sheep_0_dx"] < 0, f"Expected sheep_0_dx < 0, got {feat_dict['sheep_0_dx']}"

@@ -19,6 +19,7 @@ import type {
   StageBottleneckReport,
   EvaluationSummaryPayload,
   EvaluationRecordPayload,
+  StageHealthSummary,
 } from "../state/types";
 
 export const API_BASE_URL = "http://127.0.0.1:8000";
@@ -553,4 +554,25 @@ export async function loadStageDiagnostics(
     return null;
   }
 }
+
+export async function loadStageHealth(
+  stage?: number,
+  force?: boolean,
+): Promise<StageHealthSummary | null> {
+  const queryParts: string[] = [];
+  if (stage !== undefined && stage !== null) {
+    queryParts.push(`stage=${stage}`);
+  }
+  if (force) {
+    queryParts.push("force=1");
+  }
+  const query = queryParts.length > 0 ? `?${queryParts.join("&")}` : "";
+  try {
+    return await fetchJson<StageHealthSummary>(`/api/stage-health${query}`, undefined, API_BASE_URL);
+  } catch (err) {
+    console.warn("[Sheepdog API] Failed to load stage health:", err);
+    return null;
+  }
+}
+
 

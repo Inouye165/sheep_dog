@@ -2,10 +2,9 @@
 
 import json
 from pathlib import Path
-import pytest
+
 from sheepdog.server import (
     _get_success_threshold,
-    _auto_promote_gate_defaults,
     compute_promotion_gate_snapshot,
 )
 

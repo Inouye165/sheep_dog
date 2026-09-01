@@ -133,6 +133,7 @@ class ShepherdNeuralDogPolicy:
             clip_range=config.training.clip_range,
             ent_coef=config.training.entropy_coef,
             vf_coef=config.training.value_coef,
+            target_kl=getattr(config.training, "target_kl", None),
             seed=config.training.train_seed,
             policy_kwargs={"net_arch": list(policy_config.hidden_sizes)},
             verbose=0,

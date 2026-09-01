@@ -7,6 +7,7 @@ leaves the previous complete version intact rather than a truncated one.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import time
@@ -27,10 +28,8 @@ def atomic_replace(tmp: Path, dest: Path) -> None:
                 # but permits write access, write contents directly to destination in-place.
                 try:
                     dest.write_bytes(tmp.read_bytes())
-                    try:
+                    with contextlib.suppress(Exception):
                         os.remove(tmp)
-                    except Exception:
-                        pass
                     return
                 except Exception:
                     raise

@@ -1,9 +1,12 @@
 """MaskablePPO trainer for the experimental neural-policy path."""
 
+# Optional telemetry, logging, backup, and SDK integrations must not abort training.
+# pylint: disable=broad-exception-caught
+
 from __future__ import annotations
 
-import functools
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -140,7 +143,7 @@ class _TrainingProgressCallback(BaseCallback):
         ppo_update_count = getattr(self.model, "_n_updates", 0)
         current_policy_version = self.policy_version + ppo_update_count
         last_policy_update_time = datetime.now(UTC).isoformat() if ppo_update_count > 0 else None
-        
+
         actual_completed_episodes = 0
         try:
             if self.model is not None and self.model.get_env() is not None:
@@ -202,6 +205,22 @@ class MaskablePPOTrainer(Trainer):
     """Train the shared role-aware neural policy with MaskablePPO."""
 
     MODEL_DIRNAME = "models"
+    MODEL_PREFIX = "maskable-ppo"
+    POLICY_CLASS = NeuralPolicy
+    TRAINER_TYPE = "maskable_ppo"
+    POLICY_MODE = "neural_policy"
+    REPLAY_MODE = "neural_ppo"
+    SUMMARY_FILENAME = "training-summary.json"
+
+    def __init__(self, config: Any, output_root: str | Path) -> None:
+        super().__init__(config, output_root)
+        self._failure_sampler: Any | None = None
+
+    def _stage_model_root(self, active_stage: int) -> Path:
+        """Return the model directory for the active curriculum stage."""
+        if active_stage >= 9:
+            return self.output_root / "checkpoints" / f"stage{active_stage}"
+        return self.output_root / self.MODEL_DIRNAME
 
     def has_compatible_policy_state(self) -> bool:
         """Return whether the persisted policy state can resume this trainer."""
@@ -318,6 +337,7 @@ class MaskablePPOTrainer(Trainer):
             "best_success_rate": payload.get("best_success_rate"),
             "best_average_reward": payload.get("best_average_reward"),
             "best_completion_steps": payload.get("best_completion_steps"),
+            "adaptive_step_state": payload.get("adaptive_step_state"),
             "incomplete_batch": payload.get("incomplete_batch"),
             "run_id": payload.get("run_id"),
             "parent_run_id": payload.get("parent_run_id"),
@@ -338,10 +358,7 @@ class MaskablePPOTrainer(Trainer):
         model_root = self.output_root / self.MODEL_DIRNAME
         model_root.mkdir(parents=True, exist_ok=True)
         active_stage = self.config.rewards.instincts.curriculum_stage
-        if active_stage >= 9:
-            stage_model_root = self.output_root / "checkpoints" / f"stage{active_stage}"
-        else:
-            stage_model_root = model_root
+        stage_model_root = self._stage_model_root(active_stage)
         stage_model_root.mkdir(parents=True, exist_ok=True)
         resuming_policy = (
             bool(self._loaded_state.get("policy_state_path"))
@@ -396,6 +413,7 @@ class MaskablePPOTrainer(Trainer):
                     for previous, current in zip(
                         (0, *configured_timestep_targets[:-1]),
                         configured_timestep_targets,
+                        strict=True,
                     )
                 )
             ):
@@ -411,7 +429,9 @@ class MaskablePPOTrainer(Trainer):
             )
         segment_timesteps = tuple(
             current - previous
-            for previous, current in zip((0, *timestep_targets[:-1]), timestep_targets)
+            for previous, current in zip(
+                (0, *timestep_targets[:-1]), timestep_targets, strict=True
+            )
         )
         uniform_segment_timesteps = (
             segment_timesteps[0] if len(set(segment_timesteps)) == 1 else None
@@ -475,8 +495,15 @@ class MaskablePPOTrainer(Trainer):
         adaptive_controller = AdaptiveStepController(
             base_learning_rate=train_config.learning_rate,
             base_mutation_scale=train_config.mutation_scale,
+            base_entropy_coef=train_config.entropy_coef,
             initial_curriculum_stage=active_curriculum_stage,
         )
+        if resuming_policy:
+            adaptive_controller.restore(
+                self._loaded_state.get("adaptive_step_state"),
+                active_curriculum_stage,
+            )
+        consecutive_collapse_count: int = 0
 
         def emit(payload: dict[str, Any]) -> None:
             if progress_callback is None:
@@ -508,13 +535,13 @@ class MaskablePPOTrainer(Trainer):
         best_model_path_str = self._loaded_state.get("best_model_path")
         resume_path = best_model_path_str or self._loaded_state.get("policy_state_path")
         if resuming_policy and resume_path:
-            policy = NeuralPolicy.load(
+            policy = self.POLICY_CLASS.load(
                 resume_path,
                 self.config,
                 self._loaded_state.get("policy_config"),
             )
         else:
-            policy = NeuralPolicy.initialize(self.config)
+            policy = self.POLICY_CLASS.initialize(self.config)
 
         if getattr(train_config, "failure_directed_training_enabled", False):
             saved_fw = self._loaded_state.get("failure_directed_weights")
@@ -613,33 +640,36 @@ class MaskablePPOTrainer(Trainer):
 
             callback_list = CallbackList(callbacks_to_use)
 
-            # Adaptive learning rate controller with conservative staging and automatic curriculum reset
+            # Adaptive learning rate & entropy controller with conservative staging and automatic curriculum reset
             if getattr(train_config, "enable_adaptive_learning", True):
                 adaptive_state = adaptive_controller.get_state()
                 effective_lr = adaptive_state.effective_learning_rate
                 policy.model.learning_rate = effective_lr
-                policy.model.lr_schedule = lambda _: effective_lr
+                policy.model.lr_schedule = (
+                    lambda _, learning_rate=effective_lr: learning_rate
+                )
                 if hasattr(policy.model, "policy") and hasattr(policy.model.policy, "optimizer"):
                     for param_group in policy.model.policy.optimizer.param_groups:
                         param_group["lr"] = effective_lr
+                policy.model.ent_coef = adaptive_state.effective_entropy_coef
             else:
                 # Fallback: Linear LR annealing across the batch
                 _batch_done = completed_checkpoints - skip_segments - 1
                 _batch_span = max(1, n_checkpoints - skip_segments - 1)
                 _batch_progress = _batch_done / _batch_span
-                
+
                 # Enforce 5e-5 floor on learning rate annealing
                 policy.model.learning_rate = max(
                     5e-5,
                     train_config.learning_rate
                     + (train_config.learning_rate_final - train_config.learning_rate) * _batch_progress
                 )
+                policy.model.ent_coef = train_config.entropy_coef
                 adaptive_state = adaptive_controller.get_state()
 
-            # Apply training overrides for exploration and advantage estimation
-            policy.model.ent_coef = train_config.entropy_coef
+            # Apply training overrides for advantage estimation
             policy.model.gae_lambda = train_config.gae_lambda
-            
+
             training_phase = (
                 self.runtime_tracker.phase("training")
                 if self.runtime_tracker is not None
@@ -670,7 +700,7 @@ class MaskablePPOTrainer(Trainer):
                         progress_bar=False,
                         callback=callback_list,
                     )
-            
+
             # Increment policy update version
             policy_version += 1
             policy.policy_version = policy_version
@@ -738,7 +768,7 @@ class MaskablePPOTrainer(Trainer):
 
                             ws_sim_episodes = ws.get("similarity_episodes", {})
                             ws_sim_successes = ws.get("similarity_successes", {})
-                            all_keys = set(eval_seeds) | {int(k) for k in ws_sim_episodes.keys() if str(k).isdigit()}
+                            all_keys = set(eval_seeds) | {int(k) for k in ws_sim_episodes if str(k).isdigit()}
                             for k in all_keys:
                                 k_str = str(k)
                                 ep_val = ws_sim_episodes.get(k, ws_sim_episodes.get(k_str, 0))
@@ -752,7 +782,7 @@ class MaskablePPOTrainer(Trainer):
                     )
 
             self._loaded_state["training_scenario_coverage"] = curr_coverage
-            
+
             # Extract PPO diagnostics from model logger
             logger_obj = getattr(policy.model, "logger", None)
             approx_kl = 0.0
@@ -771,7 +801,7 @@ class MaskablePPOTrainer(Trainer):
                 value_loss = float(name_to_value.get("train/value_loss", 0.0))
                 entropy_loss = float(name_to_value.get("train/entropy_loss", 0.0))
                 loss = float(name_to_value.get("train/loss", 0.0))
-                
+
             if should_stop is not None and should_stop():
                 interrupted = True
                 break
@@ -782,7 +812,11 @@ class MaskablePPOTrainer(Trainer):
             )
             with model_save_phase:
                 active_stage = self.config.rewards.instincts.curriculum_stage
-                model_name = f"maskable-ppo-stage{active_stage}-{cumulative_ts:08d}" if active_stage >= 9 else f"maskable-ppo-{cumulative_ts:08d}"
+                model_name = (
+                    f"{self.MODEL_PREFIX}-stage{active_stage}-{cumulative_ts:08d}"
+                    if active_stage >= 9
+                    else f"{self.MODEL_PREFIX}-{cumulative_ts:08d}"
+                )
                 saved_model_path = policy.save(stage_model_root / model_name)
             total_eps_this_checkpoint = batch_starting_checkpoint_episode + _checkpoint_slot
             run_id = self._loaded_state.get("run_id")
@@ -840,7 +874,7 @@ class MaskablePPOTrainer(Trainer):
             failure_telemetry: dict[str, Any] = {}
             failure_weights: dict[str, float] = {}
             if getattr(train_config, "failure_directed_training_enabled", False):
-                if not hasattr(self, "_failure_sampler"):
+                if self._failure_sampler is None:
                     from sheepdog.training.scenario_sampler import ScenarioSampler
                     self._failure_sampler = ScenarioSampler(train_config, self.config.environment)
                     saved_fw = self._loaded_state.get("failure_directed_weights")
@@ -980,6 +1014,28 @@ class MaskablePPOTrainer(Trainer):
                 best_model_curriculum_stage = current_stage
                 best_model_name = f"stage{current_stage}-best-model" if current_stage >= 9 else "best-model"
                 tracked_best_model_path = policy.save(stage_model_root / best_model_name)
+                consecutive_collapse_count = 0
+            else:
+                auto_rollback = getattr(train_config, "auto_rollback_on_collapse", True)
+                collapse_thresh = getattr(train_config, "collapse_threshold_success", 0.35)
+                if auto_rollback and best_success_rate >= 0.80 and tracked_best_model_path is not None:
+                    if summary.success_rate < collapse_thresh:
+                        consecutive_collapse_count += 1
+                        if consecutive_collapse_count >= 3:
+                            logging.getLogger(__name__).warning(
+                                "Catastrophic policy collapse detected: success dropped to %.1f%% (< %.1f%%) for %d consecutive checkpoints. Rolling back to best model %s.",
+                                summary.success_rate * 100.0,
+                                collapse_thresh * 100.0,
+                                consecutive_collapse_count,
+                                tracked_best_model_path,
+                            )
+                            if hasattr(policy, "reload_from") and policy.reload_from(tracked_best_model_path):
+                                logging.getLogger(__name__).info("Successfully restored weights from best model checkpoint.")
+                            consecutive_collapse_count = 0
+                    else:
+                        consecutive_collapse_count = 0
+                else:
+                    consecutive_collapse_count = 0
             checkpoint_write_phase = (
                 self.runtime_tracker.phase("checkpoint_save")
                 if self.runtime_tracker is not None
@@ -1001,7 +1057,7 @@ class MaskablePPOTrainer(Trainer):
                 "trainer_type": policy.trainer_type,
                 "policy_type": policy.policy_type,
                 "policy_mode": policy.name,
-                "replay_mode": "neural_ppo",
+                "replay_mode": self.REPLAY_MODE,
                 "total_training_episodes": total_eps_this_checkpoint,
                 "policy_state_path": str(saved_model_path),
                 "success_rate": summary.success_rate,
@@ -1224,6 +1280,7 @@ class MaskablePPOTrainer(Trainer):
             "best_success_rate": best_success_rate,
             "best_average_reward": best_average_reward,
             "best_completion_steps": best_completion_steps,
+            "adaptive_step_state": adaptive_state.to_dict(),
             "policy_config": policy.config.to_dict(),
             "training_signature": self._training_signature(),
             "incomplete_batch": None,
@@ -1294,10 +1351,10 @@ class MaskablePPOTrainer(Trainer):
             "checkpoints": lightweight_checkpoints,
             "final_model_path": final_model_path,
             "policy_config": policy_config,
-            "trainer_type": "maskable_ppo",
+            "trainer_type": self.TRAINER_TYPE,
             "policy_type": "neural",
-            "policy_mode": "neural_policy",
-            "replay_mode": "neural_ppo",
+            "policy_mode": self.POLICY_MODE,
+            "replay_mode": self.REPLAY_MODE,
             "total_episodes_trained": total_episodes_trained,
         }
-        atomic_write_json(self.output_root / "training-summary.json", payload)
+        atomic_write_json(self.output_root / self.SUMMARY_FILENAME, payload)

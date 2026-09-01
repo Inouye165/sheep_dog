@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import shutil
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -76,7 +75,7 @@ class TrainingBackupManager:
             dst_cfg = stage_dir / f"stage_{stage}_config.json"
             atomic_write_json(dst_cfg, config_dict)
 
-        now_utc = datetime.now(timezone.utc).isoformat()
+        now_utc = datetime.now(UTC).isoformat()
         manifest = {
             "stage": stage,
             "stage_name": f"Stage {stage}",
@@ -117,7 +116,7 @@ class TrainingBackupManager:
             return None
 
         self._ensure_dirs()
-        timestamp_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+        timestamp_str = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
         snapshot_prefix = f"snapshot_stage{stage}_{timestamp_str}"
 
         dst_model: Path | None = None
@@ -138,7 +137,7 @@ class TrainingBackupManager:
         metadata = {
             "snapshot_id": snapshot_prefix,
             "stage": stage,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
             "model_saved": dst_model is not None and dst_model.exists(),
             "training_state": training_state or {},
             "checkpoint_payload": checkpoint_payload or {},
@@ -188,7 +187,7 @@ class TrainingBackupManager:
                 manifest_path = stage_folder / f"{stage_folder.name}_manifest.json"
                 if manifest_path.exists():
                     try:
-                        with open(manifest_path, "r", encoding="utf-8") as f:
+                        with open(manifest_path, encoding="utf-8") as f:
                             stages.append(json.load(f))
                     except Exception:
                         pass
@@ -209,7 +208,7 @@ class TrainingBackupManager:
         if self.hourly_dir.exists():
             for json_file in sorted(self.hourly_dir.glob("snapshot_*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
                 try:
-                    with open(json_file, "r", encoding="utf-8") as f:
+                    with open(json_file, encoding="utf-8") as f:
                         data = json.load(f)
                         data["metadata_file"] = json_file.name
                         data["model_file"] = f"{json_file.stem}.zip" if (self.hourly_dir / f"{json_file.stem}.zip").exists() else None
@@ -252,13 +251,13 @@ class TrainingBackupManager:
         src_chk = stage_dir / f"stage_{stage}_checkpoint.json"
         chk_payload: dict[str, Any] = {}
         if src_chk.exists():
-            with open(src_chk, "r", encoding="utf-8") as f:
+            with open(src_chk, encoding="utf-8") as f:
                 chk_payload = json.load(f)
 
         src_manifest = stage_dir / f"stage_{stage}_manifest.json"
         manifest_payload: dict[str, Any] = {}
         if src_manifest.exists():
-            with open(src_manifest, "r", encoding="utf-8") as f:
+            with open(src_manifest, encoding="utf-8") as f:
                 manifest_payload = json.load(f)
 
         return {
@@ -284,7 +283,7 @@ class TrainingBackupManager:
         if not json_path.exists():
             raise FileNotFoundError(f"Snapshot metadata {json_path} not found")
 
-        with open(json_path, "r", encoding="utf-8") as f:
+        with open(json_path, encoding="utf-8") as f:
             metadata = json.load(f)
 
         models_dir = out / "models"

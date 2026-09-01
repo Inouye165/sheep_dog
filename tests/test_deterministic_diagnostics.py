@@ -1,18 +1,8 @@
 """Comprehensive unit tests for the deterministic training diagnostics engine."""
 
-import math
-import pytest
 
 from sheepdog.training.diagnostics.config import DeterministicDiagnosticsConfig
 from sheepdog.training.diagnostics.engine import DeterministicDiagnosticsEngine
-from sheepdog.training.diagnostics.schemas import (
-    DeterministicDiagnosticReport,
-    DiagnosticFinding,
-    ProgressWithinFailuresSummary,
-    SeedCheckpointOutcome,
-    SeedEvaluationSummary,
-    SeedMatrixReport,
-)
 from sheepdog.training.diagnostics.seed_tracker import build_seed_matrix_report
 from sheepdog.training.diagnostics.signatures import (
     classify_failure_signature,
