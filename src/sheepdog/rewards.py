@@ -385,7 +385,7 @@ class RewardComputer:
                     if dist > max_dist:
                         max_dist = dist
                         farthest_sheep = s
-                
+
                 if farthest_sheep is not None:
                     dist_to_centroid = _distance(farthest_sheep, inputs.flock_centroid)
                     # A sheep/cluster requires approach incentive if it's separated from the flock centroid (>8.0),
@@ -407,7 +407,7 @@ class RewardComputer:
                             # Progress reward is scaled by the stray ignore penalty scale
                             stray_approach_reward = progress * (si_scale * 20.0) * isolation_multiplier
                             stray_penalty += stray_approach_reward
-            
+
             # Cap the overall stray penalty to avoid catastrophic policy updates
             stray_penalty = max(-15.0, stray_penalty)
 

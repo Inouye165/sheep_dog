@@ -12,6 +12,7 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = [
+  "pylint>=4.0,<5",
   "pytest>=8.0",
   "ruff>=0.6",
 ]
@@ -29,6 +30,7 @@ sheepdog-train = "sheepdog.cli:train_command"
 sheepdog-evaluate = "sheepdog.cli:evaluate_command"
 sheepdog-export-demo = "sheepdog.cli:export_demo_command"
 sheepdog-benchmark = "sheepdog.cli:benchmark_command"
+sheepdog-test-batch-size = "sheepdog.cli:batch_size_experiment_command"
 sheepdog-server = "sheepdog.server:main"
 
 [tool.setuptools]
@@ -50,7 +52,30 @@ line-length = 100
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP", "SIM"]
+select = ["E", "F", "I", "B", "UP", "SIM", "W", "D100", "D101", "D102", "D103"]
+ignore = [
+  # Ruff's formatter does not wrap long lines; readability is reviewed locally.
+  "E501",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# These callbacks execute synchronously before their enclosing loop advances.
+"src/sheepdog/server.py" = ["B023"]
+"src/sheepdog/training/scenario_sampler.py" = ["B023"]
+# Existing docstring debt is baselined by file; new production modules remain strict.
+"src/sheepdog/checkpoints/store.py" = ["D102", "D103"]
+"src/sheepdog/entities.py" = ["D102"]
+"src/sheepdog/environment.py" = ["D102"]
+"src/sheepdog/evaluation/scenario_evaluator.py" = ["D102", "D103"]
+"src/sheepdog/evaluation/scenarios.py" = ["D102"]
+"src/sheepdog/replay/store.py" = ["D102"]
+"src/sheepdog/training/diagnostics/schemas.py" = ["D102"]
+"src/sheepdog/training/episode_store.py" = ["D102", "D103"]
+"src/sheepdog/training/joint_rl_env.py" = ["D102"]
+"src/sheepdog/training/maskable_ppo.py" = ["D102"]
+"src/sheepdog/training/replay_writer.py" = ["D101", "D102", "D103"]
+"src/sheepdog/training/rl_env.py" = ["D102"]
+"tests/**/*.py" = ["D100", "D101", "D102", "D103"]
 
 [tool.ruff.format]
 quote-style = "double"

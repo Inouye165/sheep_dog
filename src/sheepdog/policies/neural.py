@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
-import sys
+import uuid
+import zipfile
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -13,9 +15,6 @@ from typing import Any
 import numpy as np
 from sb3_contrib import MaskablePPO
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnv
-
-import uuid
-import zipfile
 
 from sheepdog.atomic_io import atomic_replace
 from sheepdog.config import LabConfig
@@ -141,6 +140,7 @@ class NeuralPolicy:
             clip_range=config.training.clip_range,
             ent_coef=config.training.entropy_coef,
             vf_coef=config.training.value_coef,
+            target_kl=getattr(config.training, "target_kl", None),
             seed=config.training.train_seed,
             policy_kwargs={"net_arch": list(policy_config.hidden_sizes)},
             verbose=0,
@@ -161,6 +161,7 @@ class NeuralPolicy:
         observation_size = int(vec_env.observation_space.shape[0])
         resolved_path = Path(path)
         model = MaskablePPO.load(str(resolved_path), env=vec_env)
+        model.batch_size = config.training.batch_size
         if tensorboard_available() and config.training.output_dir:
             tb_dir = Path(config.training.output_dir) / "tb_logs"
             tb_dir.mkdir(parents=True, exist_ok=True)
@@ -194,7 +195,7 @@ class NeuralPolicy:
         target = Path(path)
         resolved_target = target if target.suffix == ".zip" else target.with_suffix(".zip")
         resolved_target.parent.mkdir(parents=True, exist_ok=True)
-        
+
         # Save to a temporary location first
         tmp_stem = f"{resolved_target.stem}-{uuid.uuid4().hex[:8]}.tmp"
         tmp_target = resolved_target.parent / tmp_stem
@@ -213,17 +214,30 @@ class NeuralPolicy:
                 if bad_file is not None:
                     raise ValueError(f"Corrupt file in zip archive: {bad_file}")
             MaskablePPO.load(str(tmp_zip), device="cpu")
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             if tmp_zip.exists():
-                try:
+                with contextlib.suppress(OSError):
                     os.remove(tmp_zip)
-                except Exception:
-                    pass
             raise RuntimeError(f"Model checkpoint zip validation failed: {exc}") from exc
 
         atomic_replace(tmp_zip, resolved_target)
         self.model_path = resolved_target
         return resolved_target
+
+    def reload_from(self, path: str | Path) -> bool:
+        """Reload policy neural weights from checkpoint file without recreating environments."""
+        resolved = Path(path)
+        if resolved.suffix != ".zip":
+            resolved = resolved.with_suffix(".zip")
+        if not resolved.exists():
+            return False
+        try:
+            loaded_model = MaskablePPO.load(str(resolved), env=self.model.get_env())
+            if hasattr(self.model, "policy") and hasattr(loaded_model, "policy"):
+                self.model.policy.load_state_dict(loaded_model.policy.state_dict())
+            return True
+        except Exception:  # pylint: disable=broad-exception-caught
+            return False
 
     def select_actions(self, environment: object, deterministic: bool = True) -> list[Action]:
         """Return one action per dog based on the neural model's predictions."""

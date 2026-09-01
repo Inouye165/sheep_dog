@@ -1,12 +1,14 @@
 """Regression tests verifying backend/frontend stage synchronization and Stage 9 remediation fork."""
 
 from __future__ import annotations
+
 import json
-import pytest
 from http import HTTPStatus
 from pathlib import Path
-from sheepdog.config import LabConfig
-from sheepdog.server import TrainingManager, resolve_workspace_path
+
+import pytest
+
+from sheepdog.server import TrainingManager
 
 
 def test_remediation_fork_atomic_transition(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -38,7 +40,7 @@ def test_remediation_fork_atomic_transition(tmp_path: Path, monkeypatch: pytest.
     # 1. Start request for Stage 9 BEFORE fork should fail because active stage is 8
     try:
         manager.start(requested_episodes=20, curriculum_stage=9)
-        assert False, "Should have failed validation before remediation fork"
+        raise AssertionError("Should have failed validation before remediation fork")
     except ValueError as err:
         assert "does not match active stage" in str(err)
 

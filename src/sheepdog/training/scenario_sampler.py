@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from random import Random
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from sheepdog.config import EnvironmentConfig, TrainingConfig
 from sheepdog.evaluation.scenarios import Scenario

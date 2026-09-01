@@ -1,8 +1,12 @@
 """Local HTTP API for interactive training control."""
 
-# pylint: disable=too-many-lines
+# This integration module deliberately isolates optional services and recovery
+# paths from each other, and coordinates state owned by the training manager.
+# pylint: disable=too-many-lines,broad-exception-caught
+# pylint: disable=redefined-outer-name,reimported,protected-access
 from __future__ import annotations
 
+import contextlib
 import datetime
 import json
 import logging
@@ -18,24 +22,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlsplit
-
-def _setup_server_logger() -> logging.Logger:
-    lg = logging.getLogger("sheepdog.server")
-    lg.setLevel(logging.INFO)
-    if not lg.handlers:
-        try:
-            logs_dir = Path(LabConfig().training.output_dir) / "logs"
-            logs_dir.mkdir(parents=True, exist_ok=True)
-            log_file = logs_dir / f"server-{datetime.datetime.now().strftime('%Y%m%d')}.log"
-            fh = logging.FileHandler(log_file, encoding="utf-8")
-            fmt = logging.Formatter("[%(asctime)s] [%(levelname)s] [%(name)s]: %(message)s")
-            fh.setFormatter(fmt)
-            lg.addHandler(fh)
-        except Exception:
-            pass
-    return lg
-
-logger = _setup_server_logger()
 
 from sheepdog.atomic_io import atomic_write_json, atomic_write_text
 from sheepdog.checkpoints.store import CheckpointMetadata
@@ -59,11 +45,34 @@ from sheepdog.evaluation.scenarios import ScenarioStore, scenario_from_snapshot
 from sheepdog.policies.base import Policy, PolicyMode
 from sheepdog.policies.factory import load_playable_policy
 from sheepdog.policies.heuristic import InstinctOnlyPolicy
-from sheepdog.training.factory import create_trainer
 from sheepdog.training.backup import TrainingBackupManager
+from sheepdog.training.factory import create_trainer
 from sheepdog.training.runtime import TrainingRuntimeTracker
 from sheepdog.training.telemetry import CurriculumTelemetryManager
 from sheepdog.training.trainer import Trainer
+
+
+def _setup_server_logger() -> logging.Logger:
+    """Create the server logger and its optional daily file handler."""
+    server_logger = logging.getLogger("sheepdog.server")
+    server_logger.setLevel(logging.INFO)
+    if not server_logger.handlers:
+        try:
+            logs_dir = Path(LabConfig().training.output_dir) / "logs"
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            log_file = logs_dir / f"server-{datetime.datetime.now().strftime('%Y%m%d')}.log"
+            file_handler = logging.FileHandler(log_file, encoding="utf-8")
+            formatter = logging.Formatter(
+                "[%(asctime)s] [%(levelname)s] [%(name)s]: %(message)s"
+            )
+            file_handler.setFormatter(formatter)
+            server_logger.addHandler(file_handler)
+        except Exception:
+            pass
+    return server_logger
+
+
+logger = _setup_server_logger()
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +90,6 @@ class ReplaySelection:
 
 class RestoreCompatibilityError(Exception):
     """Raised when the persisted state is incompatible with the current code/configuration."""
-    pass
 
 
 class _RollbackSignal(Exception):
@@ -145,7 +153,11 @@ def _policy_metadata(
     normalized_policy_type = policy_type or "instinct"
     replay_mode = "baseline"
 
-    if normalized_mode == "neural_policy" or normalized_trainer == "maskable_ppo":
+    if normalized_mode == "joint_team_policy" or normalized_trainer == "joint_maskable_ppo":
+        normalized_trainer = "joint_maskable_ppo"
+        normalized_policy_type = "neural"
+        replay_mode = "joint_team_ppo"
+    elif normalized_mode == "neural_policy" or normalized_trainer == "maskable_ppo":
         normalized_trainer = "maskable_ppo"
         normalized_policy_type = "neural"
         replay_mode = "neural_ppo"
@@ -595,8 +607,6 @@ def compute_promotion_gate_snapshot(
         }
 
     target_stage = checkpoint_payload.get("curriculum_stage", 1)
-    target_policy_version = checkpoint_payload.get("policy_version")
-    target_checkpoint_id = checkpoint_payload.get("checkpoint_id")
     target_seed_set_id = checkpoint_payload.get("evaluation_seed_set_id")
     target_seeds = checkpoint_payload.get("evaluation_seeds") or []
     target_seed_count = checkpoint_payload.get("evaluation_seed_count") or len(target_seeds) or 10
@@ -707,10 +717,8 @@ def compute_promotion_gate_snapshot(
         if (
             (s_prev2 >= s_prev1 and s_prev1 >= s_curr and improvement_from_prev2 >= 0.05 and (s_prev2 - s_curr) >= 5.0)
             or (improvement_from_prev1 >= 0.05 and (s_prev1 - s_curr) >= 5.0)
-        ):
-            # Cap hold if qualified evaluations exceed 8
-            if qualified_evaluations < 8:
-                step_efficiency_improving = True
+        ) and qualified_evaluations < 8:
+            step_efficiency_improving = True
     elif len(valid_steps) == 2:
         s_prev1 = valid_steps[-2]
         s_curr = valid_steps[-1]
@@ -1082,8 +1090,13 @@ def _append_promotion_history(output_root: Path, event: dict[str, Any]) -> list[
 
 
 def _training_checkpoint_schedule(total_episodes: int, curriculum_stage: int) -> tuple[int, ...]:
-    """Return checkpoint slots including episode 0, every 5 episodes, and final episode."""
-    interval = 5
+    """Return stage-aware checkpoint slots including episode 0 and the final episode."""
+    if curriculum_stage >= 26:
+        interval = 3
+    elif curriculum_stage >= 13:
+        interval = 5
+    else:
+        interval = 8
     final_episode = max(0, total_episodes - 1)
     slots = set(range(0, total_episodes, interval))
     slots.add(0)
@@ -1308,17 +1321,20 @@ class TrainingManager:
             time.sleep(2.0)
             try:
                 with self._lock:
-                    if self._status.get("running") and self._thread is not None:
-                        if not self._thread.is_alive():
-                            logger.error("Worker watchdog: Background training thread died unexpectedly. Setting phase=error.")
-                            self._status["running"] = False
-                            self._status["phase"] = "error"
-                            self._status["error"] = "Background worker thread died unexpectedly"
-                            self._status["error_type"] = "WorkerThreadDied"
-                            self._status["message"] = "Training process/thread terminated unexpectedly"
-                            self._active_start_request = None
-                            self._persist_training_session(
-                                state="error",
+                    if (
+                        self._status.get("running")
+                        and self._thread is not None
+                        and not self._thread.is_alive()
+                    ):
+                        logger.error("Worker watchdog: Background training thread died unexpectedly. Setting phase=error.")
+                        self._status["running"] = False
+                        self._status["phase"] = "error"
+                        self._status["error"] = "Background worker thread died unexpectedly"
+                        self._status["error_type"] = "WorkerThreadDied"
+                        self._status["message"] = "Training process/thread terminated unexpectedly"
+                        self._active_start_request = None
+                        self._persist_training_session(
+                            state="error",
                                 status=dict(self._status),
                                 request=None,
                             )
@@ -1466,7 +1482,7 @@ class TrainingManager:
                 try:
                     with path.open("r", encoding="utf-8") as f:
                         chk_data = json.load(f)
-                    if (chk_data.get("observation_schema_hash") == obs_hash and 
+                    if (chk_data.get("observation_schema_hash") == obs_hash and
                         chk_data.get("action_space_hash") == act_hash):
                         compatible_checkpoints.append(chk_data)
                 except Exception:
@@ -1572,7 +1588,7 @@ class TrainingManager:
                         obs_hash_in_data = sidecar.get("observation_schema_hash")
                         if not act_hash_in_data:
                             act_hash_in_data = sidecar.get("action_schema_hash")
-                
+
                 if obs_hash_in_data != obs_hash:
                     raise RestoreCompatibilityError(
                         f"Observation schema mismatch: expected {obs_hash}, got {obs_hash_in_data}"
@@ -1581,7 +1597,7 @@ class TrainingManager:
                     raise RestoreCompatibilityError(
                         f"Action space mismatch: expected {act_hash}, got {act_hash_in_data}"
                     )
-                
+
                 model_path_str = data.get("active_model_path") or data.get("policy_state_path")
                 if model_path_str:
                     p = Path(model_path_str)
@@ -1608,7 +1624,7 @@ class TrainingManager:
                             p = output_root / "best-model.zip"
                         else:
                             raise RestoreCompatibilityError(f"Active model file does not exist: {model_path_str}")
-                    
+
                     if data.get("policy_type") == "neural":
                         try:
                             is_real_zip = False
@@ -1625,13 +1641,15 @@ class TrainingManager:
                             if is_real_zip:
                                 from sb3_contrib import MaskablePPO
                                 MaskablePPO.load(str(p))
-                        except Exception as e:
-                            raise RestoreCompatibilityError(f"Failed to load neural model: {str(e)}")
-                
+                        except Exception as exc:
+                            raise RestoreCompatibilityError(
+                                f"Failed to load neural model: {exc}"
+                            ) from exc
+
                 if authoritative_stage is not None and data.get("active_curriculum_stage") != authoritative_stage and not data.get("target_environment_stage"):
                     data["active_curriculum_stage"] = authoritative_stage
                     data["active_stage_name"] = f"Stage {authoritative_stage}"
-                
+
                 data["recovery_status"] = recovery_status
                 data["recovery_warnings"] = recovery_warnings
                 return data
@@ -1653,7 +1671,7 @@ class TrainingManager:
                             p = output_root.parent / p
                         else:
                             p = output_root / p
-                    
+
                     if p.exists():
                         p_model_resolved = str(p)
                         if latest_chk.get("policy_type") == "neural" or "best-model" in model_path_str:
@@ -1683,10 +1701,7 @@ class TrainingManager:
                         else:
                             continue
                 else:
-                    if is_best_model_valid:
-                        p_model_resolved = str(best_model_path_obj)
-                    else:
-                        p_model_resolved = None
+                    p_model_resolved = str(best_model_path_obj) if is_best_model_valid else None
 
                 policy_type = latest_chk.get("policy_type")
                 policy_mode = latest_chk.get("policy_mode")
@@ -1695,16 +1710,16 @@ class TrainingManager:
                     policy_type = "neural"
                     policy_mode = "neural_policy"
                     trainer_type = "maskable_ppo"
-                
+
                 stage_to_use = authoritative_stage if authoritative_stage is not None else latest_chk.get("curriculum_stage", 1)
                 model_source = "recovered_best_model" if p_model_resolved == str(best_model_path_obj) else "checkpoint"
-                
+
                 previous_promotion = None
                 if promotion_history:
                     promo_events = [ev for ev in promotion_history if ev.get("event_type") == "promotion" or ev.get("from_stage") is not None]
                     if promo_events:
                         previous_promotion = promo_events[-1]
-                
+
                 return {
                     "run_id": latest_chk.get("run_id") or (latest_event.get("run_id") if latest_event else None),
                     "active_curriculum_stage": stage_to_use,
@@ -1741,15 +1756,15 @@ class TrainingManager:
                     raise RestoreCompatibilityError(
                         f"Promotion history specifies Stage {target_stage}, but best-model.zip is invalid: {best_model_err}"
                     )
-                
+
                 model_path_str = str(best_model_path_obj)
                 chk_id = latest_event.get("trigger_checkpoint_id") or latest_event.get("checkpoint_id")
                 chk_ep = latest_event.get("trigger_checkpoint_episode")
                 p_ver = latest_event.get("trigger_policy_version") or latest_event.get("policy_version")
-                
+
                 if chk_id == "unknown":
                     chk_id, chk_ep = resolve_source_checkpoint_id(model_path_str, output_root)
-                
+
                 is_neural = target_stage > 1
                 return {
                     "run_id": latest_event.get("run_id"),
@@ -1785,12 +1800,12 @@ class TrainingManager:
             target_stage = persisted_settings["curriculum_stage"]
             is_neural = target_stage > 1
             model_path_str = str(best_model_path_obj) if best_model_path_obj.exists() else None
-            
+
             chk_id = None
             chk_ep = None
             if model_path_str:
                 chk_id, chk_ep = resolve_source_checkpoint_id(model_path_str, output_root)
-                
+
             return {
                 "run_id": None,
                 "active_curriculum_stage": target_stage,
@@ -1850,7 +1865,7 @@ class TrainingManager:
         """Hydrate TrainingManager state using precedence-based restoration."""
         output_root = resolve_workspace_path(LabConfig().training.output_dir)
         resolved = self._resolve_precedence_state(output_root)
-        
+
         self._status.update({
             "run_id": resolved.get("run_id"),
             "curriculum_stage": resolved.get("active_curriculum_stage", 1),
@@ -1876,7 +1891,7 @@ class TrainingManager:
         run_state_path = output_root / "run-state.json"
         run_state_path.parent.mkdir(parents=True, exist_ok=True)
         run_state_path.write_text(json.dumps(resolved, indent=2), encoding="utf-8")
-        
+
         self._status["phase"] = "idle"
         self._status["message"] = "Idle"
 
@@ -2138,6 +2153,19 @@ class TrainingManager:
         status["latest_evaluated_environment_episode"] = latest_conf_env_ep
         status["next_evaluation_environment_episode"] = next_eval_env_ep
         status["episodes_until_next_evaluation"] = episodes_until_next_eval
+
+        # Enrich adaptive step size if state data has more up to date info
+        if isinstance(state_data, dict):
+            adaptive_step_state = state_data.get("adaptive_step_state")
+            if isinstance(adaptive_step_state, dict):
+                if status.get("adaptive_lr_stage", 1) <= 1 or adaptive_step_state.get("stage", 1) > status.get("adaptive_lr_stage", 1):
+                    status["adaptive_lr_stage"] = adaptive_step_state.get("stage", status.get("adaptive_lr_stage", 1))
+                    status["adaptive_lr_stage_max"] = adaptive_step_state.get("max_stages", status.get("adaptive_lr_stage_max", 4))
+                    status["adaptive_lr_stage_label"] = adaptive_step_state.get("label", status.get("adaptive_lr_stage_label"))
+                    status["adaptive_lr_multiplier"] = adaptive_step_state.get("multiplier", status.get("adaptive_lr_multiplier", 1.0))
+                    status["effective_learning_rate"] = adaptive_step_state.get("effective_learning_rate", status.get("effective_learning_rate"))
+                    status["effective_mutation_scale"] = adaptive_step_state.get("effective_mutation_scale", status.get("effective_mutation_scale"))
+
         return status
 
     def snapshot(self) -> dict[str, Any]:
@@ -2324,6 +2352,21 @@ class TrainingManager:
         if stage is None:
             stage = int(self.snapshot().get("curriculum_stage", 1))
         return store.get_stage_diagnostics(stage=stage, run_id=run_id)
+
+    def get_stage_health(
+        self, stage: int | None = None, force_refresh: bool = False
+    ) -> dict[str, Any]:
+        """Retrieve real-time whole-stage health classification and prescriptive recommendations."""
+        from sheepdog.training.stage_health import compute_stage_health_summary
+
+        output_root = Path(LabConfig().training.output_dir)
+        if stage is None:
+            stage = int(self.snapshot().get("curriculum_stage", 1))
+        return compute_stage_health_summary(
+            output_dir=output_root,
+            target_stage=stage,
+            force_refresh=force_refresh,
+        )
 
     def get_recent_evaluations(
         self, limit: int = 5, stage: int | None = None
@@ -2567,7 +2610,7 @@ class TrainingManager:
                                     is_mocked = True
                             except Exception:
                                 pass
-                                
+
                             if not is_mocked:
                                 with open(p, "rb") as f:
                                     header = f.read(4)
@@ -3074,12 +3117,10 @@ class TrainingManager:
         web_dir = Path(config.training.web_export_dir)
         web_dir.mkdir(parents=True, exist_ok=True)
         replay_output_dir = web_dir / "replays"
-        try:
+        # A browser can briefly hold generated replay files open on Windows.
+        # Stale extras are harmless because checkpoint-index.json is authoritative.
+        with contextlib.suppress(PermissionError):
             self._remove_path(replay_output_dir)
-        except PermissionError:
-            # A browser can briefly hold generated replay files open on Windows.
-            # Stale extras are harmless because checkpoint-index.json is authoritative.
-            pass
         replay_output_dir.mkdir(parents=True, exist_ok=True)
 
         def resolve_source(path_str: str) -> Path:
@@ -3367,7 +3408,7 @@ class TrainingManager:
             stage_to_persist = checkpoint_payload.get(
                 "environment_config", {}
             ).get("curriculum_stage", 1)
-            
+
             old_stage = self._status.get("curriculum_stage")
             if stage_to_persist != old_stage:
                 import uuid
@@ -3627,15 +3668,18 @@ class TrainingManager:
 
             if not cand_run_id or not cand_chk_id:
                 try:
-                    from sheepdog.checkpoints.store import CheckpointStore
-                    store = CheckpointStore(output_root / "checkpoints")
-                    s8_metas = [m for m in store.list_checkpoints() if getattr(m, "curriculum_stage", 1) == 8]
-                    if s8_metas:
-                        latest_s8 = s8_metas[-1]
+                    checkpoint_payloads = [
+                        payload
+                        for path in sorted((output_root / "checkpoints").glob("checkpoint-*.json"))
+                        if (payload := _load_json(path)) is not None
+                        and int(payload.get("curriculum_stage", 1)) == 8
+                    ]
+                    if checkpoint_payloads:
+                        latest_s8 = checkpoint_payloads[-1]
                         if not cand_run_id:
-                            cand_run_id = getattr(latest_s8, "run_id", None)
+                            cand_run_id = latest_s8.get("run_id")
                         if not cand_chk_id:
-                            cand_chk_id = getattr(latest_s8, "checkpoint_id", None)
+                            cand_chk_id = latest_s8.get("checkpoint_id")
                 except Exception:
                     pass
 
@@ -3654,8 +3698,8 @@ class TrainingManager:
             or 0
         )
 
-        from sheepdog.checkpoints.store import get_observation_schema_hash, get_action_space_hash
         from sheepdog.checkpoints.sidecar import create_sidecar_metadata
+        from sheepdog.checkpoints.store import get_action_space_hash, get_observation_schema_hash
         obs_hash = get_observation_schema_hash(stage_cfg)
         act_hash = get_action_space_hash()
 
@@ -3786,7 +3830,7 @@ class TrainingManager:
         try:
             current_status = self._status or {}
             source_stage = current_status.get("curriculum_stage", 9)
-            
+
             # Resolve source checkpoint & model path
             if starting_model_source == "original_stage8":
                 src_model = output_root / "models" / "best-model.zip"
@@ -3848,7 +3892,10 @@ class TrainingManager:
             shutil.copy2(src_model, active_model_zip)
 
             # Create sidecar metadata for active_model_zip if needed
-            from sheepdog.checkpoints.sidecar import load_and_verify_sidecar, create_sidecar_metadata
+            from sheepdog.checkpoints.sidecar import (
+                create_sidecar_metadata,
+                load_and_verify_sidecar,
+            )
             from sheepdog.curriculum import apply_curriculum_stage
             sidecar = load_and_verify_sidecar(src_model)
             if sidecar:
@@ -3860,7 +3907,10 @@ class TrainingManager:
                     migration_method="cross_stage_fork",
                 )
 
-            from sheepdog.checkpoints.store import get_observation_schema_hash, get_action_space_hash
+            from sheepdog.checkpoints.store import (
+                get_action_space_hash,
+                get_observation_schema_hash,
+            )
             target_config = apply_curriculum_stage(LabConfig(), target_stage)
             obs_hash = get_observation_schema_hash(target_config)
             act_hash = get_action_space_hash()
@@ -4252,30 +4302,26 @@ class TrainingManager:
         except Exception:
             pass
         if path.is_dir():
-            def _on_error(func: Any, path_str: str, exc: Any) -> None:
+            def _on_error(func: Any, path_str: str, _exc: Any) -> None:
                 try:
                     os.chmod(path_str, 0o777)
                     func(path_str)
                 except Exception:
                     pass
             try:
-                shutil.rmtree(path, onerror=_on_error)
+                shutil.rmtree(path, onerror=_on_error)  # pylint: disable=deprecated-argument
             except TypeError:
                 shutil.rmtree(path, onexc=_on_error)
             if path.exists():
-                try:
+                with contextlib.suppress(Exception):
                     shutil.rmtree(path, ignore_errors=True)
-                except Exception:
-                    pass
             return
         try:
             os.chmod(str(path), 0o777)
             path.unlink()
         except Exception:
-            try:
+            with contextlib.suppress(Exception):
                 path.unlink(missing_ok=True)
-            except Exception:
-                pass
 
     def _update_status(self, payload: dict[str, Any]) -> None:
         with self._lock:
@@ -4690,7 +4736,7 @@ class TrainingManager:
                     batch_completed_segments = payload.get("batch_completed_segments", batch_completed_raw)
                     batch_completed = batch_completed_segments
                     batch_total_segments = payload.get("batch_total_segments", payload.get("batch_total_episodes", 1))
-                    
+
                     actual_completed = payload.get("actual_completed_episodes")
                     if actual_completed is None:
                         actual_completed = int(batch_completed_segments)
@@ -4732,7 +4778,7 @@ class TrainingManager:
                         )
                         import sys
                         sys.stdout.flush()
-                        try:
+                        with contextlib.suppress(Exception):
                             self.telemetry_manager.log_episode(
                                 episode=int(ep_num),
                                 stage=stage,
@@ -4764,12 +4810,8 @@ class TrainingManager:
                                 corner_stuck_at_end=payload.get("corner_stuck_at_end"),
                                 spatial_metrics=payload.get("spatial_metrics"),
                             )
-                        except Exception:
-                            pass
 
                     success_rate = -1.0
-                    success_count = 0
-
                     if batch_total_segments > 0:
                         computed_batch_completed_episodes = round(
                             (float(batch_completed_segments) / float(batch_total_segments)) * total_episodes, 1
@@ -4834,6 +4876,18 @@ class TrainingManager:
                         update["last_evaluation_time"] = payload["last_evaluation_time"]
                     if "run_id" in payload:
                         update["run_id"] = payload["run_id"]
+                    if "adaptive_lr_stage" in payload:
+                        update["adaptive_lr_stage"] = payload["adaptive_lr_stage"]
+                    if "adaptive_lr_stage_max" in payload:
+                        update["adaptive_lr_stage_max"] = payload["adaptive_lr_stage_max"]
+                    if "adaptive_lr_stage_label" in payload:
+                        update["adaptive_lr_stage_label"] = payload["adaptive_lr_stage_label"]
+                    if "adaptive_lr_multiplier" in payload:
+                        update["adaptive_lr_multiplier"] = payload["adaptive_lr_multiplier"]
+                    if "effective_learning_rate" in payload:
+                        update["effective_learning_rate"] = payload["effective_learning_rate"]
+                    if "effective_mutation_scale" in payload:
+                        update["effective_mutation_scale"] = payload["effective_mutation_scale"]
                     if total_trained is not None:
                         update["total_episodes_trained"] = total_trained
                     if checkpoint_episode is not None:
@@ -4920,7 +4974,7 @@ class TrainingManager:
                         average_reward = float(summary.get("average_reward", float("-inf")))
                         timeout_rate = float(summary.get("timeout_rate", 1.0))
                         avg_penned = float(summary.get("average_sheep_penned", 0.0))
-                        
+
                         agreement_ok = True
                         agreement_warnings = []
                         cp_stage = None
@@ -4956,7 +5010,7 @@ class TrainingManager:
                             if cp_seeds is not None and sorted(list(cp_seeds)) != sorted(config_eval_seeds):
                                 agreement_ok = False
                                 agreement_warnings.append(f"Checkpoint seeds ({cp_seeds}) do not match active config seeds ({config_eval_seeds})")
-                            
+
                             eval_seed_count_val = summary.get("evaluation_seed_count") or (len(summary.get("records", [])) if isinstance(summary.get("records"), list) else 0)
                             if eval_seed_count_val != len(config_eval_seeds):
                                 agreement_ok = False
@@ -5000,7 +5054,7 @@ class TrainingManager:
                             import logging
                             logging.getLogger(__name__).warning(warning_msg)
                             update["message"] = warning_msg
-                            
+
                             gate_snapshot = {
                                 **gate_snapshot,
                                 "decision": "pending",
@@ -5035,7 +5089,7 @@ class TrainingManager:
                             stage_no_improvement_streak += 1
                         stage_checkpoints_seen += 1
                         stage_best_reward = max(stage_best_reward, average_reward)
-                        
+
                         update["auto_promote_gate"] = gate_snapshot
                         if checkpoint_episode is not None:
                             print(
@@ -5346,7 +5400,7 @@ class TrainingManager:
                     action_count = getattr(action_space, "n", None)
                     action_net = getattr(policy_obj, "action_net", None)
                     policy_output_width = getattr(action_net, "out_features", action_count)
-                    
+
                     if not (action_count == mapping_len == policy_output_width):
                         raise AssertionError(
                             f"Action space inconsistency detected: "
@@ -5354,7 +5408,6 @@ class TrainingManager:
                         )
 
                 early_promotion: _EarlyPromotionSignal | None = None
-                rollback_signal: _RollbackSignal | None = None
                 try:
                     now_str = datetime.datetime.now().strftime("%H:%M:%S")
                     print(
@@ -5492,7 +5545,7 @@ class TrainingManager:
 
                 import uuid
                 promo_id = f"evt_promo_{uuid.uuid4().hex[:12]}"
-                
+
                 from dataclasses import asdict
 
                 from sheepdog.checkpoints.store import (
@@ -5505,7 +5558,7 @@ class TrainingManager:
                 except Exception:
                     obs_h = None
                 act_h = get_action_space_hash()
-                
+
                 if hasattr(job_config, "to_dict"):
                     env_dict = job_config.to_dict()["environment"]
                 else:
@@ -5683,16 +5736,16 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
 
     manager = _ManagerDescriptor()
 
-    def log_message(self, format: str, *args: Any) -> None:
+    def log_message(  # pylint: disable=arguments-differ,redefined-builtin
+        self, format: str, *args: Any
+    ) -> None:
         """Suppress routine HTTP access log messages to keep terminal clean."""
         msg = format % args if args else format
         if any(verb in msg for verb in ('"GET ', '"OPTIONS ', '"HEAD ')) and any(
             code in msg for code in (" 200 -", " 204 -", " 304 -")
         ):
-            try:
+            with contextlib.suppress(Exception):
                 logger.debug("%s", msg)
-            except Exception:
-                pass
             return
         super().log_message(format, *args)
 
@@ -5722,7 +5775,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
         except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
             pass
-        except Exception as exc:
+        except Exception:
             import traceback
             traceback.print_exc()
 
@@ -5754,7 +5807,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             # Log the unexpected error to stderr so it shows in backend logs
             print(f"Error serving file {file_path}: {exc}", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
-            
+
             # Send a graceful 500 JSON response instead of aborting the connection
             try:
                 self.send_response(HTTPStatus.INTERNAL_SERVER_ERROR)
@@ -5794,16 +5847,8 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         import math
         from datetime import UTC, datetime
         from urllib.parse import parse_qs, urlsplit
-        
-        # Safe casting helpers
-        def safe_int(v, default=0):
-            if v is None:
-                return default
-            try:
-                return int(v)
-            except (ValueError, TypeError):
-                return default
 
+        # Safe casting helpers
         def safe_float(v, default=0.0):
             if v is None:
                 return default
@@ -5814,7 +5859,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
 
         # 1. Authoritative Snapshot Identity Check (retry logic)
         active_status_before = self.manager.snapshot()
-        
+
         query = urlsplit(self.path).query
         params = parse_qs(query)
         checkpoint_id_list = params.get("checkpoint_id")
@@ -5824,13 +5869,16 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         if episode_list:
             try:
                 episode = int(episode_list[0])
-            except ValueError:
-                raise DiagnosticsHTTPException("INVALID_EPISODE_PARAMETER", "episode parameter must be an integer")
-                
+            except ValueError as exc:
+                raise DiagnosticsHTTPException(
+                    "INVALID_EPISODE_PARAMETER",
+                    "episode parameter must be an integer",
+                ) from exc
+
         output_root = Path(LabConfig().training.output_dir)
         checkpoint_payload = None
         journey = None
-        
+
         # Resolve target checkpoint
         if not checkpoint_id and episode is None:
             active_chk_id = active_status_before.get("active_checkpoint_id")
@@ -5857,7 +5905,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                             episode = latest.get("checkpoint_episode")
                     except Exception:
                         pass
-                        
+
         if checkpoint_id:
             try:
                 _ep, resolved_journey = self.manager.find_checkpoint_by_id(checkpoint_id)
@@ -5868,9 +5916,12 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         if checkpoint_id or episode is not None:
             try:
                 checkpoint_payload = self.manager.get_checkpoint_details(episode, journey, checkpoint_id)
-            except Exception as e:
-                raise DiagnosticsHTTPException("LOAD_CHECKPOINT_FAILED", f"Failed to load checkpoint: {str(e)}")
-                
+            except Exception as exc:
+                raise DiagnosticsHTTPException(
+                    "LOAD_CHECKPOINT_FAILED",
+                    f"Failed to load checkpoint: {exc}",
+                ) from exc
+
         # Coherence Verification
         active_status_after = self.manager.snapshot()
         snapshot_warning = None
@@ -5879,15 +5930,13 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             # Retry once
             active_status_before = self.manager.snapshot()
             if checkpoint_id or episode is not None:
-                try:
+                with contextlib.suppress(Exception):
                     checkpoint_payload = self.manager.get_checkpoint_details(episode, journey, checkpoint_id)
-                except Exception:
-                    pass
             active_status_after = self.manager.snapshot()
             if (active_status_before.get("run_id") != active_status_after.get("run_id") or
                 active_status_before.get("active_checkpoint_id") != active_status_after.get("active_checkpoint_id")):
                 snapshot_warning = "MIXED SNAPSHOT: Active run or checkpoint changed during diagnostics compilation."
- 
+
         # Re-resolve active status fields
         status = active_status_after
         cur_stage = status.get("curriculum_stage", 1)
@@ -5906,7 +5955,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             "status": "UNAVAILABLE FOR LEGACY DATA",
             "message": "Legacy checkpoint did not record this field"
         }
-        
+
         # Helper to load SB3 model
         def get_model_and_path():
             if self.manager.active_trainer is not None:
@@ -5975,7 +6024,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                         out_features = getattr(layer, "out_features", None)
                         if isinstance(out_features, int):
                             critic_layers.append(out_features)
-                
+
                 if not actor_layers and not critic_layers and hasattr(policy_obj, "net_arch"):
                     net_arch = policy_obj.net_arch
                     if isinstance(net_arch, dict):
@@ -5989,7 +6038,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                 if hasattr(policy_obj, "activation_fn"):
                     activation_fn_name = policy_obj.activation_fn.__name__
                 total_params = sum(p.numel() for p in policy_obj.parameters() if p.requires_grad)
-                
+
                 ordered_action_mapping = ["wait", "sprint", "up", "down", "left", "right", "up_left", "up_right", "down_left", "down_right"]
                 try:
                     from sheepdog.environment import ACTION_ORDER
@@ -6063,7 +6112,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         batch_comp = status.get("batch_completed_episodes", 0)
         if isinstance(batch_comp, float) and not batch_comp.is_integer():
             counter_warnings.append(f"Inconsistent counter: completed_episodes includes fractional counts ({batch_comp}).")
-        
+
         total_trained = int(status.get("total_episodes_trained", 0))
         if total_trained < completed_eps_in_run:
             counter_warnings.append(f"Lifetime total trained episodes ({total_trained}) is smaller than active-run completed episodes ({completed_eps_in_run}).")
@@ -6090,7 +6139,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                     all_checkpoints = sum_data.get("checkpoints", [])
             except Exception:
                 pass
-                
+
         if not all_checkpoints:
             history_path = output_root / "training_history.json"
             if history_path.exists():
@@ -6125,7 +6174,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         from sheepdog.curriculum import CURRICULUM_STAGES
         default_config = LabConfig()
         ui_hyperparams = self.manager.get_hyperparams()
-        
+
         stage_overrides = {}
         if cur_stage > 0:
             from sheepdog.curriculum import (
@@ -6145,10 +6194,10 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             trn_ov = CURRICULUM_TRAINING_OVERRIDES.get(cur_stage, {})
             for k, v in trn_ov.items():
                 stage_overrides[f"training.{k}"] = v
-            
+
         config_snapshot = {}
         config_anomalies = []
-        
+
         keys_to_check = [
             ("environment.dog_speed", 1.0),
             ("environment.dog_sprint_multiplier", 2.0),
@@ -6177,7 +6226,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             ("training.entropy_coef", 0.01),
             ("training.batch_size", 64),
         ]
-        
+
         def get_nested(obj, path, is_dict=False):
             parts = path.split(".")
             val = obj
@@ -6198,10 +6247,10 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             d_val = get_nested(default_config, path, is_dict=False)
             if d_val is None:
                 d_val = def_val
-                
+
             ui_val = get_nested(ui_hyperparams, path, is_dict=True)
             stage_val = stage_overrides.get(path)
-            
+
             chk_val = None
             if checkpoint_payload:
                 chk_val = get_nested(checkpoint_payload, path.replace(".", "_config.", 1), is_dict=True)
@@ -6215,11 +6264,11 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                         chk_val = get_nested(checkpoint_payload.get("training_config", {}), ".".join(parts[1:]), is_dict=True)
                         if chk_val is None:
                             chk_val = checkpoint_payload.get(parts[-1])
-            
+
             # Determine effective/active value
             active_val = chk_val if chk_val is not None else (stage_val if stage_val is not None else (ui_val if ui_val is not None else d_val))
             source = "checkpoint" if chk_val is not None else ("stage" if stage_val is not None else ("ui" if ui_val is not None else "default"))
-            
+
             config_snapshot[path] = {
                 "default": d_val,
                 "ui": ui_val,
@@ -6228,7 +6277,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                 "active": active_val,
                 "source": source
             }
-            
+
             # Conflict Check
             if ui_val is not None and chk_val is not None and ui_val != chk_val:
                 config_anomalies.append(f"Conflict warning: UI setting for '{path}' ({ui_val}) disagrees with checkpoint configuration ({chk_val}).")
@@ -6240,7 +6289,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         chk_training_cfg = checkpoint_payload.get("training_config", {}) if checkpoint_payload else {}
         eval_env_cfg = active_config.environment
         eval_reward_cfg = active_config.rewards
-        
+
         env_fields = [
             ("width", "width", eval_env_cfg),
             ("height", "height", eval_env_cfg),
@@ -6266,7 +6315,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                     "severity": "WARNING",
                     "message": f"Training environment {eval_key} ({chk_v}) does not match evaluation environment ({eval_v})"
                 })
-                
+
         reward_fields = [
             ("progress_scale", "progress_scale"),
             ("sheep_penned_reward", "sheep_penned_reward"),
@@ -6305,18 +6354,18 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                 "similarity_episodes": {str(k): 0 for k in eval_seeds},
                 "similarity_successes": {str(k): 0 for k in eval_seeds},
             }
-            
+
         avg_sheep_to_pen = 0.0
         if coverage_data.get("count_sheep_to_pen", 0) > 0:
             avg_sheep_to_pen = float(coverage_data["sum_sheep_to_pen"] / coverage_data["count_sheep_to_pen"])
-            
+
         avg_dog_to_sheep = 0.0
         if coverage_data.get("count_dog_to_sheep", 0) > 0:
             avg_dog_to_sheep = float(coverage_data["sum_dog_to_sheep"] / coverage_data["count_dog_to_sheep"])
 
         sim_ep_dict = coverage_data.get("similarity_episodes", {})
         sim_suc_dict = coverage_data.get("similarity_successes", {})
-        all_resemblance_keys = set(eval_seeds) | {int(k) for k in sim_ep_dict.keys() if str(k).isdigit()}
+        all_resemblance_keys = set(eval_seeds) | {int(k) for k in sim_ep_dict if str(k).isdigit()}
         resemblance_counts = {str(k): sim_ep_dict.get(str(k), sim_ep_dict.get(k, 0)) for k in all_resemblance_keys}
         resemblance_successes = {str(k): sim_suc_dict.get(str(k), sim_suc_dict.get(k, 0)) for k in all_resemblance_keys}
 
@@ -6340,15 +6389,12 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         # 7. Version and Failed Seed History
         version_history = {}
         failed_seed_records = {}
-        
+
         for chk in all_checkpoints:
             p_ver = chk.get("policy_version")
             # If policy_version is absent in legacy checkpoints, represent it as None / unrecorded
-            if p_ver is None:
-                p_ver_label = "Legacy (unrecorded)"
-            else:
-                p_ver_label = f"v{p_ver}"
-            
+            p_ver_label = "Legacy (unrecorded)" if p_ver is None else f"v{p_ver}"
+
             if p_ver_label not in version_history:
                 version_history[p_ver_label] = {
                     "checkpoint_episode": chk.get("checkpoint_episode"),
@@ -6357,17 +6403,17 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                     "average_completion_steps": chk.get("average_completion_steps"),
                     "failures": []
                 }
-                
+
             records = chk.get("records", [])
             for rec in records:
                 seed = rec.get("seed")
                 success = rec.get("success", False)
                 if not success:
                     version_history[p_ver_label]["failures"].append(seed)
-                    
+
                 if seed not in failed_seed_records:
                     failed_seed_records[seed] = []
-                    
+
                 failed_seed_records[seed].append({
                     "policy_version": p_ver_label,
                     "success": success,
@@ -6376,7 +6422,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                     "reward_total": rec.get("reward_total", 0.0),
                     "reward_breakdown": rec.get("reward_breakdown", {})
                 })
-                
+
         failed_seed_trends = {}
         for seed, history in failed_seed_records.items():
             if history:
@@ -6384,7 +6430,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                 first_rec = history[0]
                 delta_dist = latest_rec["final_sheep_distance_to_pen"] - first_rec["final_sheep_distance_to_pen"]
                 delta_reward = latest_rec["reward_total"] - first_rec["reward_total"]
-                
+
                 # Check for plateaus
                 is_plateau = False
                 if len(history) >= 3:
@@ -6393,7 +6439,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                     small_reward_var = max(h["reward_total"] for h in last_three) - min(h["reward_total"] for h in last_three) < 5.0
                     if all_failed and small_reward_var:
                         is_plateau = True
-                
+
                 classification = "Mixed or unstable"
                 if is_plateau:
                     classification = "Likely repeating local strategy"
@@ -6401,7 +6447,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                     classification = "Improving beneath flat success rate"
                 elif delta_dist > 1.0:
                     classification = "No measurable improvement"
-                
+
                 if len(history) < 2:
                     classification = "Insufficient unique policy versions"
 
@@ -6435,7 +6481,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             seed = rec.get("seed")
             reported_reward = rec.get("reward_total", 0.0)
             breakdown = rec.get("reward_breakdown", {})
-            
+
             # Correctly handle scatter_penalty sign difference (subtracted in total calculation)
             sum_components = 0.0
             for k, v in breakdown.items():
@@ -6448,13 +6494,13 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
 
             diff = abs(reported_reward - sum_components)
             rec_status = "RECONCILED"
-            
+
             checkpoint_ver = checkpoint_payload.get("policy_version") if checkpoint_payload else None
             if checkpoint_ver is None:
                 rec_status = "PARTIAL LEGACY DATA"
             elif diff > 1e-2:
                 rec_status = "MISMATCH"
-                
+
             reconciliations.append({
                 "seed": seed,
                 "success": rec.get("success", False),
@@ -6477,7 +6523,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                     first_progress_idx = None
                     first_no_progress_idx = None
                     new_best_indices = []
-                    
+
                     for idx, step in enumerate(raw_traj):
                         dist = step.get("sheep_distance_to_pen", 999.0)
                         no_prog = step.get("no_progress_counter", 0)
@@ -6488,7 +6534,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                                 first_progress_idx = idx
                         if no_prog > 0 and first_no_progress_idx is None:
                             first_no_progress_idx = idx
-                            
+
                     # Gather indices
                     indices = set([0]) # initial step
                     if first_progress_idx is not None:
@@ -6506,7 +6552,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                         step_sz = max(1, (n_steps - 10 - first_no_progress_idx) // 5)
                         for idx in range(first_no_progress_idx, n_steps - 10, step_sz):
                             indices.add(idx)
-                            
+
                     sorted_indices = sorted(list(indices))
                     for idx in sorted_indices:
                         if idx >= n_steps:
@@ -6525,7 +6571,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                             event = "Termination step"
                         elif idx >= n_steps - 10:
                             event = "Final trajectory segment"
-                            
+
                         step_copy = dict(step)
                         step_copy["event"] = event
                         # Resolve no progress contradictions
@@ -6536,9 +6582,9 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                             step_copy["no_progress_explanation"] = f"Small movements occurred, but none exceeded the configured {active_config.environment.no_progress_distance_delta} progress threshold during the {no_prog_counter}-step window."
                         else:
                             step_copy["no_progress_explanation"] = "Progress continued without triggering stalled window bounds."
-                            
+
                         sampled_rows.append(step_copy)
-                        
+
                     failed_seed_trajectories[rec.get("seed")] = sampled_rows
 
         # 10. Evaluation Seed Geometry validation
@@ -6550,7 +6596,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             try:
                 temp_env = SheepdogEnvironment(active_config)
                 temp_env.reset(seed=seed)
-                
+
                 dog_positions = [(safe_float(d.position.x), safe_float(d.position.y)) for d in temp_env._dogs]
                 sheep_positions = [(safe_float(s.position.x), safe_float(s.position.y)) for s in temp_env._sheep]
                 pen_origin = (safe_float(temp_env._pen.origin.x), safe_float(temp_env._pen.origin.y))
@@ -6558,13 +6604,13 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                 pen_h = safe_float(temp_env._pen.height)
                 grid_w = safe_float(temp_env.env_config.width)
                 grid_h = safe_float(temp_env.env_config.height)
-                
+
                 bound_violation = False
                 for x, y in dog_positions + sheep_positions:
                     if x < 0 or x > grid_w or y < 0 or y > grid_h:
                         bound_violation = True
                         break
-                
+
                 overlap_detected = False
                 for x, y in dog_positions + sheep_positions:
                     if pen_origin[0] <= x <= pen_origin[0] + pen_w and pen_origin[1] <= y <= pen_origin[1] + pen_h:
@@ -6577,14 +6623,14 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                         if math.hypot(all_entities[i][0] - all_entities[j][0], all_entities[i][1] - all_entities[j][1]) < 0.8:
                             overlap_detected = True
                             break
-                            
+
                 spacing_violation = False
                 for d_x, d_y in dog_positions:
                     for s_x, s_y in sheep_positions:
                         if math.hypot(d_x - s_x, d_y - s_y) < 2.0:
                             spacing_violation = True
                             break
-                            
+
                 dog_space_behind = True
                 for sx, sy in sheep_positions:
                     dx_pen = pen_origin[0] + pen_w/2 - sx
@@ -6597,7 +6643,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                     by = sy - 3.0 * dy_pen
                     if bx < 0 or bx > grid_w or by < 0 or by > grid_h:
                         dog_space_behind = False
-                        
+
                 eval_geometry_validations[seed] = {
                     "dog_start_positions": dog_positions,
                     "sheep_start_positions": sheep_positions,
@@ -6618,7 +6664,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
 
         # 11. Diagnostic Completeness Table and AI Review Readiness
         completeness_table = []
-        
+
         # Helper to compute status
         def get_area_status(area):
             if area == "Run identity":
@@ -6708,7 +6754,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         active_p_ver = status.get("policy_version")
         active_ppo_updates = status.get("ppo_update_count")
         checkpoint_p_ver = checkpoint_payload.get("policy_version") if checkpoint_payload else None
-        
+
         is_legacy = False
         if checkpoint_payload:
             if checkpoint_p_ver is None or checkpoint_p_ver == 0:
@@ -6721,14 +6767,14 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         ppo_updates_val = active_ppo_updates if active_ppo_updates is not None else (checkpoint_p_ver if checkpoint_p_ver is not None else None)
 
         from sheepdog.curriculum import stage_summary
-        
+
         active_cur_stage = status.get("curriculum_stage") or _read_persisted_settings(output_root).get("curriculum_stage") or 1
         active_stage_name = stage_summary(active_cur_stage)
         active_policy_version = status.get("policy_version")
         active_checkpoint_id = status.get("active_checkpoint_id") or (checkpoint_payload.get("checkpoint_id") if checkpoint_payload else None)
         if not active_checkpoint_id and all_checkpoints:
             active_checkpoint_id = all_checkpoints[-1].get("checkpoint_id")
-            
+
         latest_current_stage_evaluation = None
         for chk in reversed(all_checkpoints):
             chk_stage = chk.get("curriculum_stage")
@@ -6737,7 +6783,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             if chk_stage == active_cur_stage:
                 latest_current_stage_evaluation = chk
                 break
-                
+
         latest_any_stage_evaluation = all_checkpoints[-1] if all_checkpoints else None
         current_stage_promotion_gate = None
         if checkpoint_payload:
@@ -6749,7 +6795,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             )
         else:
             current_stage_promotion_gate = status.get("auto_promote_gate")
-        
+
         promotion_history = _read_promotion_history(output_root)
         previous_stage_promotion_result = promotion_history[-1] if promotion_history else None
 
@@ -6772,7 +6818,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                 "evaluation_timestamp": status.get("last_evaluation_time") or (checkpoint_payload.get("created_timestamp") if checkpoint_payload else "Unknown"),
                 "evaluation_policy_version": checkpoint_payload.get("policy_version") if checkpoint_payload else None,
                 "evaluation_checkpoint_id": checkpoint_payload.get("checkpoint_id") if checkpoint_payload else None,
-                
+
                 "active_curriculum_stage": active_cur_stage,
                 "active_stage_name": active_stage_name,
                 "active_policy_version": active_policy_version,
@@ -6833,7 +6879,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             "health_warnings": all_health_warnings,
             "training_status": status
         }
-        
+
         return diagnostics_response
 
     def _handle_diagnostics(self) -> None:
@@ -6980,6 +7026,20 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             run_id = params["run_id"][0] if "run_id" in params else None
 
             res = self.manager.get_stage_diagnostics(stage=stage, run_id=run_id)
+            self._json_response(res)
+            return
+        if request_path in ("/api/stage-health", "/api/insights/stage-health"):
+            query = urlsplit(self.path).query
+            from urllib.parse import parse_qs
+
+            params = parse_qs(query)
+            try:
+                stage = int(params["stage"][0]) if "stage" in params else int(self.manager.snapshot().get("curriculum_stage", 1))
+            except (ValueError, IndexError):
+                stage = None
+            force = params.get("force", ["0"])[0] in ("1", "true", "True")
+
+            res = self.manager.get_stage_health(stage=stage, force_refresh=force)
             self._json_response(res)
             return
         if request_path in ("/api/insights/evaluations", "/api/evaluations/recent"):
@@ -7343,10 +7403,8 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             if "target_outcome" in payload:
                 policy.target_outcome = str(payload["target_outcome"])
             if "success_sample_rate" in payload:
-                try:
+                with contextlib.suppress(ValueError, TypeError):
                     policy.success_sample_rate = float(payload["success_sample_rate"])
-                except (ValueError, TypeError):
-                    pass
 
             self._json_response({
                 "status": "updated",
@@ -7365,8 +7423,8 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         if self.path.startswith("/api/episodes/") and self.path.endswith("/reproduce"):
             ep_id_str = self.path[len("/api/episodes/"): -len("/reproduce")]
             try:
-                from sheepdog.training.episode_store import get_episode_store
                 from sheepdog.config import LabConfig
+                from sheepdog.training.episode_store import get_episode_store
 
                 output_dir = Path(LabConfig().training.output_dir)
                 db_path = output_dir / "training-telemetry.sqlite"
@@ -7381,10 +7439,8 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                 checkpoint_id = ep_record.get("checkpoint_id")
                 checkpoint_ep = None
                 if checkpoint_id and "_ep_" in str(checkpoint_id):
-                    try:
+                    with contextlib.suppress(ValueError, TypeError):
                         checkpoint_ep = int(str(checkpoint_id).split("_ep_")[-1])
-                    except (ValueError, TypeError):
-                        pass
 
                 bundle = self.manager.run_live_replay(
                     seed=int(seed),
@@ -7402,6 +7458,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                 reproduced_path = Path("artifacts/replays") / f"{replay_id}.json.gz"
                 reproduced_path.parent.mkdir(parents=True, exist_ok=True)
                 import gzip
+
                 import numpy as np
                 def _ser(o: Any) -> Any:
                     if isinstance(o, (np.integer, np.floating)):

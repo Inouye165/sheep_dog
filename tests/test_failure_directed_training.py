@@ -1,17 +1,16 @@
 """Tests for failure-directed training, anti-forgetting decay, and benchmark protection."""
 
 import pytest
-from sheepdog.config import EnvironmentConfig, LabConfig, TrainingConfig
+
+from sheepdog.config import EnvironmentConfig, TrainingConfig
 from sheepdog.training.scenario_sampler import (
     STANDARD_EVALUATION_SEEDS,
     ScenarioSampler,
-    validate_scenario_mix,
 )
 from sheepdog.training.training_scenarios import (
     create_gate_wall_flock_scenario,
     create_isolated_stray_scenario,
     create_subpen_flock_scenario,
-    get_scenario_builder,
     list_scenario_types,
 )
 
@@ -244,7 +243,7 @@ def test_deterministic_reproducibility() -> None:
     seq1 = [s1.sample(i) for i in range(100)]
     seq2 = [s2.sample(i) for i in range(100)]
 
-    for item1, item2 in zip(seq1, seq2):
+    for item1, item2 in zip(seq1, seq2, strict=True):
         assert item1.scenario_type == item2.scenario_type
         assert item1.seed == item2.seed
         if item1.scenario is not None:

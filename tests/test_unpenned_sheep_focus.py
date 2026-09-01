@@ -1,12 +1,11 @@
 """Unit tests verifying that unpenned sheep take priority in observations and shepherd commands."""
 
-import pytest
 
 from sheepdog.config import EnvironmentConfig, LabConfig
 from sheepdog.entities import Point
 from sheepdog.environment import SheepdogEnvironment
 from sheepdog.observations import EmergentObservationBuilder
-from sheepdog.shepherd import ScriptedShepherd, ShepherdContext, ShepherdCommand
+from sheepdog.shepherd import ScriptedShepherd, ShepherdCommand, ShepherdContext
 
 
 def test_observation_builder_sorts_unpenned_sheep_first():

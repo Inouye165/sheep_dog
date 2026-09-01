@@ -120,13 +120,14 @@ class CheckpointStore:
 def get_observation_schema_hash(config: Any) -> str:
     import hashlib
     import json
-    from sheepdog.environment import SheepdogEnvironment
+
     from sheepdog.config import LabConfig
+    from sheepdog.environment import SheepdogEnvironment
 
     if isinstance(config, dict):
         # Reconstruct LabConfig from serialized environment/reward configurations
-        from dataclasses import replace
         import dataclasses
+        from dataclasses import replace
         lab_config = LabConfig()
         env_dict = config.get("environment_config", {})
         rew_dict = config.get("reward_config", {})
@@ -156,13 +157,14 @@ def get_observation_schema_hash(config: Any) -> str:
 def get_action_space_hash() -> str:
     import hashlib
     import json
+
     from sheepdog.environment import ACTION_ORDER
     return hashlib.sha256(json.dumps(list(ACTION_ORDER)).encode("utf-8")).hexdigest()
 
 
 def verify_checkpoint_compatibility(checkpoint_metadata: dict[str, Any], current_config: Any) -> dict[str, Any]:
-    from sheepdog.rewards import REWARD_SCHEMA_VERSION
     from sheepdog.environment import ENV_CONFIG_VERSION
+    from sheepdog.rewards import REWARD_SCHEMA_VERSION
 
     current_obs_hash = get_observation_schema_hash(current_config)
     current_action_hash = get_action_space_hash()
@@ -190,8 +192,8 @@ def verify_checkpoint_compatibility(checkpoint_metadata: dict[str, Any], current
         if cp_obs_hash is None:
             try:
                 cp_obs_hash = get_observation_schema_hash(checkpoint_metadata)
-            except Exception:
-                pass
+            except (AttributeError, KeyError, TypeError, ValueError):
+                cp_obs_hash = None
 
     if cp_action_hash is None:
         cp_action_hash = current_action_hash

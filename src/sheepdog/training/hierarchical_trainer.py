@@ -121,7 +121,7 @@ class _HierarchicalProgressCallback(BaseCallback):
             return True
         self._last_reported = n
         completion = min(1.0, n / self._total_timesteps)
-        
+
         actual_completed_episodes = 0
         try:
             if self.model is not None and self.model.get_env() is not None:

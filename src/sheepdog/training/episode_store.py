@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import contextlib
 import datetime
 import json
 import logging
@@ -18,7 +19,6 @@ from sheepdog.training.spatial_analytics import (
     ALL_ZONES,
     CORNER_ZONES,
     WALL_ZONES,
-    ZONE_CENTER,
     diagnose_stage_bottlenecks,
 )
 
@@ -53,7 +53,7 @@ class EpisodeStore:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
-        
+
         # Self-healing schema check: auto-recreate table if database file was recreated on disk
         tables = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
         if "training_episodes" not in tables:
@@ -138,10 +138,8 @@ class EpisodeStore:
             "CREATE INDEX IF NOT EXISTS idx_episodes_pen_zone ON training_episodes(pen_zone);",
         ]
         for idx_sql in indexes:
-            try:
+            with contextlib.suppress(sqlite3.OperationalError):
                 conn.execute(idx_sql)
-            except sqlite3.OperationalError:
-                pass
         conn.commit()
 
     def _init_db(self) -> None:
@@ -351,7 +349,7 @@ class EpisodeStore:
         sql = f"UPDATE training_episodes {set_clause} {where_sql}"
         sql_params = (*set_params, *where_values)
 
-        for attempt in range(5):
+        for _attempt in range(5):
             try:
                 with self._get_connection() as conn:
                     cursor = conn.execute(sql, sql_params)
@@ -413,13 +411,7 @@ class EpisodeStore:
                     # Verify actual file existence on disk (or allow mock test paths)
                     is_mock = bool(r_path and str(r_path).startswith("/path/to/"))
                     file_exists = False
-                    if is_mock:
-                        file_exists = True
-                    elif r_path and os.path.exists(r_path):
-                        file_exists = True
-                    elif r_id and os.path.exists(f"artifacts/replays/{r_id}.json.gz"):
-                        file_exists = True
-                    elif r_id and os.path.exists(f"artifacts/replays/{r_id}.json"):
+                    if is_mock or r_path and os.path.exists(r_path) or r_id and os.path.exists(f"artifacts/replays/{r_id}.json.gz") or r_id and os.path.exists(f"artifacts/replays/{r_id}.json"):
                         file_exists = True
 
                     if file_exists:
@@ -485,7 +477,7 @@ class EpisodeStore:
         max_disk_mb: float = 500.0,
     ) -> int:
         """Prune oldest diagnostic replays exceeding retention limits.
-        
+
         Never prunes checkpoint-evaluation replays. Updates SQLite row status to 'pruned' and replay_available=0.
         """
         self.flush()
@@ -513,7 +505,7 @@ class EpisodeStore:
                 to_prune_ids: set[int] = set()
 
                 # Stage-level pruning
-                for st, st_rows in stage_counts.items():
+                for _st, st_rows in stage_counts.items():
                     if len(st_rows) > max_files_per_stage:
                         excess = len(st_rows) - max_files_per_stage
                         for r in st_rows[:excess]:
@@ -549,10 +541,8 @@ class EpisodeStore:
                     if r["id"] in to_prune_ids:
                         p = Path(r["replay_path"])
                         if p.exists():
-                            try:
+                            with contextlib.suppress(OSError):
                                 p.unlink()
-                            except OSError:
-                                pass
                         conn.execute(
                             """
                             UPDATE training_episodes
@@ -610,10 +600,8 @@ class EpisodeStore:
             self.last_error = str(exc)
             logger.exception("Unexpected error in EpisodeStore worker loop: %s", exc)
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 conn.close()
-            except Exception:
-                pass
 
     def flush(self) -> None:
         """Synchronously write all pending queued episodes to SQLite."""
@@ -641,10 +629,8 @@ class EpisodeStore:
     def close(self) -> None:
         self.flush()
         self._stop_event.set()
-        try:
+        with contextlib.suppress(queue.Full):
             self._queue.put_nowait(None)
-        except queue.Full:
-            pass
         if self._worker_thread and self._worker_thread.is_alive():
             self._worker_thread.join(timeout=2.0)
 
@@ -1087,7 +1073,5 @@ def get_episode_store(db_path: str | Path = "artifacts/training-telemetry.sqlite
 def _on_exit_flush() -> None:
     global _global_episode_store
     if _global_episode_store is not None:
-        try:
+        with contextlib.suppress(Exception):
             _global_episode_store.close()
-        except Exception:
-            pass

@@ -83,6 +83,7 @@ python -m pip install -e .[dev,rl]
 - `tests/` Python regression tests.
 - `web/` React + TypeScript UI for replay playback and checkpoint comparison.
 - `docs/architecture.md` High-level architecture notes.
+- [`docs/rl-evaluation-roadmap.md`](docs/rl-evaluation-roadmap.md) RL experiment results, decisions, and prioritized improvement queue.
 - `artifacts/` Generated training and evaluation output.
 
 ## Architecture Overview
@@ -432,10 +433,18 @@ Python:
 
 ```powershell
 python -m pip install -e .[dev]
-python -m pytest
+python -m ruff format src tests
 python -m ruff check src tests
-python -m ruff format --check src tests
+python -m pylint src/sheepdog tests
+python -m pytest
 ```
+
+Ruff is the source of truth for formatting, imports, unused code, and Python
+style. Pylint is intentionally limited to fatal and error diagnostics so the
+VS Code Problems panel stays focused on defects instead of duplicating Ruff or
+reporting legacy complexity metrics. VS Code formats Python with Ruff on save.
+The repository-wide Ruff lint and Pylint checks are clean; a full-tree
+`ruff format --check` remains deferred until legacy formatting is normalized.
 
 Web:
 
@@ -449,9 +458,9 @@ npm run test
 Full validation pass from PowerShell:
 
 ```powershell
-python -m pytest
 python -m ruff check src tests
-python -m ruff format --check src tests
+python -m pylint src/sheepdog tests
+python -m pytest
 cd web
 npm run lint
 npm run test

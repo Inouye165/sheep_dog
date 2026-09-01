@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 CORNER_ZONES = frozenset({"top_left", "top_right", "bottom_left", "bottom_right"})
 WALL_ZONES = frozenset({"top_wall", "bottom_wall", "left_wall", "right_wall"})

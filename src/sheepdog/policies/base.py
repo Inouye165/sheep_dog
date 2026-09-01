@@ -23,6 +23,7 @@ PolicyMode = Literal[
     "heuristic_expert",
     "trained_policy",
     "neural_policy",
+    "joint_team_policy",
     # Hierarchical: scripted shepherd + neural dogs (Phase A+)
     "shepherd_neural_dogs",
 ]
@@ -32,6 +33,7 @@ PolicyType = Literal["linear", "neural"]
 TrainerType = Literal[
     "hill_climb",
     "maskable_ppo",
+    "joint_maskable_ppo",
     "hierarchical_maskable_ppo",
 ]
 

@@ -1,12 +1,8 @@
 """Backend tests for learning curve telemetry data semantics, SQLite persistence, and API behavior."""
 
-import json
-import sqlite3
-import tempfile
-from pathlib import Path
 import pytest
 
-from sheepdog.training.episode_store import EpisodeStore, get_episode_store
+from sheepdog.training.episode_store import EpisodeStore
 
 
 @pytest.fixture

@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import pytest
+
 from sheepdog.training.adaptive_learning import (
-    ADAPTIVE_STAGES,
     MAX_ADAPTIVE_STAGES,
     AdaptiveStepController,
     _target_stage_for_success,
@@ -26,6 +26,7 @@ def test_initial_state_is_stage_one_no_modification():
     controller = AdaptiveStepController(
         base_learning_rate=1e-4,
         base_mutation_scale=0.08,
+        base_entropy_coef=0.016,
         initial_curriculum_stage=1,
     )
     state = controller.get_state()
@@ -36,6 +37,12 @@ def test_initial_state_is_stage_one_no_modification():
     assert "No modification" in state.label
     assert state.effective_learning_rate == pytest.approx(1e-4)
     assert state.effective_mutation_scale == pytest.approx(0.08)
+    assert state.effective_entropy_coef == pytest.approx(0.016)
+
+    # Check to_dict serialization
+    state_dict = state.to_dict()
+    assert state_dict["effective_entropy_coef"] == pytest.approx(0.016)
+    assert state_dict["stage"] == 1
 
 
 def test_debounce_protects_against_single_fluke():
@@ -61,6 +68,7 @@ def test_stage_progression_with_sustained_high_success():
     controller = AdaptiveStepController(
         base_learning_rate=1e-4,
         base_mutation_scale=0.08,
+        base_entropy_coef=0.016,
         debounce_required_hits=2,
         initial_curriculum_stage=1,
     )
@@ -73,6 +81,7 @@ def test_stage_progression_with_sustained_high_success():
     assert "Stage 2 of 4" in state.label
     assert state.effective_learning_rate == pytest.approx(8e-5)
     assert state.effective_mutation_scale == pytest.approx(0.064)
+    assert state.effective_entropy_coef == pytest.approx(0.016 * 0.80)
 
     # Sustained 80% success advances to Stage 3
     controller.update(0.80, 1)
@@ -81,6 +90,7 @@ def test_stage_progression_with_sustained_high_success():
     assert state.stage == 3
     assert state.multiplier == 0.65
     assert "Stage 3 of 4" in state.label
+    assert state.effective_entropy_coef == pytest.approx(0.016 * 0.65)
 
     # Sustained 90% success advances to Stage 4
     controller.update(0.95, 1)
@@ -92,6 +102,7 @@ def test_stage_progression_with_sustained_high_success():
     assert "Stage 4 of 4" in state.label
     assert state.effective_learning_rate == pytest.approx(5e-5)
     assert state.effective_mutation_scale == pytest.approx(0.04)
+    assert state.effective_entropy_coef == pytest.approx(0.016 * 0.50)
 
 
 def test_curriculum_stage_reset_preserves_plasticity():
@@ -117,6 +128,51 @@ def test_curriculum_stage_reset_preserves_plasticity():
     assert "No modification" in new_state.label
     assert new_state.curriculum_stage == 7
     assert new_state.effective_learning_rate == pytest.approx(1e-4)
+
+
+def test_restore_preserves_same_curriculum_adaptive_progress():
+    controller = AdaptiveStepController(
+        base_learning_rate=1e-4,
+        base_mutation_scale=0.08,
+        base_entropy_coef=0.01,
+        initial_curriculum_stage=8,
+    )
+
+    state = controller.restore(
+        {
+            "stage": 2,
+            "curriculum_stage": 8,
+            "ema_success_rate": 0.6281,
+            "consecutive_hits": 1,
+        },
+        current_curriculum_stage=8,
+    )
+
+    assert state.stage == 2
+    assert state.curriculum_stage == 8
+    assert state.ema_success_rate == pytest.approx(0.6281)
+    assert state.consecutive_hits == 1
+    assert state.effective_learning_rate == pytest.approx(8e-5)
+    assert state.effective_entropy_coef == pytest.approx(0.008)
+
+
+def test_restore_resets_progress_when_curriculum_changes():
+    controller = AdaptiveStepController(initial_curriculum_stage=9)
+
+    state = controller.restore(
+        {
+            "stage": 4,
+            "curriculum_stage": 8,
+            "ema_success_rate": 0.95,
+            "consecutive_hits": 1,
+        },
+        current_curriculum_stage=9,
+    )
+
+    assert state.stage == 1
+    assert state.curriculum_stage == 9
+    assert state.ema_success_rate == 0.0
+    assert state.consecutive_hits == 0
 
 
 def test_graceful_asymmetric_recovery_on_performance_drop():

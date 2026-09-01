@@ -1780,11 +1780,10 @@ class SheepdogEnvironment:
         self._max_wall_stall_steps = max(self._max_wall_stall_steps, self._wall_stall_steps)
 
         for s in unpenned_sheep:
-            if self._wall_margin(s.position) == 0:
-                if (s.position.x == 0 or s.position.x == w_max) and (
-                    s.position.y == 0 or s.position.y == h_max
-                ):
-                    self._corner_occupancy_steps += 1
+            if self._wall_margin(s.position) == 0 and (
+                s.position.x == 0 or s.position.x == w_max
+            ) and (s.position.y == 0 or s.position.y == h_max):
+                self._corner_occupancy_steps += 1
 
     def _validate_action(self, action: str) -> Action:
         if action not in ACTION_DELTAS:

@@ -353,6 +353,7 @@ class Trainer:
         adaptive_controller = AdaptiveStepController(
             base_learning_rate=train_config.learning_rate,
             base_mutation_scale=train_config.mutation_scale,
+            base_entropy_coef=train_config.entropy_coef,
             initial_curriculum_stage=current_stage,
         )
         adaptive_state = adaptive_controller.get_state()

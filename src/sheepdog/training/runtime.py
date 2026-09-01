@@ -275,3 +275,8 @@ class TrainingRuntimeTracker:
             "wall_clock_elapsed_seconds": summary["wall_clock_seconds"],
             "session_id": summary["session_id"],
         }
+
+    @property
+    def active_seconds_total(self) -> float:
+        """Return cumulative active runtime across all sessions."""
+        return float(self.snapshot().get("active_seconds_total", 0.0))

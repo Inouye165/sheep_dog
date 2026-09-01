@@ -1,16 +1,19 @@
 """Regression test verifying Stage 9 remediation run loads Stage 8 policy and optimizer state."""
 
 from __future__ import annotations
+
+import dataclasses
 import hashlib
 import json
 from http import HTTPStatus
 from pathlib import Path
+
 import pytest
-import dataclasses
 from sb3_contrib import MaskablePPO
-from sheepdog.config import LabConfig, TrainingConfig
+
+from sheepdog.config import LabConfig
 from sheepdog.policies.neural import NeuralPolicy
-from sheepdog.server import TrainingManager, resolve_workspace_path, _build_training_job_config
+from sheepdog.server import TrainingManager, _build_training_job_config
 from sheepdog.training.maskable_ppo import MaskablePPOTrainer
 
 

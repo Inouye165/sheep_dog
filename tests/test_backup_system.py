@@ -1,16 +1,13 @@
 """Tests for the multi-tier stage milestone and hourly snapshot backup system."""
 
 import json
-import shutil
 import time
 from pathlib import Path
-from unittest.mock import patch, MagicMock
-
-import pytest
+from unittest.mock import patch
 
 from sheepdog.config import LabConfig
-from sheepdog.training.backup import TrainingBackupManager
 from sheepdog.server import TrainingManager
+from sheepdog.training.backup import TrainingBackupManager
 
 
 def test_backup_completed_stage(tmp_path: Path) -> None:

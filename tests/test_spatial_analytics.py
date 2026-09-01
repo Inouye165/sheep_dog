@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+
 from sheepdog.entities import Pen, Point
 from sheepdog.training.episode_store import EpisodeStore
 from sheepdog.training.spatial_analytics import (
-    ALL_ZONES,
-    CORNER_ZONES,
-    WALL_ZONES,
     ZONE_BOTTOM_LEFT,
     ZONE_BOTTOM_RIGHT,
     ZONE_BOTTOM_WALL,
