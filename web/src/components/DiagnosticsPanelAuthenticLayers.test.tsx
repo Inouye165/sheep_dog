@@ -153,7 +153,7 @@ describe("DiagnosticsPanel Authentic Telemetry & 4-Layer Controls", () => {
     expect(screen.getByText("Policy Snapshot:")).toBeInTheDocument();
   });
 
-  it("renders 4 independent layer control checkboxes", () => {
+  it("renders 3 independent layer control checkboxes", () => {
     render(
       <DiagnosticsPanel
         checkpointIndex={mockIndexWithCheckpoints}
@@ -164,7 +164,6 @@ describe("DiagnosticsPanel Authentic Telemetry & 4-Layer Controls", () => {
     );
 
     expect(screen.getByLabelText(/Raw Episodes/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/25-Episode Rolling Avg/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/Policy Snapshots/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/Formal 10-Seed Benchmark Evals/i)).toBeInTheDocument();
   });
@@ -197,19 +196,19 @@ describe("DiagnosticsPanel Authentic Telemetry & 4-Layer Controls", () => {
     );
 
     const rawCheckbox = screen.getByLabelText(/Raw Episodes/i) as HTMLInputElement;
-    const rollingCheckbox = screen.getByLabelText(/25-Episode Rolling Avg/i) as HTMLInputElement;
+    const snapshotsCheckbox = screen.getByLabelText(/Policy Snapshots/i) as HTMLInputElement;
 
     expect(rawCheckbox.checked).toBe(true);
-    expect(rollingCheckbox.checked).toBe(true);
+    expect(snapshotsCheckbox.checked).toBe(true);
 
     fireEvent.click(rawCheckbox);
     expect(rawCheckbox.checked).toBe(false);
 
-    fireEvent.click(rollingCheckbox);
-    expect(rollingCheckbox.checked).toBe(false);
+    fireEvent.click(snapshotsCheckbox);
+    expect(snapshotsCheckbox.checked).toBe(false);
   });
 
-  it("renders Completion Steps tab with raw rollout and rolling average legends", () => {
+  it("renders Completion Steps tab with raw rollout and formal benchmark legends", () => {
     render(
       <DiagnosticsPanel
         checkpointIndex={mockIndexWithCheckpoints}
@@ -224,7 +223,6 @@ describe("DiagnosticsPanel Authentic Telemetry & 4-Layer Controls", () => {
     fireEvent.click(stepsTab);
 
     expect(screen.getByText("Training rollout steps")).toBeInTheDocument();
-    expect(screen.getByText(/Rolling \d+ rollout steps/i)).toBeInTheDocument();
     expect(screen.getByText("Formal eval avg steps")).toBeInTheDocument();
   });
 

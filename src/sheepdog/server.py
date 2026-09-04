@@ -2377,8 +2377,15 @@ class TrainingManager:
         if not evals_dir.exists():
             return []
 
-        eval_files = [f for f in evals_dir.glob("eval_*.json") if f.is_file()]
+        eval_files = [
+            f for f in evals_dir.glob("eval*.json")
+            if f.is_file() and not f.name.startswith("eval_retention_index")
+        ]
         eval_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+        from sheepdog.evaluation.retention import EvaluationReplayRetentionManager
+        retention_mgr = EvaluationReplayRetentionManager(evals_dir)
+        pinned_ids = retention_mgr.get_pinned_evaluation_ids()
 
         results: list[dict[str, Any]] = []
         seen_eval_ids: set[str] = set()
@@ -2399,6 +2406,10 @@ class TrainingManager:
                     if eval_stage is not None and int(eval_stage) != stage:
                         continue
                 seen_eval_ids.add(eval_id)
+                data["pinned"] = (eval_id in pinned_ids) or bool(data.get("pinned", False))
+                e_idx = data.get("evaluation_index")
+                data["is_milestone"] = (e_idx is not None and int(e_idx) > 0 and int(e_idx) % 25 == 0)
+                data["is_first"] = (e_idx is not None and int(e_idx) == 1)
                 results.append(data)
             except Exception as exc:
                 logger.warning("Failed to load evaluation file %s: %s", fpath, exc)
@@ -2642,7 +2653,17 @@ class TrainingManager:
                 if index_path.exists():
                     with index_path.open("r", encoding="utf-8") as handle:
                         index_payload = json.load(handle)
+                    target_stage = (
+                        int(curriculum_stage)
+                        if curriculum_stage is not None
+                        else int(self._status.get("curriculum_stage") or 1)
+                    )
                     for cp in index_payload.get("checkpoints", []):
+                        cp_stage = cp.get("curriculum_stage")
+                        if cp_stage is None and isinstance(cp.get("environment_config"), dict):
+                            cp_stage = cp.get("environment_config", {}).get("curriculum_stage")
+                        if cp_stage is not None and int(cp_stage) != target_stage:
+                            continue
                         ep = cp.get("checkpoint_episode")
                         sr = cp.get("success_rate")
                         if ep is not None and sr is not None:
@@ -4957,16 +4978,16 @@ class TrainingManager:
                         if best_success_rate_ever >= 0.9 and last_50_success_rate < 0.5:
                             recent_count = len(recent_evals) if recent_evals else 1
                             update["message"] = (
-                                f"Possible policy collapse detected (best deterministic eval: {best_success_rate_ever:.0%}, "
+                                f"Possible policy collapse detected in Stage {stage} (best: {best_success_rate_ever:.0%}, "
                                 f"recent eval avg: {last_50_success_rate:.0%} over {recent_count} checkpoints) — continuing training."
                             )
                             update["anti_collapse_warning"] = {
                                 "triggered": True,
                                 "message": (
-                                    f"Possible policy collapse detected (best: {best_success_rate_ever:.0%}, "
+                                    f"Possible policy collapse detected in Stage {stage} (best: {best_success_rate_ever:.0%}, "
                                     f"recent avg: {last_50_success_rate:.0%}) — continuing training."
                                 ),
-                                "recommendation": "Try lowering entropy_coef to 0.003 or 0.001 instead of 0.01.",
+                                "recommendation": "Review the Insights tab for stage health and seed diagnostics.",
                             }
                         else:
                             update["anti_collapse_warning"] = None
@@ -5203,6 +5224,7 @@ class TrainingManager:
                         update["auto_promote_gate_ready"] = bool(should_auto_promote_now)
                         update["auto_promote_gate"] = gate_snap
                         if should_auto_promote_now and promotion_checkpoint_episode is not None:
+                            self._eval_success_history = []
                             update["message"] = (
                                 f"Checkpoint Evaluation: {success_rate:.0%} — Promotion criteria satisfied. Advancing to Stage {stage + 1}."
                             )
@@ -7130,16 +7152,23 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                 self._json_response({"error": "Invalid replay ID"}, status=HTTPStatus.BAD_REQUEST)
                 return
 
-            replays_dir = Path("artifacts/replays")
-            gz_path = replays_dir / f"{replay_id}.json.gz"
-            json_path = replays_dir / f"{replay_id}.json"
-
-            if not gz_path.exists() and not json_path.exists():
-                eval_replays_dir = Path("web/public/generated/replays")
-                json_path = eval_replays_dir / f"{replay_id}.json"
-                gz_path = eval_replays_dir / f"{replay_id}.json.gz"
-
-            target_file = gz_path if gz_path.exists() else (json_path if json_path.exists() else None)
+            candidate_dirs = [
+                Path("artifacts/replays"),
+                Path("web/public/generated/replays"),
+                Path(LabConfig().training.output_dir) / "evaluations" / "replays",
+                Path(LabConfig().training.output_dir) / "replays",
+                Path("output/evaluations/replays"),
+            ]
+            target_file = None
+            for c_dir in candidate_dirs:
+                gz_path = c_dir / f"{replay_id}.json.gz"
+                json_path = c_dir / f"{replay_id}.json"
+                if gz_path.exists():
+                    target_file = gz_path
+                    break
+                if json_path.exists():
+                    target_file = json_path
+                    break
             if target_file is None:
                 self._json_response({"error": "Authentic replay file not found or pruned"}, status=HTTPStatus.NOT_FOUND)
                 return
@@ -7180,6 +7209,20 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802  # pylint: disable=invalid-name
         """Handle HTTP POST requests."""
+        if self.path == "/api/evaluations/pin":
+            body = self._read_json()
+            evaluation_id = body.get("evaluation_id")
+            if not evaluation_id:
+                self._json_response({"error": "evaluation_id is required"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            pinned = bool(body.get("pinned", True))
+            from sheepdog.evaluation.retention import EvaluationReplayRetentionManager
+            output_root = Path(LabConfig().training.output_dir)
+            evals_dir = output_root / "evaluations"
+            mgr = EvaluationReplayRetentionManager(evals_dir)
+            ok = mgr.pin_evaluation(evaluation_id, pinned=pinned)
+            self._json_response({"success": ok, "evaluation_id": evaluation_id, "pinned": pinned})
+            return
         if self.path == "/api/shutdown":
             self._json_response({"status": "shutdown"})
             import threading

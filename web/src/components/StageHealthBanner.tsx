@@ -153,9 +153,14 @@ function buildClientFallbackHealth(
   let statusLabel = "Healthy Learning · Surging";
   let statusExplanation = `The policy is progressing well on Stage ${stage}, peaking at ${Math.round(latestFourMax * 100)}% win rate with strong pack coordination.`;
 
+  const totalCps = stageCheckpoints.length;
   if (latestFourMax >= 0.85 || (recentSr >= 0.75 && recentAvgRew > 150)) {
     status = "green";
     statusLabel = "Healthy Learning · Surging";
+  } else if (totalCps < 8) {
+    status = "yellow";
+    statusLabel = "Adapting to Stage · Baseline Gathering";
+    statusExplanation = `Stage ${stage} recently started (${totalCps} checkpoints evaluated). The policy is actively adapting to new stage dynamics. Win rates naturally fluctuate while establishing the initial performance baseline.`;
   } else if (recentSr >= 0.45 || closeness >= 0.45 || (peakSr >= 0.80 && allTimeSr >= 0.55)) {
     status = "yellow";
     statusLabel = "Active Exploration · Watch";
@@ -163,11 +168,19 @@ function buildClientFallbackHealth(
   } else {
     status = "red";
     statusLabel = "Systemic Bottleneck · Action Required";
-    statusExplanation = `The policy has remained below 40% success for an extended duration without partial progress. Check for stray recovery or pen friction.`;
+    statusExplanation = `The policy has remained below 40% success across ${totalCps} checkpoints without partial progress. Check for stray recovery or pen friction.`;
   }
 
   const recs: PrescriptiveRecommendation[] = [];
-  if (status === "green") {
+  if (totalCps < 8 && status !== "green") {
+    recs.push({
+      type: "continue",
+      title: "Allow Baseline Checkpoints to Accumulate",
+      description: `Stage ${stage} has evaluated ${totalCps} checkpoints so far. Early multi-agent adaptation requires 8–10 checkpoints to establish a stable diagnostic baseline.`,
+      suggested_action: "Keep training running without interrupting or tweaking hyperparameters prematurely.",
+      priority: "info",
+    });
+  } else if (status === "green") {
     recs.push({
       type: "continue",
       title: "Allow Live Training to Continue",

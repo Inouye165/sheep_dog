@@ -13,6 +13,7 @@ import { TrainingPanel } from "./components/TrainingPanel";
 import { StatusPanel } from "./components/StatusPanel";
 import { ResultsPanel } from "./components/ResultsPanel";
 import { WandbTab } from "./components/WandbTab";
+import { EvaluationEpisodesTab } from "./components/EvaluationEpisodesTab";
 import {
   clearTraining,
   evaluateScenario,
@@ -47,12 +48,11 @@ import type {
 } from "./state/types";
 
 type RunState = "idle" | "running" | "paused" | "success" | "timeout" | "stopped";
-type ActiveTab = "train" | "watch" | "test" | "network" | "layers" | "stages" | "insights" | "results" | "config" | "history" | "wandb";
+type ActiveTab = "train" | "test" | "network" | "layers" | "stages" | "insights" | "results" | "config" | "history" | "wandb";
 type RightRailTab = "training" | "controls" | "status" | "scenario" | "library";
 
 const APP_TABS: { id: ActiveTab; label: string }[] = [
   { id: "train", label: "Train" },
-  { id: "watch", label: "Watch" },
   { id: "test", label: "Scenarios" },
   { id: "network", label: "Network" },
   { id: "layers", label: "Layers" },
@@ -468,10 +468,6 @@ export function App() {
   useEffect(() => {
     if (activeTab === "train") {
       setRightRailTab("training");
-      return;
-    }
-    if (activeTab === "watch") {
-      setRightRailTab("controls");
       return;
     }
     if (activeTab === "test") {
@@ -1139,7 +1135,8 @@ export function App() {
     setSelectedCheckpointEpisode(episode);
     const checkpoint = checkpointIndex?.checkpoints.find((entry) => entry.checkpoint_episode === episode);
     setSelectedSeed(checkpoint?.records?.[0]?.seed ?? null);
-    setActiveTab("watch");
+    setActiveTab("train");
+    setRightRailTab("controls");
   }, [checkpointIndex]);
 
   function policySelectionForCheckpoint(episode: number | null) {
@@ -1400,19 +1397,12 @@ export function App() {
       ? [
           { id: "training" as const, label: "Training" },
           { id: "controls" as const, label: "Playback" },
-          { id: "status" as const, label: "Status" },
         ]
-      : activeTab === "watch"
-        ? [
-            { id: "controls" as const, label: "Playback" },
-            { id: "status" as const, label: "Status" },
-            { id: "training" as const, label: "Training" },
-          ]
-        : [
-            { id: "scenario" as const, label: "Scenario" },
-            { id: "library" as const, label: "Library" },
-            { id: "status" as const, label: "Status" },
-          ];
+      : [
+          { id: "scenario" as const, label: "Scenario" },
+          { id: "library" as const, label: "Library" },
+          { id: "status" as const, label: "Status" },
+        ];
 
   if (isAppClosed) {
     return (
@@ -1445,6 +1435,28 @@ export function App() {
             You may now safely close this browser window or tab.
           </div>
         </div>
+      </div>
+    );
+  }
+
+  // Check if opened as standalone 10-seed replay popup window / second screen view
+  const isStandaloneEval10 = useMemo(() => {
+    if (typeof window === "undefined") return false;
+    const params = new URLSearchParams(window.location.search);
+    return params.get("view") === "eval10" || window.location.hash === "#eval10";
+  }, []);
+
+  if (isStandaloneEval10) {
+    return (
+      <div className="eval-standalone-container" data-testid="eval-standalone-window">
+        <EvaluationEpisodesTab
+          currentStage={effectiveCurriculumStage}
+          runId={trainingStatus?.run_id}
+          popupOnly={true}
+          isOpen={true}
+          standaloneWindow={true}
+          onClose={() => window.close()}
+        />
       </div>
     );
   }
@@ -1612,30 +1624,16 @@ export function App() {
                     fastMode={playbackFastMode}
                     onFastModeChange={setPlaybackFastMode}
                   />
-                  {activeTab === "watch" ? (
-                    <StatusPanel
-                      snapshot={snapshot}
-                      replay={replay}
-                      selectedCheckpoint={selectedCheckpoint as CheckpointEntry | null}
-                      selectedCheckpointEpisode={selectedCheckpointEpisode}
-                      bestCheckpointEpisode={bestCheckpointEpisode}
-                      selectedSeed={selectedSeed}
-                      runState={statusLabel}
-                    />
-                  ) : null}
+                  <StatusPanel
+                    snapshot={snapshot}
+                    replay={replay}
+                    selectedCheckpoint={selectedCheckpoint as CheckpointEntry | null}
+                    selectedCheckpointEpisode={selectedCheckpointEpisode}
+                    bestCheckpointEpisode={bestCheckpointEpisode}
+                    selectedSeed={selectedSeed}
+                    runState={statusLabel}
+                  />
                 </>
-              ) : null}
-
-              {activeTab !== "test" && rightRailTab === "status" ? (
-                <StatusPanel
-                  snapshot={snapshot}
-                  replay={replay}
-                  selectedCheckpoint={selectedCheckpoint as CheckpointEntry | null}
-                  selectedCheckpointEpisode={selectedCheckpointEpisode}
-                  bestCheckpointEpisode={bestCheckpointEpisode}
-                  selectedSeed={selectedSeed}
-                  runState={statusLabel}
-                />
               ) : null}
 
               {activeTab === "test" && rightRailTab === "scenario" ? (

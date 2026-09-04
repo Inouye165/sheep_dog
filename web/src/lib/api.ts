@@ -229,6 +229,25 @@ export async function fetchReplayById(replayId: string): Promise<ReplayBundle | 
   }
 }
 
+export async function pinEvaluation(
+  evaluationId: string,
+  pinned: boolean = true
+): Promise<{ success: boolean; evaluation_id: string; pinned: boolean } | null> {
+  try {
+    return await fetchJson<{ success: boolean; evaluation_id: string; pinned: boolean }>(
+      "/api/evaluations/pin",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ evaluation_id: evaluationId, pinned }),
+      },
+      API_BASE_URL
+    );
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchCapturePolicy(): Promise<CapturePolicyConfig | null> {
   try {
     return await fetchJson<CapturePolicyConfig>("/api/training/capture-policy", undefined, API_BASE_URL);

@@ -566,11 +566,11 @@ export function calculateEfficiencyTrend(
   }
 
   const count = validEvals.length;
-  if (count < 2) {
+  if (count < 6) {
     return {
       status: "collecting_evidence",
       statusLabel: "COLLECTING EVIDENCE",
-      recentMedian: count === 1 ? validEvals[0].medianSteps : null,
+      recentMedian: count > 0 ? validEvals[count - 1].medianSteps : null,
       priorMedian: null,
       percentageImprovement: null,
       evaluationsCount: count,
@@ -585,21 +585,10 @@ export function calculateEfficiencyTrend(
     return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
   };
 
-  let recentMedian: number;
-  let priorMedian: number;
-
-  if (count >= 6) {
-    const recent3 = validEvals.slice(-3).map((e) => e.medianSteps);
-    const prior3 = validEvals.slice(-6, -3).map((e) => e.medianSteps);
-    recentMedian = medianOf(recent3);
-    priorMedian = medianOf(prior3);
-  } else {
-    const half = Math.floor(count / 2);
-    const priorSlice = validEvals.slice(0, half).map((e) => e.medianSteps);
-    const recentSlice = validEvals.slice(half).map((e) => e.medianSteps);
-    recentMedian = medianOf(recentSlice);
-    priorMedian = medianOf(priorSlice);
-  }
+  const recent3 = validEvals.slice(-3).map((e) => e.medianSteps);
+  const prior3 = validEvals.slice(-6, -3).map((e) => e.medianSteps);
+  const recentMedian = medianOf(recent3);
+  const priorMedian = medianOf(prior3);
 
   const pctImprovement = priorMedian > 0
     ? ((priorMedian - recentMedian) / priorMedian) * 100

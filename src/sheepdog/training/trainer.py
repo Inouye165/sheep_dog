@@ -408,6 +408,7 @@ class Trainer:
                 act_hash = get_action_space_hash()
                 recorded_time = datetime.now(UTC).isoformat()
                 active_stage = self.config.rewards.instincts.curriculum_stage
+                eval_idx = checkpoint_ordinals.get(cumulative_episode)
 
                 summary, evaluation_json, _csv_path = self.evaluator.evaluate(
                     best_policy,
@@ -417,6 +418,7 @@ class Trainer:
                     checkpoint_id=chk_id,
                     policy_version=None,
                     curriculum_stage=active_stage,
+                    evaluation_index=eval_idx,
                 )
                 representative_replay_path = Path(summary.records[0].replay_path)
 

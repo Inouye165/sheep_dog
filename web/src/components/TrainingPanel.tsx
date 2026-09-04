@@ -623,31 +623,6 @@ export function TrainingPanel({
             )}
           </div>
 
-          {antiCollapseWarning?.triggered && (
-            <div style={{
-              background: "rgba(239, 68, 68, 0.12)",
-              border: "1px solid rgba(239, 68, 68, 0.25)",
-              borderLeft: "4px solid #ef4444",
-              padding: "0.6rem 0.8rem",
-              borderRadius: "0 0.5rem 0.5rem 0",
-              fontSize: "0.75rem",
-              color: "#fca5a5",
-              lineHeight: "1.4",
-              display: "flex",
-              flexDirection: "column",
-              gap: "4px"
-            }}>
-              <strong style={{ display: "flex", alignItems: "center", gap: "6px", color: "#f87171" }}>
-                ⚠️ POLICY COLLAPSE WARNING (ADVISORY)
-              </strong>
-              <span>{antiCollapseWarning.message}</span>
-              {antiCollapseWarning.recommendation && (
-                <span style={{ fontStyle: "italic", fontSize: "0.7rem", color: "#fca5a5" }}>
-                  Recommendation: {antiCollapseWarning.recommendation}
-                </span>
-              )}
-            </div>
-          )}
 
           {/* Training Control Card */}
           <div style={{ display: "flex", flexDirection: "column", gap: "0.65rem" }}>

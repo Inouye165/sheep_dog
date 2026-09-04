@@ -1018,6 +1018,11 @@ export interface EvaluationSummaryPayload {
   evaluation_timestamp?: string | null;
   evaluation_id?: string | null;
   evaluation_mode?: string;
+  pinned?: boolean;
+  evaluation_index?: number;
+  is_milestone?: boolean;
+  is_first?: boolean;
+  retention_status?: string;
 }
 
 export interface SeedHealthItem {

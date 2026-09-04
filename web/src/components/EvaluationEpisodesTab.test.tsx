@@ -11,6 +11,7 @@ vi.mock("../lib/api", () => ({
   runLiveReplay: vi.fn(),
   fetchReplayById: vi.fn().mockResolvedValue(null),
   loadReplay: vi.fn().mockResolvedValue(null),
+  pinEvaluation: vi.fn().mockResolvedValue({ success: true, evaluation_id: "eval-5000", pinned: true }),
 }));
 
 const mockEvaluations: EvaluationSummaryPayload[] = [
@@ -178,5 +179,105 @@ describe("EvaluationEpisodesTab", () => {
     // Check scrubber and play controls
     const playBtn = screen.getByRole("button", { name: /▶ Play/i });
     expect(playBtn).toBeInTheDocument();
+  });
+
+  it("renders all 10 seeds simultaneously in the 3x3+1 grid with context and master controller cards in row 4", async () => {
+    render(<EvaluationEpisodesTab currentStage={7} />);
+
+    await waitFor(() => {
+      // All 10 seeds should be rendered as seed cards
+      expect(screen.getByRole("button", { name: /Seed 11 Replay/i })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Seed 23 Replay/i })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Seed 37 Replay/i })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Seed 41 Replay/i })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Seed 53 Replay/i })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Seed 59 Replay/i })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Seed 61 Replay/i })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Seed 67 Replay/i })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Seed 71 Replay/i })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Seed 73 Replay/i })).toBeInTheDocument();
+    });
+
+    // Verify row 4 empty areas: Context Card and Master Controller Card
+    expect(screen.getByTestId("eval-context-card")).toBeInTheDocument();
+    expect(screen.getByTestId("eval-master-card")).toBeInTheDocument();
+
+    // Verify context card metrics
+    expect(screen.getByText(/Evaluation Benchmark Context/i)).toBeInTheDocument();
+    expect(screen.getByText("70% Pass Rate")).toBeInTheDocument();
+
+    // Verify master controller controls
+    expect(screen.getByText(/Master Playback \(All 10\)/i)).toBeInTheDocument();
+    const masterScrubber = screen.getByLabelText(/Master Replay timeline scrubber/i);
+    expect(masterScrubber).toBeInTheDocument();
+  });
+
+  it("synchronizes playback controls and master scrubber across all seeds", async () => {
+    render(<EvaluationEpisodesTab currentStage={7} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("eval-master-card")).toBeInTheDocument();
+    });
+
+    // Find master play button
+    const masterPlayBtn = screen.getByRole("button", { name: /▶ Play/i });
+    expect(masterPlayBtn).toBeInTheDocument();
+
+    // Toggle play
+    fireEvent.click(masterPlayBtn);
+    expect(screen.getByRole("button", { name: /⏸ Pause/i })).toBeInTheDocument();
+
+    // Toggle pause
+    fireEvent.click(screen.getByRole("button", { name: /⏸ Pause/i }));
+    expect(screen.getByRole("button", { name: /▶ Play/i })).toBeInTheDocument();
+
+    // Master Scrubber can be adjusted
+    const masterScrubber = screen.getByLabelText(/Master Replay timeline scrubber/i);
+    fireEvent.change(masterScrubber, { target: { value: "1" } });
+    expect(masterScrubber).toHaveValue("1");
+
+    // Speed buttons
+    const speed2xBtn = screen.getByRole("button", { name: "2x" });
+    fireEvent.click(speed2xBtn);
+    expect(speed2xBtn).toHaveClass("eval-speed-btn--active");
+  });
+
+  it("toggles between 10-seed grid view and single seed focus view", async () => {
+    render(<EvaluationEpisodesTab currentStage={7} />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /⊞ All 10 Seeds Grid/i })).toBeInTheDocument();
+    });
+
+    // Switch to Single Seed Focus
+    const singleFocusBtn = screen.getByRole("button", { name: /⧉ Single Seed Focus/i });
+    fireEvent.click(singleFocusBtn);
+
+    // Should now show single seed visualizer
+    expect(screen.getByText(/Formal Evaluation Benchmark Inspector/i)).toBeInTheDocument();
+    expect(screen.queryByTestId("eval-master-card")).not.toBeInTheDocument();
+
+    // Switch back to 10-seed grid
+    const gridBtn = screen.getByRole("button", { name: /⊞ All 10 Seeds Grid/i });
+    fireEvent.click(gridBtn);
+
+    expect(screen.getByTestId("eval-master-card")).toBeInTheDocument();
+    expect(screen.getByTestId("eval-context-card")).toBeInTheDocument();
+  });
+
+  it("allows pinning and unpinning evaluation replays", async () => {
+    render(<EvaluationEpisodesTab currentStage={7} />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /📌 Pin Replays/i })).toBeInTheDocument();
+    });
+
+    const pinBtn = screen.getByRole("button", { name: /📌 Pin Replays/i });
+    fireEvent.click(pinBtn);
+
+    await waitFor(() => {
+      expect(api.pinEvaluation).toHaveBeenCalledWith("eval-5000", true);
+      expect(screen.getByRole("button", { name: /📌 Replays Pinned/i })).toBeInTheDocument();
+    });
   });
 });

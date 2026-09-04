@@ -374,7 +374,7 @@ describe("App", () => {
   it("renders the simplified controls and run button", async () => {
     render(<App />);
 
-    fireEvent.click(screen.getByRole("tab", { name: "Watch" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Playback" }));
     await waitFor(() => expect(screen.getByText("Live Replay")).toBeInTheDocument());
     expect(screen.getByLabelText("Playback controls")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Run best model (ep 0)" })).toBeInTheDocument();
@@ -447,7 +447,7 @@ describe("App", () => {
   it("shows current live run status from loaded replay data", async () => {
     render(<App />);
 
-    fireEvent.click(screen.getByRole("tab", { name: "Watch" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Playback" }));
     await waitFor(() => expect(screen.getByText("Live Replay")).toBeInTheDocument());
     await waitFor(() => expect(within(screen.getByLabelText("Run status")).getByText("idle")).toBeInTheDocument());
     expect(screen.getByLabelText("Run status")).toBeInTheDocument();
@@ -605,7 +605,7 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: "Clear" }));
 
     await waitFor(() => expect(screen.getByText("Training cleared. Baseline replay restored")).toBeInTheDocument());
-    await user.click(screen.getByRole("tab", { name: "Watch" }));
+    await user.click(screen.getByRole("tab", { name: "Playback" }));
     expect(within(screen.getByLabelText("Run status")).getByText("11")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Replay selected" })).toBeInTheDocument();
   });
@@ -681,7 +681,7 @@ describe("App", () => {
 
     render(<App />);
 
-    fireEvent.click(screen.getByRole("tab", { name: "Watch" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Playback" }));
     await waitFor(() => expect(screen.getByText("Instinct-only dogs do not know the pen. Pen-directed behavior requires training, heuristic expert mode, or a handler target command.")).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Run best model" }));
 
@@ -739,7 +739,7 @@ describe("App", () => {
 
     render(<App />);
 
-    await user.click(screen.getByRole("tab", { name: "Watch" }));
+    await user.click(screen.getByRole("tab", { name: "Playback" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Run best model (ep 0)" })).toBeInTheDocument());
     await user.click(screen.getByRole("button", { name: "Run best model (ep 0)" }));
 
@@ -984,7 +984,7 @@ describe("App", () => {
 
     render(<App />);
 
-    fireEvent.click(screen.getByRole("tab", { name: "Watch" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Playback" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "End episode" })).toBeEnabled());
 
     fireEvent.click(screen.getByRole("button", { name: "End episode" }));

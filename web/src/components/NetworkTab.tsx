@@ -19,15 +19,6 @@ type TrainingConfigView = {
   hiddenSizes: number[];
   invalidActionMasking: boolean | null;
   observationMode: string | null;
-  rolloutSteps: number | null;
-  batchSize: number | null;
-  learningRate: number | null;
-  learningRateFinal: number | null;
-  gamma: number | null;
-  gaeLambda: number | null;
-  clipRange: number | null;
-  entropyCoef: number | null;
-  valueCoef: number | null;
 };
 
 const ACTION_LABELS = [
@@ -48,10 +39,6 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function asNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
 function asBoolean(value: unknown): boolean | null {
   return typeof value === "boolean" ? value : null;
 }
@@ -69,19 +56,6 @@ function asNumberArray(value: unknown): number[] {
     .filter((item): item is number => item !== null);
 }
 
-function formatMaybeNumber(value: number | null, digits = 4): string {
-  if (value == null) {
-    return "unknown";
-  }
-  if (Math.abs(value) >= 1000) {
-    return value.toLocaleString();
-  }
-  if (Math.abs(value) >= 1) {
-    return value.toFixed(Math.min(2, digits));
-  }
-  return value.toPrecision(Math.max(2, digits));
-}
-
 function parseTrainingConfig(effectiveConfig: Record<string, unknown> | null): TrainingConfigView {
   const root = asRecord(effectiveConfig);
   const training = asRecord(root?.training);
@@ -89,15 +63,6 @@ function parseTrainingConfig(effectiveConfig: Record<string, unknown> | null): T
     hiddenSizes: asNumberArray(training?.neural_hidden_sizes),
     invalidActionMasking: asBoolean(training?.invalid_action_masking),
     observationMode: asString(training?.observation_mode),
-    rolloutSteps: asNumber(training?.rollout_steps),
-    batchSize: asNumber(training?.batch_size),
-    learningRate: asNumber(training?.learning_rate),
-    learningRateFinal: asNumber(training?.learning_rate_final),
-    gamma: asNumber(training?.gamma),
-    gaeLambda: asNumber(training?.gae_lambda),
-    clipRange: asNumber(training?.clip_range),
-    entropyCoef: asNumber(training?.entropy_coef),
-    valueCoef: asNumber(training?.value_coef),
   };
 }
 
@@ -205,29 +170,6 @@ export function NetworkTab({ checkpointIndex, trainingStatus, effectiveConfig, t
           </dl>
         </section>
 
-        <section className="network-tab__card">
-          <h3>PPO setup</h3>
-          <dl className="network-tab__specs">
-            <dt>learning_rate</dt>
-            <dd>{formatMaybeNumber(trainingConfig.learningRate, 4)}</dd>
-            <dt>learning_rate_final</dt>
-            <dd>{formatMaybeNumber(trainingConfig.learningRateFinal, 4)}</dd>
-            <dt>rollout_steps</dt>
-            <dd>{formatMaybeNumber(trainingConfig.rolloutSteps, 0)}</dd>
-            <dt>batch_size</dt>
-            <dd>{formatMaybeNumber(trainingConfig.batchSize, 0)}</dd>
-            <dt>gamma</dt>
-            <dd>{formatMaybeNumber(trainingConfig.gamma, 4)}</dd>
-            <dt>gae_lambda</dt>
-            <dd>{formatMaybeNumber(trainingConfig.gaeLambda, 4)}</dd>
-            <dt>clip_range</dt>
-            <dd>{formatMaybeNumber(trainingConfig.clipRange, 4)}</dd>
-            <dt>entropy_coef</dt>
-            <dd>{formatMaybeNumber(trainingConfig.entropyCoef, 4)}</dd>
-            <dt>value_coef</dt>
-            <dd>{formatMaybeNumber(trainingConfig.valueCoef, 4)}</dd>
-          </dl>
-        </section>
 
         <section className="network-tab__card">
           <h3>Implementation notes</h3>
