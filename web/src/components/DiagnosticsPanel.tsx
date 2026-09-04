@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { createPortal } from "react-dom";
 import type { CheckpointEntry, CheckpointIndex, TrainingStatus, TrainingEpisode } from "../state/types";
 import { loadTrainingEpisodes } from "../lib/api";
-import { CopyAgentDataButton } from "./CopyAgentDataButton";
 import { StackedLearningPanels } from "./StackedLearningPanels";
 import { StageBottlenecksPanel } from "./StageBottlenecksPanel";
 import { EvaluationEpisodesTab } from "./EvaluationEpisodesTab";
@@ -226,7 +225,6 @@ export interface ChartPoint {
 export interface LineChartProps {
   data: ChartPoint[];
   rawPoints?: ChartPoint[];
-  rollingData?: ChartPoint[];
   blockPoints?: ChartPoint[];
   formalEvalPoints?: FormalEvalMarker[];
   label?: string;
@@ -785,7 +783,6 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
 function LineChart({
   data,
   rawPoints,
-  rollingData,
   blockPoints,
   formalEvalPoints,
   label,
@@ -887,7 +884,6 @@ function LineChart({
   const allXValues = [
     ...data.map((p) => p.x),
     ...(rawPoints ? rawPoints.map((p) => p.x) : []),
-    ...(rollingData ? rollingData.map((p) => p.x) : []),
     ...(blockPoints ? blockPoints.map((p) => p.x) : []),
   ];
 
@@ -907,7 +903,7 @@ function LineChart({
   const secTicks = hasSecondary ? [secYMax, (secYMax + secYMin) / 2, secYMin] : [];
 
   function toSvgX(x: number, index?: number): number {
-    if (useSequentialX && !rawPoints && !rollingData && !blockPoints) {
+    if (useSequentialX && !rawPoints && !blockPoints) {
       if (data.length <= 1) return PAD.left + plotW / 2;
       const idx = index !== undefined ? index : data.findIndex((d) => d.x === x);
       return PAD.left + (idx / (data.length - 1)) * plotW;
@@ -930,10 +926,6 @@ function LineChart({
     ? `${toSvgX(data[0].x, 0).toFixed(1)},${(PAD.top + plotH).toFixed(1)} ${polyline} ${toSvgX(data[data.length - 1].x, data.length - 1).toFixed(1)},${(PAD.top + plotH).toFixed(1)}`
     : "";
 
-  const rollingPolyline = rollingData && rollingData.length >= 2
-    ? rollingData.map((d) => `${toSvgX(d.x).toFixed(1)},${toSvgY(d.y).toFixed(1)}`).join(" ")
-    : "";
-
   const blockPolyline = blockPoints && blockPoints.length >= 2
     ? blockPoints.map((d) => `${toSvgX(d.x).toFixed(1)},${toSvgY(d.y).toFixed(1)}`).join(" ")
     : "";
@@ -943,7 +935,6 @@ function LineChart({
   const hasAnyData =
     data.length > 0 ||
     (rawPoints && rawPoints.length > 0) ||
-    (rollingData && rollingData.length > 0) ||
     (blockPoints && blockPoints.length > 0) ||
     (formalEvalPoints && formalEvalPoints.length > 0);
 
@@ -1095,19 +1086,6 @@ function LineChart({
               />
             );
           })}
-
-        {/* Rolling training average line */}
-        {rollingPolyline ? (
-          <polyline
-            points={rollingPolyline}
-            fill="none"
-            stroke="#38bdf8"
-            strokeWidth={2.2}
-            strokeLinejoin="round"
-            strokeLinecap="round"
-            opacity={0.9}
-          />
-        ) : null}
 
         {/* Primary 25-episode Block Performance Line & Markers */}
         {blockPolyline ? (
@@ -2125,12 +2103,21 @@ export function DiagnosticsPanel({
     if (saved === "all" || saved === "current" || saved === "current-journey") {
       return saved;
     }
+    // Clean up any historical numeric values so returning to insights always defaults to the current stage/journey
     if (saved !== null) {
-      const parsed = Number(saved);
-      if (!isNaN(parsed)) return parsed;
+      localStorage.removeItem("sheepdog_insights_stage_scope");
     }
     return "current-journey";
   });
+
+  const prevEffectiveStageRef = useRef<number>(effectiveCurriculumStage);
+  useEffect(() => {
+    if (prevEffectiveStageRef.current !== effectiveCurriculumStage) {
+      prevEffectiveStageRef.current = effectiveCurriculumStage;
+      // When the training engine advances or switches stages, automatically update to the new stage
+      setSelectedStageScope("current-journey");
+    }
+  }, [effectiveCurriculumStage]);
   const [smoothingWindow, setSmoothingWindow] = useState<SmoothingWindow>(() => {
     const saved = localStorage.getItem("sheepdog_insights_smoothing_window");
     if (saved === "25" || saved === "50" || saved === "100") {
@@ -2147,10 +2134,6 @@ export function DiagnosticsPanel({
   });
   const [layerRawEpisodes, setLayerRawEpisodes] = useState<boolean>(() => {
     const saved = localStorage.getItem("sheepdog_insights_layer_raw_episodes");
-    return saved !== null ? saved === "true" : true;
-  });
-  const [layerRollingAvg, setLayerRollingAvg] = useState<boolean>(() => {
-    const saved = localStorage.getItem("sheepdog_insights_layer_rolling_avg");
     return saved !== null ? saved === "true" : true;
   });
   const [layerPolicySnapshots, setLayerPolicySnapshots] = useState<boolean>(() => {
@@ -2349,11 +2332,9 @@ export function DiagnosticsPanel({
     }
     if (selectedStageScope === "current") {
       const base = currentJourneyCheckpoints.length > 0 ? currentJourneyCheckpoints : checkpoints;
-      const filtered = base.filter(
+      return base.filter(
         (c) => getCheckpointStage(c) === effectiveCurriculumStage,
       );
-      if (filtered.length > 0) return filtered;
-      return base;
     }
     const target = Number(selectedStageScope);
     const currentFiltered = currentJourneyCheckpoints.filter((c) => getCheckpointStage(c) === target);
@@ -2539,8 +2520,8 @@ export function DiagnosticsPanel({
   }, [stageScopedCheckpoints.length, stageLatestSuccessRate, requiredThreshold, qualifiedStreak, plateauInfo, isImproving, minStreak, liveMetrics, smoothingWindow, targetStage, trainingStatus?.auto_promote_gate, efficiencyTrend]);
 
   const currentJourneyStages = useMemo(
-    () => [...new Set(currentJourneyCheckpoints.map((c) => getCheckpointStage(c)))].sort((a, b) => a - b),
-    [currentJourneyCheckpoints],
+    () => [...new Set([...currentJourneyCheckpoints.map((c) => getCheckpointStage(c)), effectiveCurriculumStage])].filter((s) => s > 0).sort((a, b) => a - b),
+    [currentJourneyCheckpoints, effectiveCurriculumStage],
   );
 
   const archivedStages = useMemo(
@@ -2753,31 +2734,6 @@ export function DiagnosticsPanel({
     return calculateBlockSuccessPoints(filteredEpisodes, 25, episodeX);
   }, [filteredEpisodes, episodeX]);
 
-  const rollingSuccessData: ChartPoint[] = useMemo(() => {
-    const validEps = filteredEpisodes.filter((ep) => episodeX(ep) != null);
-    if (validEps.length < 5) return [];
-    const windowSize = 25;
-    const minWindowSize = 5;
-    return validEps
-      .map((ep, i): ChartPoint | null => {
-        const start = Math.max(0, i - windowSize + 1);
-        const slice = validEps.slice(start, i + 1);
-        if (slice.length < minWindowSize) return null;
-        const avgSuccess = calculateRollingSuccess(slice, windowSize, minWindowSize);
-        if (avgSuccess === null) return null;
-        const xVal = episodeX(ep)!;
-        return {
-          x: xVal,
-          y: avgSuccess,
-          stage: ep.curriculum_stage,
-          isRolling: true,
-          rollingWindowSize: Math.min(slice.length, windowSize),
-          labelText: `${avgSuccess.toFixed(1)}% (rolling ${Math.min(slice.length, windowSize)} eps)`,
-        };
-      })
-      .filter((pt): pt is ChartPoint => pt !== null);
-  }, [filteredEpisodes, episodeX]);
-
   const rawRewardPoints: ChartPoint[] = useMemo(() => {
     const validEps = filteredEpisodes.filter((ep) => episodeX(ep) != null);
     return validEps.map((ep) => {
@@ -2789,30 +2745,6 @@ export function DiagnosticsPanel({
         rawEpisode: ep,
       };
     });
-  }, [filteredEpisodes, episodeX]);
-
-  const rollingRewardData: ChartPoint[] = useMemo(() => {
-    const validEps = filteredEpisodes.filter((ep) => episodeX(ep) != null);
-    if (validEps.length < 5) return [];
-    const windowSize = 25;
-    const minWindowSize = 5;
-    return validEps
-      .map((ep, i): ChartPoint | null => {
-        const start = Math.max(0, i - windowSize + 1);
-        const slice = validEps.slice(start, i + 1);
-        if (slice.length < minWindowSize) return null;
-        const avgReward = slice.reduce((sum, e) => sum + e.reward, 0) / slice.length;
-        const xVal = episodeX(ep)!;
-        return {
-          x: xVal,
-          y: avgReward,
-          stage: ep.curriculum_stage,
-          isRolling: true,
-          rollingWindowSize: slice.length,
-          labelText: `Avg reward ${avgReward.toFixed(1)} (rolling ${slice.length} eps)`,
-        };
-      })
-      .filter((pt): pt is ChartPoint => pt !== null);
   }, [filteredEpisodes, episodeX]);
 
   const rawSheepPoints: ChartPoint[] = useMemo(() => {
@@ -2828,30 +2760,6 @@ export function DiagnosticsPanel({
     });
   }, [filteredEpisodes, episodeX]);
 
-  const rollingSheepData: ChartPoint[] = useMemo(() => {
-    if (filteredEpisodes.length < 5) return [];
-    const windowSize = 25;
-    const minWindowSize = 5;
-    return filteredEpisodes
-      .map((ep, i): ChartPoint | null => {
-        const start = Math.max(0, i - windowSize + 1);
-        const slice = filteredEpisodes.slice(start, i + 1);
-        if (slice.length < minWindowSize) return null;
-        const avgSheep = slice.reduce((sum, e) => sum + e.sheep_penned, 0) / slice.length;
-        const xVal = episodeX(ep) ?? ep.global_environment_episode;
-        if (xVal == null) return null;
-        return {
-          x: xVal,
-          y: avgSheep,
-          stage: ep.curriculum_stage,
-          isRolling: true,
-          rollingWindowSize: slice.length,
-          labelText: `Avg sheep ${avgSheep.toFixed(1)} (rolling ${slice.length} eps)`,
-        };
-      })
-      .filter((pt): pt is ChartPoint => pt !== null);
-  }, [filteredEpisodes, episodeX]);
-
   const rawStepsPoints: ChartPoint[] = useMemo(() => {
     const validEps = filteredEpisodes.filter((ep) => episodeX(ep) != null && typeof ep.steps === "number" && !isNaN(ep.steps));
     return validEps.map((ep) => {
@@ -2865,58 +2773,31 @@ export function DiagnosticsPanel({
     });
   }, [filteredEpisodes, episodeX]);
 
-  const rollingStepsData: ChartPoint[] = useMemo(() => {
-    const validEps = filteredEpisodes.filter((ep) => episodeX(ep) != null && typeof ep.steps === "number" && !isNaN(ep.steps));
-    if (validEps.length < 5) return [];
-    const windowSize = 25;
-    const minWindowSize = 5;
-    return validEps
-      .map((ep, i): ChartPoint | null => {
-        const start = Math.max(0, i - windowSize + 1);
-        const slice = validEps.slice(start, i + 1);
-        if (slice.length < minWindowSize) return null;
-        const avgSteps = slice.reduce((sum, e) => sum + e.steps, 0) / slice.length;
-        const xVal = episodeX(ep)!;
-        return {
-          x: xVal,
-          y: avgSteps,
-          stage: ep.curriculum_stage,
-          isRolling: true,
-          rollingWindowSize: slice.length,
-          labelText: `Avg steps ${avgSteps.toFixed(1)} (rolling ${slice.length} eps)`,
-        };
-      })
-      .filter((pt): pt is ChartPoint => pt !== null);
-  }, [filteredEpisodes, episodeX]);
-
   const rewardRange = useMemo(() => {
     const vals = [
       ...rewardData.map((d) => d.y),
       ...rawRewardPoints.map((d) => d.y),
-      ...rollingRewardData.map((d) => d.y),
     ].filter((v) => !isNaN(v));
     if (!vals.length) return { min: 0, max: 1 };
     const minV = Math.min(...vals);
     const maxV = Math.max(...vals);
     const pad = (maxV - minV) * 0.12 || 1;
     return { min: minV - pad, max: maxV + pad };
-  }, [rewardData, rawRewardPoints, rollingRewardData]);
+  }, [rewardData, rawRewardPoints]);
 
   const maxSheepPenned = useMemo(() => {
     const vals = [
       ...sheepData.map((d) => d.y),
       ...rawSheepPoints.map((d) => d.y),
-      ...rollingSheepData.map((d) => d.y),
     ].filter((v) => !isNaN(v));
     if (!vals.length) return 1;
     return Math.max(...vals, 1);
-  }, [sheepData, rawSheepPoints, rollingSheepData]);
+  }, [sheepData, rawSheepPoints]);
 
   const stepsRange = useMemo(() => {
     const vals = [
       ...stepsData.map((d) => d.y),
       ...rawStepsPoints.map((d) => d.y),
-      ...rollingStepsData.map((d) => d.y),
       ...episodeBuckets.map((b) => b.avgSuccessfulSteps).filter((v): v is number => v != null && !isNaN(v) && v > 0),
     ].filter((v) => !isNaN(v) && v > 0);
     if (!vals.length) return { min: 0, max: 500 };
@@ -2924,7 +2805,7 @@ export function DiagnosticsPanel({
     const maxV = Math.max(...vals);
     const pad = (maxV - minV) * 0.15 || 30;
     return { min: Math.max(0, Math.floor(minV - pad)), max: Math.ceil(maxV + pad) };
-  }, [stepsData, rawStepsPoints, rollingStepsData, episodeBuckets]);
+  }, [stepsData, rawStepsPoints, episodeBuckets]);
 
   const tableRows = useMemo(() => [...filteredCheckpoints].reverse(), [filteredCheckpoints]);
 
@@ -2988,12 +2869,42 @@ export function DiagnosticsPanel({
 
   const [activeChart, setActiveChart] = useState<ChartTab>(() => {
     const saved = localStorage.getItem("sheepdog_insights_active_chart") as ChartTab | null;
-    const validCharts: ChartTab[] = ["stacked", "success", "steps", "reward", "sheep", "learningSignal", "seedReliability", "evaluations", "health", "history"];
+    const validCharts: ChartTab[] = ["stacked", "success", "steps", "reward", "sheep", "learningSignal", "seedReliability", "health", "history"];
+    if (saved === "evaluations") {
+      try {
+        localStorage.setItem("sheepdog_insights_active_chart", "stacked");
+      } catch {}
+      return "stacked";
+    }
     if (saved && validCharts.includes(saved)) {
       return saved;
     }
     return "stacked";
   });
+
+  const [isEvalPopupOpen, setIsEvalPopupOpen] = useState<boolean>(false);
+
+  const handleOpenEvalWindow = useCallback(() => {
+    const width = Math.min(1600, (window.screen?.availWidth ?? 1600));
+    const height = Math.min(950, (window.screen?.availHeight ?? 950));
+    const left = (window.screenX ?? 0) + 40;
+    const top = (window.screenY ?? 0) + 40;
+    const win = window.open(
+      "/?view=eval10",
+      "SheepdogEval10Window",
+      `width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=no`
+    );
+    if (!win || win.closed || typeof win.closed === "undefined") {
+      setIsEvalPopupOpen(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeChart === "evaluations") {
+      setActiveChart("stacked");
+      handleOpenEvalWindow();
+    }
+  }, [activeChart, handleOpenEvalWindow]);
 
   const [learningSignalWindow, setLearningSignalWindow] = useState<ViewWindow>(() => {
     const saved = localStorage.getItem("sheepdog_insights_learning_signal_window");
@@ -3016,7 +2927,9 @@ export function DiagnosticsPanel({
   }, [viewWindow]);
 
   useEffect(() => {
-    localStorage.setItem("sheepdog_insights_stage_scope", String(selectedStageScope));
+    if (selectedStageScope === "all" || selectedStageScope === "current" || selectedStageScope === "current-journey") {
+      localStorage.setItem("sheepdog_insights_stage_scope", String(selectedStageScope));
+    }
   }, [selectedStageScope]);
 
   useEffect(() => {
@@ -3038,10 +2951,6 @@ export function DiagnosticsPanel({
   useEffect(() => {
     localStorage.setItem("sheepdog_insights_layer_raw_episodes", String(layerRawEpisodes));
   }, [layerRawEpisodes]);
-
-  useEffect(() => {
-    localStorage.setItem("sheepdog_insights_layer_rolling_avg", String(layerRollingAvg));
-  }, [layerRollingAvg]);
 
   useEffect(() => {
     localStorage.setItem("sheepdog_insights_layer_policy_snapshots", String(layerPolicySnapshots));
@@ -3291,11 +3200,6 @@ export function DiagnosticsPanel({
         </div>
 
         <div className="insights-header__actions">
-          <CopyAgentDataButton
-            trainingStatus={trainingStatus}
-            checkpointIndex={checkpointIndex}
-            curriculumStage={effectiveCurriculumStage}
-          />
           <button
             onClick={() => setIsHelpOpen(true)}
             className="insights-help-btn"
@@ -3311,7 +3215,7 @@ export function DiagnosticsPanel({
       {/* ── Real-Time Whole-Stage Learning Health Visual Banner ── */}
       <StageHealthBanner
         curriculumStage={effectiveCurriculumStage}
-        lastLiveRefreshTime={lastLiveRefreshTime}
+        lastLiveRefreshTime={lastLiveRefreshTime ?? undefined}
         isLiveTraining={isLiveTraining}
         checkpoints={checkpoints}
         trainingStatus={trainingStatus}
@@ -3502,30 +3406,41 @@ export function DiagnosticsPanel({
 
       {/* ── Unified Interactive Toolbar ── */}
       <div className="insights-toolbar">
-        {/* Navigation Sub-Tabs */}
-        <div className="chart-tabs" role="tablist" aria-label="Insights Visualization Tabs">
-          {([
-            { id: "stacked", label: "Overview (Dual-Axis)" },
-            { id: "success", label: "Success Rate" },
-            { id: "steps", label: "Completion Steps" },
-            { id: "reward", label: "Avg Reward" },
-            { id: "sheep", label: "Sheep Penned" },
-            { id: "learningSignal", label: "Learning Signal" },
-            { id: "seedReliability", label: "Seed Reliability" },
-            { id: "evaluations", label: "Evaluation Episodes" },
-            { id: "health", label: "Health" },
-            { id: "history", label: "History" },
-          ] as Array<{ id: ChartTab; label: string }>).map(({ id, label }) => (
-            <button
-              key={id}
-              role="tab"
-              aria-selected={activeChart === id}
-              className={`chart-tab${activeChart === id ? " chart-tab--active" : ""}`}
-              onClick={() => setActiveChart(id)}
-            >
-              {label}
-            </button>
-          ))}
+        {/* Navigation Sub-Tabs and Standalone Pop-out Button */}
+        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+          <div className="chart-tabs" role="tablist" aria-label="Insights Visualization Tabs">
+            {([
+              { id: "stacked", label: "Overview (Dual-Axis)" },
+              { id: "success", label: "Success Rate" },
+              { id: "steps", label: "Completion Steps" },
+              { id: "reward", label: "Avg Reward" },
+              { id: "sheep", label: "Sheep Penned" },
+              { id: "learningSignal", label: "Learning Signal" },
+              { id: "seedReliability", label: "Seed Reliability" },
+              { id: "health", label: "Health" },
+              { id: "history", label: "History" },
+            ] as Array<{ id: ChartTab; label: string }>).map(({ id, label }) => (
+              <button
+                key={id}
+                role="tab"
+                aria-selected={activeChart === id}
+                className={`chart-tab${activeChart === id ? " chart-tab--active" : ""}`}
+                onClick={() => setActiveChart(id)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          <button
+            type="button"
+            className="eval-hero-popup-btn"
+            style={{ padding: "0.22rem 0.75rem", fontSize: "0.78rem" }}
+            onClick={handleOpenEvalWindow}
+            title="Pop out all 10 evaluation seeds in a standalone window (ideal for dual monitors or side-by-side)"
+          >
+            🎬 Pop Out 10 Seeds (2nd Screen) ↗
+          </button>
         </div>
 
         {/* Filters and Controls */}
@@ -3609,10 +3524,6 @@ export function DiagnosticsPanel({
               <input type="checkbox" checked={layerRawEpisodes} onChange={(e) => setLayerRawEpisodes(e.target.checked)} />
               Raw Episodes
             </label>
-            <label className="layer-pill" title="Toggle 25-episode moving average">
-              <input type="checkbox" checked={layerRollingAvg} onChange={(e) => setLayerRollingAvg(e.target.checked)} />
-              25-Episode Rolling Avg
-            </label>
             <label className="layer-pill" title="Toggle policy version snapshots">
               <input type="checkbox" checked={layerPolicySnapshots} onChange={(e) => setLayerPolicySnapshots(e.target.checked)} />
               Policy Snapshots
@@ -3639,8 +3550,6 @@ export function DiagnosticsPanel({
             <LineChart
               data={successData}
               rawPoints={layerRawEpisodes ? rawSuccessPoints : []}
-              rollingData={layerRollingAvg ? rollingSuccessData : []}
-              blockPoints={blockSuccessData}
               showPolicySnapshots={layerPolicySnapshots}
               showFormalEvals={layerFormalEvals}
               formatX={formatChartX}
@@ -3662,7 +3571,6 @@ export function DiagnosticsPanel({
             <ChartLegend
               entries={[
                 { symbol: { kind: "dot", color: "rgba(56,189,248,0.7)" }, label: "Training rollout (0/100%)", detail: "individual episode outcome (100% = success, 0% = fail/timeout)" },
-                { symbol: { kind: "line", color: "#38bdf8" }, label: `Rolling ${smoothingWindow} rollout avg`, detail: `moving average success over the last ${smoothingWindow} rollouts` },
                 { symbol: { kind: "line", color: "#34d399" }, label: "Formal 10-seed evaluation", detail: "deterministic 10-seed benchmark evaluation at saved checkpoint" },
                 { symbol: { kind: "dash", color: "rgba(251,146,60,0.9)" }, label: "Avg completion steps", detail: "steps to complete penning (fewer is faster, plotted on right axis)" },
                 { symbol: { kind: "dash", color: "rgba(74,222,128,0.65)" }, label: `${Math.round(requiredThreshold * 100)}% Target`, detail: "promotion readiness gate" },
@@ -3685,8 +3593,6 @@ export function DiagnosticsPanel({
             <LineChart
               data={successData}
               rawPoints={layerRawEpisodes ? rawSuccessPoints : []}
-              rollingData={layerRollingAvg ? rollingSuccessData : []}
-              blockPoints={blockSuccessData}
               showPolicySnapshots={layerPolicySnapshots}
               showFormalEvals={layerFormalEvals}
               formatX={formatChartX}
@@ -3703,7 +3609,6 @@ export function DiagnosticsPanel({
             <ChartLegend
               entries={[
                 { symbol: { kind: "dot", color: "rgba(56,189,248,0.7)" }, label: "Training rollout (0/100%)", detail: "individual terminal rollout result" },
-                { symbol: { kind: "line", color: "#38bdf8" }, label: `Rolling ${smoothingWindow} training avg`, detail: `moving average over the last ${smoothingWindow} completed rollouts` },
                 { symbol: { kind: "line", color: "#34d399" }, label: "Formal 10-seed evaluation", detail: "formal deterministic 10-seed benchmark evaluation at saved checkpoint" },
                 { symbol: { kind: "dash", color: "rgba(74,222,128,0.65)" }, label: `${Math.round(requiredThreshold * 100)}% Target`, detail: "promotion requirement" },
                 { symbol: { kind: "ring", color: "#9ca3af" }, label: "All-time best", detail: "currently active policy" },
@@ -3724,7 +3629,6 @@ export function DiagnosticsPanel({
             <LineChart
               data={stepsData}
               rawPoints={layerRawEpisodes ? rawStepsPoints : []}
-              rollingData={layerRollingAvg ? rollingStepsData : []}
               showPolicySnapshots={layerPolicySnapshots}
               showFormalEvals={layerFormalEvals}
               formatX={formatChartX}
@@ -3739,7 +3643,6 @@ export function DiagnosticsPanel({
             <ChartLegend
               entries={[
                 { symbol: { kind: "dot", color: "rgba(56,189,248,0.7)" }, label: "Training rollout steps", detail: "individual episode step count" },
-                { symbol: { kind: "line", color: "#38bdf8" }, label: `Rolling ${smoothingWindow} rollout steps`, detail: `moving average steps over the last ${smoothingWindow} completed rollouts` },
                 { symbol: { kind: "line", color: "#fb923c" }, label: "Formal eval avg steps", detail: "benchmark evaluation average completion steps at checkpoint" },
                 { symbol: { kind: "ring", color: "#9ca3af" }, label: "Best model checkpoint", detail: "loaded policy model" },
                 ...uniqueStages.map((s) => ({ symbol: { kind: "dot" as const, color: stageColor(s) }, label: stageLabel(s), detail: `curriculum stage ${s}` })),
@@ -3754,7 +3657,6 @@ export function DiagnosticsPanel({
             <LineChart
               data={rewardData}
               rawPoints={layerRawEpisodes ? rawRewardPoints : []}
-              rollingData={layerRollingAvg ? rollingRewardData : []}
               showPolicySnapshots={layerPolicySnapshots}
               showFormalEvals={layerFormalEvals}
               formatX={formatChartX}
@@ -3768,7 +3670,6 @@ export function DiagnosticsPanel({
             <ChartLegend
               entries={[
                 { symbol: { kind: "dot", color: "rgba(56,189,248,0.7)" }, label: "Training episode", detail: "raw per-episode terminal reward" },
-                { symbol: { kind: "line", color: "#38bdf8" }, label: "Rolling training avg", detail: "moving average reward over the last 25 completed rollouts" },
                 { symbol: { kind: "line", color: "var(--accent)" }, label: "Confidence evaluation", detail: "mean total reward per 10-seed formal evaluation" },
                 ...uniqueStages.map((s) => ({ symbol: { kind: "dot" as const, color: stageColor(s) }, label: stageLabel(s), detail: `curriculum stage ${s}` })),
                 { symbol: { kind: "ring", color: "#9ca3af" }, label: "Best checkpoint", detail: "loaded for inference" },
@@ -3783,7 +3684,6 @@ export function DiagnosticsPanel({
             <LineChart
               data={sheepData}
               rawPoints={layerRawEpisodes ? rawSheepPoints : []}
-              rollingData={layerRollingAvg ? rollingSheepData : []}
               showPolicySnapshots={layerPolicySnapshots}
               showFormalEvals={layerFormalEvals}
               formatX={formatChartX}
@@ -3797,7 +3697,6 @@ export function DiagnosticsPanel({
             <ChartLegend
               entries={[
                 { symbol: { kind: "dot", color: "rgba(56,189,248,0.7)" }, label: "Training episode", detail: "raw per-episode sheep penned count" },
-                { symbol: { kind: "line", color: "#38bdf8" }, label: "Rolling training avg", detail: "moving average sheep penned over the last 25 rollouts" },
                 { symbol: { kind: "line", color: "#c084fc" }, label: "Confidence evaluation", detail: "average sheep penned per formal evaluation" },
                 ...uniqueStages.map((s) => ({ symbol: { kind: "dot" as const, color: stageColor(s) }, label: stageLabel(s), detail: `curriculum stage ${s}` })),
                 { symbol: { kind: "ring", color: "#9ca3af" }, label: "Best checkpoint", detail: "active model" },
@@ -4257,6 +4156,17 @@ export function DiagnosticsPanel({
             </div>
           </div>
         </div>
+      )}
+
+      {/* ── Fullscreen 10-Seed Replay Pop-up Modal ── */}
+      {isEvalPopupOpen && (
+        <EvaluationEpisodesTab
+          currentStage={effectiveCurriculumStage}
+          runId={trainingStatus?.run_id}
+          popupOnly={true}
+          isOpen={isEvalPopupOpen}
+          onClose={() => setIsEvalPopupOpen(false)}
+        />
       )}
     </section>
   );

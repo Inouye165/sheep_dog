@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useRef } from "react";
 import type { StageBottleneckReport, ZoneMetricSummary } from "../state/types";
 import { loadStageDiagnostics } from "../lib/api";
 
@@ -28,9 +28,11 @@ export const StageBottlenecksPanel: React.FC<StageBottlenecksPanelProps> = ({
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Sync selected stage if currentStage changes and user hasn't manually switched
+  const prevStageRef = useRef<number>(currentStage);
+  // Sync selected stage only if currentStage actually changes to a new stage
   useEffect(() => {
-    if (currentStage && currentStage > 0) {
+    if (currentStage && currentStage > 0 && currentStage !== prevStageRef.current) {
+      prevStageRef.current = currentStage;
       setSelectedStage(currentStage);
     }
   }, [currentStage]);

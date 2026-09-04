@@ -15,6 +15,7 @@ from sheepdog.environment import EpisodeResult, SheepdogEnvironment
 from sheepdog.policies.base import Policy
 from sheepdog.replay.store import ReplayStore
 from sheepdog.training.runtime import TrainingRuntimeTracker
+from sheepdog.evaluation.retention import EvaluationReplayRetentionManager
 
 
 def _policy_metadata(
@@ -155,6 +156,9 @@ class EvaluationSummary:
     evaluation_id: str | None = None
     evaluation_mode: str = "confidence"
     promotion_eligible: bool = True
+    evaluation_index: int | None = None
+    retention_status: str | None = None
+    pinned: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict."""
@@ -169,7 +173,9 @@ class Evaluator:
         self.output_root = Path(output_root)
         self.output_root.mkdir(parents=True, exist_ok=True)
         self.replay_store = ReplayStore(self.output_root / "replays")
+        self.retention_manager = EvaluationReplayRetentionManager(self.output_root)
         self.runtime_tracker: TrainingRuntimeTracker | None = None
+        self._evaluation_count = 0
 
     def evaluate(
         self,
@@ -184,10 +190,19 @@ class Evaluator:
         checkpoint_id: str | None = None,
         policy_version: int | None = None,
         curriculum_stage: int | None = None,
+        evaluation_index: int | None = None,
     ) -> tuple[EvaluationSummary, Path, Path]:
         """Run the policy on each seed and optionally capture full replays."""
+        if evaluation_index is not None:
+            eval_idx = int(evaluation_index)
+            self._evaluation_count = max(self._evaluation_count, eval_idx)
+        else:
+            self._evaluation_count += 1
+            eval_idx = self._evaluation_count
+
         results: list[EpisodeResult] = []
         records: list[EvaluationRecord] = []
+        saved_replay_paths: list[Path] = []
 
         for seed in seeds:
             environment = SheepdogEnvironment(self.config)
@@ -241,6 +256,8 @@ class Evaluator:
                         "frames": [frame.to_dict() for frame in result.replay],
                         },
                     )
+                    if replay_path is not None:
+                        saved_replay_paths.append(replay_path)
             p_ver = policy_version if policy_version is not None else getattr(policy, "policy_version", None)
             records.append(
                 EvaluationRecord(
@@ -356,9 +373,33 @@ class Evaluator:
             evaluation_id=evaluation_id,
             evaluation_mode=evaluation_mode,
             promotion_eligible=evaluation_mode == "confidence",
+            evaluation_index=eval_idx,
+            retention_status=None,
+            pinned=False,
         )
 
         artifact_name = evaluation_id or f"evaluation-checkpoint-{checkpoint_episode:06d}"
+        retention_status = None
+        pinned = self.retention_manager.is_pinned(artifact_name)
+        if capture_replays and saved_replay_paths:
+            retention_res = self.retention_manager.register_and_prune(
+                evaluation_id=artifact_name,
+                evaluation_index=eval_idx,
+                checkpoint_episode=checkpoint_episode,
+                replay_paths=saved_replay_paths,
+            )
+            retention_status = retention_res.get("status")
+            pinned = self.retention_manager.is_pinned(artifact_name)
+
+        summary = EvaluationSummary(
+            **{
+                **summary.to_dict(),
+                "records": summary.records,
+                "retention_status": retention_status,
+                "pinned": pinned,
+            }
+        )
+
         json_path = self.output_root / f"{artifact_name}.json"
         csv_path = self.output_root / f"{artifact_name}.csv"
         with json_path.open("w", encoding="utf-8") as handle:

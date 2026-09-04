@@ -598,4 +598,107 @@ describe("DiagnosticsPanel Live Insights & Telemetry", () => {
 
     loadEpisodesSpy.mockRestore();
   });
+
+  it("automatically changes stage scope when app triggers a stage transition from 8 to 9", () => {
+    const { rerender } = render(
+      <DiagnosticsPanel
+        checkpointIndex={mockCheckpointIndex}
+        bestCheckpointEpisode={6508}
+        trainingStatus={activeTrainingStatus}
+        effectiveCurriculumStage={8}
+        lastLiveRefreshTime={Date.now()}
+      />
+    );
+
+    const stageSelect = screen.getByLabelText("Stage scope") as HTMLSelectElement;
+    expect(stageSelect.value).toBe("current-journey");
+
+    // Rerender with advanced curriculum stage 9
+    rerender(
+      <DiagnosticsPanel
+        checkpointIndex={mockCheckpointIndex}
+        bestCheckpointEpisode={6508}
+        trainingStatus={{
+          ...activeTrainingStatus,
+          curriculum_stage: 9,
+        }}
+        effectiveCurriculumStage={9}
+        lastLiveRefreshTime={Date.now()}
+      />
+    );
+
+    // Should automatically track the new stage
+    expect(stageSelect.value).toBe("current-journey");
+    expect(screen.getAllByText(/Current stage \(Stage 9\)/i).length).toBeGreaterThan(0);
+  });
+
+  it("preserves user manual selection of a previous stage during routine telemetry updates without reverting to current", () => {
+    const { rerender } = render(
+      <DiagnosticsPanel
+        checkpointIndex={mockCheckpointIndex}
+        bestCheckpointEpisode={6508}
+        trainingStatus={activeTrainingStatus}
+        effectiveCurriculumStage={9}
+        lastLiveRefreshTime={Date.now()}
+      />
+    );
+
+    const stageSelect = screen.getByLabelText("Stage scope") as HTMLSelectElement;
+    // User explicitly switches to Stage 8 to review historical data
+    fireEvent.change(stageSelect, { target: { value: "8" } });
+    expect(stageSelect.value).toBe("8");
+
+    // Training emits telemetry refresh while remaining on stage 9
+    rerender(
+      <DiagnosticsPanel
+        checkpointIndex={mockCheckpointIndex}
+        bestCheckpointEpisode={6508}
+        trainingStatus={{
+          ...activeTrainingStatus,
+          total_episodes_trained: 2000,
+        }}
+        effectiveCurriculumStage={9}
+        lastLiveRefreshTime={Date.now() + 1000}
+      />
+    );
+
+    // Remains on Stage 8 as chosen by user
+    expect(stageSelect.value).toBe("8");
+  });
+
+  it("automatically loads current stage upon fresh mount / returning to insights even if user reviewed a previous stage earlier", () => {
+    // Simulate leftover numeric stage in localStorage
+    window.localStorage.setItem("sheepdog_insights_stage_scope", "8");
+
+    render(
+      <DiagnosticsPanel
+        checkpointIndex={mockCheckpointIndex}
+        bestCheckpointEpisode={6508}
+        trainingStatus={activeTrainingStatus}
+        effectiveCurriculumStage={9}
+        lastLiveRefreshTime={Date.now()}
+      />
+    );
+
+    const stageSelect = screen.getByLabelText("Stage scope") as HTMLSelectElement;
+    // Numeric stage from previous session was not restored; defaults to current
+    expect(stageSelect.value).toBe("current-journey");
+  });
+
+  it("does not render previous stage checkpoints on the chart when stage scope is set to current stage 9 with 0 checkpoints", () => {
+    render(
+      <DiagnosticsPanel
+        checkpointIndex={mockCheckpointIndex}
+        bestCheckpointEpisode={6508}
+        trainingStatus={activeTrainingStatus}
+        effectiveCurriculumStage={9}
+        initialStageScope="current"
+        lastLiveRefreshTime={Date.now()}
+      />
+    );
+
+    // Formals for stage 8 should not be rendered in the table or formal markers for stage 9
+    expect(screen.queryByText(/FORMAL EVALUATION \(STAGE 8 TARGET/i)).toBeNull();
+    expect(screen.getAllByText(/Awaiting Checkpoints/i).length).toBeGreaterThan(0);
+  });
 });

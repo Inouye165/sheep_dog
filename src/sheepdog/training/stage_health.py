@@ -341,7 +341,7 @@ def compute_stage_health_summary(
     ]
 
     # Health Classifier: Green / Yellow / Red
-    # Recent surges (e.g. hitting 90% in multiple recent evals) or high failure progress = Green
+    total_cps = total_stage_checkpoints
     latest_sr = recent_sr_list[-1] if recent_sr_list else 0.0
     latest_few_max = max(recent_sr_list[-4:]) if len(recent_sr_list) >= 4 else latest_sr
 
@@ -353,6 +353,15 @@ def compute_stage_health_summary(
             f"Recent evaluations have peaked at {int(round(latest_few_max * 100))}% win rate with "
             f"strong step efficiency ({round(recent_avg_steps, 1)} avg steps). Exploration is healthy "
             f"and dogs are consistently solving primary flock coordinates."
+        )
+    elif total_cps < 8:
+        # Early adaptation phase for newly started or promoted stages
+        status = "yellow"
+        status_label = "Adapting to Stage · Baseline Gathering"
+        status_explanation = (
+            f"Stage {target_stage} recently started ({total_cps} checkpoints evaluated). "
+            f"The policy is actively exploring new stage dynamics and parameters. Win rates naturally fluctuate "
+            f"while establishing the initial performance baseline (8–10 checkpoints recommended)."
         )
     elif recent_sr >= 0.45 or closeness >= 0.45 or (peak_sr >= 0.80 and all_time_sr >= 0.55):
         status = "yellow"
@@ -367,7 +376,7 @@ def compute_stage_health_summary(
         status = "red"
         status_label = "Systemic Bottleneck · Action Required"
         status_explanation = (
-            f"The policy has remained below 40% success for an extended duration without partial progress "
+            f"The policy has remained below 40% success across {total_cps} checkpoints without partial progress "
             f"(only {int(round(three_pct * 100))}% 3-penned failures). Dogs are likely encountering an "
             f"unrewarded attractor state or severe corner/wall entrapment."
         )
@@ -425,7 +434,17 @@ def compute_stage_health_summary(
     # Prescriptive Recommendations
     recommendations: list[PrescriptiveRecommendation] = []
 
-    if status == "green":
+    if total_cps < 8 and status != "green":
+        recommendations.append(
+            PrescriptiveRecommendation(
+                type="continue",
+                title="Allow Baseline Checkpoints to Accumulate",
+                description=f"Stage {target_stage} has evaluated {total_cps} checkpoints so far. Early multi-agent adaptation requires 8–10 checkpoints to establish a stable diagnostic baseline.",
+                suggested_action="Keep training running without interrupting or tweaking hyperparameters prematurely.",
+                priority="info",
+            )
+        )
+    elif status == "green":
         recommendations.append(
             PrescriptiveRecommendation(
                 type="continue",

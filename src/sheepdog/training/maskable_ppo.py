@@ -859,12 +859,13 @@ class MaskablePPOTrainer(Trainer):
                         policy,
                         tuple(train_config.evaluation_seeds),
                         checkpoint_episode=total_eps_this_checkpoint,
-                        capture_replays=False,
+                        capture_replays=True,
                         evaluation_mode="confidence",
                         run_id=run_id,
                         checkpoint_id=chk_id,
                         policy_version=policy_version,
                         curriculum_stage=active_stage,
+                        evaluation_index=completed_checkpoints,
                     )
                 else:
                     summary = quick_summary
@@ -929,16 +930,23 @@ class MaskablePPOTrainer(Trainer):
             )
             representative_replay_path: Path | None = None
             if should_export_replay:
-                representative_replay_path = self.evaluator.export_replay(
-                    policy,
-                    int(summary.records[0].seed),
-                    total_eps_this_checkpoint,
-                )
-                records = list(summary.records)
-                records[0] = replace(
-                    records[0], replay_path=str(representative_replay_path)
-                )
-                summary = replace(summary, records=tuple(records))
+                if (
+                    summary.records
+                    and summary.records[0].replay_path
+                    and Path(summary.records[0].replay_path).exists()
+                ):
+                    representative_replay_path = Path(summary.records[0].replay_path)
+                else:
+                    representative_replay_path = self.evaluator.export_replay(
+                        policy,
+                        int(summary.records[0].seed),
+                        total_eps_this_checkpoint,
+                    )
+                    records = list(summary.records)
+                    records[0] = replace(
+                        records[0], replay_path=str(representative_replay_path)
+                    )
+                    summary = replace(summary, records=tuple(records))
 
             runtime_snapshot = (
                 self.runtime_tracker.episode_snapshot()
