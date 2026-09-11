@@ -179,7 +179,7 @@ export function App() {
     const parsed = saved !== null ? parseInt(saved, 10) : NaN;
     return !isNaN(parsed) && parsed >= 1 ? parsed : 1;
   });
-  const [startingModelSource, setStartingModelSource] = useState("fresh");
+  const [startingModelSource, setStartingModelSource] = useState("latest");
   const [trainingDebugRewardBreakdown, setTrainingDebugRewardBreakdown] = useState(false);
   const [playbackFastMode, setPlaybackFastMode] = useState(false);
   const [trainingStatus, setTrainingStatus] = useState<TrainingStatus | null>(null);
@@ -820,6 +820,29 @@ export function App() {
       cancelled = true;
     };
   }, [trainingStatus?.latest_checkpoint_episode, trainingStatus?.running]);
+
+  useEffect(() => {
+    if (!trainingStatus?.latest_replay_path) {
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const bundle = await loadReplay(trainingStatus.latest_replay_path!);
+        if (!cancelled && bundle) {
+          setReplay(bundle);
+          setFrameIndex(0);
+          setRunState("running");
+        }
+      } catch {
+        // Fallback silently if replay is still being written
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [trainingStatus?.latest_replay_path]);
 
   useEffect(() => {
     if (!selectedCheckpoint) {

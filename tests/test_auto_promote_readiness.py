@@ -299,3 +299,32 @@ def test_safety_cap_on_step_hold(tmp_path: Path):
     assert res["decision"] == "promote_ready"
     assert res["status_text"] == "READY TO PROMOTE"
 
+
+def test_duplicate_checkpoint_evaluations_deduplicated(tmp_path: Path):
+    """Four checkpoints emitting both quick and confidence evaluations only count as 4 formal evaluations, not 8."""
+    eval_dir = tmp_path / "evaluations"
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    chk_dir = tmp_path / "checkpoints"
+    chk_dir.mkdir(parents=True, exist_ok=True)
+
+    for ep in [10, 20, 30, 40]:
+        base_payload = _make_eval_payload(ep, stage=16, success_rate=1.0)
+        # Write confidence eval
+        conf_payload = {**base_payload, "evaluation_mode": "confidence", "promotion_eligible": True}
+        with open(eval_dir / f"eval_chk_run_ep_{ep}_confidence.json", "w") as f:
+            json.dump(conf_payload, f)
+        # Write quick eval
+        quick_payload = {**base_payload, "evaluation_mode": "quick", "promotion_eligible": False}
+        with open(eval_dir / f"eval_chk_run_ep_{ep}_quick.json", "w") as f:
+            json.dump(quick_payload, f)
+        with open(chk_dir / f"checkpoint-{ep:06d}.json", "w") as f:
+            json.dump(base_payload, f)
+
+    res = compute_promotion_gate_snapshot(tmp_path, target_ep=40)
+    assert res["ready"] is False
+    assert res["decision"] == "pending"
+    assert res["status_text"] == "COLLECTING EVIDENCE"
+    assert res["formal_evaluations_available"] == 4
+    assert res["formal_evaluations_required"] == 6
+
+

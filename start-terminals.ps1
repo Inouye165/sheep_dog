@@ -18,9 +18,18 @@ if (Test-Path $stopScript) {
 Start-Sleep -Seconds 1
 
 Write-Host "Launching Backend API Server (Port 8000) in new PowerShell terminal..."
-Start-Process powershell.exe -ArgumentList "-NoExit", "-Command", "Set-Location '$root'; Write-Host '=== Sheepdog Backend API Server (Port 8000) ===' -ForegroundColor Cyan; & '$pythonExe' -m sheepdog.server"
+$backendProc = Start-Process powershell.exe -ArgumentList "-NoExit", "-Command", "Set-Location '$root'; Write-Host '=== Sheepdog Backend API Server (Port 8000) ===' -ForegroundColor Cyan; & '$pythonExe' -m sheepdog.server" -PassThru
 
 Write-Host "Launching Frontend Web Server (Port 5173) in new PowerShell terminal..."
-Start-Process powershell.exe -ArgumentList "-NoExit", "-Command", "Set-Location '$webDir'; Write-Host '=== Sheepdog Web UI Server (Port 5173) ===' -ForegroundColor Green; npm run dev"
+$webProc = Start-Process powershell.exe -ArgumentList "-NoExit", "-Command", "Set-Location '$webDir'; Write-Host '=== Sheepdog Web UI Server (Port 5173) ===' -ForegroundColor Green; npm run dev" -PassThru
+
+$artifactDir = Join-Path $root 'artifacts\startup'
+if (-not (Test-Path $artifactDir)) { New-Item -ItemType Directory -Path $artifactDir -Force | Out-Null }
+$pids = @{
+    backendTerminalPid = $backendProc.Id
+    webTerminalPid = $webProc.Id
+    createdAt = (Get-Date).ToString("o")
+}
+$pids | ConvertTo-Json | Set-Content (Join-Path $artifactDir 'pids.json') -Encoding UTF8
 
 Write-Host "Successfully launched both servers in separate PowerShell terminal windows!" -ForegroundColor Green

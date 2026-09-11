@@ -109,11 +109,17 @@ catch {
 if (Test-Path $pidFile) {
     try {
         $existing = Get-Content $pidFile -Raw | ConvertFrom-Json
+        if ($existing.backendTerminalPid) {
+            $stoppedBackend = (Stop-UniqueProcessIfRunning -Id ([int]$existing.backendTerminalPid)) -or $stoppedBackend
+        }
+        if ($existing.webTerminalPid) {
+            $stoppedWeb = (Stop-UniqueProcessIfRunning -Id ([int]$existing.webTerminalPid)) -or $stoppedWeb
+        }
         if ($existing.backendListenerPid) {
-            $stoppedBackend = Stop-UniqueProcessIfRunning -Id ([int]$existing.backendListenerPid)
+            $stoppedBackend = (Stop-UniqueProcessIfRunning -Id ([int]$existing.backendListenerPid)) -or $stoppedBackend
         }
         if ($existing.webListenerPid) {
-            $stoppedWeb = Stop-UniqueProcessIfRunning -Id ([int]$existing.webListenerPid)
+            $stoppedWeb = (Stop-UniqueProcessIfRunning -Id ([int]$existing.webListenerPid)) -or $stoppedWeb
         }
         if ($existing.watchdogPid) {
             $watchdogPid = [int]$existing.watchdogPid

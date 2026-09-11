@@ -570,7 +570,7 @@ export function TrainingPanel({
               <select
                 id="starting-model-select-console"
                 aria-label="Starting Model Source"
-                value={startingModelSource ?? "fresh"}
+                value={running ? "active" : (startingModelSource ?? "latest")}
                 onChange={(e) => onStartingModelSourceChange?.(e.target.value)}
                 disabled={busy}
                 style={{
@@ -584,19 +584,36 @@ export function TrainingPanel({
                   cursor: busy ? "not-allowed" : "pointer"
                 }}
               >
+                {running && (
+                  <option value="active">
+                    Active Run Model ({trainingStatus?.parent_run_id ? `Forked from Stage ${trainingStatus?.source_stage ?? '16'}` : 'Current Run'})
+                  </option>
+                )}
+                {(activeCheckpointsCount > 0 || Boolean(trainingStatus?.active_checkpoint_id)) && (
+                  <option value="latest">
+                    Latest Stage Checkpoint ({trainingStatus?.active_checkpoint_id ? `Active: ${trainingStatus.active_checkpoint_id}` : 'Continue Learning'})
+                  </option>
+                )}
                 <option value="fresh">
                   Fresh Model (Initialize from Scratch)
                 </option>
-                {activeCheckpointsCount > 0 && (
-                  <option value="latest">
-                    Latest Stage Checkpoint (Continue Learning)
-                  </option>
-                )}
               </select>
             </div>
 
             {/* Explicit Confirmation Text */}
-            {startingModelSource === "fresh" ? (
+            {running ? (
+              <div style={{
+                background: "rgba(16, 185, 129, 0.12)",
+                border: "1px solid rgba(16, 185, 129, 0.3)",
+                borderRadius: "0.4rem",
+                padding: "0.5rem 0.65rem",
+                fontSize: "0.74rem",
+                color: "#6ee7b7",
+                lineHeight: "1.45"
+              }}>
+                🟢 <strong>Active Model Lineage:</strong> {trainingStatus?.parent_run_id ? `Trained model preserved! Continuing from Stage ${trainingStatus?.source_stage ?? '16'} (Parent: ${trainingStatus?.parent_checkpoint_id ?? 'chk_stage16'})` : `Active Run: ${trainingStatus?.run_id ?? 'Current Run'}`}
+              </div>
+            ) : startingModelSource === "fresh" ? (
               <div style={{
                 background: "rgba(59, 130, 246, 0.12)",
                 border: "1px solid rgba(59, 130, 246, 0.3)",
@@ -618,7 +635,7 @@ export function TrainingPanel({
                 color: "#c4b5fd",
                 lineHeight: "1.45"
               }}>
-                ℹ️ <strong>Confirmation:</strong> Training will start from the latest saved checkpoint for Stage {curriculumStage}.
+                ℹ️ <strong>Confirmation:</strong> Training will continue from the active Stage {curriculumStage} checkpoint ({trainingStatus?.active_checkpoint_id ?? `Latest saved checkpoint`}).
               </div>
             )}
           </div>

@@ -379,3 +379,119 @@ def test_stray_approach_reward_for_multi_sheep_unpenned_cluster() -> None:
     assert breakdown_closer.stray_ignore_penalty > breakdown_further.stray_ignore_penalty
 
 
+def test_gate_camping_penalty_when_unpenned_sheep_are_far() -> None:
+    config = RewardConfig(
+        lane_crowding_penalty_scale=1.0,
+        lane_crowding_activation_distance=14.0,
+    )
+    computer = RewardComputer(config)
+
+    # Pen target at (100, 10), stray sheep far away at (50, 50) (dist ~ 64 > 14)
+    target = (100.0, 10.0)
+    stray_sheep = (50.0, 50.0)
+
+    # Dog A is camping near the gate at (102, 12) (dist ~ 2.8 < 12)
+    camping_inputs = RewardInputs(
+        previous_average_distance=64.0,
+        current_average_distance=64.0,
+        previous_flock_spread=0.0,
+        current_flock_spread=0.0,
+        newly_penned=0,
+        no_progress_step=False,
+        touched_wall=False,
+        waited_without_reason=False,
+        terminated=False,
+        timeout=False,
+        success=False,
+        target_position=target,
+        sheep_positions=(stray_sheep,),
+        dog_positions=((102.0, 12.0),),
+    )
+
+    # Dog B is out in the field pursuing the sheep at (60, 45) (dist to pen ~ 53 > 12)
+    field_inputs = RewardInputs(
+        previous_average_distance=64.0,
+        current_average_distance=64.0,
+        previous_flock_spread=0.0,
+        current_flock_spread=0.0,
+        newly_penned=0,
+        no_progress_step=False,
+        touched_wall=False,
+        waited_without_reason=False,
+        terminated=False,
+        timeout=False,
+        success=False,
+        target_position=target,
+        sheep_positions=(stray_sheep,),
+        dog_positions=((60.0, 45.0),),
+    )
+
+    camping_breakdown = computer.compute(camping_inputs)
+    field_breakdown = computer.compute(field_inputs)
+
+    # Dog camping at gate receives a penalty; dog out in field does not
+    assert camping_breakdown.lane_crowding_penalty < 0.0
+    assert field_breakdown.lane_crowding_penalty == 0.0
+
+
+def test_pressure_zone_alignment_rewards_behind_and_penalizes_between() -> None:
+    from sheepdog.config import InstinctRewardConfig
+
+    instincts = InstinctRewardConfig(
+        enable_instinct_rewards=True,
+        pressure_zone_weight=1.0,
+        safe_pressure_weight=0.0,
+        dog_overshoot_penalty_hold=0.5,
+    )
+    config = RewardConfig(instincts=instincts)
+    computer = RewardComputer(config)
+
+    target = (100.0, 10.0)
+    sheep = (50.0, 10.0)
+
+    # Dog between sheep and pen: at (75, 10)
+    between_inputs = RewardInputs(
+        previous_average_distance=50.0,
+        current_average_distance=50.0,
+        previous_flock_spread=0.0,
+        current_flock_spread=0.0,
+        newly_penned=0,
+        no_progress_step=False,
+        touched_wall=False,
+        waited_without_reason=False,
+        terminated=False,
+        timeout=False,
+        success=False,
+        flock_centroid=sheep,
+        target_position=target,
+        sheep_positions=(sheep,),
+        dog_positions=((75.0, 10.0),),
+    )
+
+    # Dog behind sheep relative to pen: at (40, 10)
+    behind_inputs = RewardInputs(
+        previous_average_distance=50.0,
+        current_average_distance=50.0,
+        previous_flock_spread=0.0,
+        current_flock_spread=0.0,
+        newly_penned=0,
+        no_progress_step=False,
+        touched_wall=False,
+        waited_without_reason=False,
+        terminated=False,
+        timeout=False,
+        success=False,
+        flock_centroid=sheep,
+        target_position=target,
+        sheep_positions=(sheep,),
+        dog_positions=((40.0, 10.0),),
+    )
+
+    between_breakdown = computer.compute(between_inputs)
+    behind_breakdown = computer.compute(behind_inputs)
+
+    assert between_breakdown.pressure_zone < 0.0
+    assert behind_breakdown.pressure_zone > 0.0
+
+
+

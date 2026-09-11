@@ -640,6 +640,21 @@ class EpisodeStore:
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         self.close()
 
+    def get_max_episode(self, run_id: str | None = None) -> int:
+        """Return the highest global_environment_episode persisted in the database."""
+        with self._lock:
+            conn = self._get_connection()
+            if run_id:
+                row = conn.execute(
+                    "SELECT MAX(global_environment_episode) FROM training_episodes WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT MAX(global_environment_episode) FROM training_episodes"
+                ).fetchone()
+            return int(row[0]) if row and row[0] is not None else 0
+
     def get_episodes(
         self,
         after_id: int | None = None,

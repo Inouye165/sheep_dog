@@ -216,6 +216,8 @@ export interface TrainingStatus {
   run_id?: string;
   parent_run_id?: string;
   parent_checkpoint_id?: string;
+  source_stage?: number;
+  target_environment_stage?: number;
   active_model_source?: string;
   active_checkpoint_id?: string;
   training_start_time?: string;

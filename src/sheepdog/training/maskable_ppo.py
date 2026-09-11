@@ -105,9 +105,17 @@ class _TrainingProgressCallback(BaseCallback):
                             actual_eps = 0
                         ep_num = self._starting_total + actual_eps
                         current_global_ts = self._completed_timesteps + int(self.num_timesteps)
+                        current_seg_ts = min(int(self.num_timesteps), self._total_timesteps)
+                        completion_pct = current_seg_ts / max(1, self._total_timesteps)
+                        msg = (
+                            f"Learning neural policy: "
+                            f"{current_seg_ts}/{self._total_timesteps} "
+                            f"timesteps ({completion_pct:.0%})"
+                        )
                         self._emit(
                             {
                                 "phase": "episode_complete",
+                                "message": msg,
                                 "episode": ep_num,
                                 "current_episode": ep_num,
                                 "total_episodes_trained": ep_num,
@@ -290,11 +298,47 @@ class MaskablePPOTrainer(Trainer):
         return sig
 
     def _has_compatible_policy_state(self) -> bool:
+        policy_path_str = self._loaded_state.get("policy_state_path") or self._loaded_state.get("best_model_path")
+        if not policy_path_str:
+            return False
+        # Check if the policy state file actually exists
+        p = Path(policy_path_str)
+        if not p.is_absolute():
+            for cand in (
+                self.output_root / p,
+                self.output_root.parent / p,
+                self.output_root / "models" / p.name,
+                self.output_root / "checkpoints" / p.name,
+            ):
+                if cand.exists():
+                    p = cand
+                    break
+        if not p.exists():
+            # Check models directory fallback
+            best_fallback = self.output_root / "models" / "best-model.zip"
+            if not best_fallback.exists():
+                return False
+
         stored_signature = self._loaded_state.get("training_signature")
         if not isinstance(stored_signature, dict):
+            # If no signature was stored (e.g. from restored/forked checkpoint),
+            # check policy_config architecture if present
+            stored_config = self._loaded_state.get("policy_config")
+            if isinstance(stored_config, dict):
+                stored_act = stored_config.get("action_size")
+                if stored_act is not None and stored_act != len(ACTION_ORDER):
+                    return False
+            return True
+
+        # Check core architectural compatibility: action_size and observation_mode
+        stored_act = stored_signature.get("action_size")
+        if stored_act is not None and stored_act != len(ACTION_ORDER):
             return False
-        normalize = self._strip_non_architectural_fields
-        return normalize(stored_signature) == normalize(self._training_signature())
+        stored_obs = stored_signature.get("observation_mode")
+        if stored_obs is not None and stored_obs != self.config.training.observation_mode:
+            return False
+
+        return True
 
     def _load_state(self) -> dict[str, Any]:
         if not self._state_path.exists():
@@ -370,6 +414,15 @@ class MaskablePPOTrainer(Trainer):
             if resuming_policy
             else 0
         )
+        try:
+            from sheepdog.training.episode_store import get_episode_store
+            store = get_episode_store(self._output_dir / "training-telemetry.sqlite")
+            run_id = self._loaded_state.get("run_id")
+            max_ep = store.get_max_episode(run_id)
+            if max_ep > starting_environment_episodes:
+                starting_environment_episodes = max_ep
+        except Exception:
+            pass
         loaded_p_ver = self._loaded_state.get("policy_version")
         policy_version = int(loaded_p_ver) if (resuming_policy and loaded_p_ver is not None) else 0
         batch_total = max(1, len(train_config.checkpoint_episodes))
@@ -535,8 +588,23 @@ class MaskablePPOTrainer(Trainer):
         best_model_path_str = self._loaded_state.get("best_model_path")
         resume_path = best_model_path_str or self._loaded_state.get("policy_state_path")
         if resuming_policy and resume_path:
+            p = Path(resume_path)
+            if not p.is_absolute() and not p.exists():
+                for cand in (
+                    self.output_root / p,
+                    self.output_root.parent / p,
+                    self.output_root / "models" / p.name,
+                    self.output_root / "checkpoints" / p.name,
+                ):
+                    if cand.exists():
+                        p = cand
+                        break
+            if not p.exists():
+                best_fallback = self.output_root / "models" / "best-model.zip"
+                if best_fallback.exists():
+                    p = best_fallback
             policy = self.POLICY_CLASS.load(
-                resume_path,
+                p,
                 self.config,
                 self._loaded_state.get("policy_config"),
             )

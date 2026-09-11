@@ -42,11 +42,23 @@ const STAGE_COLORS: Record<number, string> = {
 
 const PROMOTE_THRESHOLD = 0.5;
 
+const STAGE_SUCCESS_THRESHOLDS: Record<number, number> = {
+  1: 0.80,
+  10: 0.70,
+  11: 0.72,
+  12: 0.75,
+  13: 0.78,
+  16: 0.75,
+};
+
 function getSuccessThreshold(stage: number): number {
-  if (stage >= 2) {
-    return 0.90;
+  if (stage in STAGE_SUCCESS_THRESHOLDS) {
+    return STAGE_SUCCESS_THRESHOLDS[stage];
   }
-  return 0.80;
+  if (stage <= 1) {
+    return 0.80;
+  }
+  return 0.90;
 }
 const RECENT_WINDOW = 5;
 
