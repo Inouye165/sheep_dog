@@ -12,6 +12,13 @@ import json
 import logging
 import math
 import os
+import re
+import sys
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 import shutil
 import threading
 import time
@@ -540,27 +547,60 @@ def _seed_success_gate(success_count: int, seed_count: int) -> bool:
     return success_count >= seed_count
 
 
+_EVAL_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_DIR_EVAL_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+
+
 def _load_all_persisted_evaluations(output_root: Path, journey: str | None = None) -> list[dict[str, Any]]:
     eval_dir = output_root / "evaluations"
     if journey:
         eval_dir = output_root / "archive" / f"journey-{journey}" / "evaluations"
 
+    if not eval_dir.exists() or not eval_dir.is_dir():
+        return []
+
+    dir_key = str(eval_dir)
+    try:
+        dir_mtime = eval_dir.stat().st_mtime
+    except Exception:
+        dir_mtime = 0.0
+
+    cached_dir = _DIR_EVAL_CACHE.get(dir_key)
+    if cached_dir is not None and cached_dir[0] == dir_mtime and dir_mtime > 0.0:
+        return cached_dir[1]
+
     evaluations = []
     seen_ids = set()
-    if eval_dir.exists() and eval_dir.is_dir():
-        patterns = ["evaluation-checkpoint-*.json", "eval_*.json"]
-        for pattern in patterns:
-            for p in eval_dir.glob(pattern):
-                try:
+    try:
+        for p in eval_dir.iterdir():
+            name = p.name
+            if not name.endswith(".json"):
+                continue
+            if not (name.startswith("eval_") or name.startswith("evaluation-checkpoint-")):
+                continue
+            try:
+                mtime = p.stat().st_mtime
+                cached = _EVAL_CACHE.get(name)
+                if cached is not None and cached[0] == mtime:
+                    data = cached[1]
+                else:
                     with p.open("r", encoding="utf-8") as f:
                         data = json.load(f)
-                        if isinstance(data, dict):
-                            eval_id = data.get("evaluation_id") or data.get("checkpoint_id") or str(p.name)
-                            if eval_id not in seen_ids:
-                                seen_ids.add(eval_id)
-                                evaluations.append(data)
-                except Exception:
-                    pass
+                    if isinstance(data, dict):
+                        _EVAL_CACHE[name] = (mtime, data)
+                if isinstance(data, dict):
+                    eval_id = data.get("evaluation_id") or data.get("checkpoint_id") or name
+                    if eval_id not in seen_ids:
+                        seen_ids.add(eval_id)
+                        evaluations.append(data)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    if dir_mtime > 0.0:
+        _DIR_EVAL_CACHE[dir_key] = (dir_mtime, evaluations)
+
     return evaluations
 
 
@@ -634,8 +674,10 @@ def compute_promotion_gate_snapshot(
 
     all_evals = _load_all_persisted_evaluations(output_root, journey)
 
-    # Filter formal evaluations compatible with the current stage and journey
-    compatible_evals = []
+    # Filter formal evaluations compatible with the current stage and journey.
+    # Deduplicate by checkpoint_episode so each checkpoint is counted at most once
+    # (preferring formal 'confidence' benchmark runs over 'quick' runs).
+    evals_by_ep: dict[int, dict[str, Any]] = {}
     for ev in all_evals:
         ev_ep = ev.get("checkpoint_episode")
         if ev_ep is None or ev_ep > target_ep:
@@ -645,8 +687,33 @@ def compute_promotion_gate_snapshot(
         ev_recs = ev.get("records", [])
         if len(ev_recs) < 5:  # Require formal multi-seed evaluation
             continue
-        compatible_evals.append(ev)
 
+        existing = evals_by_ep.get(ev_ep)
+        if existing is None:
+            evals_by_ep[ev_ep] = ev
+        else:
+            ev_is_conf = (
+                ev.get("evaluation_mode") == "confidence"
+                or ev.get("promotion_eligible") is True
+            )
+            existing_is_conf = (
+                existing.get("evaluation_mode") == "confidence"
+                or existing.get("promotion_eligible") is True
+            )
+            if ev_is_conf and not existing_is_conf:
+                evals_by_ep[ev_ep] = ev
+            elif not existing_is_conf and ev.get("evaluation_mode") != "quick":
+                evals_by_ep[ev_ep] = ev
+
+    if target_ep not in evals_by_ep and checkpoint_payload:
+        if checkpoint_payload.get("curriculum_stage") == target_stage and len(eval_records) >= 5:
+            evals_by_ep[target_ep] = {
+                **checkpoint_payload,
+                "checkpoint_episode": target_ep,
+                "records": eval_records,
+            }
+
+    compatible_evals = list(evals_by_ep.values())
     # Sort strictly chronologically by checkpoint_episode
     compatible_evals.sort(key=lambda x: x.get("checkpoint_episode", 0))
 
@@ -3369,14 +3436,49 @@ class TrainingManager:
         output_root = Path(LabConfig().training.output_dir)
 
         # Build state payload
+        current_config = LabConfig()
+        stage_to_persist = (
+            checkpoint_payload.get("curriculum_stage")
+            or checkpoint_payload.get("environment_config", {}).get("curriculum_stage", 1)
+        )
+
+        total_ts = checkpoint_payload.get("total_timesteps")
+        if total_ts is None:
+            chk_id_str = str(checkpoint_payload.get("checkpoint_id") or "")
+            ts_m = re.search(r'_ts_(\d+)', chk_id_str)
+            total_ts = int(ts_m.group(1)) if ts_m else 0
+
+        from dataclasses import asdict
+        sig = checkpoint_payload.get("training_signature")
+        if not isinstance(sig, dict):
+            sig = {
+                "action_size": 9,
+                "observation_mode": current_config.training.observation_mode,
+                "rewards": asdict(current_config.rewards),
+                "environment": {
+                    "dog_speed": current_config.environment.dog_speed,
+                    "dog_sprint_multiplier": current_config.environment.dog_sprint_multiplier,
+                    "sheep_speed": current_config.environment.sheep_speed,
+                },
+            }
+
         state_payload = {
             "total_episodes_trained": int(checkpoint_payload.get("total_training_episodes", episode)),
+            "total_environment_episodes": int(checkpoint_payload.get("environment_episodes_total", episode)),
+            "total_timesteps": int(total_ts),
             "policy_state_path": checkpoint_payload.get("policy_state_path"),
             "best_model_path": checkpoint_payload.get("policy_state_path"),
+            "best_model_curriculum_stage": stage_to_persist,
             "best_success_rate": checkpoint_payload.get("success_rate"),
             "best_average_reward": checkpoint_payload.get("average_reward"),
             "best_completion_steps": checkpoint_payload.get("average_completion_steps"),
-            "policy_config": checkpoint_payload.get("policy_config"),
+            "policy_config": checkpoint_payload.get("policy_config") or {
+                "hidden_sizes": [128, 128, 128],
+                "observation_size": 54,
+                "action_size": 9,
+                "env_workers": 1,
+            },
+            "training_signature": sig,
             "run_id": checkpoint_payload.get("run_id"),
             "parent_run_id": checkpoint_payload.get("parent_run_id"),
             "parent_checkpoint_id": checkpoint_payload.get("parent_checkpoint_id"),
@@ -3406,6 +3508,18 @@ class TrainingManager:
                 )
                 if archive_zip.exists():
                     src_zip = archive_zip
+
+            if not src_zip.exists():
+                for cand in [
+                    output_root / "checkpoints" / f"stage{stage_to_persist}" / Path(policy_state_path_str).name,
+                    output_root / "models" / Path(policy_state_path_str).name,
+                    output_root / "checkpoints" / f"stage{stage_to_persist}" / f"stage{stage_to_persist}-best-model.zip",
+                    output_root / "backups" / "stages" / f"stage_{stage_to_persist}" / f"stage_{stage_to_persist}_best_model.zip",
+                    output_root / "models" / "best-model.zip",
+                ]:
+                    if cand.exists():
+                        src_zip = cand
+                        break
 
             if src_zip.exists():
                 active_models_dir = output_root / "models"
@@ -3570,6 +3684,21 @@ class TrainingManager:
                 active_policy_state_path = str(dest_zip)
 
         # Write new training-state.json
+        current_config = LabConfig()
+        from dataclasses import asdict
+        sig = checkpoint_payload.get("training_signature")
+        if not isinstance(sig, dict):
+            sig = {
+                "action_size": 9,
+                "observation_mode": current_config.training.observation_mode,
+                "rewards": asdict(current_config.rewards),
+                "environment": {
+                    "dog_speed": current_config.environment.dog_speed,
+                    "dog_sprint_multiplier": current_config.environment.dog_sprint_multiplier,
+                    "sheep_speed": current_config.environment.sheep_speed,
+                },
+            }
+
         state_payload = {
             "total_episodes_trained": int(checkpoint_payload.get("total_training_episodes", episode)),
             "policy_state_path": active_policy_state_path,
@@ -3577,7 +3706,13 @@ class TrainingManager:
             "best_success_rate": checkpoint_payload.get("success_rate"),
             "best_average_reward": checkpoint_payload.get("average_reward"),
             "best_completion_steps": checkpoint_payload.get("average_completion_steps"),
-            "policy_config": checkpoint_payload.get("policy_config"),
+            "policy_config": checkpoint_payload.get("policy_config") or {
+                "hidden_sizes": [128, 128, 128],
+                "observation_size": 54,
+                "action_size": 9,
+                "env_workers": 1,
+            },
+            "training_signature": sig,
             "run_id": new_run_id,
             "parent_run_id": checkpoint_payload.get("run_id"),
             "parent_checkpoint_id": checkpoint_payload.get("checkpoint_id"),
@@ -3936,6 +4071,7 @@ class TrainingManager:
             obs_hash = get_observation_schema_hash(target_config)
             act_hash = get_action_space_hash()
 
+            from dataclasses import asdict
             training_state = {
                 "run_id": new_run_id,
                 "parent_run_id": parent_run_id,
@@ -3950,6 +4086,22 @@ class TrainingManager:
                 "curriculum_stage": target_stage,
                 "total_episodes_trained": 0,
                 "best_model_path": str(active_model_zip),
+                "policy_config": {
+                    "hidden_sizes": [128, 128, 128],
+                    "observation_size": 54,
+                    "action_size": 9,
+                    "env_workers": 1,
+                },
+                "training_signature": {
+                    "action_size": 9,
+                    "observation_mode": target_config.training.observation_mode,
+                    "rewards": asdict(target_config.rewards),
+                    "environment": {
+                        "dog_speed": target_config.environment.dog_speed,
+                        "dog_sprint_multiplier": target_config.environment.dog_sprint_multiplier,
+                        "sheep_speed": target_config.environment.sheep_speed,
+                    },
+                },
                 "created_at": datetime.datetime.now(datetime.UTC).isoformat(),
             }
             (output_root / Trainer.STATE_FILENAME).write_text(
@@ -4868,11 +5020,29 @@ class TrainingManager:
                         "current_episode": payload.get("current_episode"),
                         "checkpoint_episode": checkpoint_episode,
                         "best_score": payload.get("best_score"),
-                        "message": payload.get("message", "Training"),
+                        "message": payload.get("message") or self._status.get("message", "Training"),
                         "error": None,
                         "error_type": None,
                         "traceback": None,
                     }
+                    if phase == "episode_complete":
+                        update["latest_episode_completed_at"] = datetime.datetime.now(datetime.UTC).isoformat()
+                        if "reward" in payload:
+                            update["latest_episode_reward"] = float(payload["reward"])
+                        if "status" in payload:
+                            update["latest_episode_result"] = str(payload["status"])
+                        if payload.get("replay_path"):
+                            try:
+                                source_p = Path(payload["replay_path"])
+                                if source_p.exists():
+                                    target_replays = Path(job_config.training.web_export_dir) / "replays"
+                                    target_replays.mkdir(parents=True, exist_ok=True)
+                                    target_file = target_replays / source_p.name
+                                    if not target_file.exists():
+                                        shutil.copy2(source_p, target_file)
+                                    update["latest_replay_path"] = f"/generated/replays/{source_p.name}"
+                            except Exception:
+                                pass
                     if phase == "checkpoint":
                         update["durable_completed_timesteps"] = update[
                             "batch_completed_timesteps"
@@ -5130,7 +5300,7 @@ class TrainingManager:
                                         e_rew = rec.get("reward_total", 0.0)
                                         res_str = "SUCCESS" if e_succ else f"FAILED ({e_reason})"
                                         print(
-                                            f"[Sheepdog]   └─ [EVAL] Seed: {e_seed} | Penned: {e_penned} | "
+                                            f"[Sheepdog]   |- [EVAL] Seed: {e_seed} | Penned: {e_penned} | "
                                             f"Reward: {e_rew:.2f} | Result: {res_str}",
                                             flush=True,
                                         )

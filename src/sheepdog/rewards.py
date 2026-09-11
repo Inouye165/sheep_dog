@@ -393,8 +393,8 @@ class RewardComputer:
                     is_isolated = (dist_to_centroid > 8.0) or (max_dist > 10.0)
                     if is_isolated:
                         min_dog_dist = min(_distance(dog, farthest_sheep) for dog in inputs.dog_positions)
-                        # Dense approach penalty: 10x the stray ignore scale to provide a clear gradient
-                        effective_min_dog_dist = min(12.0, min_dog_dist)
+                        # Dense approach penalty: 10x the stray ignore scale to provide a clear gradient across field
+                        effective_min_dog_dist = min(30.0, min_dog_dist)
                         stray_penalty -= effective_min_dog_dist * (si_scale * 10.0)
 
                         # Dense approach progress reward: localized distance-based multiplier
@@ -423,6 +423,17 @@ class RewardComputer:
             if _distance(sheep, target) <= self._config.lane_crowding_activation_distance
         ]
         if not active_sheep:
+            # Gate camping check: when all unpenned sheep are beyond activation distance,
+            # but dogs are lingering within the gate entrance area, penalize dogs
+            # lingering near the gate instead of pursuing unpenned sheep.
+            gate_camping_score = 0.0
+            gate_zone = max(16.0, self._config.lane_crowding_activation_distance)
+            for dog in inputs.dog_positions:
+                dist_to_target = _distance(dog, target)
+                if dist_to_target < gate_zone:
+                    gate_camping_score += 1.0 - (dist_to_target / max(1.0, gate_zone))
+            if gate_camping_score > 0.0:
+                return -gate_camping_score * (self._config.lane_crowding_penalty_scale * 0.5)
             return 0.0
         blocking_score = 0.0
         for sheep in active_sheep:
