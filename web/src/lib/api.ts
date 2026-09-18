@@ -22,7 +22,7 @@ import type {
   StageHealthSummary,
 } from "../state/types";
 
-export const API_BASE_URL = "http://127.0.0.1:8000";
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL?.trim() || "";
 
 export interface ApiError extends Error {
   status?: number;
@@ -217,6 +217,13 @@ export async function loadRecentEvaluations(
 export async function loadReplay(path: string): Promise<ReplayBundle> {
   if (!path || !path.trim()) {
     throw new Error("No replay path specified.");
+  }
+  const cleanPath = path.replace(/\\/g, "/");
+  const filename = cleanPath.split("/").pop() || "";
+  const replayId = filename.replace(/\.json(\.gz)?$/, "");
+  if (replayId && (cleanPath.includes("evaluations") || cleanPath.includes("replays") || cleanPath.startsWith("artifacts/"))) {
+    const fromApi = await fetchReplayById(replayId);
+    if (fromApi) return fromApi;
   }
   return fetchJson<ReplayBundle>(path, undefined, API_BASE_URL);
 }

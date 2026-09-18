@@ -22,7 +22,7 @@ from sheepdog.policies.random_policy import RandomPolicy
 from sheepdog.policies.trainable import TrainableLinearPolicy
 from sheepdog.server import _load_playable_policy
 from sheepdog.training.factory import create_trainer
-from sheepdog.training.maskable_ppo import finish_wandb_run
+from sheepdog.training.maskable_ppo import MaskablePPOTrainer, finish_wandb_run
 from sheepdog.training.rl_env import SheepdogRLAdapter
 
 
@@ -167,6 +167,42 @@ def test_maskable_ppo_trainer_emits_progress_updates(tmp_path: Path) -> None:
     assert "checkpoint" in phases
     assert "complete" in phases
     assert any(payload.get("checkpoint_episode") == 0 for payload in payloads)
+
+
+def test_stage_transition_evaluates_inherited_policy_before_learning(tmp_path: Path) -> None:
+    config = make_experiment_config(tmp_path)
+    artifacts = Path(config.training.output_dir)
+    previous_model = artifacts / "models" / "best-model.zip"
+    previous_model.parent.mkdir(parents=True, exist_ok=True)
+    NeuralPolicy.initialize(config).save(previous_model)
+    state = {
+        "total_episodes_trained": 10,
+        "total_timesteps": 100,
+        "policy_state_path": str(previous_model),
+        "best_model_path": str(previous_model),
+        "best_model_curriculum_stage": 1,
+        "policy_config": {"hidden_sizes": [128, 128, 128], "observation_size": 54},
+        "policy_version": 4,
+    }
+    (artifacts / "training-state.json").write_text(json.dumps(state), encoding="utf-8")
+    config = replace(config, rewards=replace(config.rewards, instincts=replace(
+        config.rewards.instincts, curriculum_stage=2
+    )))
+    trainer = MaskablePPOTrainer(config, artifacts)
+    original_evaluate = trainer.evaluator.evaluate
+    evaluation_modes: list[str] = []
+
+    def observe_evaluate(*args: object, **kwargs: object):
+        evaluation_modes.append(str(kwargs["evaluation_mode"]))
+        return original_evaluate(*args, **kwargs)
+
+    with patch.object(trainer.evaluator, "evaluate", side_effect=observe_evaluate):
+        trainer.train()
+
+    persisted = json.loads((artifacts / "training-state.json").read_text(encoding="utf-8"))
+    assert evaluation_modes[0] == "stage_transition_baseline"
+    assert persisted["stage_transition_baseline"]["source_stage"] == 1
+    assert persisted["stage_transition_baseline"]["target_stage"] == 2
 
 
 def test_maskable_ppo_resume_applies_saved_adaptive_stage(tmp_path: Path) -> None:

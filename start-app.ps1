@@ -504,10 +504,15 @@ try {
     Write-Host ("Backend ready after {0:n1}s." -f $startupTimer.Elapsed.TotalSeconds)
     if ($null -ne $resumeTraining) {
         Write-Host "Resuming training with $($resumeTraining.remainingEpisodes) remaining episodes..."
-        $resumeResponse = Invoke-JsonPost -Uri "http://127.0.0.1:$backendPort/api/training/start" -Body $resumeTraining.request
-        $msg = $resumeResponse.message
-        if ($null -eq $msg) { $msg = 'Training resume requested.' }
-        Write-Host $msg
+        try {
+            $resumeResponse = Invoke-JsonPost -Uri "http://127.0.0.1:$backendPort/api/training/start" -Body $resumeTraining.request
+            $msg = $resumeResponse.message
+            if ($null -eq $msg) { $msg = 'Training resume requested.' }
+            Write-Host $msg
+        }
+        catch {
+            Write-Warning "Could not resume saved training session: $_"
+        }
     }
 
     Write-Host "Waiting for web readiness (timeout ${webStartupTimeoutSeconds}s)..."

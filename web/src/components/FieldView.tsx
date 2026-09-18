@@ -56,84 +56,135 @@ export function FieldView({ snapshot }: FieldViewProps) {
   const roleTagHeight = 0.54 * densityScale;
   const roleTagRadius = 0.12 * densityScale;
   const roleTagStroke = 0.04 * densityScale;
-  const roleLabelY = 0.94 * densityScale;
   const roleLabelSize = 0.28 * densityScale;
 
   return (
     <section className="field-card" aria-label="Simulation field">
-      <div className="field-card__header">
-        <div>
-          <p className="eyebrow">Live Replay</p>
-          <h2>Herding field</h2>
+      <div className="field-card__header" style={{ alignItems: "center" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+          <div style={{ display: "flex", flexDirection: "column" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", marginBottom: "0.15rem" }}>
+              <span
+                style={{
+                  display: "inline-block",
+                  width: "7px",
+                  height: "7px",
+                  borderRadius: "50%",
+                  background: snapshot ? "#4ade80" : "#94a3b8",
+                  boxShadow: snapshot ? "0 0 8px rgba(74, 222, 128, 0.7)" : "none",
+                }}
+              />
+              <span className="eyebrow" style={{ fontSize: "0.68rem", letterSpacing: "0.08em", fontWeight: 700, color: snapshot ? "#4ade80" : "var(--muted)", textTransform: "uppercase" }}>
+                Live Replay
+              </span>
+            </div>
+            <h2 style={{ fontSize: "1.25rem", fontWeight: 700, margin: 0, letterSpacing: "-0.01em" }}>Herding field</h2>
+          </div>
         </div>
         {snapshot ? (
-          <div className="field-card__meta">
-            <span>Step {snapshot.step ?? 0}</span>
+          <div className="field-card__meta" style={{ display: "flex", alignItems: "center", gap: "0.45rem" }}>
+            <span style={{
+              background: "rgba(148, 163, 184, 0.08)",
+              border: "1px solid rgba(148, 163, 184, 0.16)",
+              borderRadius: "999px",
+              padding: "0.2rem 0.65rem",
+              fontWeight: 600,
+              fontSize: "0.76rem",
+              color: "#e2e8f0"
+            }}>
+              Step {snapshot.step ?? 0}
+            </span>
             {snapshot.simulated_seconds !== undefined && snapshot.simulated_seconds !== null ? (
-              <span>{snapshot.simulated_seconds.toFixed(0)}s simulated</span>
+              <span style={{
+                background: "rgba(148, 163, 184, 0.08)",
+                border: "1px solid rgba(148, 163, 184, 0.16)",
+                borderRadius: "999px",
+                padding: "0.2rem 0.65rem",
+                fontWeight: 600,
+                fontSize: "0.76rem",
+                color: "#e2e8f0"
+              }}>
+                {snapshot.simulated_seconds.toFixed(0)}s simulated
+              </span>
             ) : null}
           </div>
         ) : null}
       </div>
-      {snapshot?.dogs.length ? (
-        <div className="field-card__meta" aria-label="Dog legend">
-          {snapshot.dogs.map((dog) => (
-            <span key={`legend-${dog.index}`}>
-              <span
-                aria-hidden="true"
-                style={{
-                  display: "inline-block",
-                  width: "0.85rem",
-                  height: "0.85rem",
-                  borderRadius: "999px",
-                  marginRight: "0.4rem",
-                  verticalAlign: "middle",
-                  backgroundColor: dogColor(dog.index),
-                  border: "1px solid rgba(255,255,255,0.55)",
-                }}
-              />
-              {`Dog ${dog.index + 1}${dog.role ? ` - ${ROLE_LABELS[dog.role] ?? dog.role}` : ""}`}
-            </span>
-          ))}
+
+      {/* Unified Legend Strip */}
+      {(snapshot?.dogs?.length || snapshot?.sheep?.length) ? (
+        <div style={{
+          display: "flex",
+          flexWrap: "wrap",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: "0.4rem 1rem",
+          padding: "0.35rem 0.65rem",
+          background: "rgba(15, 23, 42, 0.45)",
+          border: "1px solid rgba(148, 163, 184, 0.12)",
+          borderRadius: "0.6rem",
+          fontSize: "0.76rem"
+        }}>
+          {snapshot?.dogs.length ? (
+            <div className="field-card__meta" aria-label="Dog legend" style={{ display: "flex", alignItems: "center", gap: "0.8rem", flexWrap: "wrap" }}>
+              {snapshot.dogs.map((dog) => (
+                <span key={`legend-${dog.index}`} style={{ display: "inline-flex", alignItems: "center", color: "#cbd5e1" }}>
+                  <span
+                    aria-hidden="true"
+                    style={{
+                      display: "inline-block",
+                      width: "0.75rem",
+                      height: "0.75rem",
+                      borderRadius: "999px",
+                      marginRight: "0.35rem",
+                      backgroundColor: dogColor(dog.index),
+                      border: "1px solid rgba(255,255,255,0.7)",
+                      boxShadow: `0 0 6px ${dogColor(dog.index)}40`,
+                    }}
+                  />
+                  {`Dog ${dog.index + 1}${dog.role ? ` - ${ROLE_LABELS[dog.role] ?? dog.role}` : ""}`}
+                </span>
+              ))}
+            </div>
+          ) : null}
+
+          {snapshot?.sheep.length ? (
+            <div className="field-card__meta" aria-label="Sheep legend" style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap" }}>
+              {(() => {
+                const groups = new Map<string, { color: string; count: number }>();
+                for (const sheep of snapshot.sheep) {
+                  const key = sheep.personality ?? "obedient";
+                  const color = sheep.color ?? DEFAULT_SHEEP_COLOR;
+                  const existing = groups.get(key);
+                  if (existing) {
+                    existing.count += 1;
+                  } else {
+                    groups.set(key, { color, count: 1 });
+                  }
+                }
+                return Array.from(groups.entries()).map(([personality, info]) => (
+                  <span key={`sheep-legend-${personality}`} style={{ display: "inline-flex", alignItems: "center", color: "#cbd5e1" }}>
+                    <span
+                      aria-hidden="true"
+                      style={{
+                        display: "inline-block",
+                        width: "0.7rem",
+                        height: "0.7rem",
+                        borderRadius: "999px",
+                        marginRight: "0.35rem",
+                        backgroundColor: info.color,
+                        border: `1px solid ${ACTIVE_SHEEP_STROKE}`,
+                      }}
+                    />
+                    <span>{`${personality} (${info.count})`}</span>
+                  </span>
+                ));
+              })()}
+            </div>
+          ) : null}
         </div>
       ) : null}
-      {snapshot?.sheep.length ? (
-        <div className="field-card__meta" aria-label="Sheep legend">
-          {(() => {
-            // Group sheep by personality so the legend shows one swatch per
-            // archetype (with a count), not one swatch per individual sheep.
-            const groups = new Map<string, { color: string; count: number }>();
-            for (const sheep of snapshot.sheep) {
-              const key = sheep.personality ?? "obedient";
-              const color = sheep.color ?? DEFAULT_SHEEP_COLOR;
-              const existing = groups.get(key);
-              if (existing) {
-                existing.count += 1;
-              } else {
-                groups.set(key, { color, count: 1 });
-              }
-            }
-            return Array.from(groups.entries()).map(([personality, info]) => (
-              <span key={`sheep-legend-${personality}`}>
-                <span
-                  aria-hidden="true"
-                  style={{
-                    display: "inline-block",
-                    width: "0.85rem",
-                    height: "0.85rem",
-                    borderRadius: "999px",
-                    marginRight: "0.4rem",
-                    verticalAlign: "middle",
-                    backgroundColor: info.color,
-                    border: `1px solid ${ACTIVE_SHEEP_STROKE}`,
-                  }}
-                />
-                {`${personality} (${info.count})`}
-              </span>
-            ));
-          })()}
-        </div>
-      ) : null}
+
       <div className="field-stage">
         {snapshot ? (
           <svg className="field-stage__svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Sheepdog simulation map">
@@ -198,9 +249,21 @@ export function FieldView({ snapshot }: FieldViewProps) {
               const roleLabel = ROLE_LABELS[dog.role ?? ""] ?? dog.role ?? "Dog";
               const roleTagWidth = Math.max(1.9, roleLabel.length * 0.28) * densityScale;
               const roleTagX = -roleTagWidth / 2;
+
+              // Smart anti-collision placement when dogs are clustered together
+              const isClustered = snapshot.dogs.some(
+                (other) => other.index !== dog.index && Math.hypot(other.x - dog.x, other.y - dog.y) < 2.5
+              );
+              // Alternate positioning: even dog indexes below, odd dog indexes above (if space permits)
+              const placeAbove = isClustered && (dog.index % 2 === 1) && (dog.y > 2);
+              const dynamicTagY = placeAbove
+                ? -(0.66 * densityScale) - roleTagHeight
+                : (0.66 * densityScale);
+              const dynamicLabelY = dynamicTagY + (roleTagHeight / 2);
+
               return (
               <g key={`dog-${dog.index}`} transform={`translate(${dog.x + 0.5}, ${dog.y + 0.5})`} aria-label={`Dog ${dog.index + 1}`}>
-                <circle r={dogRadius} fill={dogColor(dog.index)} stroke="rgba(255,255,255,0.82)" strokeWidth={penStroke} style={transitionStyle} />
+                <circle r={dogRadius} fill={dogColor(dog.index)} stroke="rgba(255,255,255,0.88)" strokeWidth={penStroke} style={transitionStyle} />
                 <text
                   textAnchor="middle"
                   dominantBaseline="central"
@@ -218,21 +281,21 @@ export function FieldView({ snapshot }: FieldViewProps) {
                   <>
                     <rect
                       x={roleTagX}
-                      y={roleTagY}
+                      y={dynamicTagY}
                       width={roleTagWidth}
                       height={roleTagHeight}
                       rx={roleTagRadius}
-                      fill="rgba(15, 23, 42, 0.88)"
-                      stroke="rgba(248, 250, 252, 0.6)"
+                      fill="rgba(15, 23, 42, 0.92)"
+                      stroke="rgba(248, 250, 252, 0.5)"
                       strokeWidth={roleTagStroke}
                     />
                     <text
                       textAnchor="middle"
-                      dominantBaseline="middle"
-                      y={roleLabelY}
+                      dominantBaseline="central"
+                      y={dynamicLabelY}
                       fill="#f8fafc"
                       fontSize={roleLabelSize}
-                      fontWeight={800}
+                      fontWeight={700}
                     >
                       {roleLabel}
                     </text>

@@ -143,8 +143,6 @@ class AsyncReplayWriter:
     def enqueue(self, job: ReplayWriteJob) -> bool:
         """Enqueue a replay write job without blocking rollout collection."""
         try:
-            self._queue.put_nowait(job)
-            self.queued_count += 1
             if self.episode_store:
                 self.episode_store.update_replay_info(
                     event_key=job.event_key,
@@ -155,6 +153,8 @@ class AsyncReplayWriter:
                     capture_reason=job.capture_reason,
                     capture_status="queued",
                 )
+            self._queue.put_nowait(job)
+            self.queued_count += 1
             return True
         except queue.Full:
             self.dropped_count += 1

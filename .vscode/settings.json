@@ -1,4 +1,14 @@
 {
+  "terminal.integrated.defaultProfile.windows": "PowerShell 7.6.6",
+  "terminal.integrated.profiles.windows": {
+    "PowerShell 7.6.6": {
+      "path": "C:\\Users\\inouy\\AppData\\Local\\Microsoft\\WindowsApps\\pwsh.exe"
+    }
+  },
+  "powershell.powerShellAdditionalExePaths": {
+    "PowerShell 7.6.6": "C:\\Users\\inouy\\AppData\\Local\\Microsoft\\WindowsApps\\pwsh.exe"
+  },
+  "powershell.powerShellDefaultVersion": "PowerShell 7.6.6",
   "pylint.args": [
     "--rcfile=${workspaceFolder}/.pylintrc"
   ],

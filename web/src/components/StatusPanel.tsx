@@ -1,4 +1,5 @@
-import type { CheckpointEntry, ReplayBundle, ReplaySnapshot } from "../state/types";
+import type { CheckpointEntry, ReplayBundle, ReplaySnapshot, TrainingStatus } from "../state/types";
+import { EvaluationBanner } from "./EvaluationBanner";
 
 function formatRoleDistribution(roleDistribution: Record<string, number> | undefined): string {
   if (!roleDistribution) {
@@ -68,6 +69,7 @@ interface StatusPanelProps {
   bestCheckpointEpisode: number | null;
   selectedSeed: number | null;
   runState: string;
+  trainingStatus?: TrainingStatus | null;
 }
 
 export function StatusPanel({
@@ -78,6 +80,7 @@ export function StatusPanel({
   bestCheckpointEpisode,
   selectedSeed,
   runState,
+  trainingStatus,
 }: StatusPanelProps) {
   const sheepPenned = snapshot?.penned_count ?? 0;
   const totalSheep = snapshot?.sheep?.length ?? replay?.final_snapshot?.sheep?.length ?? 0;
@@ -127,6 +130,8 @@ export function StatusPanel({
           <span className="pill pill--muted">{runState}</span>
         </div>
       </div>
+
+      <EvaluationBanner status={trainingStatus} compact={true} />
 
       <div className="status-grid">
         <div>

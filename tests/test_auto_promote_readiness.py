@@ -300,6 +300,25 @@ def test_safety_cap_on_step_hold(tmp_path: Path):
     assert res["status_text"] == "READY TO PROMOTE"
 
 
+def test_latest_qualifying_checkpoint_promotes_despite_an_older_better_reward(tmp_path: Path):
+    """Readiness belongs to the current evidence window, not the highest-reward checkpoint."""
+    evals = [
+        _make_eval_payload(10, stage=4, success_rate=1.0, steps=200),
+        _make_eval_payload(20, stage=4, success_rate=1.0, steps=200),
+        _make_eval_payload(30, stage=4, success_rate=1.0, steps=200),
+        _make_eval_payload(40, stage=4, success_rate=1.0, steps=200),
+        _make_eval_payload(50, stage=4, success_rate=1.0, steps=200),
+        _make_eval_payload(60, stage=4, success_rate=1.0, steps=200),
+    ]
+    _setup_eval_dir(tmp_path, evals)
+
+    latest_gate = compute_promotion_gate_snapshot(tmp_path, target_ep=60)
+    older_gate = compute_promotion_gate_snapshot(tmp_path, target_ep=10)
+
+    assert latest_gate["decision"] == "promote_ready"
+    assert older_gate["decision"] == "pending"
+
+
 def test_duplicate_checkpoint_evaluations_deduplicated(tmp_path: Path):
     """Four checkpoints emitting both quick and confidence evaluations only count as 4 formal evaluations, not 8."""
     eval_dir = tmp_path / "evaluations"

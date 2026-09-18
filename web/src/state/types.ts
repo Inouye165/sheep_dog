@@ -271,6 +271,44 @@ export interface TrainingStatus {
   latest_evaluated_environment_episode?: number;
   next_evaluation_environment_episode?: number;
   episodes_until_next_evaluation?: number;
+  evaluation_in_progress?: boolean;
+  evaluation_status?: EvaluationProgressStatus;
+  evaluation_mode?: string | null;
+  evaluation_seed?: number | null;
+  evaluation_seed_index?: number;
+  evaluation_total_seeds?: number;
+  evaluation_completed_seeds?: number;
+  evaluation_success_count?: number;
+  evaluation_message?: string | null;
+  evaluation_latest_result?: EvaluationSeedResult | null;
+  evaluation_recent_results?: EvaluationSeedResult[];
+}
+
+export interface EvaluationSeedResult {
+  seed: number;
+  success: boolean;
+  timeout: boolean;
+  status: string;
+  reward: number;
+  penned: number;
+  total_sheep: number;
+  steps: number;
+}
+
+export interface EvaluationProgressStatus {
+  in_progress: boolean;
+  mode?: string | null;
+  current_seed?: number | null;
+  seed_index?: number;
+  total_seeds?: number;
+  completed_seeds?: number;
+  success_count?: number;
+  timeout_count?: number;
+  success_rate?: number | null;
+  seeds?: number[];
+  message?: string | null;
+  latest_result?: EvaluationSeedResult | null;
+  recent_results?: EvaluationSeedResult[];
 }
 
 export interface RuntimeSessionRecord {

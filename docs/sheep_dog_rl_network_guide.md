@@ -531,9 +531,12 @@ Steps are stored as a JSON array of `StepRecord` elements containing:
 * `snapshot`: `EnvironmentSnapshot` representing positions of all agents.
 * `reward`: Dict breakdown of all reward components.
 
-### Checkpoint vs Live
-* **Live Replay**: Replayed dynamically from the API server `/api/replay/run` based on current configuration and model weights.
-* **Evaluation Replays**: Saved statically under `artifacts/evaluations/replays/checkpoint-NNNNNN-seed-SSSSSS.json` during training evaluation checkpoints.
+Evaluation and diagnostic replay files support transparent Gzip compression (`.json.gz`), reducing storage requirements while remaining fully readable by backend stores and the web viewer.
+
+### Authentic Evaluation Replays vs Live Simulation
+* **Authentic Evaluation Replays**: Captured during formal training evaluation benchmarks (both quick checkpoint evaluations and confidence evaluations) across all 10 evaluation seeds. Every step, dog action, reward component, and sheep coordinate is recorded directly from the evaluation rollout into `artifacts/evaluations/replays/checkpoint-NNNNNN-seed-SSSSSS.json.gz` (or uncompressed `.json`). The UI inspector plays back this exact recorded ground truth rather than running a divergent on-the-fly simulation.
+* **Live Replay**: Replayed dynamically from the API server `/api/replay/run` on demand for ad-hoc policy visualization.
+* **Strict Evaluation Pass/Fail Semantics**: An evaluation episode is classified as a pass if and only if **100% of sheep are safely penned** (`penned_count == total_sheep` and `success == True`). Partial completions (e.g., 4 of 6 sheep penned when the step limit expires) are strictly marked and displayed as **FAIL** (`✗ FAIL`, `✗ 4/6`), eliminating false-positive pass badges in the UI. Replay caches in the inspector use distinct keys (`checkpoint_episode + eval_id + seed`) to prevent cached runs from conflating quick and confidence benchmarks.
 
 ---
 

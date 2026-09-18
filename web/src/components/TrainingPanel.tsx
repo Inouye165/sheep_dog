@@ -1,6 +1,8 @@
 import { useMemo, useState } from "react";
 import { CopyAgentDataButton } from "./CopyAgentDataButton";
+import { EvaluationBanner } from "./EvaluationBanner";
 import type { AutoPromoteGateDiagnostics, CheckpointEntry, CheckpointIndex, TrainingStatus } from "../state/types";
+import { RECOMMENDED_EPISODES_BY_STAGE } from "../lib/trainingConfig";
 
 const STAGE_DESCRIPTIONS: Record<number, string> = {
   0: "Full problem — 3 dogs, 6 sheep, 80×60 grid",
@@ -37,46 +39,6 @@ const STAGE_DESCRIPTIONS: Record<number, string> = {
   31: "3 dogs · 6 sheep · reduce cohesion + stronger personalities",
   32: "3 dogs · 6 sheep · lowest cohesion + strongest personalities",
 };
-
-/** Ideal episode count to run per curriculum stage before evaluating. */
-const RECOMMENDED_EPISODES: Record<number, number> = {
-  0: 50,
-  1: 50,
-  2: 75,
-  3: 100,
-  4: 125,
-  5: 150,
-  6: 175,
-  7: 200,
-  8: 225,
-  9: 250,
-  10: 275,
-  11: 300,
-  12: 325,
-  13: 350,
-  14: 375,
-  15: 400,
-  16: 450,
-  17: 500,
-  18: 550,
-  19: 600,
-  20: 650,
-  21: 700,
-  22: 750,
-  23: 800,
-  24: 850,
-  25: 900,
-  26: 950,
-  27: 1000,
-  28: 1050,
-  29: 1100,
-  30: 1200,
-  31: 1300,
-  32: 1400,
-};
-
-/** Success rate threshold above which promoting to the next stage is recommended. */
-const PROMOTE_THRESHOLD = 0.5;
 
 interface GlossaryItem {
   term: string;
@@ -159,6 +121,7 @@ interface TrainingPanelProps {
   autoPromoteGate?: AutoPromoteGateDiagnostics | null;
   running: boolean;
   clearing: boolean;
+  lifecycleAction?: "pause" | "stop" | null;
   batchCompletedEpisodes: number;
   batchTotalEpisodes: number;
   currentEpisode: number | null;
@@ -235,6 +198,7 @@ export function TrainingPanel({
   autoPromoteGate,
   running,
   clearing,
+  lifecycleAction = null,
   isStartingTraining = false,
   batchCompletedEpisodes,
   batchTotalEpisodes,
@@ -316,16 +280,16 @@ export function TrainingPanel({
   const stageDesc = STAGE_DESCRIPTIONS[curriculumStage] ?? `Stage ${curriculumStage}`;
   const successPct = successRate !== null ? `${Math.round(successRate * 100)}%` : "—";
   const successGood = successRate !== null && successRate >= 0.5;
-  const recommendedEpisodes = RECOMMENDED_EPISODES[curriculumStage] ?? 100;
+  const recommendedEpisodes = RECOMMENDED_EPISODES_BY_STAGE[curriculumStage] ?? 100;
   const hasPromotionHeadroom = curriculumStage < maxCurriculumStage;
   const canPromote = hasPromotionHeadroom && !busy;
-  const readyToPromote = canPromote && successRate !== null && successRate >= PROMOTE_THRESHOLD;
   const activeCheckpointsCount = checkpointIndex ? (Array.isArray(checkpointIndex.checkpoints) ? checkpointIndex.checkpoints.length : Object.keys(checkpointIndex.checkpoints || {}).length) : 0;
-  const canResume = !busy && resumeAvailable && (resumeRemainingEpisodes ?? 0) > 0;
-  const effectiveAutoPromoteThreshold = autoPromoteThreshold ?? PROMOTE_THRESHOLD;
+  const resumeRequestStage = trainingStatus?.resume_request?.curriculum_stage;
+  const isResumeStageCompatible =
+    resumeRequestStage == null ||
+    resumeRequestStage === (trainingStatus?.curriculum_stage ?? curriculumStage);
+  const canResume = !busy && resumeAvailable && (resumeRemainingEpisodes ?? 0) > 0 && isResumeStageCompatible;
   const hasAutoPromoteGate = autoPromoteGate != null;
-
-  const [showAutoPromotePopover, setShowAutoPromotePopover] = useState(false);
 
   const stageTargetPct = useMemo(() => {
     if (autoPromoteGate?.success_threshold != null) {
@@ -336,6 +300,11 @@ export function TrainingPanel({
     }
     return curriculumStage <= 1 ? 80 : 90;
   }, [autoPromoteGate?.success_threshold, autoPromoteThreshold, curriculumStage]);
+  const stageTarget = stageTargetPct / 100;
+  const readyToPromote = canPromote && successRate !== null && (hasAutoPromoteGate ? autoPromoteGate.ready === true : successRate >= stageTarget);
+  const effectiveAutoPromoteThreshold = autoPromoteThreshold ?? stageTarget;
+
+  const [showAutoPromotePopover, setShowAutoPromotePopover] = useState(false);
 
   const popoverEvalsAvailable = autoPromoteGate?.formal_evaluations_available ?? (autoPromoteGate?.recent_checkpoints_considered ?? 0);
   const popoverEvalsRequired = autoPromoteGate?.formal_evaluations_required ?? (autoPromoteGate?.minimum_required_evaluations ?? 6);
@@ -464,7 +433,7 @@ export function TrainingPanel({
       </div>
 
       {/* 2. FIXED SUB-TABS */}
-      <div style={{ display: "flex", borderBottom: "1px solid var(--panel-border)", gap: "0.15rem", marginBottom: "0.6rem", flexShrink: 0 }}>
+      <div role="tablist" aria-label="Training views" style={{ display: "flex", borderBottom: "1px solid var(--panel-border)", gap: "0.15rem", marginBottom: "0.6rem", flexShrink: 0 }}>
         {([
           { id: "console", label: "Console", desc: "Run Controls" },
           { id: "curriculum", label: "Curriculum", desc: "Stage Progression" },
@@ -476,7 +445,22 @@ export function TrainingPanel({
             <button
               key={tab.id}
               type="button"
+              id={`training-tab-${tab.id}`}
+              role="tab"
+              aria-selected={isActive}
+              aria-controls={`training-panel-${tab.id}`}
+              tabIndex={isActive ? 0 : -1}
               onClick={() => setActiveSubTab(tab.id)}
+              onKeyDown={(event) => {
+                const tabs = ["console", "curriculum", "metrics", "help"] as const;
+                const currentIndex = tabs.indexOf(tab.id);
+                const offset = event.key === "ArrowRight" || event.key === "ArrowDown" ? 1 : event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 0;
+                if (!offset) return;
+                event.preventDefault();
+                const next = tabs[(currentIndex + offset + tabs.length) % tabs.length];
+                setActiveSubTab(next);
+                document.getElementById(`training-tab-${next}`)?.focus();
+              }}
               style={{
                 background: "transparent",
                 border: "none",
@@ -502,9 +486,9 @@ export function TrainingPanel({
       <div style={{ flex: 1, overflowY: "auto", paddingRight: "0.2rem", minHeight: 0, display: "flex", flexDirection: "column", gap: "0.75rem" }}>
         
         {/* SUB-TAB: CONSOLE */}
-        <div style={{
+        <div id="training-panel-console" role="tabpanel" aria-labelledby="training-tab-console" tabIndex={0} style={{
           height: activeSubTab === "console" ? "auto" : 0,
-          overflow: "hidden",
+          overflow: activeSubTab === "console" ? "visible" : "hidden",
           opacity: activeSubTab === "console" ? 1 : 0,
           pointerEvents: activeSubTab === "console" ? "auto" : "none",
           display: "flex",
@@ -512,6 +496,359 @@ export function TrainingPanel({
           gap: "0.75rem",
           flexShrink: 0
         }}>
+          {/* ========================================================= */}
+          {/* 1. HERO TRAINING COMMAND DECK (TOP PRIORITY CONTROLS)     */}
+          {/* ========================================================= */}
+          <div style={{
+            position: "sticky",
+            top: 0,
+            zIndex: 10,
+            background: "linear-gradient(180deg, rgba(15, 23, 42, 0.98) 0%, rgba(15, 23, 42, 0.94) 100%)",
+            backdropFilter: "blur(12px)",
+            border: "1px solid var(--panel-border)",
+            borderRadius: "0.65rem",
+            padding: "0.85rem",
+            boxShadow: "0 4px 18px rgba(0, 0, 0, 0.35)",
+            display: "flex",
+            flexDirection: "column",
+            gap: "0.7rem"
+          }}>
+            {/* Header: Action Status & Quick Stage Context */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.45rem" }}>
+                <span
+                  style={{
+                    display: "inline-block",
+                    width: "8px",
+                    height: "8px",
+                    borderRadius: "50%",
+                    background: running ? "var(--accent)" : canResume ? "var(--good)" : "#60a5fa",
+                    boxShadow: running ? "0 0 10px var(--accent)" : "none",
+                    animation: running ? "pulse-subtle 1.8s infinite" : "none"
+                  }}
+                />
+                <span style={{ fontSize: "0.75rem", fontWeight: "700", textTransform: "uppercase", letterSpacing: "0.05em", color: running ? "var(--accent)" : "var(--text)" }}>
+                  {running ? "Training Active" : canResume ? "Session Paused" : "Training Command"}
+                </span>
+              </div>
+              <span style={{ fontSize: "0.72rem", color: "var(--muted)", fontWeight: "500" }}>
+                Stage {curriculumStage} ({stageDesc})
+              </span>
+            </div>
+
+            {/* Core Action Buttons (Train / Pause / Stop / Resume) */}
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.45rem" }}>
+              {running ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.45rem" }}>
+                  <div style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    background: "rgba(59, 130, 246, 0.1)",
+                    border: "1px solid rgba(59, 130, 246, 0.25)",
+                    borderRadius: "0.45rem",
+                    padding: "0.45rem 0.65rem",
+                    fontSize: "0.76rem",
+                    color: "#93c5fd"
+                  }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.45rem" }}>
+                      <span className="spinner" aria-hidden="true" style={{ width: "12px", height: "12px", borderWidth: "2px" }} />
+                      <strong>Training batch in progress...</strong>
+                    </div>
+                    <span style={{ fontSize: "0.72rem", opacity: 0.85 }}>
+                      Ep {completedEpisodesDisplay} / {totalEpisodesInBatch}
+                    </span>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem" }}>
+                    <button
+                      type="button"
+                      onClick={onPauseTraining}
+                      disabled={clearing || lifecycleAction !== null}
+                      style={{
+                        padding: "0.65rem 0.5rem",
+                        fontSize: "0.8rem",
+                        fontWeight: "600",
+                        background: "rgba(59, 130, 246, 0.15)",
+                        border: "1px solid rgba(59, 130, 246, 0.35)",
+                        color: "#bfdbfe",
+                        borderRadius: "0.45rem",
+                        cursor: clearing || lifecycleAction !== null ? "not-allowed" : "pointer",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        whiteSpace: "nowrap",
+                        transition: "all 120ms ease"
+                      }}
+                      title="Pause after the current checkpoint completes. The remaining batch episodes will be saved so you can resume."
+                    >
+                      {lifecycleAction === "pause" ? "Pausing..." : "Pause after checkpoint"}
+                    </button>
+                    <button
+                      type="button"
+                      className="button-row__danger"
+                      onClick={onStopTraining}
+                      disabled={clearing || lifecycleAction !== null}
+                      style={{
+                        padding: "0.65rem 0.5rem",
+                        fontSize: "0.8rem",
+                        fontWeight: "600",
+                        background: "rgba(239, 68, 68, 0.18)",
+                        border: "1px solid rgba(239, 68, 68, 0.45)",
+                        color: "#fca5a5",
+                        borderRadius: "0.45rem",
+                        cursor: clearing || lifecycleAction !== null ? "not-allowed" : "pointer",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        whiteSpace: "nowrap",
+                        transition: "all 120ms ease"
+                      }}
+                      title="Stop training after the current checkpoint completes and discard remaining batch episodes."
+                    >
+                      {lifecycleAction === "stop" ? "Stopping..." : "Stop after checkpoint"}
+                    </button>
+                  </div>
+                </div>
+              ) : canResume ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem" }}>
+                  <button
+                    type="button"
+                    onClick={onResumeTraining}
+                    disabled={busy}
+                    style={{
+                      width: "100%",
+                      padding: "0.75rem",
+                      background: "rgba(74, 222, 128, 0.18)",
+                      border: "1px solid var(--good)",
+                      color: "#86efac",
+                      fontWeight: "700",
+                      fontSize: "0.88rem",
+                      borderRadius: "0.45rem",
+                      cursor: busy ? "not-allowed" : "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center"
+                    }}
+                    title="Resume training where it was paused or interrupted."
+                  >
+                    {isStartingTraining ? (
+                      <>
+                        <span className="spinner" aria-hidden="true" style={{ marginRight: "0.5rem" }} />
+                        Starting training...
+                      </>
+                    ) : (
+                      `Resume ${resumeRemainingEpisodes} remaining`
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    className="button-row__primary"
+                    onClick={onStartTraining}
+                    disabled={busy}
+                    style={{
+                      width: "100%",
+                      padding: "0.5rem",
+                      fontWeight: "600",
+                      fontSize: "0.78rem",
+                      background: "rgba(148, 163, 184, 0.08)",
+                      border: "1px solid var(--panel-border)",
+                      color: "var(--text)"
+                    }}
+                    title="Start fresh batch instead of resuming"
+                  >
+                    Train fresh {episodes} episodes
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  className="button-row__primary"
+                  onClick={onStartTraining}
+                  disabled={busy}
+                  style={{
+                    width: "100%",
+                    padding: "0.8rem",
+                    fontWeight: "700",
+                    fontSize: "0.92rem",
+                    display: "flex",
+                    justifyContent: "center",
+                    alignItems: "center",
+                    borderRadius: "0.45rem"
+                  }}
+                  title="Starts running training episodes on the server"
+                >
+                  {isStartingTraining ? (
+                    <>
+                      <span className="spinner" aria-hidden="true" style={{ marginRight: "0.5rem" }} />
+                      Starting training...
+                    </>
+                  ) : running ? (
+                    "Training..."
+                  ) : (
+                    `Train ${episodes} more`
+                  )}
+                </button>
+              )}
+            </div>
+
+            {/* Quick Batch Configuration */}
+            <div style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: "0.4rem",
+              paddingTop: "0.4rem",
+              borderTop: "1px solid rgba(148, 163, 184, 0.12)"
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                <div style={{ flex: 1 }}>
+                  <label
+                    htmlFor="episodes-input"
+                    style={{ fontSize: "0.72rem", color: "var(--muted)", display: "block", marginBottom: "0.2rem" }}
+                  >
+                    Batch Size (Episodes to Train)
+                  </label>
+                  <input
+                    id="episodes-input"
+                    type="number"
+                    min={1}
+                    max={1000}
+                    value={episodes}
+                    onChange={(event) => onEpisodesChange(Number(event.target.value) || 1)}
+                    disabled={busy}
+                    style={{
+                      padding: "0.45rem 0.65rem",
+                      fontSize: "0.85rem",
+                      height: "2.35rem",
+                      lineHeight: "1.4",
+                      boxSizing: "border-box",
+                      width: "100%"
+                    }}
+                  />
+                </div>
+                <div style={{ display: "flex", alignSelf: "flex-end" }}>
+                  {episodes !== recommendedEpisodes && !busy ? (
+                    <button
+                      type="button"
+                      onClick={() => onEpisodesChange(recommendedEpisodes)}
+                      style={{ padding: "0.45rem 0.6rem", fontSize: "0.72rem", height: "2.35rem", display: "inline-flex", alignItems: "center" }}
+                      title={`Use suggested ${recommendedEpisodes} episodes for Stage ${curriculumStage}`}
+                    >
+                      Use suggested ({recommendedEpisodes})
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: "0.76rem" }}>
+                <label style={{ display: "flex", alignItems: "center", gap: "0.45rem", cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={enableInstincts}
+                    onChange={(event) => onEnableInstinctsChange(event.target.checked)}
+                    disabled={busy}
+                  />
+                  <span>Enable instinct rewards</span>
+                </label>
+                <button
+                  type="button"
+                  onClick={() => navigateToHelp("instincts")}
+                  style={{ background: "transparent", border: "none", color: "var(--accent)", cursor: "pointer", padding: 0, fontSize: "0.76rem" }}
+                  title="What are instincts?"
+                >
+                  ❓ Help
+                </button>
+              </div>
+            </div>
+
+            {/* Live Progress Bar & Sub-step Progress */}
+            <div style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: "0.3rem",
+              paddingTop: "0.4rem",
+              borderTop: running ? "none" : "1px solid rgba(148, 163, 184, 0.1)"
+            }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.75rem", color: "var(--muted)" }}>
+                <span style={{ fontWeight: "600", color: "var(--text)" }}>Batch Progress</span>
+                <span style={{ fontWeight: "600", color: running ? "var(--accent)" : "var(--text)" }}>
+                  {completedEpisodesDisplay} / {totalEpisodesInBatch} Episodes ({progressPct}%)
+                </span>
+              </div>
+              <div
+                className="progress-shell"
+                role="progressbar"
+                aria-label="Current batch progress"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={progressPct}
+                style={{ margin: 0, height: "8px", borderRadius: "999px" }}
+              >
+                <div className="progress-shell__bar" style={{ width: `${progressPct}%` }} />
+              </div>
+
+              {/* Active Checkpoint Timesteps sub-progress bar */}
+              {running && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.2rem", marginTop: "0.15rem" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.68rem", color: "var(--muted)" }}>
+                    <span>Checkpoint Step Progress (Fills per checkpoint interval)</span>
+                    <span>{segmentPct}%</span>
+                  </div>
+                  <div
+                    className="progress-shell"
+                    role="progressbar"
+                    aria-label="Current checkpoint progress"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={segmentPct}
+                    style={{ margin: 0, height: "4px", borderRadius: "999px", background: "rgba(148, 163, 184, 0.08)" }}
+                  >
+                    <div
+                      className="progress-shell__bar"
+                      style={{
+                        width: `${segmentPct}%`,
+                        height: "100%",
+                        background: "var(--accent)",
+                        borderRadius: "999px",
+                        transition: "width 0.3s ease"
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              <div style={{ fontSize: "0.7rem", color: "var(--muted)", marginTop: "0.1rem", display: "flex", justifyContent: "space-between", padding: "0 0.1rem" }}>
+                {running && currentEpisode !== null ? (
+                  <>
+                    <span>
+                      Saved Episode {completedEpisodesDisplay} of {totalEpisodesInBatch}{" "}
+                      <span style={{ opacity: 0.85, fontWeight: "600", color: "var(--accent)", marginLeft: "0.2rem" }}>
+                        (Overall Ep {currentEpisode})
+                      </span>
+                    </span>
+                    <span>
+                      {totalSegments > 0 ? `Checkpoint ${activeSegmentNumber} of ${totalSegments} · ` : ""}
+                      {displayEpisodeIndex} simulation episodes run
+                    </span>
+                  </>
+                ) : (
+                  <div style={{ width: "100%", textAlign: "center" }}>
+                    {completedEpisodesDisplay} of {totalEpisodesInBatch} episodes completed
+                    {totalSegments > 0 ? ` (${totalSegments} checkpoints saved)` : ""}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <EvaluationBanner status={trainingStatus} compact={true} />
+
+          {curriculumStage === 0 ? (
+            <div className="warning-box warning-box--error" role="status" style={{ margin: 0, padding: "0.5rem", fontSize: "0.72rem" }}>
+              Stage 0 is the full problem — dogs rarely discover the pen from scratch.
+              Promote to <strong>Stage 1</strong> to start simple.
+            </div>
+          ) : null}
+
           {/* Quick Curriculum Stage & Starting Model Summary */}
           <div style={{
             background: "rgba(10, 20, 35, 0.4)",
@@ -544,7 +881,7 @@ export function TrainingPanel({
                       cursor: busy ? "not-allowed" : "pointer"
                     }}
                   >
-                    {Array.from({ length: Math.max(maxCurriculumStage, 10) }, (_, i) => i + 1).map((s) => (
+                    {Array.from({ length: maxCurriculumStage + 1 }, (_, i) => i).map((s) => (
                       <option key={s} value={s}>
                         Stage {s} {s === (activeCurriculumStage ?? curriculumStage) ? "(Active Server Stage)" : ""}
                       </option>
@@ -640,263 +977,23 @@ export function TrainingPanel({
             )}
           </div>
 
-
-          {/* Training Control Card */}
-          <div style={{ display: "flex", flexDirection: "column", gap: "0.65rem" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span style={{ fontSize: "0.82rem", fontWeight: "600", color: "var(--text)" }}>
-                Batch Configuration
-              </span>
-              <button
-                type="button"
-                onClick={() => navigateToHelp("episodes")}
-                style={{ background: "transparent", border: "none", color: "var(--accent)", cursor: "pointer", padding: "0.1rem 0.3rem", fontSize: "0.8rem" }}
-                title="What is an episode/batch?"
-              >
-                ❓ Help
-              </button>
-            </div>
-
-            <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                <div style={{ flex: 1 }}>
-                  <label htmlFor="episodes-input" style={{ fontSize: "0.72rem", color: "var(--muted)", display: "block", marginBottom: "0.2rem" }}>
-                    Batch Size (Episodes to Train)
-                  </label>
-                  <input
-                    id="episodes-input"
-                    type="number"
-                    min={1}
-                    max={1000}
-                    value={episodes}
-                    onChange={(event) => onEpisodesChange(Number(event.target.value) || 1)}
-                    disabled={busy}
-                    style={{ padding: "0.5rem", fontSize: "0.85rem" }}
-                  />
-                </div>
-                <div style={{ display: "flex", alignSelf: "flex-end" }}>
-                  {episodes !== recommendedEpisodes && !busy ? (
-                    <button
-                      type="button"
-                      onClick={() => onEpisodesChange(recommendedEpisodes)}
-                      style={{ padding: "0.5rem 0.6rem", fontSize: "0.72rem" }}
-                      title={`Use suggested ${recommendedEpisodes} episodes for Stage ${curriculumStage}`}
-                    >
-                      Use suggested ({recommendedEpisodes})
-                    </button>
-                  ) : null}
-                </div>
-              </div>
-            </div>
-
-            <div style={{
-              background: "rgba(59, 130, 246, 0.1)",
-              border: "1px solid rgba(59, 130, 246, 0.2)",
-              borderRadius: "0.5rem",
-              padding: "0.6rem",
-              fontSize: "0.75rem",
-              color: "#93c5fd",
-              lineHeight: "1.4",
-              display: "flex",
-              flexDirection: "column",
-              gap: "4px",
-            }}>
-              <span style={{ fontWeight: "700" }}>💡 Tip: Restore / Fork Past Checkpoints</span>
-              <span>
-                To restore or fork training from a previous stage or checkpoint episode, select a checkpoint entry in the <strong>Checkpoints & Results</strong> section below and click <strong>Restore</strong> or <strong>Promote</strong>.
-              </span>
-            </div>
-
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "rgba(148, 163, 184, 0.05)", padding: "0.5rem", borderRadius: "0.5rem" }}>
-              <label style={{ display: "flex", alignItems: "center", gap: "0.45rem", cursor: "pointer", fontSize: "0.78rem" }}>
-                <input
-                  type="checkbox"
-                  checked={enableInstincts}
-                  onChange={(event) => onEnableInstinctsChange(event.target.checked)}
-                  disabled={busy}
-                />
-                <span>Enable instinct rewards</span>
-              </label>
-              <button
-                type="button"
-                onClick={() => navigateToHelp("instincts")}
-                style={{ background: "transparent", border: "none", color: "var(--accent)", cursor: "pointer", padding: 0, fontSize: "0.78rem" }}
-                title="What are instincts?"
-              >
-                ❓
-              </button>
-            </div>
-          </div>
-
-          {curriculumStage === 0 ? (
-            <div className="warning-box warning-box--error" role="status" style={{ margin: 0, padding: "0.5rem", fontSize: "0.72rem" }}>
-              Stage 0 is the full problem — dogs rarely discover the pen from scratch.
-              Promote to <strong>Stage 1</strong> to start simple.
-            </div>
-          ) : null}
-
-          {/* Progress bar */}
-          <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.75rem", color: "var(--muted)" }}>
-              <span>Batch Progress</span>
-              <span>{completedEpisodesDisplay} / {totalEpisodesInBatch} Episodes ({progressPct}%)</span>
-            </div>
-            <div
-              className="progress-shell"
-              role="progressbar"
-              aria-label="Current batch progress"
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={progressPct}
-              style={{ margin: 0, height: "10px", borderRadius: "999px" }}
-            >
-              <div className="progress-shell__bar" style={{ width: `${progressPct}%` }} />
-            </div>
-
-            {/* Active Checkpoint Timesteps sub-progress bar */}
-            {running && (
-              <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem", marginTop: "0.2rem" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.68rem", color: "var(--muted)" }}>
-                  <span>Checkpoint Step Progress (Fills per checkpoint interval)</span>
-                  <span>{segmentPct}%</span>
-                </div>
-                <div
-                  className="progress-shell"
-                  role="progressbar"
-                  aria-label="Current checkpoint progress"
-                  aria-valuemin={0}
-                  aria-valuemax={100}
-                  aria-valuenow={segmentPct}
-                  style={{ margin: 0, height: "5px", borderRadius: "999px", background: "rgba(148, 163, 184, 0.08)" }}
-                >
-                  <div
-                    className="progress-shell__bar"
-                    style={{
-                      width: `${segmentPct}%`,
-                      height: "100%",
-                      background: "var(--accent)",
-                      borderRadius: "999px",
-                      transition: "width 0.3s ease"
-                    }}
-                  />
-                </div>
-              </div>
-            )}
-
-            <div style={{ fontSize: "0.72rem", color: "var(--muted)", marginTop: "0.1rem", display: "flex", justifyContent: "space-between", padding: "0 0.2rem" }}>
-              {running && currentEpisode !== null ? (
-                <>
-                  <span>
-                    Saved Episode {completedEpisodesDisplay} of {totalEpisodesInBatch}{" "}
-                    <span style={{ opacity: 0.85, fontWeight: "600", color: "var(--accent)", marginLeft: "0.2rem" }}>
-                      (Overall Ep {currentEpisode})
-                    </span>
-                  </span>
-                  <span>
-                    {totalSegments > 0 ? `Checkpoint ${activeSegmentNumber} of ${totalSegments} · ` : ""}
-                    {displayEpisodeIndex} simulation episodes run
-                  </span>
-                </>
-              ) : (
-                <div style={{ width: "100%", textAlign: "center" }}>
-                  {completedEpisodesDisplay} of {totalEpisodesInBatch} episodes completed
-                  {totalSegments > 0 ? ` (${totalSegments} checkpoints saved)` : ""}
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Core Controls Buttons */}
-          <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", marginTop: "0.2rem" }}>
-            <button
-              type="button"
-              className="button-row__primary"
-              onClick={onStartTraining}
-              disabled={busy}
-              style={{
-                width: "100%",
-                padding: "0.8rem",
-                fontWeight: "700",
-                fontSize: "0.9rem",
-                display: "flex",
-                justifyContent: "center",
-                alignItems: "center"
-              }}
-              title="Starts running training episodes on the server"
-            >
-              {isStartingTraining ? (
-                <>
-                  <span className="spinner" aria-hidden="true" style={{ marginRight: "0.5rem" }} />
-                  Starting training...
-                </>
-              ) : running ? (
-                "Training..."
-              ) : (
-                `Train ${episodes} more`
-              )}
-            </button>
-
-            {running ? (
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem" }}>
-                <button
-                  type="button"
-                  onClick={onPauseTraining}
-                  disabled={clearing}
-                  style={{ padding: "0.6rem 0.5rem", fontSize: "0.75rem", whiteSpace: "nowrap" }}
-                  title="Pause after the current checkpoint completes. The remaining batch episodes will be saved so you can resume."
-                >
-                  Pause after checkpoint
-                </button>
-                <button
-                  type="button"
-                  className="button-row__danger"
-                  onClick={onStopTraining}
-                  disabled={clearing}
-                  style={{ padding: "0.6rem 0.5rem", fontSize: "0.75rem", whiteSpace: "nowrap" }}
-                  title="Stop training after the current checkpoint completes and discard remaining batch episodes."
-                >
-                  Stop after checkpoint
-                </button>
-              </div>
-            ) : canResume ? (
-              <button
-                type="button"
-                onClick={onResumeTraining}
-                disabled={busy}
-                style={{
-                  width: "100%",
-                  padding: "0.65rem",
-                  background: "rgba(74, 222, 128, 0.15)",
-                  borderColor: "var(--good)"
-                }}
-                title="Resume training where it was paused or interrupted."
-              >
-                {isStartingTraining ? (
-                  <>
-                    <span className="spinner" aria-hidden="true" style={{ marginRight: "0.5rem" }} />
-                    Starting training...
-                  </>
-                ) : (
-                  `Resume ${resumeRemainingEpisodes} remaining`
-                )}
-              </button>
-            ) : null}
-
-            <button
-              type="button"
-              onClick={onCloseApp}
-              style={{
-                width: "100%",
-                padding: "0.65rem",
-                background: "rgba(251, 113, 133, 0.1)",
-                borderColor: "rgba(251, 113, 133, 0.3)",
-                color: "var(--danger)",
-                marginTop: "0.4rem"
-              }}
-              title="Gracefully pause training, save progress, and shut down the backend server."
-            >
-              🔌 Close Application
-            </button>
+          {/* Tips Card */}
+          <div style={{
+            background: "rgba(59, 130, 246, 0.08)",
+            border: "1px solid rgba(59, 130, 246, 0.18)",
+            borderRadius: "0.5rem",
+            padding: "0.6rem 0.75rem",
+            fontSize: "0.74rem",
+            color: "#93c5fd",
+            lineHeight: "1.4",
+            display: "flex",
+            flexDirection: "column",
+            gap: "4px",
+          }}>
+            <span style={{ fontWeight: "700" }}>💡 Tip: Restore / Fork Past Checkpoints</span>
+            <span>
+              To restore or fork training from a previous stage or checkpoint episode, select a checkpoint entry in the <strong>Checkpoints & Results</strong> section below and click <strong>Restore</strong> or <strong>Promote</strong>.
+            </span>
           </div>
 
           {/* Quick Stats Grid */}
@@ -970,11 +1067,33 @@ export function TrainingPanel({
                 Reset Journey
               </button>
             </div>
+            <button
+              type="button"
+              onClick={onCloseApp}
+              style={{
+                width: "100%",
+                padding: "0.45rem 0.6rem",
+                background: "rgba(251, 113, 133, 0.08)",
+                border: "1px solid rgba(251, 113, 133, 0.25)",
+                borderRadius: "0.4rem",
+                color: "#fda4af",
+                fontSize: "0.72rem",
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: "0.4rem",
+                transition: "all 120ms ease"
+              }}
+              title="Gracefully pause training, save progress, and shut down the backend server."
+            >
+              <span>🔌</span> Close Application &amp; Server
+            </button>
           </div>
         </div>
 
         {/* SUB-TAB: CURRICULUM */}
-        <div style={{
+        <div id="training-panel-curriculum" role="tabpanel" aria-labelledby="training-tab-curriculum" tabIndex={0} style={{
           height: activeSubTab === "curriculum" ? "auto" : 0,
           overflow: "hidden",
           opacity: activeSubTab === "curriculum" ? 1 : 0,
@@ -1006,7 +1125,7 @@ export function TrainingPanel({
                     cursor: busy ? "not-allowed" : "pointer"
                   }}
                 >
-                  {Array.from({ length: Math.max(maxCurriculumStage, 10) }, (_, i) => i + 1).map((s) => (
+                  {Array.from({ length: maxCurriculumStage + 1 }, (_, i) => i).map((s) => (
                     <option key={s} value={s}>
                       Stage {s} {s === (activeCurriculumStage ?? curriculumStage) ? "(Active)" : ""}
                     </option>
@@ -1063,7 +1182,7 @@ export function TrainingPanel({
           {/* Promotion lock/success warning status boxes */}
           {canPromote && !readyToPromote ? (
             <div className="warning-box" role="status" style={{ margin: 0, padding: "0.5rem 0.75rem", fontSize: "0.72rem" }}>
-              Promotion locked until Stage {curriculumStage} reaches &ge; {Math.round(PROMOTE_THRESHOLD * 100)}% success.
+              Promotion locked until Stage {curriculumStage} reaches &ge; {stageTargetPct}% success.
             </div>
           ) : null}
 
@@ -1071,9 +1190,9 @@ export function TrainingPanel({
             <div className="warning-box warning-box--success" role="status" style={{ margin: 0, padding: "0.5rem 0.75rem", fontSize: "0.72rem" }}>
               ✓ {Math.round(successRate! * 100)}% success — ready to promote to Stage {curriculumStage + 1}
             </div>
-          ) : successRate !== null && successRate < PROMOTE_THRESHOLD && !running && curriculumStage < maxCurriculumStage ? (
+          ) : successRate !== null && successRate < stageTarget && !running && curriculumStage < maxCurriculumStage ? (
             <div className="warning-box" role="status" style={{ margin: 0, padding: "0.5rem 0.75rem", fontSize: "0.72rem" }}>
-              {Math.round(successRate * 100)}% success — target &ge; {Math.round(PROMOTE_THRESHOLD * 100)}% to promote.
+              {Math.round(successRate * 100)}% success — target &ge; {stageTargetPct}% to promote.
             </div>
           ) : null}
 
@@ -1271,7 +1390,7 @@ export function TrainingPanel({
         </div>
 
         {/* SUB-TAB: METRICS */}
-        <div style={{
+        <div id="training-panel-metrics" role="tabpanel" aria-labelledby="training-tab-metrics" tabIndex={0} style={{
           height: activeSubTab === "metrics" ? "auto" : 0,
           overflow: "hidden",
           opacity: activeSubTab === "metrics" ? 1 : 0,
@@ -1414,7 +1533,7 @@ export function TrainingPanel({
         </div>
 
         {/* SUB-TAB: HELP & TERMS */}
-        <div style={{
+        <div id="training-panel-help" role="tabpanel" aria-labelledby="training-tab-help" tabIndex={0} style={{
           height: activeSubTab === "help" ? "auto" : 0,
           overflow: "hidden",
           opacity: activeSubTab === "help" ? 1 : 0,
