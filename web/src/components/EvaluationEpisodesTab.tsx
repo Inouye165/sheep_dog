@@ -5,7 +5,7 @@ import type {
   ReplayBundle,
   ReplaySnapshot,
 } from "../state/types";
-import { loadRecentEvaluations, runLiveReplay, fetchReplayById, loadReplay, pinEvaluation } from "../lib/api";
+import { loadRecentEvaluations, fetchReplayById, loadReplay, pinEvaluation } from "../lib/api";
 import { FieldView } from "./FieldView";
 import { dogColor } from "./dogPalette";
 
@@ -48,6 +48,20 @@ function extractBundleFrames(bundle: ReplayBundle | null): ReplaySnapshot[] {
   return initOrFin ? [initOrFin] : [];
 }
 
+function getEvaluationReplayCacheKey(
+  evalSummary: EvaluationSummaryPayload | null | undefined,
+  seed: number,
+  replayPath?: string | null
+): string {
+  if (replayPath && replayPath.trim().length > 0) {
+    return `path_${replayPath.trim().replace(/\\/g, "/")}`;
+  }
+  const evalId =
+    evalSummary?.evaluation_id ||
+    `${evalSummary?.checkpoint_episode ?? "none"}_${evalSummary?.evaluation_mode || "default"}`;
+  return `${evalId}_seed_${seed}`;
+}
+
 interface SeedMiniCardProps {
   record: EvaluationRecordPayload;
   bundle: ReplayBundle | null;
@@ -76,11 +90,13 @@ function SeedMiniCard({
     frames[activeStep] || (bundle as any)?.initial_state || bundle?.final_snapshot || null;
 
   const isCompleted = frames.length > 0 && currentStep >= totalSteps;
-  const isPass = record.success;
+  const totalSheep = snapshot?.sheep?.length ?? (record as any).total_sheep ?? (record as any).sheep ?? 4;
   const pennedCount = snapshot
     ? (snapshot.penned_count ?? snapshot.sheep?.filter((s) => s.penned).length ?? record.sheep_penned)
     : record.sheep_penned;
-  const totalSheep = snapshot?.sheep?.length ?? 4;
+  // A run is strictly a pass only if ALL sheep are penned. When the run has completed, if fewer sheep
+  // than totalSheep are penned, it is unequivocally a FAIL.
+  const isPass = record.success && (!isCompleted || pennedCount >= totalSheep);
 
   const baseWidth = snapshot?.grid_width ?? snapshot?.field_width ?? 40;
   const baseHeight = snapshot?.grid_height ?? snapshot?.field_height ?? 30;
@@ -134,7 +150,13 @@ function SeedMiniCard({
               color: isCompleted ? (isPass ? "#34d399" : "#f87171") : "#94a3b8",
             }}
           >
-            {isCompleted ? (isPass ? "✓ Done" : "✗ Stopped") : `S${activeStep}/${totalSteps || record.steps}`}
+            {isCompleted
+              ? isPass
+                ? "✓ Done"
+                : pennedCount < totalSheep
+                ? `✗ ${pennedCount}/${totalSheep}`
+                : "✗ Stopped"
+              : `S${activeStep}/${totalSteps || record.steps}`}
           </span>
         </div>
       </div>
@@ -293,7 +315,9 @@ function SeedMiniCard({
             Reward: <strong style={{ color: "#cbd5e1" }}>{record.reward_total.toFixed(0)}</strong>
           </span>
           <span style={{ color: isPass ? "#34d399" : "#f87171" }}>
-            {record.stop_reason || (isPass ? "success" : "timeout")}
+            {!isPass && (record.stop_reason === "success" || !record.stop_reason)
+              ? "incomplete"
+              : record.stop_reason || (isPass ? "success" : "timeout")}
           </span>
           <button
             type="button"
@@ -454,7 +478,7 @@ export function EvaluationEpisodesTab({
         { bundle: ReplayBundle | null; loading: boolean; error: string | null }
       > = {};
       for (const rec of evalSummary.records) {
-        const cacheKey = `${evalSummary.checkpoint_episode}_${rec.seed}`;
+        const cacheKey = getEvaluationReplayCacheKey(evalSummary, rec.seed, rec.replay_path);
         if (replayCacheRef.current.has(cacheKey)) {
           next[rec.seed] = {
             bundle: replayCacheRef.current.get(cacheKey)!,
@@ -469,7 +493,7 @@ export function EvaluationEpisodesTab({
     });
 
     const recordsToFetch = evalSummary.records.filter((rec) => {
-      const cacheKey = `${evalSummary.checkpoint_episode}_${rec.seed}`;
+      const cacheKey = getEvaluationReplayCacheKey(evalSummary, rec.seed, rec.replay_path);
       return !replayCacheRef.current.has(cacheKey);
     });
 
@@ -495,22 +519,21 @@ export function EvaluationEpisodesTab({
                   bundle = await loadReplay(rawPath);
                 }
               } catch {
-                // fall back to live simulation
+                // fall through to default filename check
               }
             }
 
-            if (!bundle || !bundle.frames || bundle.frames.length === 0) {
-              const runRes = await runLiveReplay({
-                seed: record.seed,
-                checkpoint_episode: evalSummary.checkpoint_episode,
-              });
-              if (runRes && (runRes.frames?.length || (runRes as any).move_history?.length)) {
-                bundle = runRes;
+            if (!bundle && evalSummary.checkpoint_episode != null) {
+              const defaultReplayId = `checkpoint-${String(evalSummary.checkpoint_episode).padStart(6, "0")}-seed-${String(record.seed).padStart(6, "0")}`;
+              try {
+                bundle = await fetchReplayById(defaultReplayId);
+              } catch {
+                bundle = null;
               }
             }
 
-            if (bundle) {
-              const cacheKey = `${evalSummary.checkpoint_episode}_${record.seed}`;
+            if (bundle && bundle.frames && bundle.frames.length > 0) {
+              const cacheKey = getEvaluationReplayCacheKey(evalSummary, record.seed, record.replay_path);
               replayCacheRef.current.set(cacheKey, bundle);
               setMultiReplays((prev) => ({
                 ...prev,
@@ -519,7 +542,7 @@ export function EvaluationEpisodesTab({
             } else {
               setMultiReplays((prev) => ({
                 ...prev,
-                [record.seed]: { bundle: null, loading: false, error: "No replay frames available" },
+                [record.seed]: { bundle: null, loading: false, error: "Authentic evaluation recording not available or pruned" },
               }));
             }
           } catch (err: any) {
@@ -528,7 +551,7 @@ export function EvaluationEpisodesTab({
               [record.seed]: {
                 bundle: null,
                 loading: false,
-                error: err?.message || "Failed to load replay",
+                error: err?.message || "Failed to load authentic evaluation recording",
               },
             }));
           }
@@ -546,10 +569,10 @@ export function EvaluationEpisodesTab({
     }
   }, [activeEval, loadAllSeedReplays]);
 
-  // Fallback single-seed replay loader (sync with multiReplays cache)
+  // Authentic single-seed replay loader (sync with multiReplays cache)
   useEffect(() => {
     if (!activeRecord || !activeEval) return;
-    const cacheKey = `${activeEval.checkpoint_episode}_${activeRecord.seed}`;
+    const cacheKey = getEvaluationReplayCacheKey(activeEval, activeRecord.seed, activeRecord.replay_path);
     if (replayCacheRef.current.has(cacheKey)) {
       setIsLoadingSingleReplay(false);
       setSingleReplayError(null);
@@ -560,23 +583,51 @@ export function EvaluationEpisodesTab({
     setIsLoadingSingleReplay(true);
     setSingleReplayError(null);
 
-    runLiveReplay({
-      seed: activeRecord.seed,
-      checkpoint_episode: activeEval.checkpoint_episode,
-    })
+    const loadSingleAuthenticReplay = async () => {
+      let bundle: ReplayBundle | null = null;
+      if (activeRecord.replay_path && activeRecord.replay_path.trim().length > 0) {
+        try {
+          const rawPath = activeRecord.replay_path.replace(/\\/g, "/");
+          const filename = rawPath.split("/").pop() || "";
+          const replayId = filename.replace(/\.json(\.gz)?$/, "");
+          if (replayId) {
+            bundle = await fetchReplayById(replayId);
+          }
+          if (!bundle) {
+            bundle = await loadReplay(rawPath);
+          }
+        } catch {
+          // fall through
+        }
+      }
+      if (!bundle && activeEval.checkpoint_episode != null) {
+        const defaultReplayId = `checkpoint-${String(activeEval.checkpoint_episode).padStart(6, "0")}-seed-${String(activeRecord.seed).padStart(6, "0")}`;
+        try {
+          bundle = await fetchReplayById(defaultReplayId);
+        } catch {
+          bundle = null;
+        }
+      }
+      return bundle;
+    };
+
+    loadSingleAuthenticReplay()
       .then((bundle) => {
         if (!isMounted) return;
-        if (bundle) {
+        if (bundle && bundle.frames && bundle.frames.length > 0) {
           replayCacheRef.current.set(cacheKey, bundle);
           setMultiReplays((prev) => ({
             ...prev,
             [activeRecord.seed]: { bundle, loading: false, error: null },
           }));
+          setSingleReplayError(null);
+        } else {
+          setSingleReplayError("Authentic evaluation recording not available or pruned");
         }
       })
       .catch((err) => {
         if (!isMounted) return;
-        setSingleReplayError(err?.message || "Failed to load episode replay");
+        setSingleReplayError(err?.message || "Failed to load authentic episode replay");
       })
       .finally(() => {
         if (isMounted) setIsLoadingSingleReplay(false);
@@ -724,7 +775,7 @@ export function EvaluationEpisodesTab({
               </h2>
               <span style={{ fontSize: "0.72rem", color: "#94a3b8" }}>
                 All 10 Seeds Synchronized Replay · Stage {activeEval?.curriculum_stage ?? "—"} ·{" "}
-                {activeEval?.records.filter((r) => r.success).length ?? 0}/10 Penned · Step {currentStep} /{" "}
+                {activeEval?.records.filter((r) => r.success).length ?? 0}/10 Seeds Penned · Step {currentStep} /{" "}
                 {maxSteps}
               </span>
             </div>

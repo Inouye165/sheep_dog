@@ -19,8 +19,11 @@ from typing import Any
 from stable_baselines3.common.callbacks import BaseCallback
 
 from sheepdog.atomic_io import atomic_write_json
+from sheepdog.evaluation.evaluator import EvaluationInterruptedError
 from sheepdog.checkpoints.store import (
     CheckpointMetadata,
+    compute_env_config_hash,
+    compute_seed_set_id,
     get_action_space_hash,
     get_observation_schema_hash,
 )
@@ -219,6 +222,7 @@ class MaskablePPOTrainer(Trainer):
     POLICY_MODE = "neural_policy"
     REPLAY_MODE = "neural_ppo"
     SUMMARY_FILENAME = "training-summary.json"
+    STAGE_TRANSITION_MIN_SUCCESS_RATE = 0.20
 
     def __init__(self, config: Any, output_root: str | Path) -> None:
         super().__init__(config, output_root)
@@ -388,6 +392,7 @@ class MaskablePPOTrainer(Trainer):
             "parent_checkpoint_id": payload.get("parent_checkpoint_id"),
             "policy_version": payload.get("policy_version"),
             "training_scenario_coverage": payload.get("training_scenario_coverage"),
+            "stage_transition_baseline": payload.get("stage_transition_baseline"),
         }
 
     @_wandb_finish_on_exit
@@ -565,6 +570,8 @@ class MaskablePPOTrainer(Trainer):
             payload.setdefault("starting_total_episodes", starting_total)
             progress_callback(payload)
 
+        self.evaluator.progress_callback = emit
+
         emit(
             {
                 "phase": "starting",
@@ -610,6 +617,133 @@ class MaskablePPOTrainer(Trainer):
             )
         else:
             policy = self.POLICY_CLASS.initialize(self.config)
+
+        source_stage = self._loaded_state.get("best_model_curriculum_stage")
+        existing_baseline = self._loaded_state.get("stage_transition_baseline")
+        environment_config_hash = compute_env_config_hash(
+            self.config.to_dict()["environment"]
+        )
+        baseline_matches_environment = (
+            isinstance(existing_baseline, dict)
+            and int(existing_baseline.get("target_stage", -1)) == int(active_stage)
+            and existing_baseline.get("environment_config_hash") == environment_config_hash
+        )
+        is_new_stage_transition = (
+            resuming_policy
+            and source_stage is not None
+            and int(source_stage) < int(active_stage)
+            and not baseline_matches_environment
+        )
+        if (
+            resuming_policy
+            and baseline_matches_environment
+            and float(existing_baseline.get("success_rate", 0.0))
+            < self.STAGE_TRANSITION_MIN_SUCCESS_RATE
+        ):
+            logger.warning(
+                "Stage transition note: inherited policy scored %.0f%% on Stage %s "
+                "(minimum recommended %.0f%%). Training is proceeding to learn new stage dynamics.",
+                float(existing_baseline.get("success_rate", 0.0)) * 100,
+                active_stage,
+                self.STAGE_TRANSITION_MIN_SUCCESS_RATE * 100,
+            )
+            emit(
+                {
+                    "phase": "transition_warning",
+                    "batch_completed_episodes": 0,
+                    "total_episodes_trained": starting_total,
+                    "checkpoint_episode": starting_total,
+                    "message": (
+                        f"Inherited Stage {source_stage} policy scored "
+                        f"{float(existing_baseline.get('success_rate', 0.0)):.0%} on Stage {active_stage}. "
+                        "Training may be slow initially as new concepts are acquired."
+                    ),
+                }
+            )
+        if is_new_stage_transition:
+            run_id = self._loaded_state.get("run_id")
+            baseline_id = f"stage{active_stage}-inherited-pv{policy_version}"
+            emit(
+                {
+                    "phase": "evaluating_transition",
+                    "batch_completed_episodes": 0,
+                    "total_episodes_trained": starting_total,
+                    "checkpoint_episode": starting_total,
+                    "message": (
+                        f"Evaluating inherited Stage {source_stage} policy on Stage {active_stage}"
+                    ),
+                }
+            )
+            try:
+                baseline_summary, evaluation_json, _csv_path = self.evaluator.evaluate(
+                    policy,
+                    tuple(train_config.evaluation_seeds),
+                    checkpoint_episode=starting_total,
+                    capture_replays=True,
+                    evaluation_mode="stage_transition_baseline",
+                    run_id=run_id,
+                    checkpoint_id=baseline_id,
+                    policy_version=policy_version,
+                    curriculum_stage=active_stage,
+                    evaluation_index=0,
+                    should_stop=should_stop,
+                )
+            except EvaluationInterruptedError:
+                logger.info(
+                    "Stage transition baseline evaluation interrupted by stop/pause request."
+                )
+                emit(
+                    {
+                        "phase": "paused" if (should_stop and self._loaded_state.get("paused")) else "stopped",
+                        "batch_completed_episodes": 0,
+                        "total_episodes_trained": starting_total,
+                        "checkpoint_episode": starting_total,
+                        "message": (
+                            f"Stage {active_stage} baseline evaluation paused/stopped. "
+                            "Progress has been saved and will resume automatically on next start."
+                        ),
+                    }
+                )
+                return NeuralTrainingRunSummary(
+                    checkpoints=[],
+                    final_model_path=str(self._loaded_state.get("policy_state_path", "")),
+                    policy_config=policy.config.to_dict(),
+                )
+            baseline = {
+                "source_stage": int(source_stage),
+                "target_stage": int(active_stage),
+                "environment_config_hash": environment_config_hash,
+                "policy_version": policy_version,
+                "evaluation": str(evaluation_json),
+                "success_rate": baseline_summary.success_rate,
+                "timeout_rate": baseline_summary.timeout_rate,
+                "average_reward": baseline_summary.average_reward,
+                "average_completion_steps": baseline_summary.average_completion_steps,
+            }
+            self._loaded_state["stage_transition_baseline"] = baseline
+            atomic_write_json(self._state_path, self._loaded_state)
+            if baseline_summary.success_rate < self.STAGE_TRANSITION_MIN_SUCCESS_RATE:
+                logger.warning(
+                    "Stage transition baseline: inherited Stage %s policy scored %.0f%% on Stage %s "
+                    "(minimum recommended %.0f%%). Proceeding with training to adapt policy.",
+                    source_stage,
+                    baseline_summary.success_rate * 100,
+                    active_stage,
+                    self.STAGE_TRANSITION_MIN_SUCCESS_RATE * 100,
+                )
+                emit(
+                    {
+                        "phase": "transition_warning",
+                        "batch_completed_episodes": 0,
+                        "total_episodes_trained": starting_total,
+                        "checkpoint_episode": starting_total,
+                        "message": (
+                            f"Inherited Stage {source_stage} policy baseline scored "
+                            f"{baseline_summary.success_rate:.0%} on Stage {active_stage}. "
+                            "Proceeding with training to acquire new concepts."
+                        ),
+                    }
+                )
 
         if getattr(train_config, "failure_directed_training_enabled", False):
             saved_fw = self._loaded_state.get("failure_directed_weights")
@@ -892,11 +1026,6 @@ class MaskablePPOTrainer(Trainer):
             recorded_time = datetime.now(UTC).isoformat()
             active_stage = self.config.rewards.instincts.curriculum_stage
 
-            from sheepdog.checkpoints.store import (
-                compute_env_config_hash,
-                compute_seed_set_id,
-            )
-
             self.evaluator.runtime_tracker = self.runtime_tracker
             quick_seed_count = max(1, int(train_config.quick_evaluation_seed_count))
             quick_seeds = tuple(train_config.evaluation_seeds[:quick_seed_count])
@@ -905,38 +1034,45 @@ class MaskablePPOTrainer(Trainer):
                 if self.runtime_tracker is not None
                 else contextlib.nullcontext()
             )
-            with evaluation_phase:
-                quick_summary, evaluation_json, _csv_path = self.evaluator.evaluate(
-                    policy,
-                    quick_seeds,
-                    checkpoint_episode=total_eps_this_checkpoint,
-                    capture_replays=False,
-                    evaluation_mode="quick",
-                    run_id=run_id,
-                    checkpoint_id=chk_id,
-                    policy_version=policy_version,
-                    curriculum_stage=active_stage,
-                )
-                is_final_checkpoint = completed_checkpoints == n_checkpoints
-                confidence_candidate = (
-                    quick_summary.success_rate
-                    >= float(train_config.confidence_candidate_success_rate)
-                )
-                if is_final_checkpoint or confidence_candidate or len(quick_summary.records) < len(train_config.evaluation_seeds):
-                    summary, evaluation_json, _csv_path = self.evaluator.evaluate(
+            try:
+                with evaluation_phase:
+                    quick_summary, evaluation_json, _csv_path = self.evaluator.evaluate(
                         policy,
-                        tuple(train_config.evaluation_seeds),
+                        quick_seeds,
                         checkpoint_episode=total_eps_this_checkpoint,
                         capture_replays=True,
-                        evaluation_mode="confidence",
+                        evaluation_mode="quick",
                         run_id=run_id,
                         checkpoint_id=chk_id,
                         policy_version=policy_version,
                         curriculum_stage=active_stage,
-                        evaluation_index=completed_checkpoints,
+                        should_stop=should_stop,
                     )
-                else:
-                    summary = quick_summary
+                    is_final_checkpoint = completed_checkpoints == n_checkpoints
+                    confidence_candidate = (
+                        quick_summary.success_rate
+                        >= float(train_config.confidence_candidate_success_rate)
+                    )
+                    if is_final_checkpoint or confidence_candidate or len(quick_summary.records) < len(train_config.evaluation_seeds):
+                        summary, evaluation_json, _csv_path = self.evaluator.evaluate(
+                            policy,
+                            tuple(train_config.evaluation_seeds),
+                            checkpoint_episode=total_eps_this_checkpoint,
+                            capture_replays=True,
+                            evaluation_mode="confidence",
+                            run_id=run_id,
+                            checkpoint_id=chk_id,
+                            policy_version=policy_version,
+                            curriculum_stage=active_stage,
+                            evaluation_index=completed_checkpoints,
+                            should_stop=should_stop,
+                        )
+                    else:
+                        summary = quick_summary
+            except EvaluationInterruptedError:
+                logger.info("Evaluation at checkpoint %d interrupted by stop/pause request.", total_eps_this_checkpoint)
+                interrupted = True
+                break
 
             current_stage = self.config.rewards.instincts.curriculum_stage
             # Failure-directed training weight update from evaluation
@@ -1223,6 +1359,7 @@ class MaskablePPOTrainer(Trainer):
                 "training_scenario_coverage": curr_coverage,
                 "failure_directed_weights": failure_weights if getattr(train_config, "failure_directed_training_enabled", False) else None,
                 "failure_directed_telemetry": failure_telemetry if getattr(train_config, "failure_directed_training_enabled", False) else None,
+                "stage_transition_baseline": self._loaded_state.get("stage_transition_baseline"),
             }
             state_export_phase = (
                 self.runtime_tracker.phase("checkpoint_save")
@@ -1364,6 +1501,7 @@ class MaskablePPOTrainer(Trainer):
             "parent_run_id": self._loaded_state.get("parent_run_id"),
             "parent_checkpoint_id": self._loaded_state.get("parent_checkpoint_id"),
             "policy_version": policy_version,
+            "stage_transition_baseline": self._loaded_state.get("stage_transition_baseline"),
         }
         atomic_write_json(self._state_path, state_payload)
         self._loaded_state = state_payload

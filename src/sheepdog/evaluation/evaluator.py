@@ -8,7 +8,7 @@ import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from statistics import fmean
-from typing import Any
+from typing import Any, Callable
 
 from sheepdog.config import LabConfig
 from sheepdog.environment import EpisodeResult, SheepdogEnvironment
@@ -16,6 +16,34 @@ from sheepdog.policies.base import Policy
 from sheepdog.replay.store import ReplayStore
 from sheepdog.training.runtime import TrainingRuntimeTracker
 from sheepdog.evaluation.retention import EvaluationReplayRetentionManager
+
+
+import logging
+import types
+from sheepdog.atomic_io import atomic_write_json
+
+logger = logging.getLogger(__name__)
+
+
+class EvaluationInterruptedError(Exception):
+    """Raised when an evaluation run is interrupted by a stop or pause request."""
+
+    def __init__(self, message: str, inprogress_path: Path | None = None) -> None:
+        super().__init__(message)
+        self.inprogress_path = inprogress_path
+
+
+class _RestoredStats:
+    def __init__(self, data: dict[str, Any]) -> None:
+        self._data = data
+
+    def __getattr__(self, name: str) -> Any:
+        return self._data.get(name, 0.0)
+
+
+class _RestoredResult:
+    def __init__(self, stats: dict[str, Any]) -> None:
+        self.stats = _RestoredStats(stats)
 
 
 def _policy_metadata(
@@ -176,6 +204,7 @@ class Evaluator:
         self.retention_manager = EvaluationReplayRetentionManager(self.output_root)
         self.runtime_tracker: TrainingRuntimeTracker | None = None
         self._evaluation_count = 0
+        self.progress_callback: Callable[[dict[str, Any]], None] | None = None
 
     def evaluate(
         self,
@@ -191,6 +220,8 @@ class Evaluator:
         policy_version: int | None = None,
         curriculum_stage: int | None = None,
         evaluation_index: int | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> tuple[EvaluationSummary, Path, Path]:
         """Run the policy on each seed and optionally capture full replays."""
         if evaluation_index is not None:
@@ -200,11 +231,220 @@ class Evaluator:
             self._evaluation_count += 1
             eval_idx = self._evaluation_count
 
-        results: list[EpisodeResult] = []
+        import datetime
+
+        from sheepdog.checkpoints.store import (
+            compute_env_config_hash,
+            compute_seed_set_id,
+            get_action_space_hash,
+            get_observation_schema_hash,
+        )
+
+        active_curriculum_stage = curriculum_stage if curriculum_stage is not None else self.config.rewards.instincts.curriculum_stage
+        active_run_id = run_id
+        active_checkpoint_id = checkpoint_id
+        active_policy_version = policy_version if policy_version is not None else getattr(policy, "policy_version", None)
+
+        callback = progress_callback or self.progress_callback
+        eval_mode_label = evaluation_mode or "confidence"
+        total_seeds = len(seeds)
+        seeds_list = list(seeds)
+        success_count = 0
+        timeout_count = 0
+        recent_results: list[dict[str, Any]] = []
+
+        evaluation_seed_set_id = compute_seed_set_id(seeds)
+        evaluation_seed_count = len(seeds)
+        evaluation_id = (
+            f"eval_{active_checkpoint_id}_{evaluation_mode}_{evaluation_seed_set_id[:12]}"
+            if active_checkpoint_id
+            else None
+        )
+        artifact_name = evaluation_id or f"evaluation-checkpoint-{checkpoint_episode:06d}"
+        inprogress_path = self.output_root / f"{artifact_name}.inprogress.json"
+
+        # Check for existing partial evaluation progress to resume
+        resumed_records: dict[int, EvaluationRecord] = {}
+        resumed_stats: dict[int, dict[str, Any]] = {}
+        resumed_replay_paths_by_seed: dict[int, Path] = {}
+        resumed_seed_results: dict[int, dict[str, Any]] = {}
+
+        if inprogress_path.exists():
+            try:
+                with inprogress_path.open("r", encoding="utf-8") as handle:
+                    inprog_data = json.load(handle)
+                if inprog_data.get("seeds") == seeds_list:
+                    for entry in inprog_data.get("completed_seeds_data", []):
+                        s = entry.get("seed")
+                        if s is not None and s in seeds:
+                            rec_dict = entry.get("record")
+                            if rec_dict:
+                                resumed_records[s] = EvaluationRecord(**rec_dict)
+                            st_dict = entry.get("stats")
+                            if st_dict:
+                                resumed_stats[s] = st_dict
+                            rep_str = entry.get("replay_path")
+                            if rep_str and Path(rep_str).exists():
+                                resumed_replay_paths_by_seed[s] = Path(rep_str)
+                            s_res = entry.get("seed_result")
+                            if s_res:
+                                resumed_seed_results[s] = s_res
+                    if resumed_records:
+                        now_res_str = datetime.datetime.now().strftime("%H:%M:%S")
+                        print(
+                            f"[Sheepdog] [{now_res_str}] Resuming evaluation [{eval_mode_label}]: "
+                            f"{len(resumed_records)}/{total_seeds} seeds already completed on disk.",
+                            flush=True,
+                        )
+            except Exception as exc:
+                logger.warning("Could not read in-progress evaluation cache %s: %s", inprogress_path, exc)
+
+        now_str = datetime.datetime.now().strftime("%H:%M:%S")
+        seed_preview = str(seeds_list[:6]) if total_seeds <= 6 else f"{seeds_list[:5]}... (+{total_seeds - 5} more)"
+        print(
+            f"[Sheepdog] [{now_str}] Evaluation [{eval_mode_label}] started | "
+            f"Evaluating {total_seeds} seeds: {seed_preview}",
+            flush=True,
+        )
+
+        if callback:
+            with contextlib.suppress(Exception):
+                callback({
+                    "phase": "evaluation",
+                    "evaluation_in_progress": True,
+                    "evaluation_mode": eval_mode_label,
+                    "evaluation_seed": seeds[0] if seeds else None,
+                    "evaluation_seed_index": 1 if seeds else 0,
+                    "evaluation_total_seeds": total_seeds,
+                    "evaluation_completed_seeds": len(resumed_records),
+                    "evaluation_success_count": sum(1 for r in resumed_records.values() if r.success),
+                    "evaluation_timeout_count": sum(1 for r in resumed_records.values() if r.timeout),
+                    "evaluation_success_rate": round(sum(1 for r in resumed_records.values() if r.success) / len(resumed_records), 4) if resumed_records else 0.0,
+                    "evaluation_seeds": seeds_list,
+                    "evaluation_message": f"Starting {eval_mode_label} evaluation on {total_seeds} seeds...",
+                    "evaluation_latest_result": None,
+                    "evaluation_recent_results": [],
+                })
+
+        results: list[Any] = []
         records: list[EvaluationRecord] = []
         saved_replay_paths: list[Path] = []
+        completed_entries: list[tuple[EvaluationRecord, dict[str, Any], Path | None, dict[str, Any]]] = []
 
-        for seed in seeds:
+        def _save_in_progress() -> None:
+            payload = {
+                "evaluation_id": evaluation_id,
+                "artifact_name": artifact_name,
+                "checkpoint_episode": checkpoint_episode,
+                "evaluation_mode": eval_mode_label,
+                "seeds": seeds_list,
+                "success_count": success_count,
+                "timeout_count": timeout_count,
+                "recent_results": recent_results,
+                "completed_seeds_data": [
+                    {
+                        "seed": rec.seed,
+                        "record": rec.to_dict(),
+                        "stats": st_dict,
+                        "replay_path": str(rep) if rep else None,
+                        "seed_result": s_res,
+                    }
+                    for rec, st_dict, rep, s_res in completed_entries
+                ],
+                "updated_at": datetime.datetime.now(datetime.UTC).isoformat(),
+            }
+            try:
+                atomic_write_json(inprogress_path, payload)
+            except Exception as exc:
+                logger.warning("Failed to save evaluation progress to %s: %s", inprogress_path, exc)
+
+        for idx, seed in enumerate(seeds, start=1):
+            if should_stop is not None and should_stop():
+                if completed_entries:
+                    _save_in_progress()
+                raise EvaluationInterruptedError(
+                    f"Evaluation [{eval_mode_label}] stopped before seed {seed}",
+                    inprogress_path=inprogress_path,
+                )
+
+            # Check if this seed was previously completed and can be reused
+            if seed in resumed_records:
+                rec = resumed_records[seed]
+                records.append(rec)
+                st = resumed_stats.get(seed, {})
+                results.append(_RestoredResult(st))
+                rep_path = resumed_replay_paths_by_seed.get(seed)
+                if rep_path:
+                    saved_replay_paths.append(rep_path)
+                s_res = resumed_seed_results.get(seed)
+                if s_res:
+                    recent_results.append(s_res)
+                    if s_res.get("success"):
+                        success_count += 1
+                    if s_res.get("timeout"):
+                        timeout_count += 1
+                else:
+                    if rec.success:
+                        success_count += 1
+                    if rec.timeout:
+                        timeout_count += 1
+
+                completed_entries.append((rec, st, rep_path, s_res or {}))
+
+                now_str = datetime.datetime.now().strftime("%H:%M:%S")
+                rate_so_far = round((success_count / idx) * 100, 1)
+                res_str = rec.stop_reason.upper() if rec.stop_reason else ("SUCCESS" if rec.success else "TIMEOUT")
+                seed_done_msg = (
+                    f"Evaluation [{eval_mode_label}] seed {seed} ({idx}/{total_seeds}) {res_str} (cached) | "
+                    f"Penned: {rec.sheep_penned}/{int(self.config.environment.sheep)} | "
+                    f"Reward: {rec.reward_total:.2f} | Steps: {rec.steps} | "
+                    f"Score: {success_count}/{idx} ({rate_so_far:.0f}%)"
+                )
+                print(f"[Sheepdog] [{now_str}] {seed_done_msg}", flush=True)
+
+                if callback:
+                    with contextlib.suppress(Exception):
+                        callback({
+                            "phase": "evaluation",
+                            "evaluation_in_progress": True,
+                            "evaluation_mode": eval_mode_label,
+                            "evaluation_seed": seed,
+                            "evaluation_seed_index": idx,
+                            "evaluation_total_seeds": total_seeds,
+                            "evaluation_completed_seeds": idx,
+                            "evaluation_success_count": success_count,
+                            "evaluation_timeout_count": timeout_count,
+                            "evaluation_success_rate": round(success_count / idx, 4),
+                            "evaluation_seeds": seeds_list,
+                            "evaluation_message": seed_done_msg,
+                            "evaluation_latest_result": s_res,
+                            "evaluation_recent_results": list(recent_results),
+                        })
+                continue
+
+            now_str = datetime.datetime.now().strftime("%H:%M:%S")
+            in_prog_msg = f"Evaluation [{eval_mode_label}] in progress: seed {seed} ({idx}/{total_seeds})"
+            print(f"[Sheepdog] [{now_str}] {in_prog_msg}...", flush=True)
+
+            if callback:
+                with contextlib.suppress(Exception):
+                    callback({
+                        "phase": "evaluation",
+                        "evaluation_in_progress": True,
+                        "evaluation_mode": eval_mode_label,
+                        "evaluation_seed": seed,
+                        "evaluation_seed_index": idx,
+                        "evaluation_total_seeds": total_seeds,
+                        "evaluation_completed_seeds": idx - 1,
+                        "evaluation_success_count": success_count,
+                        "evaluation_timeout_count": timeout_count,
+                        "evaluation_success_rate": round(success_count / (idx - 1), 4) if (idx > 1) else 0.0,
+                        "evaluation_seeds": seeds_list,
+                        "evaluation_message": in_prog_msg,
+                        "evaluation_latest_result": recent_results[-1] if recent_results else None,
+                        "evaluation_recent_results": list(recent_results),
+                    })
+
             environment = SheepdogEnvironment(self.config)
             capture_phase = (
                 self.runtime_tracker.phase("replay_capture")
@@ -219,6 +459,57 @@ class Evaluator:
                     deterministic=deterministic,
                 )
             results.append(result)
+
+            is_success = bool(result.stats.success)
+            is_timeout = bool(result.stats.timeout)
+            if is_success:
+                success_count += 1
+            if is_timeout:
+                timeout_count += 1
+
+            total_sheep = int(self.config.environment.sheep)
+            res_str = "SUCCESS" if is_success else ("TIMEOUT" if is_timeout else "FAILED")
+            seed_result = {
+                "seed": int(seed),
+                "success": is_success,
+                "timeout": is_timeout,
+                "status": res_str,
+                "reward": round(float(result.stats.reward_total), 2),
+                "penned": int(result.stats.sheep_penned),
+                "total_sheep": total_sheep,
+                "steps": int(result.stats.steps),
+            }
+            recent_results.append(seed_result)
+
+            now_str = datetime.datetime.now().strftime("%H:%M:%S")
+            rate_so_far = round((success_count / idx) * 100, 1)
+            seed_done_msg = (
+                f"Evaluation [{eval_mode_label}] seed {seed} ({idx}/{total_seeds}) {res_str} | "
+                f"Penned: {result.stats.sheep_penned}/{total_sheep} | "
+                f"Reward: {result.stats.reward_total:.2f} | Steps: {result.stats.steps} | "
+                f"Score: {success_count}/{idx} ({rate_so_far:.0f}%)"
+            )
+            print(f"[Sheepdog] [{now_str}] {seed_done_msg}", flush=True)
+
+            if callback:
+                with contextlib.suppress(Exception):
+                    callback({
+                        "phase": "evaluation",
+                        "evaluation_in_progress": True,
+                        "evaluation_mode": eval_mode_label,
+                        "evaluation_seed": seed,
+                        "evaluation_seed_index": idx,
+                        "evaluation_total_seeds": total_seeds,
+                        "evaluation_completed_seeds": idx,
+                        "evaluation_success_count": success_count,
+                        "evaluation_timeout_count": timeout_count,
+                        "evaluation_success_rate": round(success_count / idx, 4),
+                        "evaluation_seeds": seeds_list,
+                        "evaluation_message": seed_done_msg,
+                        "evaluation_latest_result": seed_result,
+                        "evaluation_recent_results": list(recent_results),
+                    })
+
             trainer_type, policy_type, replay_mode = _policy_metadata(
                 result.policy_name,
                 trainer_type=getattr(policy, "trainer_type", None),
@@ -259,14 +550,21 @@ class Evaluator:
                     if replay_path is not None:
                         saved_replay_paths.append(replay_path)
             p_ver = policy_version if policy_version is not None else getattr(policy, "policy_version", None)
-            records.append(
-                EvaluationRecord(
-                    **{
-                        **self._record_from_result(result, policy_version=p_ver).to_dict(),
-                        "replay_path": str(replay_path) if replay_path is not None else "",
-                    }
-                )
+            new_record = EvaluationRecord(
+                **{
+                    **self._record_from_result(result, policy_version=p_ver).to_dict(),
+                    "replay_path": str(replay_path) if replay_path is not None else "",
+                }
             )
+            records.append(new_record)
+            completed_entries.append((new_record, asdict(result.stats), replay_path, seed_result))
+            _save_in_progress()
+
+            if should_stop is not None and should_stop():
+                raise EvaluationInterruptedError(
+                    f"Evaluation [{eval_mode_label}] stopped after seed {seed}",
+                    inprogress_path=inprogress_path,
+                )
 
         summary_trainer_type, summary_policy_type, _summary_replay_mode = _policy_metadata(
             policy.name,
@@ -274,28 +572,7 @@ class Evaluator:
             policy_type=getattr(policy, "policy_type", None),
         )
 
-        import datetime
-
-        from sheepdog.checkpoints.store import (
-            compute_env_config_hash,
-            compute_seed_set_id,
-            get_action_space_hash,
-            get_observation_schema_hash,
-        )
-
-        active_curriculum_stage = curriculum_stage if curriculum_stage is not None else self.config.rewards.instincts.curriculum_stage
-        active_run_id = run_id
-        active_checkpoint_id = checkpoint_id
-        active_policy_version = policy_version if policy_version is not None else getattr(policy, "policy_version", None)
-
         evaluation_timestamp = datetime.datetime.now(datetime.UTC).isoformat()
-        evaluation_seed_set_id = compute_seed_set_id(seeds)
-        evaluation_seed_count = len(seeds)
-        evaluation_id = (
-            f"eval_{active_checkpoint_id}_{evaluation_mode}_{evaluation_seed_set_id[:12]}"
-            if active_checkpoint_id
-            else None
-        )
 
         if hasattr(self.config, "to_dict"):
             env_dict = self.config.to_dict()["environment"]
@@ -335,30 +612,30 @@ class Evaluator:
             average_farthest_distance_to_flock_center=fmean(
                 record.final_farthest_distance_to_flock_center for record in records
             ),
-            average_role_switches=fmean(result.stats.role_switches for result in results),
+            average_role_switches=fmean(getattr(result.stats, "role_switches", 0.0) for result in results),
             average_collector_activations=fmean(
-                result.stats.collector_activations for result in results
+                getattr(result.stats, "collector_activations", 0.0) for result in results
             ),
             average_blocker_activations=fmean(
-                result.stats.blocker_activations for result in results
+                getattr(result.stats, "blocker_activations", 0.0) for result in results
             ),
             average_gate_progress=fmean(
-                result.stats.cumulative_gate_progress for result in results
+                getattr(result.stats, "cumulative_gate_progress", 0.0) for result in results
             ),
             average_controlled_stall_steps=fmean(
-                result.stats.controlled_stall_steps for result in results
+                getattr(result.stats, "controlled_stall_steps", 0.0) for result in results
             ),
             average_left_flank_occupancy_steps=fmean(
-                result.stats.left_flank_occupancy_steps for result in results
+                getattr(result.stats, "left_flank_occupancy_steps", 0.0) for result in results
             ),
             average_right_flank_occupancy_steps=fmean(
-                result.stats.right_flank_occupancy_steps for result in results
+                getattr(result.stats, "right_flank_occupancy_steps", 0.0) for result in results
             ),
             average_gate_corridor_occupancy_peak=fmean(
-                result.stats.gate_corridor_occupancy_peak for result in results
+                getattr(result.stats, "gate_corridor_occupancy_peak", 0.0) for result in results
             ),
             average_gate_corridor_failure_steps=fmean(
-                result.stats.gate_corridor_failure_steps for result in results
+                getattr(result.stats, "gate_corridor_failure_steps", 0.0) for result in results
             ),
             curriculum_stage=active_curriculum_stage,
             run_id=active_run_id,
@@ -378,7 +655,6 @@ class Evaluator:
             pinned=False,
         )
 
-        artifact_name = evaluation_id or f"evaluation-checkpoint-{checkpoint_episode:06d}"
         retention_status = None
         pinned = self.retention_manager.is_pinned(artifact_name)
         if capture_replays and saved_replay_paths:
@@ -409,6 +685,40 @@ class Evaluator:
             writer.writeheader()
             for record in records:
                 writer.writerow(record.to_dict())
+
+        # Clean up the inprogress file since evaluation completed fully
+        if inprogress_path.exists():
+            with contextlib.suppress(OSError):
+                inprogress_path.unlink()
+
+        now_str = datetime.datetime.now().strftime("%H:%M:%S")
+        summary_msg = (
+            f"Evaluation [{eval_mode_label}] complete | "
+            f"Success Rate: {summary.success_rate * 100:.1f}% ({success_count}/{total_seeds}) | "
+            f"Avg Reward: {summary.average_reward:.2f} | "
+            f"Avg Penned: {summary.average_sheep_penned:.1f}/{self.config.environment.sheep}"
+        )
+        print(f"[Sheepdog] [{now_str}] {summary_msg}", flush=True)
+
+        if callback:
+            with contextlib.suppress(Exception):
+                callback({
+                    "phase": "evaluation_complete",
+                    "evaluation_in_progress": False,
+                    "evaluation_mode": eval_mode_label,
+                    "evaluation_seed": seeds[-1] if seeds else None,
+                    "evaluation_seed_index": total_seeds,
+                    "evaluation_total_seeds": total_seeds,
+                    "evaluation_completed_seeds": total_seeds,
+                    "evaluation_success_count": success_count,
+                    "evaluation_timeout_count": timeout_count,
+                    "evaluation_success_rate": round(summary.success_rate, 4),
+                    "evaluation_seeds": seeds_list,
+                    "evaluation_message": summary_msg,
+                    "evaluation_latest_result": recent_results[-1] if recent_results else None,
+                    "evaluation_recent_results": list(recent_results),
+                    "summary": summary.to_dict() if hasattr(summary, "to_dict") else asdict(summary),
+                })
 
         return summary, json_path, csv_path
 

@@ -155,6 +155,14 @@ def test_stage_27_uses_random_pen_placement() -> None:
     assert config.environment.pen_placement == "random"
 
 
+def test_stage_23_defers_pen_location_generalization() -> None:
+    stage_23 = apply_curriculum_stage(LabConfig(), 23)
+    stage_24 = apply_curriculum_stage(LabConfig(), 24)
+
+    assert stage_23.environment.pen_placement == "corner"
+    assert stage_24.environment.pen_placement == "same_wall"
+
+
 def test_stage_30_uses_all_corners_spawn_mode() -> None:
     config = apply_curriculum_stage(LabConfig(), 30)
     assert config.environment.spawn_mix == {"all_corners": 1.0}

@@ -512,7 +512,13 @@ describe("App", () => {
         };
       });
 
-    expect(historyRows()).toHaveLength(3);
+    // Defaults to the current stage being worked on (stage 3)
+    expect(historyRows()).toHaveLength(1);
+    expect(rowEpisodes()).toEqual([{ episode: "90", stage: "3" }]);
+
+    // Select current journey to browse all stages in current journey
+    await user.selectOptions(screen.getByLabelText("Stage scope"), "current-journey");
+    await waitFor(() => expect(historyRows()).toHaveLength(3));
     expect(rowEpisodes()).toEqual(
       expect.arrayContaining([
         { episode: "90", stage: "3" },
@@ -641,7 +647,7 @@ describe("App", () => {
 
     await waitFor(() => expect(screen.getByText("Training history cleared")).toBeInTheDocument());
     expect(fetchMock).toHaveBeenCalledWith(
-      new URL("/api/training/clear", "http://127.0.0.1:8000"),
+      "/api/training/clear",
       expect.objectContaining({ cache: "no-store", method: "POST" }),
     );
   });
@@ -688,7 +694,7 @@ describe("App", () => {
     await waitFor(() => expect(screen.getByText("Instinct only")).toBeInTheDocument());
     expect(screen.getByText("Instinct-only dogs can chase, circle, avoid diving into the flock, and recover nearby sheep, but they do not know where the pen is.")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith(
-      new URL("/api/replay/run", "http://127.0.0.1:8000"),
+      "/api/replay/run",
       expect.objectContaining({ cache: "no-store", method: "POST" }),
     );
     const runReplayCall = fetchMock.mock.calls.find(([request]) => String(request).includes("/api/replay/run"));

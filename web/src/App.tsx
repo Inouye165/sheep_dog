@@ -14,6 +14,7 @@ import { StatusPanel } from "./components/StatusPanel";
 import { ResultsPanel } from "./components/ResultsPanel";
 import { WandbTab } from "./components/WandbTab";
 import { EvaluationEpisodesTab } from "./components/EvaluationEpisodesTab";
+import { EvaluationBanner } from "./components/EvaluationBanner";
 import {
   clearTraining,
   evaluateScenario,
@@ -37,6 +38,7 @@ import {
   shutdownApp,
 } from "./lib/api";
 import type { CheckpointMode } from "./lib/api";
+import { recommendedEpisodesForStage } from "./lib/trainingConfig";
 import type {
   CheckpointEntry,
   CheckpointIndex,
@@ -67,47 +69,6 @@ const APP_TABS: { id: ActiveTab; label: string }[] = [
 const CLEAR_TRAINING_MESSAGE = "Training cleared. Baseline replay restored";
 const DEFAULT_MAX_CURRICULUM_STAGE = 32;
 const DEFAULT_EVAL_SEEDS = [101, 103, 107, 109, 113, 127, 131, 137, 139, 149];
-
-/** Mirrors RECOMMENDED_EPISODES in TrainingPanel — update both together. */
-const RECOMMENDED_EPISODES_BY_STAGE: Record<number, number> = {
-  0: 50,
-  1: 50,
-  2: 75,
-  3: 100,
-  4: 125,
-  5: 150,
-  6: 175,
-  7: 200,
-  8: 225,
-  9: 250,
-  10: 275,
-  11: 300,
-  12: 325,
-  13: 350,
-  14: 375,
-  15: 400,
-  16: 450,
-  17: 500,
-  18: 550,
-  19: 600,
-  20: 650,
-  21: 700,
-  22: 750,
-  23: 800,
-  24: 850,
-  25: 900,
-  26: 950,
-  27: 1000,
-  28: 1050,
-  29: 1100,
-  30: 1200,
-  31: 1300,
-  32: 1400,
-};
-
-function recommendedEpisodesForStage(stage: number): number {
-  return RECOMMENDED_EPISODES_BY_STAGE[stage] ?? 100;
-}
 
 function getCheckpointStage(c: CheckpointEntry): number {
   if (c.reward_config?.instincts?.curriculum_stage !== undefined && c.reward_config?.instincts?.curriculum_stage !== null) {
@@ -177,7 +138,7 @@ export function App() {
   const [trainingCurriculumStage, setTrainingCurriculumStage] = useState(() => {
     const saved = localStorage.getItem("sheepdog_curriculum_stage");
     const parsed = saved !== null ? parseInt(saved, 10) : NaN;
-    return !isNaN(parsed) && parsed >= 1 ? parsed : 1;
+    return !isNaN(parsed) && parsed >= 0 ? parsed : 1;
   });
   const [startingModelSource, setStartingModelSource] = useState("latest");
   const [trainingDebugRewardBreakdown, setTrainingDebugRewardBreakdown] = useState(false);
@@ -187,6 +148,7 @@ export function App() {
   const pollDelayRef = useRef<number>(500);
   const [clearingTraining, setClearingTraining] = useState(false);
   const [isStartingTraining, setIsStartingTraining] = useState(false);
+  const [lifecycleAction, setLifecycleAction] = useState<"pause" | "stop" | null>(null);
   const [runningCurrentReplay, setRunningCurrentReplay] = useState(false);
   const [loadingSelectedReplay, setLoadingSelectedReplay] = useState(false);
   const [activeTab, setActiveTab] = useState<ActiveTab>("train");
@@ -662,6 +624,7 @@ export function App() {
   useEffect(() => {
     let active = true;
     let timerId: ReturnType<typeof setTimeout> | null = null;
+    let pollInFlight = false;
     // Track the very first fetch so we can apply initial-load stage adoption logic.
     let isInitialFetch = true;
 
@@ -674,7 +637,8 @@ export function App() {
     };
 
     const poll = async () => {
-      if (!active) return;
+      if (!active || pollInFlight) return;
+      pollInFlight = true;
       const firstFetch = isInitialFetch;
       isInitialFetch = false;
       try {
@@ -749,6 +713,7 @@ export function App() {
           };
         });
       } finally {
+        pollInFlight = false;
         scheduleNext();
       }
     };
@@ -995,24 +960,32 @@ export function App() {
   }
 
   async function handlePauseTraining() {
+    if (lifecycleAction !== null) return;
     setTrainingError(null);
     setError(null);
+    setLifecycleAction("pause");
     try {
       const status = await pauseTraining();
       setTrainingStatus(status);
     } catch (pauseError) {
       setTrainingError(pauseError instanceof Error ? pauseError.message : "Unable to pause training.");
+    } finally {
+      setLifecycleAction(null);
     }
   }
 
   async function handleStopTraining() {
+    if (lifecycleAction !== null) return;
     setTrainingError(null);
     setError(null);
+    setLifecycleAction("stop");
     try {
       const status = await stopTraining();
       setTrainingStatus(status);
     } catch (stopError) {
       setTrainingError(stopError instanceof Error ? stopError.message : "Unable to stop training.");
+    } finally {
+      setLifecycleAction(null);
     }
   }
 
@@ -1537,6 +1510,7 @@ export function App() {
       ) : (
         <div className="layout-grid">
           <section className="visual-column">
+            <EvaluationBanner status={trainingStatus} />
             <FieldView snapshot={fieldSnapshot} />
           </section>
           <aside className="side-column side-column--tabs">
@@ -1570,6 +1544,7 @@ export function App() {
                   autoPromoteGate={trainingStatus?.auto_promote_gate ?? null}
                   running={trainingStatus?.running ?? false}
                   clearing={clearingTraining}
+                  lifecycleAction={lifecycleAction}
                   isStartingTraining={isStartingTraining}
                   batchCompletedEpisodes={trainingStatus?.batch_completed_episodes ?? trainingStatus?.completed_episodes ?? 0}
                   batchTotalEpisodes={trainingStatus?.batch_total_episodes ?? trainingStatus?.requested_episodes ?? trainingEpisodes}
@@ -1655,6 +1630,7 @@ export function App() {
                     bestCheckpointEpisode={bestCheckpointEpisode}
                     selectedSeed={selectedSeed}
                     runState={statusLabel}
+                    trainingStatus={trainingStatus}
                   />
                 </>
               ) : null}

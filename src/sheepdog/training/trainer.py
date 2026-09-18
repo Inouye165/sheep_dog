@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import gzip
 import json
 import random
 from collections.abc import Callable
@@ -23,7 +24,7 @@ from sheepdog.checkpoints.store import (
 )
 from sheepdog.config import LabConfig, TrainingConfig
 from sheepdog.environment import ENV_CONFIG_VERSION, SheepdogEnvironment
-from sheepdog.evaluation.evaluator import EvaluationSummary, Evaluator
+from sheepdog.evaluation.evaluator import EvaluationInterruptedError, EvaluationSummary, Evaluator
 from sheepdog.evaluation.scenario_evaluator import evaluate_checkpoint_on_scenarios
 from sheepdog.policies.trainable import PolicyWeights, TrainableLinearPolicy
 from sheepdog.rewards import REWARD_SCHEMA_VERSION
@@ -335,6 +336,8 @@ class Trainer:
             payload.setdefault("starting_total_episodes", starting_total)
             progress_callback(payload)
 
+        self.evaluator.progress_callback = emit
+
         emit(
             {
                 "phase": "starting",
@@ -410,16 +413,21 @@ class Trainer:
                 active_stage = self.config.rewards.instincts.curriculum_stage
                 eval_idx = checkpoint_ordinals.get(cumulative_episode)
 
-                summary, evaluation_json, _csv_path = self.evaluator.evaluate(
-                    best_policy,
-                    train_config.evaluation_seeds,
-                    checkpoint_episode=cumulative_episode,
-                    run_id=run_id,
-                    checkpoint_id=chk_id,
-                    policy_version=None,
-                    curriculum_stage=active_stage,
-                    evaluation_index=eval_idx,
-                )
+                try:
+                    summary, evaluation_json, _csv_path = self.evaluator.evaluate(
+                        best_policy,
+                        train_config.evaluation_seeds,
+                        checkpoint_episode=cumulative_episode,
+                        run_id=run_id,
+                        checkpoint_id=chk_id,
+                        policy_version=None,
+                        curriculum_stage=active_stage,
+                        evaluation_index=eval_idx,
+                        should_stop=should_stop,
+                    )
+                except EvaluationInterruptedError:
+                    interrupted = True
+                    break
                 representative_replay_path = Path(summary.records[0].replay_path)
 
                 if getattr(train_config, "enable_adaptive_learning", True):
@@ -795,7 +803,7 @@ class Trainer:
             if source_path.exists():
                 try:
                     target_path.parent.mkdir(parents=True, exist_ok=True)
-                    target_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
+                    target_path.write_bytes(source_path.read_bytes())
                 except (FileNotFoundError, OSError):
                     pass
             exported_record = dict(record)
@@ -836,7 +844,13 @@ class Trainer:
         )
         replay_target = web_export_dir / "latest-replay.json"
         if replay_path is not None and replay_path.exists():
-            atomic_write_text(replay_target, replay_path.read_text(encoding="utf-8"))
+            if str(replay_path).endswith(".gz"):
+                atomic_write_text(
+                    replay_target,
+                    gzip.decompress(replay_path.read_bytes()).decode("utf-8"),
+                )
+            else:
+                atomic_write_text(replay_target, replay_path.read_text(encoding="utf-8"))
 
     def _load_archived_checkpoints(self) -> list[dict[str, Any]]:
         """Load checkpoints from all archived journeys.

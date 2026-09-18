@@ -483,7 +483,7 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "curriculum_stage": 23,
         "count_collection_progress": True,
         "spawn_mix": _mix(scattered_sheep=0.35, partial_scattered=0.25, split_flock=0.2, farther_stray=0.1, nearby_stray=0.1),
-        "pen_placement": "same_wall",
+        "pen_placement": "corner",
     },
     24: {
         "dogs": 3,
@@ -501,7 +501,7 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "curriculum_stage": 24,
         "count_collection_progress": True,
         "spawn_mix": _mix(scattered_sheep=0.35, partial_scattered=0.2, split_flock=0.2, farther_stray=0.15, nearby_stray=0.1),
-        "pen_placement": "any_wall",
+        "pen_placement": "same_wall",
     },
     25: {
         "dogs": 3,

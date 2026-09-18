@@ -1369,9 +1369,12 @@ class TrainingManager:
         self._status["message"] = "Restoring training state"
         try:
             self.restore_active_run_state()
-            if initial_phase in ("paused", "stopped"):
+            if self._status.get("resume_available") and initial_phase in ("paused", "stopped"):
                 self._status["phase"] = initial_phase
                 self._status["message"] = initial_message
+            elif self._status.get("phase") in ("paused", "stopped") and not self._status.get("resume_available"):
+                self._status["phase"] = "idle"
+                self._status["message"] = "Idle"
         except Exception as e:
             self._status["phase"] = "restore_failed"
             self._status["error"] = str(e)
@@ -1962,6 +1965,48 @@ class TrainingManager:
         self._status["phase"] = "idle"
         self._status["message"] = "Idle"
 
+        # Invalidate any stale resume session marker that cannot be resumed with active run state
+        session_state = _read_training_session_state(output_root)
+        if isinstance(session_state, dict):
+            req = session_state.get("training_request")
+            req_stage = req.get("curriculum_stage") if isinstance(req, dict) else None
+            active_stg = self._status.get("curriculum_stage", 1)
+            stage_history = _read_stage_history(output_root)
+            recorded_stages = [
+                int(stage)
+                for stage, episodes in stage_history.items()
+                if float(episodes) > 0
+            ]
+            highest_recorded_stage = max(recorded_stages, default=0)
+            promotion_history = _read_promotion_history(output_root)
+            latest_promo_stage = None
+            if promotion_history:
+                stage_events = [ev for ev in promotion_history if ev.get("to_stage") is not None]
+                if stage_events:
+                    latest_promo_stage = stage_events[-1].get("to_stage")
+
+            is_stale = False
+            if req_stage is not None:
+                req_stage_int = int(req_stage)
+                if highest_recorded_stage > 0 and req_stage_int < highest_recorded_stage:
+                    is_stale = True
+                elif latest_promo_stage is not None and req_stage_int != int(active_stg):
+                    is_stale = True
+
+            if is_stale:
+                logger.info(
+                    "Invalidating stale resume session: requested stage %s is incompatible with active stage %s (highest: %s, promo: %s)",
+                    req_stage,
+                    active_stg,
+                    highest_recorded_stage,
+                    latest_promo_stage,
+                )
+                self._clear_training_session()
+                self._status["resume_available"] = False
+                self._status["resume_remaining_episodes"] = None
+                self._status["resume_remaining_timesteps"] = None
+                self._status["resume_request"] = None
+
     def _initial_status(self) -> dict[str, Any]:
         config = LabConfig()
         instincts = config.rewards.instincts
@@ -2025,6 +2070,31 @@ class TrainingManager:
             "latest_avg_flock_spread": None,
             "latest_avg_farthest_distance_to_pen": None,
             "latest_avg_farthest_distance_to_flock_center": None,
+            "evaluation_in_progress": False,
+            "evaluation_status": {
+                "in_progress": False,
+                "mode": None,
+                "current_seed": None,
+                "seed_index": 0,
+                "total_seeds": 0,
+                "completed_seeds": 0,
+                "success_count": 0,
+                "timeout_count": 0,
+                "success_rate": None,
+                "seeds": [],
+                "message": None,
+                "latest_result": None,
+                "recent_results": [],
+            },
+            "evaluation_mode": None,
+            "evaluation_seed": None,
+            "evaluation_seed_index": 0,
+            "evaluation_total_seeds": 0,
+            "evaluation_completed_seeds": 0,
+            "evaluation_success_count": 0,
+            "evaluation_message": None,
+            "evaluation_latest_result": None,
+            "evaluation_recent_results": [],
             "phase": "idle",
             "message": "Idle",
             "error": None,
@@ -2241,7 +2311,7 @@ class TrainingManager:
             thread_alive = self._thread is not None and self._thread.is_alive()
             if not thread_alive and self._status.get("running"):
                 self._status["running"] = False
-                if self._status.get("phase") in {"learning", "training", "starting", "checkpoint"}:
+                if self._status.get("phase") in {"learning", "training", "starting", "checkpoint", "evaluation"}:
                     self._status["phase"] = "error"
                     self._status["error"] = "Background training thread terminated unexpectedly"
                     self._status["error_type"] = "WorkerThreadDied"
@@ -2391,24 +2461,19 @@ class TrainingManager:
                 )
         except ValueError as exc:
             message = f"Automatic resume blocked: {exc}"
+            logger.warning("Automatic resume blocked: %s", exc)
+            self._clear_training_session()
             self._status.update(
                 {
                     "running": False,
-                    "phase": "paused",
+                    "phase": "idle",
                     "message": message,
-                    "resume_available": True,
-                    "resume_remaining_timesteps": (
-                        remaining_work if has_timestep_request else None
-                    ),
-                    "resume_remaining_episodes": (
-                        None if has_timestep_request else remaining_work
-                    ),
-                    "resume_request": request,
+                    "resume_available": False,
+                    "resume_remaining_timesteps": None,
+                    "resume_remaining_episodes": None,
+                    "resume_request": None,
                 }
             )
-            session_state["state"] = "paused"
-            session_state["status"] = dict(self._status)
-            _write_training_session_state(output_root, session_state)
 
     def get_stage_diagnostics(self, stage: int | None = None, run_id: str | None = None) -> dict[str, Any]:
         """Aggregate full historical spatial telemetry and bottleneck metrics for a curriculum stage."""
@@ -5051,6 +5116,59 @@ class TrainingManager:
                             "environment_episodes_total",
                             self._status.get("cumulative_environment_episodes", 0),
                         )
+                    if phase in ("evaluation", "evaluation_complete"):
+                        eval_in_prog = bool(payload.get("evaluation_in_progress", False))
+                        eval_mode = payload.get("evaluation_mode", "confidence")
+                        eval_seed = payload.get("evaluation_seed")
+                        eval_seed_idx = payload.get("evaluation_seed_index", 0)
+                        eval_total_seeds = payload.get("evaluation_total_seeds", 0)
+                        eval_completed_seeds = payload.get("evaluation_completed_seeds", 0)
+                        eval_success_count = payload.get("evaluation_success_count", 0)
+                        eval_timeout_count = payload.get("evaluation_timeout_count", 0)
+                        eval_success_rate = payload.get("evaluation_success_rate")
+                        eval_seeds = payload.get("evaluation_seeds", [])
+                        eval_msg = payload.get("evaluation_message")
+                        eval_latest_res = payload.get("evaluation_latest_result")
+                        eval_recent_res = payload.get("evaluation_recent_results", [])
+
+                        update["evaluation_in_progress"] = eval_in_prog
+                        update["evaluation_status"] = {
+                            "in_progress": eval_in_prog,
+                            "mode": eval_mode,
+                            "current_seed": eval_seed,
+                            "seed_index": eval_seed_idx,
+                            "total_seeds": eval_total_seeds,
+                            "completed_seeds": eval_completed_seeds,
+                            "success_count": eval_success_count,
+                            "timeout_count": eval_timeout_count,
+                            "success_rate": eval_success_rate,
+                            "seeds": eval_seeds,
+                            "message": eval_msg,
+                            "latest_result": eval_latest_res,
+                            "recent_results": eval_recent_res,
+                        }
+                        update["evaluation_mode"] = eval_mode
+                        update["evaluation_seed"] = eval_seed
+                        update["evaluation_seed_index"] = eval_seed_idx
+                        update["evaluation_total_seeds"] = eval_total_seeds
+                        update["evaluation_completed_seeds"] = eval_completed_seeds
+                        update["evaluation_success_count"] = eval_success_count
+                        update["evaluation_message"] = eval_msg
+                        update["evaluation_latest_result"] = eval_latest_res
+                        update["evaluation_recent_results"] = eval_recent_res
+
+                        if eval_in_prog:
+                            update["phase"] = "evaluation"
+                            update["message"] = eval_msg or f"Evaluating seed {eval_seed} ({eval_seed_idx}/{eval_total_seeds})"
+                        else:
+                            update["phase"] = "evaluation_complete"
+                            update["message"] = eval_msg or "Evaluation complete"
+                    elif phase == "episode_complete":
+                        update["evaluation_in_progress"] = False
+                        if "evaluation_status" in self._status and isinstance(self._status["evaluation_status"], dict):
+                            eval_stat = dict(self._status["evaluation_status"])
+                            eval_stat["in_progress"] = False
+                            update["evaluation_status"] = eval_stat
                     if "approx_kl" in payload:
                         update["approx_kl"] = payload["approx_kl"]
                     if "clip_fraction" in payload:
@@ -5370,21 +5488,16 @@ class TrainingManager:
                             recorded_at=datetime.datetime.now(datetime.UTC).isoformat(),
                         )
 
-                        promotion_checkpoint_episode: int | None = None
-                        if stage_best_checkpoint_episode is not None:
-                            promotion_checkpoint_episode = int(stage_best_checkpoint_episode)
-                        elif checkpoint_episode is not None:
-                            promotion_checkpoint_episode = int(checkpoint_episode)
-
-                        if phase == "checkpoint" and checkpoint_episode is not None and promotion_checkpoint_episode == checkpoint_episode:
-                            gate_snap = gate_snapshot
-                        elif promotion_checkpoint_episode is not None and int(promotion_checkpoint_episode) > 0:
-                            gate_snap = compute_promotion_gate_snapshot(
-                                output_root,
-                                int(promotion_checkpoint_episode),
-                            )
-                        else:
-                            gate_snap = _auto_promote_gate_defaults(stage)
+                        promotion_checkpoint_episode = (
+                            int(checkpoint_episode)
+                            if phase == "checkpoint" and checkpoint_episode is not None
+                            else None
+                        )
+                        gate_snap = (
+                            gate_snapshot
+                            if promotion_checkpoint_episode is not None
+                            else _auto_promote_gate_defaults(stage)
+                        )
                         should_auto_promote_now = (
                             auto_promote_enabled
                             and stage < max_stage
@@ -5608,6 +5721,8 @@ class TrainingManager:
                         f"Fast mode: {fast_mode}",
                         flush=True,
                     )
+                    if hasattr(trainer, "evaluator") and trainer.evaluator is not None:
+                        trainer.evaluator.progress_callback = progress_callback
                     trainer.train(progress_callback=progress_callback, should_stop=should_stop)
                 except _EarlyPromotionSignal as signal:
                     early_promotion = signal
@@ -5718,12 +5833,17 @@ class TrainingManager:
                     resume_checkpoint_episode = stage_best_checkpoint_episode
                     break
 
-                last_healthy_checkpoint_episode = stage_best_checkpoint_episode
+                promotion_checkpoint_episode = (
+                    early_promotion.checkpoint_episode
+                    if early_promotion is not None
+                    else stage_best_checkpoint_episode
+                )
+                last_healthy_checkpoint_episode = promotion_checkpoint_episode
                 promoted_stages += 1
                 current_stage = stage + 1
 
                 try:
-                    trigger_cp = self.get_checkpoint_details(stage_best_checkpoint_episode)
+                    trigger_cp = self.get_checkpoint_details(promotion_checkpoint_episode)
                     trigger_checkpoint_id = trigger_cp.get("checkpoint_id")
                     trigger_policy_version = trigger_cp.get("policy_version")
                     trigger_seeds = trigger_cp.get("evaluation_seeds", [])
@@ -5768,7 +5888,7 @@ class TrainingManager:
                         "promoted_at": datetime.datetime.now(datetime.UTC).isoformat(),
                         "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
                         "trigger_checkpoint_id": trigger_checkpoint_id,
-                        "trigger_checkpoint_episode": stage_best_checkpoint_episode,
+                        "trigger_checkpoint_episode": promotion_checkpoint_episode,
                         "trigger_policy_version": trigger_policy_version,
                         "evaluation_seed_set_id": seed_set_id,
                         "evaluation_seed_count": len(trigger_seeds) if trigger_seeds else 0,
@@ -5799,7 +5919,7 @@ class TrainingManager:
                             model_path=best_model_path if best_model_path.exists() else None,
                             checkpoint_payload={
                                 "checkpoint_id": trigger_checkpoint_id,
-                                "checkpoint_episode": stage_best_checkpoint_episode,
+                                "checkpoint_episode": promotion_checkpoint_episode,
                                 "policy_version": trigger_policy_version,
                                 "success_rate": max(0.0, best_success),
                                 "run_id": self._status.get("run_id"),
@@ -5815,7 +5935,7 @@ class TrainingManager:
                         logger.warning("Stage milestone automated backup failed: %s", backup_err)
                 batch_episodes = RECOMMENDED_EPISODES_BY_STAGE.get(current_stage, 100)
                 total_episodes = batch_episodes
-                resume_checkpoint_episode = stage_best_checkpoint_episode
+                resume_checkpoint_episode = promotion_checkpoint_episode
                 stage_best_checkpoint_episode = None
                 stage_best_rank = (-1.0, float("-inf"), float("-inf"), float("-inf"))
                 stage_best_reward = float("-inf")
@@ -5841,7 +5961,7 @@ class TrainingManager:
                         },
                         "message": (
                             f"Auto-promoted to Stage {current_stage} "
-                            f"from checkpoint ep {stage_best_checkpoint_episode}"
+                            f"from checkpoint ep {promotion_checkpoint_episode}"
                         ),
                     }
                 )

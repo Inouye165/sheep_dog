@@ -103,7 +103,7 @@ The experimental path keeps that scripted role assignment and swaps only the mod
 
 The role system is still scripted in this phase. The neural policy does not learn role assignment from scratch yet.
 
-The web app is a viewer, not a second simulation engine. It loads exported checkpoint and replay JSON files from `web/public/generated/` and plays them back frame by frame.
+The web app is a viewer, not a second simulation engine. It loads exported checkpoint and replay files (`.json` or compressed `.json.gz`) and plays back the exact, authentic step-by-step trajectories recorded during evaluation benchmarks and rollouts. Benchmark episodes strictly require 100% of sheep penned to be marked as a pass (`✗ FAIL` if any sheep remain unpenned).
 
 ## Policy Modes
 

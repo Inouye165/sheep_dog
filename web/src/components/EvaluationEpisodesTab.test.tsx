@@ -67,7 +67,7 @@ describe("EvaluationEpisodesTab", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(api.loadRecentEvaluations).mockResolvedValue(mockEvaluations);
-    vi.mocked(api.runLiveReplay).mockResolvedValue({
+    vi.mocked(api.fetchReplayById).mockResolvedValue({
       frames: [
         {
           snapshot: {
@@ -279,5 +279,60 @@ describe("EvaluationEpisodesTab", () => {
       expect(api.pinEvaluation).toHaveBeenCalledWith("eval-5000", true);
       expect(screen.getByRole("button", { name: /📌 Replays Pinned/i })).toBeInTheDocument();
     });
+  });
+
+  it("marks a completed seed as FAIL if fewer than all sheep are penned even if record.success was true", async () => {
+    // Mock authentic replay where 6 sheep exist but only 4 are penned at completion
+    vi.mocked(api.fetchReplayById).mockResolvedValue({
+      frames: [
+        {
+          snapshot: {
+            field_width: 96,
+            field_height: 72,
+            penned_count: 4,
+            sheep: [
+              { penned: true },
+              { penned: true },
+              { penned: true },
+              { penned: true },
+              { penned: false },
+              { penned: false },
+            ],
+            dogs: [{ position: { x: 10, y: 10 } }],
+          },
+        },
+      ],
+    } as any);
+
+    render(<EvaluationEpisodesTab currentStage={7} />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Seed 11 Replay/i })).toBeInTheDocument();
+    });
+
+    const seed11Card = screen.getByRole("button", { name: /Seed 11 Replay/i });
+    // Should NOT show ✓ PASS or ✓ Done because only 4 of 6 sheep are penned
+    expect(seed11Card).toHaveTextContent("✗ FAIL");
+    expect(seed11Card).toHaveTextContent("🐑 4/6");
+    expect(seed11Card).toHaveTextContent("✗ 4/6");
+    expect(seed11Card).not.toHaveTextContent("✓ Done");
+  });
+
+  it("displays authentic replay not available notice and does not invoke divergent live simulation", async () => {
+    vi.mocked(api.fetchReplayById).mockResolvedValue(null);
+    vi.mocked(api.loadReplay).mockResolvedValue(null as any);
+
+    render(<EvaluationEpisodesTab currentStage={7} />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Seed 11 Replay/i })).toBeInTheDocument();
+    });
+
+    await waitFor(() => {
+      expect(screen.getAllByText(/Authentic evaluation recording not available or pruned/i).length).toBeGreaterThan(0);
+    });
+
+    // runLiveReplay must NEVER have been called for historical evaluation inspection
+    expect(api.runLiveReplay).not.toHaveBeenCalled();
   });
 });

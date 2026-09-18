@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import queue
+import shutil
 import sqlite3
 import threading
 import time
@@ -47,18 +48,54 @@ class EpisodeStore:
         self._init_db()
         self.start_worker()
 
-    def _get_connection(self) -> sqlite3.Connection:
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+    def _handle_corrupt_database(self, open_conn: sqlite3.Connection | None = None) -> sqlite3.Connection:
+        """Self-heal a malformed SQLite database by archiving the corrupted file and creating a fresh one."""
+        if open_conn is not None:
+            with contextlib.suppress(Exception):
+                open_conn.close()
+        logger.error("Corrupted SQLite database detected at %s. Quarantining and re-initializing.", self.db_path)
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        corrupt_backup = self.db_path.with_name(f"{self.db_path.stem}.corrupt_{timestamp}.bak")
+        try:
+            if self.db_path.exists():
+                shutil.copy2(self.db_path, corrupt_backup)
+            for suffix in ["-wal", "-shm"]:
+                extra = self.db_path.with_name(f"{self.db_path.name}{suffix}")
+                if extra.exists():
+                    with contextlib.suppress(Exception):
+                        extra.unlink()
+            if self.db_path.exists():
+                self.db_path.unlink()
+        except Exception as e:
+            logger.warning("Failed to isolate malformed database files: %s", e)
+
         conn = sqlite3.connect(str(self.db_path), timeout=30.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
-
-        # Self-healing schema check: auto-recreate table if database file was recreated on disk
-        tables = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-        if "training_episodes" not in tables:
-            self._ensure_schema(conn)
+        self._ensure_schema(conn)
         return conn
+
+    def _get_connection(self) -> sqlite3.Connection:
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = sqlite3.connect(str(self.db_path), timeout=30.0)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+
+            # Self-healing schema check: auto-recreate table if database file was recreated on disk
+            tables = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            if "training_episodes" not in tables:
+                self._ensure_schema(conn)
+            else:
+                conn.execute("SELECT 1 FROM training_episodes LIMIT 1;").fetchall()
+            return conn
+        except sqlite3.DatabaseError as exc:
+            if "malformed" in str(exc).lower() or "not a database" in str(exc).lower():
+                return self._handle_corrupt_database(conn)
+            raise
 
     def _ensure_schema(self, conn: sqlite3.Connection) -> None:
         conn.execute(
@@ -365,6 +402,14 @@ class EpisodeStore:
                         return True
             except sqlite3.OperationalError:
                 time.sleep(0.05)
+            except sqlite3.DatabaseError as exc:
+                if "malformed" in str(exc).lower():
+                    logger.warning("Malformed database encountered during update_replay_info; initiating self-healing recovery.")
+                    self._handle_corrupt_database()
+                self.error_count += 1
+                self.last_error = str(exc)
+                logger.error("Failed to update replay info in SQLite: %s", exc)
+                return False
             except Exception as exc:
                 self.error_count += 1
                 self.last_error = str(exc)

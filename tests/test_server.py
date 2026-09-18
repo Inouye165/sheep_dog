@@ -640,6 +640,73 @@ def test_initial_status_loads_paused_training_session(tmp_path: Path) -> None:
     assert status["message"].startswith("Pause requested")
 
 
+def test_startup_invalidates_stale_cross_stage_resume_session(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    generated = tmp_path / "web" / "public" / "generated"
+    session_dir = artifacts / "startup"
+    artifacts.mkdir(parents=True)
+    generated.mkdir(parents=True)
+    session_dir.mkdir(parents=True)
+
+    # Active run state is at stage 24
+    run_state = {
+        "run_id": "run_test_active",
+        "active_curriculum_stage": 24,
+        "trainer_type": "maskable_ppo",
+        "policy_type": "neural",
+        "policy_mode": "neural_policy",
+        "active_checkpoint_episode": 20000,
+        "active_policy_version": 100,
+        "observation_schema_hash": "dummy_obs",
+        "action_space_hash": "dummy_act",
+    }
+    (artifacts / "run-state.json").write_text(json.dumps(run_state), encoding="utf-8")
+    (artifacts / "stage-history.json").write_text(json.dumps({"20": 100, "23": 200}), encoding="utf-8")
+
+    # Stale paused session from stage 20
+    session_payload = {
+        "state": "paused",
+        "requested_at": "2026-09-12T11:19:00+00:00",
+        "remaining_episodes": 114,
+        "training_request": {
+            "episodes": 500,
+            "fast_mode": True,
+            "enable_instinct_rewards": False,
+            "curriculum_stage": 20,
+        },
+        "status": {
+            "running": False,
+            "curriculum_stage": 20,
+            "phase": "paused",
+        },
+    }
+    (session_dir / "training-session.json").write_text(
+        json.dumps(session_payload), encoding="utf-8"
+    )
+
+    config = LabConfig(
+        training=TrainingConfig(
+            output_dir=str(artifacts),
+            web_export_dir=str(generated),
+        )
+    )
+
+    class TestConfig:
+        def __new__(cls):
+            return config
+
+    with patch("sheepdog.server.LabConfig", TestConfig):
+        with patch.object(TrainingManager, "_resolve_precedence_state", return_value=run_state):
+            manager = TrainingManager()
+            status = manager.snapshot()
+
+    assert status["curriculum_stage"] == 24
+    assert status["resume_available"] is False
+    assert status["resume_remaining_episodes"] is None
+    assert status["resume_request"] is None
+    assert not (session_dir / "training-session.json").exists()
+
+
 def test_startup_auto_resumes_interrupted_running_session(tmp_path: Path) -> None:
     artifacts = tmp_path / "artifacts"
     generated = tmp_path / "web" / "public" / "generated"
@@ -1137,6 +1204,104 @@ def test_auto_promotion_updates_batch_episodes(tmp_path: Path) -> None:
 
     assert configs_seen[-1].rewards.instincts.curriculum_stage == 2
     assert configs_seen[-1].training.episodes == 74
+
+
+def test_auto_promotion_uses_current_qualifying_checkpoint(tmp_path: Path) -> None:
+    """Promotion evidence selects its current checkpoint even when an older reward is higher."""
+    artifacts = tmp_path / "artifacts"
+    generated = tmp_path / "web" / "public" / "generated"
+    checkpoint_dir = artifacts / "checkpoints"
+    evaluation_dir = artifacts / "evaluations"
+    checkpoint_dir.mkdir(parents=True)
+    evaluation_dir.mkdir(parents=True)
+    generated.mkdir(parents=True)
+
+    seeds = [11, 23, 37, 41, 53, 59, 61, 67, 71, 73]
+    for episode in range(10, 70, 10):
+        checkpoint_id = f"chk_{episode:06d}"
+        records = [
+            {"seed": seed, "success": True, "timeout": False, "steps": 200}
+            for seed in seeds
+        ]
+        payload = {
+            "checkpoint_episode": episode,
+            "checkpoint_id": checkpoint_id,
+            "curriculum_stage": 4,
+            "policy_version": 1,
+            "evaluation_seeds": seeds,
+            "evaluation_seed_count": len(seeds),
+            "success_rate": 1.0,
+            "timeout_rate": 0.0,
+            "average_completion_steps": 200.0,
+            "average_sheep_penned": 6.0,
+            "average_reward": 1000.0 if episode == 10 else 100.0,
+            "records": records,
+        }
+        (checkpoint_dir / f"checkpoint-{episode:06d}.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+        (evaluation_dir / f"evaluation-checkpoint-{episode:06d}.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+
+    config = LabConfig(
+        training=TrainingConfig(
+            episodes=60,
+            checkpoint_episodes=(0,),
+            evaluation_seeds=tuple(seeds),
+            output_dir=str(artifacts),
+            web_export_dir=str(generated),
+        )
+    )
+
+    class TestConfig:
+        def __new__(cls):
+            return config
+
+    class FakeTrainer:
+        total_episodes_trained = 0
+
+        def __init__(self, cfg, output_dir):
+            self.cfg = cfg
+
+        def train(self, progress_callback=None, should_stop=None):
+            assert progress_callback is not None
+            if self.cfg.rewards.instincts.curriculum_stage == 4:
+                for episode in range(10, 70, 10):
+                    payload = json.loads(
+                        (evaluation_dir / f"evaluation-checkpoint-{episode:06d}.json").read_text(
+                            encoding="utf-8"
+                        )
+                    )
+                    progress_callback({
+                        "phase": "checkpoint",
+                        "checkpoint_episode": episode,
+                        "policy_version": 1,
+                        "summary": payload,
+                    })
+            else:
+                raise ValueError("Stage 5 reached successfully")
+
+    with (
+        patch("sheepdog.server.LabConfig", TestConfig),
+        patch("sheepdog.server.create_trainer", side_effect=FakeTrainer),
+    ):
+        manager = TrainingManager()
+        manager.start(
+            requested_episodes=60,
+            fast_mode=True,
+            curriculum_stage=4,
+            auto_promote=True,
+        )
+
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and manager.snapshot()["running"]:
+            time.sleep(0.05)
+
+    promotion_history = json.loads(
+        (artifacts / "promotion-history.json").read_text(encoding="utf-8")
+    )
+    assert promotion_history[-1]["trigger_checkpoint_episode"] == 60
 
 
 def test_diagnostics_endpoint_route_integration(tmp_path: Path) -> None:

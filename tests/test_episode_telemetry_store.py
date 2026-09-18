@@ -283,3 +283,24 @@ def test_12_controlled_fixture_telemetry_summary(temp_store):
     assert summary["success_rate"] == 0.6
     assert summary["current_stage_environment_episode"] == 959
     assert summary["latest_completed_environment_episode"] == 959
+
+
+def test_13_corrupt_database_self_healing():
+    """Verify that a malformed database file triggers automatic quarantine and re-initialization."""
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+        db_path = Path(tmpdir) / "corrupt_test.sqlite"
+        # Write corrupted/invalid file contents
+        db_path.write_bytes(b"Not a valid sqlite database file at all")
+
+        # Opening store should detect malformed/invalid DB and self-heal
+        recovered_store = EpisodeStore(db_path=db_path)
+        conn = recovered_store._get_connection()
+        check = conn.execute("PRAGMA integrity_check;").fetchall()
+        conn.close()
+        assert tuple(check[0]) == ("ok",)
+
+        # Verify quarantine backup was made
+        backups = list(Path(tmpdir).glob("corrupt_test.corrupt_*.bak"))
+        assert len(backups) == 1
+        recovered_store.close()
+

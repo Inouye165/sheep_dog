@@ -83,7 +83,9 @@ Reward shaping may still include target-progress terms during training. That sig
 
 ## Checkpoint and Evaluation Flow
 
-Training runs the configured trainer across scheduled checkpoints and evaluates each checkpoint on fixed comparison seeds. Hill-climb candidate mutations can be scored on a separate fixed candidate seed set so policy promotion is less sensitive to a single rollout. Evaluation writes JSON summaries, CSV rows, and replay files for every seed. Training also writes a compact checkpoint index for the UI.
+Training runs the configured trainer across scheduled checkpoints and evaluates each checkpoint on fixed comparison seeds. Hill-climb candidate mutations can be scored on a separate fixed candidate seed set so policy promotion is less sensitive to a single rollout. Evaluation writes JSON summaries, CSV rows, and authentic step replay files (`.json.gz` or `.json`) for every evaluated seed. Training also writes a compact checkpoint index for the UI.
+
+In the evaluation harness and web inspector, an episode is strictly considered a **PASS** if and only if 100% of sheep are successfully penned (`penned_count == total_sheep` and `success == True`). Episodes ending with partial herding (such as 4 of 6 sheep penned) are unambiguously recorded and rendered as failures. The inspector streams the authentic recorded evaluation trajectories directly rather than re-simulating episodes.
 
 Checkpoint metadata is backward-compatible with older linear checkpoints and now also carries trainer type, policy type, and optional neural policy state paths so playback and benchmarking can load either baseline or experiment artifacts.
 

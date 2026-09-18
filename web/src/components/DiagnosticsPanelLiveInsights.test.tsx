@@ -237,7 +237,8 @@ describe("DiagnosticsPanel Live Insights & Telemetry", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    const { loadCheckpointIndex } = await import("../lib/api");
+    const { loadCheckpointIndex, setIsBackendOffline } = await import("../lib/api");
+    setIsBackendOffline(false);
     await loadCheckpointIndex();
 
     expect(fetchMock).toHaveBeenCalled();
@@ -611,7 +612,7 @@ describe("DiagnosticsPanel Live Insights & Telemetry", () => {
     );
 
     const stageSelect = screen.getByLabelText("Stage scope") as HTMLSelectElement;
-    expect(stageSelect.value).toBe("current-journey");
+    expect(stageSelect.value).toBe("current");
 
     // Rerender with advanced curriculum stage 9
     rerender(
@@ -628,7 +629,7 @@ describe("DiagnosticsPanel Live Insights & Telemetry", () => {
     );
 
     // Should automatically track the new stage
-    expect(stageSelect.value).toBe("current-journey");
+    expect(stageSelect.value).toBe("current");
     expect(screen.getAllByText(/Current stage \(Stage 9\)/i).length).toBeGreaterThan(0);
   });
 
@@ -666,9 +667,28 @@ describe("DiagnosticsPanel Live Insights & Telemetry", () => {
     expect(stageSelect.value).toBe("8");
   });
 
-  it("automatically loads current stage upon fresh mount / returning to insights even if user reviewed a previous stage earlier", () => {
-    // Simulate leftover numeric stage in localStorage
+  it("restores user-selected stage upon returning to insights when no stage promotion occurred", () => {
     window.localStorage.setItem("sheepdog_insights_stage_scope", "8");
+    window.localStorage.setItem("sheepdog_insights_last_curriculum_stage", "8");
+
+    render(
+      <DiagnosticsPanel
+        checkpointIndex={mockCheckpointIndex}
+        bestCheckpointEpisode={6508}
+        trainingStatus={activeTrainingStatus}
+        effectiveCurriculumStage={8}
+        lastLiveRefreshTime={Date.now()}
+      />
+    );
+
+    const stageSelect = screen.getByLabelText("Stage scope") as HTMLSelectElement;
+    expect(stageSelect.value).toBe("8");
+  });
+
+  it("automatically loads current stage upon fresh mount / returning to insights if app self-promoted to a new stage", () => {
+    // User had selected stage 8 previously, but app promoted to stage 9 while away
+    window.localStorage.setItem("sheepdog_insights_stage_scope", "8");
+    window.localStorage.setItem("sheepdog_insights_last_curriculum_stage", "8");
 
     render(
       <DiagnosticsPanel
@@ -681,8 +701,8 @@ describe("DiagnosticsPanel Live Insights & Telemetry", () => {
     );
 
     const stageSelect = screen.getByLabelText("Stage scope") as HTMLSelectElement;
-    // Numeric stage from previous session was not restored; defaults to current
-    expect(stageSelect.value).toBe("current-journey");
+    // Self-promotion detected: automatically switches to the new stage
+    expect(stageSelect.value).toBe("current");
   });
 
   it("does not render previous stage checkpoints on the chart when stage scope is set to current stage 9 with 0 checkpoints", () => {
