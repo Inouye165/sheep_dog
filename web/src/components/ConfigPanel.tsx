@@ -176,21 +176,35 @@ interface HyperparamsEditorProps {
   onSaved: (updated: UserHyperparams) => void;
 }
 
-function HyperparamsEditor({ hyperparams, onSaved }: HyperparamsEditorProps) {
-  type Draft = { environment: Record<string, number>; training: Record<string, number>; rewards: Record<string, number> };
-  const toDraft = (hp: UserHyperparams): Draft => ({
-    environment: { ...hp.environment as unknown as Record<string, number> },
-    training: { ...hp.training as unknown as Record<string, number> },
-    rewards: { ...hp.rewards as unknown as Record<string, number> },
-  });
+type HyperparamDraft = {
+  environment: Record<string, number>;
+  training: Record<string, number>;
+  rewards: Record<string, number>;
+};
 
-  const [draft, setDraft] = useState<Draft>(() => toDraft(hyperparams));
+function toDraft(hp: UserHyperparams): HyperparamDraft {
+  return {
+    environment: { ...(hp.environment as unknown as Record<string, number>) },
+    training: { ...(hp.training as unknown as Record<string, number>) },
+    rewards: { ...(hp.rewards as unknown as Record<string, number>) },
+  };
+}
+
+function HyperparamsEditor({ hyperparams, onSaved }: HyperparamsEditorProps) {
+  const [draft, setDraft] = useState<HyperparamDraft>(() => toDraft(hyperparams));
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savedOk, setSavedOk] = useState(false);
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const userEditedRef = useRef(false);
+
+  useEffect(() => {
+    return () => {
+      if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
+      if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     setDraft(toDraft(hyperparams));
@@ -210,7 +224,7 @@ function HyperparamsEditor({ hyperparams, onSaved }: HyperparamsEditorProps) {
     setDraft(toDraft(HYPERPARAM_DEFAULTS));
   };
 
-  const handleSave = async () => {
+  const handleSave = useCallback(async () => {
     userEditedRef.current = false;
     setSaving(true);
     setSaveError(null);
@@ -227,7 +241,7 @@ function HyperparamsEditor({ hyperparams, onSaved }: HyperparamsEditorProps) {
     } finally {
       setSaving(false);
     }
-  };
+  }, [draft, onSaved]);
 
   useEffect(() => {
     if (!userEditedRef.current) return;
@@ -236,7 +250,7 @@ function HyperparamsEditor({ hyperparams, onSaved }: HyperparamsEditorProps) {
     return () => {
       if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
     };
-  }, [draft]);
+  }, [draft, handleSave]);
 
   const isModified = (section: keyof UserHyperparams, key: string): boolean => {
     const def = (HYPERPARAM_DEFAULTS[section] as unknown as Record<string, number>)[key];

@@ -96,6 +96,8 @@ def test_loaded_policy_disables_unavailable_tensorboard(tmp_path: Path) -> None:
     model = MagicMock()
     model.batch_size = 1024
     model.tensorboard_log = str(tmp_path / "stale-tensorboard-path")
+    model.observation_space = SimpleNamespace(shape=(12,))
+    model.policy_kwargs = {"net_arch": list(config.training.neural_hidden_sizes)}
     vec_env = SimpleNamespace(observation_space=SimpleNamespace(shape=(12,)))
 
     with (
@@ -181,7 +183,10 @@ def test_stage_transition_evaluates_inherited_policy_before_learning(tmp_path: P
         "policy_state_path": str(previous_model),
         "best_model_path": str(previous_model),
         "best_model_curriculum_stage": 1,
-        "policy_config": {"hidden_sizes": [128, 128, 128], "observation_size": 54},
+        "policy_config": {
+            "hidden_sizes": list(config.training.neural_hidden_sizes),
+            "observation_size": 54,
+        },
         "policy_version": 4,
     }
     (artifacts / "training-state.json").write_text(json.dumps(state), encoding="utf-8")
@@ -242,7 +247,7 @@ def test_maskable_ppo_resume_applies_saved_adaptive_stage(tmp_path: Path) -> Non
         create_trainer(config, config.training.output_dir).train()
 
     assert len(learn_settings) == 1
-    assert np.allclose(learn_settings[0], (8e-5, 8e-5, 0.008))
+    assert np.allclose(learn_settings[0], (8e-5, 8e-5, 0.01))
 
 
 def test_maskable_ppo_trainer_resets_incompatible_saved_action_space(tmp_path: Path) -> None:
@@ -387,7 +392,7 @@ def test_maskable_ppo_trainer_compatible_across_curriculum_stages(tmp_path: Path
         "total_timesteps": 300,
         "policy_state_path": "stage-1-model.zip",
         "policy_config": {
-            "hidden_sizes": [128, 128],
+            "hidden_sizes": list(config_stage_1.training.neural_hidden_sizes),
             "observation_size": 54,
             "action_size": 9
         },
@@ -396,6 +401,7 @@ def test_maskable_ppo_trainer_compatible_across_curriculum_stages(tmp_path: Path
 
     artifacts_dir = Path(config_stage_1.training.output_dir)
     artifacts_dir.mkdir(parents=True, exist_ok=True)
+    (artifacts_dir / "stage-1-model.zip").write_bytes(b"PK\x03\x04dummy")
     (artifacts_dir / "training-state.json").write_text(
         json.dumps(state_payload, indent=2),
         encoding="utf-8",

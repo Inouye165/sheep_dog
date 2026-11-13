@@ -1,6 +1,8 @@
 """Tests for evaluation progress telemetry and terminal tracking."""
 
+from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from sheepdog.config import LabConfig
 from sheepdog.evaluation.evaluator import Evaluator
@@ -56,9 +58,6 @@ def test_evaluator_progress_callback_emits_seed_lifecycle_and_results(tmp_path: 
     assert complete_event["evaluation_completed_seeds"] == 2
     assert complete_event["evaluation_success_rate"] is not None
 
-
-from unittest.mock import patch
-from dataclasses import replace
 
 def test_server_status_tracks_evaluation_progress(tmp_path: Path) -> None:
     """Test that TrainingManager updates evaluation_status and evaluation_in_progress."""

@@ -11,15 +11,59 @@ from pathlib import Path
 from typing import Any
 
 from sheepdog.atomic_io import atomic_write_json
+from sheepdog.checkpoints.sidecar import get_sidecar_path_for_model
 
 logger = logging.getLogger("sheepdog.training.backup")
+
+
+def _find_sidecar_for_model(model_path: Path) -> Path | None:
+    """Return existing canonical (`*.sidecar.json`) or legacy (`*.zip.sidecar.json`) sidecar."""
+    canonical = get_sidecar_path_for_model(model_path)
+    if canonical.exists():
+        return canonical
+    legacy = model_path.with_name(f"{model_path.name}.sidecar.json")
+    if legacy.exists():
+        return legacy
+    return None
+
+
+def _copy_model_with_canonical_sidecar(src_model: Path, dst_model: Path) -> None:
+    """Copy *src_model* to *dst_model* and write canonical sidecar if present."""
+    dst_model.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src_model, dst_model)
+    sidecar = _find_sidecar_for_model(src_model)
+    if sidecar is not None:
+        shutil.copy2(sidecar, get_sidecar_path_for_model(dst_model))
+
+
+def _resolve_path_under_output_root(raw_path: str | Path, output_root: Path) -> Path | None:
+    """Resolve *raw_path* if and only if it stays within *output_root*."""
+    p = Path(raw_path)
+    if p.is_absolute():
+        resolved = p.resolve()
+        return resolved if resolved.is_relative_to(output_root) else None
+    direct = (output_root / p).resolve()
+    if p.parts and p.parts[0] == output_root.name:
+        via_parent = (output_root.parent / p).resolve()
+        if via_parent.is_relative_to(output_root):
+            return via_parent
+    return direct if direct.is_relative_to(output_root) else None
 
 
 class TrainingBackupManager:
     """Manages immutable completed stage backups and rolling hourly training snapshots."""
 
-    def __init__(self, backup_root: str | Path = "artifacts/backups") -> None:
+    def __init__(
+        self,
+        backup_root: str | Path = "artifacts/backups",
+        output_root: str | Path | None = None,
+    ) -> None:
         self.backup_root = Path(backup_root).resolve()
+        self.output_root = (
+            Path(output_root).resolve()
+            if output_root is not None
+            else self.backup_root.parent
+        )
         self.stages_dir = self.backup_root / "stages"
         self.hourly_dir = self.backup_root / "hourly"
         self._ensure_dirs()
@@ -54,12 +98,11 @@ class TrainingBackupManager:
                     shutil.copy2(src_model, dst_model)
                     copied_model_path = str(dst_model)
                     logger.info("Backed up Stage %d model to %s", stage, dst_model)
-                    # Also copy sidecar if present
-                    sidecar = src_model.with_suffix(".zip.sidecar.json")
-                    if not sidecar.exists():
-                        sidecar = src_model.with_name(f"{src_model.name}.sidecar.json")
-                    if sidecar.exists():
-                        shutil.copy2(sidecar, stage_dir / f"stage_{stage}_best_model.zip.sidecar.json")
+                    # Also copy sidecar if present (canonical and legacy naming)
+                    sidecar = _find_sidecar_for_model(src_model)
+                    if sidecar is not None:
+                        shutil.copy2(sidecar, get_sidecar_path_for_model(dst_model))
+                        shutil.copy2(sidecar, dst_model.with_name(f"{dst_model.name}.sidecar.json"))
                 except Exception as exc:
                     logger.warning("Failed to copy model for Stage %d backup: %s", stage, exc)
 
@@ -126,11 +169,10 @@ class TrainingBackupManager:
                 dst_model = self.hourly_dir / f"{snapshot_prefix}.zip"
                 try:
                     shutil.copy2(src_model, dst_model)
-                    sidecar = src_model.with_suffix(".zip.sidecar.json")
-                    if not sidecar.exists():
-                        sidecar = src_model.with_name(f"{src_model.name}.sidecar.json")
-                    if sidecar.exists():
-                        shutil.copy2(sidecar, self.hourly_dir / f"{snapshot_prefix}.zip.sidecar.json")
+                    sidecar = _find_sidecar_for_model(src_model)
+                    if sidecar is not None:
+                        shutil.copy2(sidecar, get_sidecar_path_for_model(dst_model))
+                        shutil.copy2(sidecar, dst_model.with_name(f"{dst_model.name}.sidecar.json"))
                 except Exception as exc:
                     logger.warning("Failed to copy active model for hourly backup: %s", exc)
 
@@ -168,13 +210,17 @@ class TrainingBackupManager:
             for meta_p in to_remove:
                 base_stem = meta_p.stem
                 try:
+                    zip_file = self.hourly_dir / f"{base_stem}.zip"
                     meta_p.unlink(missing_ok=True)
-                    (self.hourly_dir / f"{base_stem}.zip").unlink(missing_ok=True)
+                    zip_file.unlink(missing_ok=True)
+                    get_sidecar_path_for_model(zip_file).unlink(missing_ok=True)
                     (self.hourly_dir / f"{base_stem}.zip.sidecar.json").unlink(missing_ok=True)
                     pruned_count += 1
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("Failed to prune hourly snapshot %s: %s", meta_p, exc)
         return pruned_count
+
+    _prune_hourly_backups = prune_old_hourly_snapshots
 
     def list_backups(self) -> dict[str, Any]:
         """List all available completed stage milestones and hourly snapshots."""
@@ -189,8 +235,10 @@ class TrainingBackupManager:
                     try:
                         with open(manifest_path, encoding="utf-8") as f:
                             stages.append(json.load(f))
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to read stage backup manifest %s: %s", manifest_path, exc
+                        )
                 else:
                     try:
                         stg_num = int(stage_folder.name.split("_")[1])
@@ -201,8 +249,10 @@ class TrainingBackupManager:
                             "has_model": (stage_folder / f"stage_{stg_num}_best_model.zip").exists(),
                             "path": str(stage_folder),
                         })
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to inspect stage backup directory %s: %s", stage_folder, exc
+                        )
 
         hourly: list[dict[str, Any]] = []
         if self.hourly_dir.exists():
@@ -213,8 +263,8 @@ class TrainingBackupManager:
                         data["metadata_file"] = json_file.name
                         data["model_file"] = f"{json_file.stem}.zip" if (self.hourly_dir / f"{json_file.stem}.zip").exists() else None
                         hourly.append(data)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("Failed to read hourly backup metadata %s: %s", json_file, exc)
 
         return {
             "completed_stages": stages,
@@ -225,10 +275,10 @@ class TrainingBackupManager:
     def restore_stage_milestone(
         self,
         stage: int,
-        output_root: str | Path = "artifacts",
+        output_root: str | Path | None = None,
     ) -> dict[str, Any]:
         """Restore a completed stage milestone back into the active workspace."""
-        out = Path(output_root).resolve()
+        out = Path(output_root).resolve() if output_root is not None else self.output_root
         stage_dir = self.stages_dir / f"stage_{stage}"
         if not stage_dir.exists():
             raise FileNotFoundError(f"Stage {stage} milestone backup does not exist in {stage_dir}")
@@ -237,16 +287,6 @@ class TrainingBackupManager:
         models_dir.mkdir(parents=True, exist_ok=True)
         checkpoints_dir = out / "checkpoints"
         checkpoints_dir.mkdir(parents=True, exist_ok=True)
-
-        restored_model: Path | None = None
-        src_model = stage_dir / f"stage_{stage}_best_model.zip"
-        if src_model.exists():
-            dst_best = models_dir / "best-model.zip"
-            shutil.copy2(src_model, dst_best)
-            restored_model = dst_best
-            sidecar = stage_dir / f"stage_{stage}_best_model.zip.sidecar.json"
-            if sidecar.exists():
-                shutil.copy2(sidecar, models_dir / "best-model.zip.sidecar.json")
 
         src_chk = stage_dir / f"stage_{stage}_checkpoint.json"
         chk_payload: dict[str, Any] = {}
@@ -260,6 +300,36 @@ class TrainingBackupManager:
             with open(src_manifest, encoding="utf-8") as f:
                 manifest_payload = json.load(f)
 
+        training_state = manifest_payload.get("training_state") or chk_payload.get("training_state")
+
+        restored_model: Path | None = None
+        src_model = stage_dir / f"stage_{stage}_best_model.zip"
+        if src_model.exists():
+            dst_best = models_dir / "best-model.zip"
+            _copy_model_with_canonical_sidecar(src_model, dst_best)
+            restored_model = dst_best
+            if stage >= 9:
+                stage_best = checkpoints_dir / f"stage{stage}" / f"stage{stage}-best-model.zip"
+                _copy_model_with_canonical_sidecar(src_model, stage_best)
+                restored_model = stage_best
+                if isinstance(training_state, dict) and training_state.get("policy_state_path"):
+                    psp = _resolve_path_under_output_root(training_state["policy_state_path"], out)
+                    if psp is not None and psp != stage_best and psp != dst_best:
+                        _copy_model_with_canonical_sidecar(src_model, psp)
+
+        if isinstance(training_state, dict) and training_state:
+            updated_state = dict(training_state)
+            if restored_model is not None:
+                updated_state["best_model_path"] = str(restored_model)
+                updated_state["best_model_curriculum_stage"] = int(stage)
+                psp_raw = updated_state.get("policy_state_path")
+                psp_resolved = (
+                    _resolve_path_under_output_root(psp_raw, out) if psp_raw else None
+                )
+                if psp_resolved is None or not psp_resolved.exists():
+                    updated_state["policy_state_path"] = str(restored_model)
+            atomic_write_json(out / "training-state.json", updated_state)
+
         return {
             "stage": stage,
             "restored_model_path": str(restored_model) if restored_model else None,
@@ -272,10 +342,10 @@ class TrainingBackupManager:
     def restore_hourly_snapshot(
         self,
         snapshot_id: str,
-        output_root: str | Path = "artifacts",
+        output_root: str | Path | None = None,
     ) -> dict[str, Any]:
         """Restore a specific hourly snapshot model and state back into active workspace."""
-        out = Path(output_root).resolve()
+        out = Path(output_root).resolve() if output_root is not None else self.output_root
         clean_id = Path(snapshot_id).stem
         json_path = self.hourly_dir / f"{clean_id}.json"
         zip_path = self.hourly_dir / f"{clean_id}.zip"
@@ -286,20 +356,50 @@ class TrainingBackupManager:
         with open(json_path, encoding="utf-8") as f:
             metadata = json.load(f)
 
+        raw_stage = metadata.get("stage")
+        snap_stage = int(raw_stage) if raw_stage is not None else None
+        training_state = metadata.get("training_state")
+
         models_dir = out / "models"
         models_dir.mkdir(parents=True, exist_ok=True)
         restored_model: Path | None = None
         if zip_path.exists():
             dst_best = models_dir / "best-model.zip"
-            shutil.copy2(zip_path, dst_best)
+            _copy_model_with_canonical_sidecar(zip_path, dst_best)
             restored_model = dst_best
-            sidecar = self.hourly_dir / f"{clean_id}.zip.sidecar.json"
-            if sidecar.exists():
-                shutil.copy2(sidecar, models_dir / "best-model.zip.sidecar.json")
+            if snap_stage is not None and snap_stage >= 9:
+                stage_best = out / "checkpoints" / f"stage{snap_stage}" / f"stage{snap_stage}-best-model.zip"
+                _copy_model_with_canonical_sidecar(zip_path, stage_best)
+                restored_model = stage_best
+            if isinstance(training_state, dict) and training_state.get("policy_state_path"):
+                psp = _resolve_path_under_output_root(training_state["policy_state_path"], out)
+                if psp is not None and psp != dst_best and psp != restored_model:
+                    _copy_model_with_canonical_sidecar(zip_path, psp)
+
+        if isinstance(training_state, dict) and training_state:
+            updated_state = dict(training_state)
+            if restored_model is not None:
+                psp_raw = updated_state.get("policy_state_path")
+                psp_resolved = (
+                    _resolve_path_under_output_root(psp_raw, out) if psp_raw else None
+                )
+                if psp_resolved is None or not psp_resolved.exists():
+                    updated_state["policy_state_path"] = str(restored_model)
+                else:
+                    updated_state["policy_state_path"] = str(psp_resolved)
+                if snap_stage is not None and snap_stage >= 9:
+                    bmp_raw = updated_state.get("best_model_path")
+                    bmp_resolved = (
+                        _resolve_path_under_output_root(bmp_raw, out) if bmp_raw else None
+                    )
+                    if bmp_resolved is None or not bmp_resolved.exists():
+                        updated_state["best_model_path"] = str(restored_model)
+                    updated_state.setdefault("best_model_curriculum_stage", snap_stage)
+            atomic_write_json(out / "training-state.json", updated_state)
 
         return {
             "snapshot_id": clean_id,
-            "stage": metadata.get("stage"),
+            "stage": snap_stage,
             "restored_model_path": str(restored_model) if restored_model else None,
             "metadata": metadata,
             "status": "success",

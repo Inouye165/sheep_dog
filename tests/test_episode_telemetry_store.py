@@ -294,9 +294,8 @@ def test_13_corrupt_database_self_healing():
 
         # Opening store should detect malformed/invalid DB and self-heal
         recovered_store = EpisodeStore(db_path=db_path)
-        conn = recovered_store._get_connection()
-        check = conn.execute("PRAGMA integrity_check;").fetchall()
-        conn.close()
+        with recovered_store._get_connection() as conn:
+            check = conn.execute("PRAGMA integrity_check;").fetchall()
         assert tuple(check[0]) == ("ok",)
 
         # Verify quarantine backup was made

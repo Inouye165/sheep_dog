@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { loadStageHealth } from "../lib/api";
 import type {
   StageHealthSummary,
@@ -26,7 +26,7 @@ function getStageFromCheckpoint(c: CheckpointEntry): number {
   if (c.reward_config?.instincts?.curriculum_stage !== undefined && c.reward_config?.instincts?.curriculum_stage !== null) {
     return c.reward_config.instincts.curriculum_stage;
   }
-  return 1;
+  return -1;
 }
 
 function buildClientFallbackHealth(
@@ -35,10 +35,27 @@ function buildClientFallbackHealth(
   trainingStatus?: TrainingStatus | null,
 ): StageHealthSummary | null {
   const stageCheckpoints = checkpoints.filter((c) => getStageFromCheckpoint(c) === stage);
+  const latestStageCp = stageCheckpoints.length > 0 ? stageCheckpoints[stageCheckpoints.length - 1] : null;
+  const envCfg = latestStageCp?.environment_config;
+  const dogsCount = envCfg?.dogs;
+  const sheepCount =
+    envCfg?.sheep ??
+    (trainingStatus?.curriculum_stage === stage
+      ? trainingStatus?.evaluation_latest_result?.total_sheep
+      : undefined);
+  const gridDims = envCfg?.width && envCfg?.height ? `${envCfg.width}x${envCfg.height}` : null;
+  const stageTitle =
+    dogsCount != null && sheepCount != null && gridDims
+      ? `Stage ${stage} (${dogsCount} ${dogsCount === 1 ? "Dog" : "Dogs"}, ${sheepCount} Sheep, ${gridDims})`
+      : `Stage ${stage}`;
+  const nearGoalThreshold = sheepCount != null && sheepCount >= 4 ? sheepCount - 1 : 3;
+  const nearGoalLabel =
+    sheepCount != null ? `${nearGoalThreshold} of ${sheepCount} sheep` : `${nearGoalThreshold}+ sheep`;
+
   if (stageCheckpoints.length === 0) {
     return {
       stage,
-      stage_title: `Stage ${stage}`,
+      stage_title: stageTitle,
       total_stage_checkpoints: 0,
       all_time_stage_success_rate: 0.0,
       recent_success_rate: 0.0,
@@ -67,8 +84,6 @@ function buildClientFallbackHealth(
   }
 
   const allSr = stageCheckpoints.map((c) => c.success_rate ?? 0.0);
-  const allSteps = stageCheckpoints.map((c) => c.average_completion_steps ?? 0.0).filter((s) => s > 0);
-  const allRew = stageCheckpoints.map((c) => c.average_reward ?? 0.0);
 
   const allTimeSr = allSr.reduce((a, b) => a + b, 0) / allSr.length;
   const peakSr = Math.max(...allSr);
@@ -108,7 +123,7 @@ function buildClientFallbackHealth(
           totalFailures += 1;
           if (r.sheep_penned != null) {
             pennedCounts.push(r.sheep_penned);
-            if (r.sheep_penned >= 3) threePenned += 1;
+            if (r.sheep_penned >= nearGoalThreshold) threePenned += 1;
             else if (r.sheep_penned === 2) twoPenned += 1;
             else if (r.sheep_penned === 1) onePenned += 1;
             else zeroPenned += 1;
@@ -164,7 +179,7 @@ function buildClientFallbackHealth(
   } else if (recentSr >= 0.45 || closeness >= 0.45 || (peakSr >= 0.80 && allTimeSr >= 0.55)) {
     status = "yellow";
     statusLabel = "Active Exploration · Watch";
-    statusExplanation = `The policy is undergoing standard multi-agent exploratory consolidation (win rates fluctuate around ${Math.round(recentSr * 100)}%, but ${Math.round(threePct * 100)}% of failures pen 3 of 4 sheep). Do not panic or interrupt.`;
+    statusExplanation = `The policy is undergoing standard multi-agent exploratory consolidation (win rates fluctuate around ${Math.round(recentSr * 100)}%, and ${Math.round(threePct * 100)}% of failures pen ${nearGoalLabel}). Do not panic or interrupt.`;
   } else {
     status = "red";
     statusLabel = "Systemic Bottleneck · Action Required";
@@ -184,7 +199,7 @@ function buildClientFallbackHealth(
     recs.push({
       type: "continue",
       title: "Allow Live Training to Continue",
-      description: "The policy is actively hitting 90% benchmarks. Do not reset weights or interrupt.",
+      description: "The policy is actively hitting target benchmarks. Do not reset weights or interrupt.",
       suggested_action: "Keep training running. Monitor auto-promotion gate for consecutive qualification.",
       priority: "info",
     });
@@ -192,7 +207,7 @@ function buildClientFallbackHealth(
     recs.push({
       type: "continue",
       title: "Do Not Panic on Temporary Dips",
-      description: `Failed runs are penning 3 of 4 sheep ${Math.round(threePct * 100)}% of the time. PPO typically surges after exploration consolidation.`,
+      description: `Failed runs are penning ${nearGoalLabel} ${Math.round(threePct * 100)}% of the time. PPO typically surges after exploration consolidation.`,
       suggested_action: "Allow 10–15 more checkpoints before making intervention decisions.",
       priority: "info",
     });
@@ -213,15 +228,49 @@ function buildClientFallbackHealth(
     recs.push({
       type: "reward_tweak",
       title: "Boost Lone Straggler Approach Scale",
-      description: "Failures frequently leave 1 sheep unpenned until timeout. A stronger approach gradient motivates dogs to retrieve the 4th sheep cross-field.",
+      description: "Failures frequently leave 1 sheep unpenned until timeout. A stronger approach gradient motivates dogs to retrieve the final sheep cross-field.",
       suggested_action: `Update CURRICULUM_REWARD_OVERRIDES[8]['farthest_sheep_progress_scale'] = 0.55 in src/sheepdog/curriculum.py`,
       priority: "medium",
     });
   }
 
+  const gridLabel = gridDims ? `${gridDims} grid` : `Stage ${stage} arena`;
+  const effectiveLr = trainingStatus?.effective_learning_rate;
+  const auditItems = [
+    ...(stage === 8
+      ? [
+          {
+            parameter: "farthest_sheep_progress_scale",
+            current_value: 0.42,
+            recommended_value: 0.55,
+            status: "warn" as const,
+            note: `Current 0.42 is low for stray recovery on ${gridLabel}; recommend >= 0.55.`,
+          },
+        ]
+      : []),
+    ...(effectiveLr != null
+      ? [
+          {
+            parameter: "effective_learning_rate",
+            current_value: effectiveLr,
+            recommended_value: effectiveLr,
+            status: "ok" as const,
+            note: `Active learning rate reported by trainer for Stage ${stage}.`,
+          },
+        ]
+      : []),
+    {
+      parameter: "entropy_coef",
+      current_value: 0.010,
+      recommended_value: 0.010,
+      status: "ok" as const,
+      note: "Baseline PPO exploration entropy active.",
+    },
+  ];
+
   return {
     stage,
-    stage_title: `Stage ${stage} (3 Dogs, 4 Sheep, 108x78)`,
+    stage_title: stageTitle,
     total_stage_checkpoints: stageCheckpoints.length,
     all_time_stage_success_rate: allTimeSr,
     recent_success_rate: recentSr,
@@ -252,22 +301,7 @@ function buildClientFallbackHealth(
       mode: c.evaluation_mode || "quick",
       timestamp: c.created_timestamp || "",
     })),
-    hyperparameter_audit: [
-      {
-        parameter: "farthest_sheep_progress_scale",
-        current_value: 0.42,
-        recommended_value: 0.55,
-        status: "warn",
-        note: "Current 0.42 is low for stray recovery on 108x78 grid; recommend >= 0.55.",
-      },
-      {
-        parameter: "entropy_coef",
-        current_value: 0.010,
-        recommended_value: 0.010,
-        status: "ok",
-        note: "Baseline PPO exploration entropy active.",
-      },
-    ],
+    hyperparameter_audit: auditItems,
     prescriptive_recommendations: recs,
   };
 }
@@ -275,7 +309,7 @@ function buildClientFallbackHealth(
 export function StageHealthBanner({
   curriculumStage,
   lastLiveRefreshTime,
-  isLiveTraining = false,
+  isLiveTraining: _isLiveTraining = false,
   checkpoints = [],
   trainingStatus = null,
 }: StageHealthBannerProps) {
@@ -285,6 +319,15 @@ export function StageHealthBanner({
   const [loading, setLoading] = useState<boolean>(false);
   const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
   const [copied, setCopied] = useState<boolean>(false);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current) {
+        clearTimeout(copyTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     let isMounted = true;
@@ -308,14 +351,14 @@ export function StageHealthBanner({
         if (isMounted) setLoading(false);
       }
     };
-    load();
+    void load();
     return () => {
       isMounted = false;
     };
   }, [curriculumStage, checkpoints, trainingStatus, lastLiveRefreshTime]);
 
 
-  const handleCopySummary = () => {
+  const handleCopyForAgent = () => {
     if (!healthData) return;
     const text = [
       `=== STAGE ${healthData.stage} HEALTH AUDIT & DIAGNOSTIC SUMMARY ===`,
@@ -332,15 +375,14 @@ export function StageHealthBanner({
       ``,
       `--- FAILURE PROGRESS (Closeness to Victory) ---`,
       `Total Failed Episodes: ${healthData.failure_progress.total_failures}`,
-      `3 of 4 Sheep Penned on Fail: ${(healthData.failure_progress.three_penned_pct * 100).toFixed(1)}%`,
-      `2 of 4 Sheep Penned on Fail: ${(healthData.failure_progress.two_penned_pct * 100).toFixed(1)}%`,
+      `Near-Complete Failures (3+ Sheep Penned): ${(healthData.failure_progress.three_penned_pct * 100).toFixed(1)}%`,
+      `2 Sheep Penned on Fail: ${(healthData.failure_progress.two_penned_pct * 100).toFixed(1)}%`,
       `Avg Sheep Penned on Fail: ${healthData.failure_progress.avg_penned_on_fail}`,
       ``,
       `--- SEED RELIABILITY MATRIX ---`,
       ...healthData.seed_matrix.map(
         (s) =>
-          `Seed ${s.seed}: ${(s.win_rate * 100).toFixed(1)}% (${s.wins}/${s.total} wins) - Status: ${s.status.toUpperCase()}${
-            s.current_consecutive_fails > 0 ? ` (Streak: ${s.current_consecutive_fails} fails)` : ""
+          `Seed ${s.seed}: ${(s.win_rate * 100).toFixed(1)}% (${s.wins}/${s.total} wins) - Status: ${s.status.toUpperCase()}${s.current_consecutive_fails > 0 ? ` (Streak: ${s.current_consecutive_fails} fails)` : ""
           }`
       ),
       ``,
@@ -351,10 +393,18 @@ export function StageHealthBanner({
       ),
     ].join("\n");
 
-    navigator.clipboard.writeText(text).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2500);
-    });
+    navigator.clipboard
+      .writeText(text)
+      .then(() => {
+        setCopied(true);
+        if (copyTimerRef.current) {
+          clearTimeout(copyTimerRef.current);
+        }
+        copyTimerRef.current = setTimeout(() => setCopied(false), 2500);
+      })
+      .catch((err) => {
+        console.warn("[StageHealthBanner] Clipboard write failed:", err);
+      });
   };
 
   if (!healthData) {
@@ -417,8 +467,8 @@ export function StageHealthBanner({
                     healthData.recent_success_rate >= 0.8
                       ? "#4ade80"
                       : healthData.recent_success_rate >= 0.5
-                      ? "#fbbf24"
-                      : "#f87171",
+                        ? "#fbbf24"
+                        : "#f87171",
                 }}
               >
                 {(healthData.recent_success_rate * 100).toFixed(1)}%
@@ -448,9 +498,8 @@ export function StageHealthBanner({
                 <div
                   key={s.seed}
                   className={`stage-seed-pill stage-seed-pill--${s.status}`}
-                  title={`Seed ${s.seed}: ${(s.win_rate * 100).toFixed(1)}% (${s.wins}/${s.total} wins)${
-                    s.current_consecutive_fails > 0 ? ` · ${s.current_consecutive_fails} consecutive fails` : ""
-                  }`}
+                  title={`Seed ${s.seed}: ${(s.win_rate * 100).toFixed(1)}% (${s.wins}/${s.total} wins)${s.current_consecutive_fails > 0 ? ` · ${s.current_consecutive_fails} consecutive fails` : ""
+                    }`}
                 >
                   <span className="stage-seed-pill__num">{s.seed}</span>
                   <span className="stage-seed-pill__pct">{Math.round(s.win_rate * 100)}%</span>
@@ -581,7 +630,7 @@ export function StageHealthBanner({
               {/* Seed Reliability Matrix Breakdown */}
               <div className="stage-health-modal__section">
                 <div className="stage-health-modal__section-title">
-                  <span>🎯 Seed Reliability Matrix (All-Time Stage 8)</span>
+                  <span>🎯 Seed Reliability Matrix (All-Time Stage {healthData.stage})</span>
                 </div>
                 <div className="stage-seed-grid">
                   {healthData.seed_matrix.map((s) => (
@@ -606,7 +655,7 @@ export function StageHealthBanner({
 
             <div className="stage-health-modal__footer">
               <button
-                onClick={handleCopySummary}
+                onClick={handleCopyForAgent}
                 className="stage-health-copy-btn"
                 title="Copy full diagnostic report to clipboard"
               >

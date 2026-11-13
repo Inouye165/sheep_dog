@@ -554,6 +554,191 @@ def create_isolated_stray_scenario(
     )
 
 
+def create_high_pen_standoff_scenario(
+    *,
+    seed: int,
+    config: EnvironmentConfig,
+) -> Scenario:
+    """Create a scenario with an upper-boundary pen and south-facing gate.
+
+    Models the failure geometry of Seeds 37 and 73: pen positioned near top edge
+    (y in [3, 24]), opening="bottom", with sheep flock located in the central field.
+    Forces dogs to coordinate north-pushing without 2-position oscillation deadlock.
+    """
+    width = config.width
+    height = config.height
+    sheep_count = config.sheep
+    dog_count = config.dogs
+    rng = Random(seed + config.seed_offset)
+
+    # Upper boundary pen: y between 3 and min(24, int(height * 0.25))
+    pen_origin_y = rng.randint(3, max(3, min(24, int(height * 0.22))))
+    pen_min_x = 4
+    pen_max_x = max(pen_min_x, width - config.pen_width - 6)
+    pen_origin_x = rng.randint(pen_min_x, pen_max_x)
+
+    pen = PenLayout(
+        origin_x=pen_origin_x,
+        origin_y=pen_origin_y,
+        width=config.pen_width,
+        height=config.pen_height,
+        opening="bottom",
+    )
+
+    # Central flock below the pen
+    center_x = max(8, min(width - 8, pen_origin_x + config.pen_width // 2 + rng.randint(-8, 8)))
+    min_sheep_y = pen_origin_y + config.pen_height + 5
+    max_sheep_y = max(min_sheep_y + 2, min(height - 12, int(height * 0.55)))
+    center_y = rng.randint(min_sheep_y, max_sheep_y)
+
+    sheep: list[AgentLayout] = []
+    occupied: set[tuple[int, int]] = set()
+    for i in range(sheep_count):
+        placed = False
+        for _ in range(50):
+            sx = max(2, min(width - 3, center_x + rng.randint(-5, 5)))
+            sy = max(min_sheep_y, min(height - 4, center_y + rng.randint(-4, 4)))
+            if (sx, sy) not in occupied:
+                occupied.add((sx, sy))
+                sheep.append(AgentLayout(index=i, x=sx, y=sy))
+                placed = True
+                break
+        if not placed:
+            sheep.append(AgentLayout(index=i, x=center_x + i, y=center_y))
+
+    # Dogs positioned south and flanking the flock to herd north toward the pen
+    dogs: list[AgentLayout] = []
+    dog_base_y = min(height - 3, center_y + rng.randint(8, 14))
+    dog_spread = max(4, min(12, width // (dog_count + 1)))
+    for i in range(dog_count):
+        dx = max(2, min(width - 3, center_x + (i - dog_count // 2) * dog_spread + rng.randint(-1, 1)))
+        dy = max(2, min(height - 3, dog_base_y + rng.randint(-2, 2)))
+        dogs.append(AgentLayout(index=i, x=dx, y=dy))
+
+    return Scenario(
+        id=f"high_pen_standoff_{seed}",
+        name="high_pen_standoff",
+        created_at="",
+        seed=seed,
+        width=width,
+        height=height,
+        dogs=tuple(dogs),
+        sheep=tuple(sheep),
+        pen=pen,
+        sheep_personality_strength=config.sheep_personality_strength,
+        sheep_personality_seed_offset=config.sheep_personality_seed_offset,
+        seed_offset=config.seed_offset,
+        description="High boundary pen with south-facing entrance to remediate 2-position oscillation standoff (Seed-37/73 archetype)",
+    )
+
+
+def create_wall_stray_extraction_scenario(
+    *,
+    seed: int,
+    config: EnvironmentConfig,
+) -> Scenario:
+    """Create a scenario with majority of sheep at/in pen and 1–2 strays against walls/corners.
+
+    Models the 5-penned failure mode of Seeds 11, 23, 41, 53, 59, 61, 71.
+    Trains the team to detach from gate defense and retrieve wall/corner strays.
+    """
+    width = config.width
+    height = config.height
+    sheep_count = config.sheep
+    dog_count = config.dogs
+    rng = Random(seed + config.seed_offset)
+
+    # Determine pen placement (interior if configured, else corner/wall)
+    placement = (getattr(config, "pen_placement", "corner") or "corner").lower()
+    if placement in ("interior", "random"):
+        min_x = 4
+        max_x = max(min_x, width - config.pen_width - 6)
+        min_y = 4
+        max_y = max(min_y, height - config.pen_height - 6)
+        pen_origin_x = rng.randint(min_x, max_x)
+        pen_origin_y = rng.randint(min_y, max_y)
+    else:
+        pen_origin_x = width - config.pen_width - 2
+        pen_origin_y = 2
+
+    pen = PenLayout(
+        origin_x=pen_origin_x,
+        origin_y=pen_origin_y,
+        width=config.pen_width,
+        height=config.pen_height,
+        opening=config.pen_opening,
+    )
+
+    # 1 stray (or 2 if large flock and rng rolls 20%)
+    stray_count = 1 if sheep_count <= 4 or rng.random() > 0.20 else 2
+    near_count = sheep_count - stray_count
+
+    sheep: list[AgentLayout] = []
+    occupied: set[tuple[int, int]] = set()
+
+    # Place near-pen sheep directly in front of or inside the pen entrance
+    entrance_center_x = pen_origin_x + config.pen_width // 2
+    entrance_y = pen_origin_y + config.pen_height + 2 if config.pen_opening == "bottom" else max(2, pen_origin_y - 2)
+
+    for i in range(near_count):
+        placed = False
+        for _ in range(50):
+            sx = max(2, min(width - 3, entrance_center_x + rng.randint(-3, 3)))
+            sy = max(2, min(height - 3, entrance_y + rng.randint(-2, 3)))
+            if (sx, sy) not in occupied:
+                occupied.add((sx, sy))
+                sheep.append(AgentLayout(index=i, x=sx, y=sy))
+                placed = True
+                break
+        if not placed:
+            sheep.append(AgentLayout(index=i, x=entrance_center_x + i, y=entrance_y))
+
+    # Place stray sheep tight against one of the perimeter walls or corners
+    wall_choices = ["bottom", "right", "left", "top"]
+    for i in range(stray_count):
+        wall = rng.choice(wall_choices)
+        if wall == "bottom":
+            sx = rng.randint(4, max(4, width - 5))
+            sy = rng.randint(max(2, height - 3), height - 2)
+        elif wall == "right":
+            sx = rng.randint(max(2, width - 3), width - 2)
+            sy = rng.randint(4, max(4, height - 5))
+        elif wall == "left":
+            sx = rng.randint(2, min(4, width - 2))
+            sy = rng.randint(4, max(4, height - 5))
+        else:  # top
+            sx = rng.randint(4, max(4, width - 5))
+            sy = rng.randint(2, min(4, height - 2))
+        sheep.append(AgentLayout(index=near_count + i, x=sx, y=sy))
+
+    # Dogs: 1 holding near pen entrance, other dogs positioned toward the stray
+    dogs: list[AgentLayout] = []
+    dogs.append(AgentLayout(index=0, x=entrance_center_x - 2, y=entrance_y + 1))
+    stray_ref_x = sheep[-1].x
+    stray_ref_y = sheep[-1].y
+    for i in range(1, dog_count):
+        t = i / dog_count
+        dx = int(entrance_center_x + t * (stray_ref_x - entrance_center_x))
+        dy = int(entrance_y + t * (stray_ref_y - entrance_y))
+        dogs.append(AgentLayout(index=i, x=max(2, min(width - 3, dx)), y=max(2, min(height - 3, dy))))
+
+    return Scenario(
+        id=f"wall_stray_extraction_{seed}",
+        name="wall_stray_extraction",
+        created_at="",
+        seed=seed,
+        width=width,
+        height=height,
+        dogs=tuple(dogs),
+        sheep=tuple(sheep),
+        pen=pen,
+        sheep_personality_strength=config.sheep_personality_strength,
+        sheep_personality_seed_offset=config.sheep_personality_seed_offset,
+        seed_offset=config.seed_offset,
+        description="Near-pen flock with lone stray trapped against perimeter wall/corner (Seeds 11/23/41/53/59/61/71 archetype)",
+    )
+
+
 # Scenario type registry
 SCENARIO_BUILDERS: dict[str, callable] = {
     "scattered_sheep": create_scattered_sheep_scenario,
@@ -564,6 +749,8 @@ SCENARIO_BUILDERS: dict[str, callable] = {
     "subpen_flock": create_subpen_flock_scenario,
     "gate_wall_flock": create_gate_wall_flock_scenario,
     "isolated_stray": create_isolated_stray_scenario,
+    "high_pen_standoff": create_high_pen_standoff_scenario,
+    "wall_stray_extraction": create_wall_stray_extraction_scenario,
 }
 
 

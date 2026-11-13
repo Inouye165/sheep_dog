@@ -3,14 +3,12 @@ import {
   analyzePerSeedReliability,
   assertMonotonicX,
   buildFormalEvalMarkers,
+  calculateAdaptiveBlockSize,
   calculateEfficiencyTrend,
-  compareCanonicalEpisodes,
   computeCheckpointEfficiency,
   computeRollingTrainingSeries,
-  normalizeEpisodeRecord,
   processCanonicalHistory,
   selectWindowSlice,
-  type CanonicalEpisodeRecord,
 } from "./chartPipeline";
 import type { CheckpointEntry, TrainingEpisode } from "../state/types";
 
@@ -331,5 +329,32 @@ describe("Chart Pipeline Architecture & Integrity", () => {
     // Monotonicity assertion on canonical history
     expect(() => assertMonotonicX(stage1.map((e) => ({ x: e.global_timestep })))).not.toThrow();
     expect(() => assertMonotonicX(stage2.map((e) => ({ x: e.global_timestep })))).not.toThrow();
+  });
+
+  it("calculates adaptive bucket and block sizes accurately without single-point collapses", () => {
+    // viewWindow = 25
+    expect(calculateAdaptiveBlockSize(25, 25)).toBe(5);
+    expect(calculateAdaptiveBlockSize(25, 20)).toBe(5);
+    expect(calculateAdaptiveBlockSize(25, 12)).toBe(3);
+    expect(calculateAdaptiveBlockSize(25, 4)).toBe(1);
+    expect(calculateAdaptiveBlockSize(25, 0)).toBe(1);
+
+    // viewWindow = 50
+    expect(calculateAdaptiveBlockSize(50, 50)).toBe(10);
+    expect(calculateAdaptiveBlockSize(50, 45)).toBe(9);
+    expect(calculateAdaptiveBlockSize(50, 10)).toBe(2);
+    expect(calculateAdaptiveBlockSize(50, 1)).toBe(1);
+
+    // viewWindow = 100
+    expect(calculateAdaptiveBlockSize(100, 100)).toBe(20);
+    expect(calculateAdaptiveBlockSize(100, 80)).toBe(16);
+    expect(calculateAdaptiveBlockSize(100, 10)).toBe(2);
+    expect(calculateAdaptiveBlockSize(100, 1)).toBe(1);
+
+    // viewWindow = "all"
+    expect(calculateAdaptiveBlockSize("all", 100)).toBe(25);
+    expect(calculateAdaptiveBlockSize("all", 25)).toBe(25);
+    expect(calculateAdaptiveBlockSize("all", 15)).toBe(3);
+    expect(calculateAdaptiveBlockSize("all", 0)).toBe(1);
   });
 });

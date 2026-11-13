@@ -1,0 +1,7 @@
+# Agent rules entry point
+
+The canonical repository instructions are in [AGENTS.md](AGENTS.md), the filename recognized by Codex.
+
+Read and follow that file before working here. This file preserves the requested `agents.mf` entry point without duplicating rules that could drift.
+
+Current state: [handoff.md](handoff.md). Prioritized work: [todo.md](todo.md).

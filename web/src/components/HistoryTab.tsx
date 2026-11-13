@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { loadTrainingHistory } from "../lib/api";
 import type { TelemetryRecord } from "../state/types";
 import { RecentEpisodesViewer } from "./RecentEpisodesViewer";
@@ -11,41 +11,71 @@ function getStageName(stage: number): string {
   return String(stage);
 }
 
+function isFiniteNumber(val: unknown): val is number {
+  return typeof val === "number" && Number.isFinite(val);
+}
+
 export function HistoryTab() {
   const [history, setHistory] = useState<TelemetryRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const activeRef = useRef(true);
+  const hasLoadedOnceRef = useRef(false);
 
-  const fetchHistory = async () => {
+  const fetchHistory = useCallback(async (isBackgroundPoll = false) => {
     try {
-      setLoading(true);
-      setError(null);
+      if (!isBackgroundPoll && !hasLoadedOnceRef.current) {
+        setLoading(true);
+      }
+      if (!isBackgroundPoll) {
+        setError(null);
+      }
       const data = await loadTrainingHistory();
+      if (!activeRef.current) return;
+      if (!Array.isArray(data)) {
+        if (!hasLoadedOnceRef.current) {
+          setHistory([]);
+        }
+        return;
+      }
       // Sort history by step/timestamp just in case
-      const sorted = [...data].sort((a, b) => a.step - b.step);
+      const sorted = [...data].sort((a, b) => (a.step ?? 0) - (b.step ?? 0));
       setHistory(sorted);
+      setError(null);
+      hasLoadedOnceRef.current = true;
     } catch (err) {
+      if (!activeRef.current) return;
       console.error(err);
-      setError("Failed to load training history telemetry records.");
+      if (!hasLoadedOnceRef.current) {
+        setError("Failed to load training history telemetry records.");
+      }
     } finally {
-      setLoading(false);
+      if (activeRef.current) {
+        setLoading(false);
+      }
     }
-  };
+  }, []);
 
   useEffect(() => {
-    fetchHistory();
-    // Set up auto-refresh every 8 seconds
-    const interval = setInterval(fetchHistory, 8000);
-    return () => clearInterval(interval);
-  }, []);
+    activeRef.current = true;
+    void fetchHistory(false);
+    // Set up auto-refresh every 8 seconds without resetting loading=true
+    const interval = setInterval(() => {
+      void fetchHistory(true);
+    }, 8000);
+    return () => {
+      activeRef.current = false;
+      clearInterval(interval);
+    };
+  }, [fetchHistory]);
 
   // Compute metrics
   const totalRecords = history.length;
   const latestRecord = totalRecords > 0 ? history[totalRecords - 1] : null;
   
   const peakSuccess = useMemoPeakSuccess(history);
-  const totalSteps = latestRecord?.step ?? 0;
-  const currentStageName = latestRecord ? getStageName(latestRecord.stage) : "N/A";
+  const totalSteps = isFiniteNumber(latestRecord?.step) ? latestRecord.step : 0;
+  const currentStageName = latestRecord && isFiniteNumber(latestRecord.stage) ? getStageName(latestRecord.stage) : "N/A";
 
   // Render SVG Chart for Success Rate
   const chartWidth = 800;
@@ -60,15 +90,18 @@ export function HistoryTab() {
 
     return history.map((record, i) => {
       const x = paddingLeft + (i / (totalRecords - 1)) * (chartWidth - paddingLeft - paddingRight);
+      const sr = isFiniteNumber(record.success_rate) ? record.success_rate : 0;
       // y goes from top (0) to bottom (chartHeight). Success rate is 0.0 to 1.0.
-      const y = chartHeight - paddingBottom - record.success_rate * (chartHeight - paddingTop - paddingBottom);
+      const y = chartHeight - paddingBottom - sr * (chartHeight - paddingTop - paddingBottom);
       return { x, y, record };
     });
   }, [history, totalRecords]);
 
   const svgPath = React.useMemo(() => {
     if (chartPoints.length < 2) return "";
-    return chartPoints.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(" ");
+    return chartPoints
+      .map((p, i) => `${i === 0 ? "M" : "L"} ${isFiniteNumber(p.x) ? p.x.toFixed(1) : "0.0"} ${isFiniteNumber(p.y) ? p.y.toFixed(1) : "0.0"}`)
+      .join(" ");
   }, [chartPoints]);
 
   const svgAreaPath = React.useMemo(() => {
@@ -76,7 +109,9 @@ export function HistoryTab() {
     const first = chartPoints[0];
     const last = chartPoints[chartPoints.length - 1];
     const baselineY = chartHeight - paddingBottom;
-    return `${svgPath} L ${last.x.toFixed(1)} ${baselineY} L ${first.x.toFixed(1)} ${baselineY} Z`;
+    const lastX = isFiniteNumber(last.x) ? last.x.toFixed(1) : "0.0";
+    const firstX = isFiniteNumber(first.x) ? first.x.toFixed(1) : "0.0";
+    return `${svgPath} L ${lastX} ${baselineY} L ${firstX} ${baselineY} Z`;
   }, [chartPoints, svgPath]);
 
   return (
@@ -87,7 +122,7 @@ export function HistoryTab() {
           <p className="network-tab__intro">Real-time learning metrics, hyperparameters, and PPO agent diagnostics.</p>
         </div>
         <button 
-          onClick={fetchHistory} 
+          onClick={() => void fetchHistory(false)} 
           className="control-bar__button"
           style={{ padding: "0.5rem 1rem", backgroundColor: "var(--theme-accent)", color: "white", borderRadius: "4px", border: "none", cursor: "pointer", fontWeight: "bold" }}
         >
@@ -120,7 +155,9 @@ export function HistoryTab() {
 
             <div className="network-tab__card" style={{ padding: "1rem", borderRadius: "8px", border: "1px solid var(--border-color)" }}>
               <span style={{ fontSize: "0.85rem", color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>Peak Success Rate</span>
-              <strong style={{ display: "block", fontSize: "1.75rem", margin: "0.5rem 0", color: "#10b981" }}>{(peakSuccess * 100).toFixed(0)}%</strong>
+              <strong style={{ display: "block", fontSize: "1.75rem", margin: "0.5rem 0", color: "#10b981" }}>
+                {isFiniteNumber(peakSuccess) ? `${(peakSuccess * 100).toFixed(0)}%` : "0%"}
+              </strong>
               <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>Best evaluation run</span>
             </div>
 
@@ -133,7 +170,7 @@ export function HistoryTab() {
             <div className="network-tab__card" style={{ padding: "1rem", borderRadius: "8px", border: "1px solid var(--border-color)" }}>
               <span style={{ fontSize: "0.85rem", color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>Latest KL Divergence</span>
               <strong style={{ display: "block", fontSize: "1.75rem", margin: "0.5rem 0" }}>
-                {latestRecord?.metrics.approx_kl != null ? latestRecord.metrics.approx_kl.toFixed(5) : "N/A"}
+                {isFiniteNumber(latestRecord?.metrics?.approx_kl) ? latestRecord.metrics.approx_kl.toFixed(5) : "N/A"}
               </strong>
               <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>Policy update divergence</span>
             </div>
@@ -207,6 +244,9 @@ export function HistoryTab() {
                         ? pt.record.evaluation_id 
                         : `${pt.record.run_id || "unknown"}-${pt.record.stage}-${pt.record.global_episode || pt.record.step}-${pt.record.episode_in_stage || pt.record.step}-${pt.record.recorded_at || pt.record.timestamp}`;
                     const dotKey = `${baseKey}-${idx}`;
+                    const ptStep = isFiniteNumber(pt.record.step) ? pt.record.step.toLocaleString() : "0";
+                    const ptSr = isFiniteNumber(pt.record.success_rate) ? (pt.record.success_rate * 100).toFixed(0) : "0";
+                    const ptRew = isFiniteNumber(pt.record.metrics?.average_reward) ? pt.record.metrics.average_reward.toFixed(1) : "N/A";
                     return (
                       <g key={dotKey} className="chart-dot">
                         <circle 
@@ -218,7 +258,7 @@ export function HistoryTab() {
                           strokeWidth="1.5" 
                         />
                         <title>
-                          {`Step: ${pt.record.step.toLocaleString()}\nStage: ${getStageName(pt.record.stage)}\nSuccess: ${(pt.record.success_rate * 100).toFixed(0)}%\nReward: ${pt.record.metrics.average_reward.toFixed(1)}`}
+                          {`Step: ${ptStep}\nStage: ${getStageName(pt.record.stage)}\nSuccess: ${ptSr}%\nReward: ${ptRew}`}
                         </title>
                       </g>
                     );
@@ -228,13 +268,13 @@ export function HistoryTab() {
                   {chartPoints.length > 1 && (
                     <>
                       <text x={paddingLeft} y={chartHeight - 15} fill="var(--text-muted)" fontSize="10" textAnchor="middle">
-                        {history[0].step.toLocaleString()}
+                        {isFiniteNumber(history[0]?.step) ? history[0].step.toLocaleString() : "0"}
                       </text>
                       <text x={(chartWidth - paddingRight + paddingLeft) / 2} y={chartHeight - 15} fill="var(--text-muted)" fontSize="10" textAnchor="middle">
                         Steps (Timesteps)
                       </text>
                       <text x={chartWidth - paddingRight} y={chartHeight - 15} fill="var(--text-muted)" fontSize="10" textAnchor="middle">
-                        {history[history.length - 1].step.toLocaleString()}
+                        {isFiniteNumber(history[history.length - 1]?.step) ? history[history.length - 1].step.toLocaleString() : "0"}
                       </text>
                     </>
                   )}
@@ -273,31 +313,37 @@ export function HistoryTab() {
                           ? record.evaluation_id 
                           : `${record.run_id || "unknown"}-${record.stage}-${record.global_episode || record.step}-${record.episode_in_stage || record.step}-${record.recorded_at || record.timestamp}`;
                       const rowKey = `${baseKey}-${index}`;
+                      const sr = isFiniteNumber(record.success_rate) ? record.success_rate : 0;
+                      const avgReward = record.metrics?.average_reward;
+                      const approxKl = record.metrics?.approx_kl;
+                      const clipFrac = record.metrics?.clip_fraction;
+                      const explVar = record.metrics?.explained_variance;
+                      const lr = record.hyperparameters?.learning_rate;
                       return (
                         <tr key={rowKey} style={{ borderBottom: "1px solid var(--border-color)" }}>
-                          <td style={{ padding: "0.75rem" }}>{record.step.toLocaleString()}</td>
+                          <td style={{ padding: "0.75rem" }}>{isFiniteNumber(record.step) ? record.step.toLocaleString() : "-"}</td>
                         <td style={{ padding: "0.75rem" }}>
                           <span style={{ padding: "0.2rem 0.5rem", borderRadius: "4px", backgroundColor: "var(--theme-bg-accent, #333)", fontWeight: "bold" }}>
-                            {getStageName(record.stage)}
+                            {isFiniteNumber(record.stage) ? getStageName(record.stage) : "-"}
                           </span>
                         </td>
-                        <td style={{ padding: "0.75rem", fontWeight: "bold", color: record.success_rate >= 0.8 ? "#10b981" : record.success_rate >= 0.5 ? "#f59e0b" : "#ef4444" }}>
-                          {(record.success_rate * 100).toFixed(0)}%
+                        <td style={{ padding: "0.75rem", fontWeight: "bold", color: sr >= 0.8 ? "#10b981" : sr >= 0.5 ? "#f59e0b" : "#ef4444" }}>
+                          {isFiniteNumber(record.success_rate) ? `${(record.success_rate * 100).toFixed(0)}%` : "-"}
                         </td>
-                        <td style={{ padding: "0.75rem" }}>{record.metrics.average_reward.toFixed(2)}</td>
+                        <td style={{ padding: "0.75rem" }}>{isFiniteNumber(avgReward) ? avgReward.toFixed(2) : "-"}</td>
                         <td style={{ padding: "0.75rem", fontFamily: "monospace" }}>
-                          {record.metrics.approx_kl != null ? record.metrics.approx_kl.toFixed(5) : "-"}
+                          {isFiniteNumber(approxKl) ? approxKl.toFixed(5) : "-"}
                         </td>
                         <td style={{ padding: "0.75rem" }}>
-                          {record.metrics.clip_fraction != null ? record.metrics.clip_fraction.toFixed(3) : "-"}
+                          {isFiniteNumber(clipFrac) ? clipFrac.toFixed(3) : "-"}
                         </td>
                         <td style={{ padding: "0.75rem" }}>
-                          {record.metrics.explained_variance != null ? record.metrics.explained_variance.toFixed(3) : "-"}
+                          {isFiniteNumber(explVar) ? explVar.toFixed(3) : "-"}
                         </td>
                         <td style={{ padding: "0.75rem", fontSize: "0.8rem", color: "var(--text-muted)" }}>
-                          lr: {record.hyperparameters.learning_rate.toExponential(1)}, 
-                          ent: {record.hyperparameters.entropy_coef}, 
-                          gae: {record.hyperparameters.gae_lambda}
+                          lr: {isFiniteNumber(lr) ? lr.toExponential(1) : "-"},{" "}
+                          ent: {record.hyperparameters?.entropy_coef ?? "-"},{" "}
+                          gae: {record.hyperparameters?.gae_lambda ?? "-"}
                         </td>
                       </tr>
                     );
@@ -315,7 +361,8 @@ export function HistoryTab() {
 
 function useMemoPeakSuccess(history: TelemetryRecord[]): number {
   return React.useMemo(() => {
-    if (!history.length) return 0;
-    return Math.max(...history.map((r) => r.success_rate));
+    const valid = history.map((r) => r.success_rate).filter(isFiniteNumber);
+    if (!valid.length) return 0;
+    return Math.max(...valid);
   }, [history]);
 }

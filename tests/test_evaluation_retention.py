@@ -1,17 +1,14 @@
 """Unit and integration tests for Evaluation Replay Retention Manager."""
 
-from pathlib import Path
 import json
-from unittest.mock import MagicMock
-
-import pytest
+from pathlib import Path
 
 from sheepdog.config import LabConfig
+from sheepdog.evaluation.evaluator import Evaluator
 from sheepdog.evaluation.retention import (
     EvaluationReplayRetentionManager,
     EvaluationRetentionPolicy,
 )
-from sheepdog.evaluation.evaluator import Evaluator
 from sheepdog.policies.base import Policy
 
 
@@ -136,9 +133,10 @@ def test_server_replay_and_pin_endpoints(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    from sheepdog.server import TrainingManager
-    from sheepdog.config import TrainingConfig
     from unittest.mock import patch
+
+    from sheepdog.config import TrainingConfig
+    from sheepdog.server import TrainingManager
 
     config = LabConfig(
         training=TrainingConfig(

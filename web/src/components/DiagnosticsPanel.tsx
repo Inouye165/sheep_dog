@@ -1,8 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { CheckpointEntry, CheckpointIndex, TrainingStatus, TrainingEpisode } from "../state/types";
-import { loadTrainingEpisodes } from "../lib/api";
-import { StackedLearningPanels } from "./StackedLearningPanels";
+import type { CheckpointEntry, CheckpointIndex, TrainingStatus, TrainingEpisode, SessionChangeEvent } from "../state/types";
+import { loadTrainingEpisodes, loadSessionEvents } from "../lib/api";
 import { StageBottlenecksPanel } from "./StageBottlenecksPanel";
 import { EvaluationEpisodesTab } from "./EvaluationEpisodesTab";
 import { StageHealthBanner } from "./StageHealthBanner";
@@ -13,8 +12,7 @@ import {
   processCanonicalHistory,
   selectWindowSlice,
   buildEpisodeBuckets,
-  buildFormalEvalMarkers,
-  computeRollingTrainingSeries,
+  calculateAdaptiveBlockSize,
   calculateEfficiencyTrend,
   analyzePerSeedReliability,
   assertMonotonicX,
@@ -26,6 +24,8 @@ import {
   type ViewWindow,
   type XAxisMode,
 } from "../lib/chartPipeline";
+
+export { calculateAdaptiveBlockSize };
 
 /** Number of most-recent checkpoints to watch for a plateau. */
 const PLATEAU_WINDOW = 5;
@@ -260,6 +260,12 @@ export interface ChartPoint {
   blockIndex?: number;
   blockStartEp?: number;
   blockEndEp?: number;
+  blockSize?: number;
+}
+
+export interface MappedSessionEvent {
+  event: SessionChangeEvent;
+  x: number;
 }
 
 export interface LineChartProps {
@@ -286,6 +292,10 @@ export interface LineChartProps {
   formatX?: (v: number) => string;
   useSequentialX?: boolean;
   height?: number;
+  sessionEvents?: MappedSessionEvent[];
+  showSessionMarkers?: boolean;
+  selectedSessionId?: string | null;
+  onSelectSession?: (sessionId: string | null) => void;
 }
 
 export const formatDate = (dateStr?: string | number | null) => {
@@ -608,6 +618,35 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
     );
   }
 
+  if (hoveredPoint.isBlockPoint) {
+    return createPortal(
+      <div
+        ref={tooltipRef}
+        className="chart-tooltip"
+        style={style}
+        role="tooltip"
+        id="chart-hover-tooltip"
+        aria-live="polite"
+        data-testid="chart-tooltip"
+      >
+        <div className="chart-tooltip__header">
+          <span className="chart-tooltip__episode">
+            {`Block #${hoveredPoint.blockIndex ?? ""}: Episodes ${hoveredPoint.blockStartEp ?? ""}-${hoveredPoint.blockEndEp ?? ""}`}
+          </span>
+        </div>
+        <div className="chart-tooltip__section-title">
+          {hoveredPoint.blockSize ? `${hoveredPoint.blockSize}-Episode Block Performance` : "Block Performance"}
+        </div>
+        <div className="chart-tooltip__grid">
+          <span className="chart-tooltip__metric-label">Value:</span>
+          <span className="chart-tooltip__metric-value">{hoveredPoint.labelText || hoveredPoint.y.toFixed(1)}</span>
+          <span></span>
+        </div>
+      </div>,
+      document.body
+    );
+  }
+
   const checkpoint = hoveredPoint.checkpoint;
   if (!checkpoint) {
     return createPortal(
@@ -820,6 +859,239 @@ export function ChartHoverPortal({ hoveredPoint, targetRect }: ChartHoverPortalP
   );
 }
 
+export interface SessionEventHoverPortalProps {
+  event: SessionChangeEvent;
+  targetRect: DOMRect;
+}
+
+export function SessionEventHoverPortal({ event, targetRect }: SessionEventHoverPortalProps) {
+  const tooltipRef = useRef<HTMLDivElement>(null);
+  const [style, setStyle] = useState<React.CSSProperties>({
+    position: "fixed",
+    left: "-9999px",
+    top: "-9999px",
+    opacity: 0,
+    zIndex: 99999,
+    pointerEvents: "none",
+  });
+
+  const updatePosition = useCallback(() => {
+    if (!tooltipRef.current) return;
+    const tooltipNode = tooltipRef.current;
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    const padding = 12;
+
+    const tooltipWidth = tooltipNode.offsetWidth || 340;
+    const tooltipHeight = tooltipNode.offsetHeight || 300;
+
+    const targetCenterX = targetRect.left + targetRect.width / 2;
+    let left = targetCenterX - tooltipWidth / 2;
+    left = Math.max(padding, Math.min(viewportWidth - tooltipWidth - padding, left));
+
+    const spaceAbove = targetRect.top - padding;
+    let top: number;
+    if (spaceAbove >= tooltipHeight + 8) {
+      top = targetRect.top - tooltipHeight - 8;
+    } else {
+      top = targetRect.bottom + 8;
+    }
+    top = Math.max(padding, Math.min(viewportHeight - tooltipHeight - padding, top));
+
+    setStyle({
+      position: "fixed",
+      left: `${left}px`,
+      top: `${top}px`,
+      maxWidth: `calc(100vw - 24px)`,
+      maxHeight: `calc(100vh - 24px)`,
+      overflowY: "auto",
+      overflowWrap: "anywhere",
+      opacity: 1,
+      zIndex: 99999,
+      pointerEvents: "none",
+    });
+  }, [targetRect]);
+
+  useLayoutEffect(() => {
+    updatePosition();
+    const raf = requestAnimationFrame(updatePosition);
+    return () => cancelAnimationFrame(raf);
+  }, [updatePosition]);
+
+  const dateStr = formatDate(event.timestamp);
+  const isModel = event.event_type === "model_change";
+  const isParam = event.event_type === "param_change";
+  const isPromo = event.event_type === "promotion";
+
+  const typeLabel = isModel
+    ? "MODEL ARCHITECTURE UPDATE"
+    : isParam
+    ? "PARAMETER TUNING"
+    : isPromo
+    ? "CURRICULUM PROMOTION"
+    : "SESSION BOUNDARY";
+
+  return createPortal(
+    <div
+      ref={tooltipRef}
+      className="chart-tooltip chart-tooltip--session"
+      style={style}
+      role="tooltip"
+      id="session-hover-tooltip"
+      aria-live="polite"
+      data-testid="session-tooltip"
+    >
+      <div className="chart-tooltip__header">
+        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+          <span style={{ fontSize: "1.1rem" }}>{event.badge_icon}</span>
+          <span className="chart-tooltip__episode" style={{ color: event.badge_color }}>
+            {event.title}
+          </span>
+        </div>
+        {dateStr && (
+          <span className="chart-tooltip__timestamp-badge" aria-label={`Recorded at ${dateStr}`}>
+            <span className="chart-tooltip__timestamp-icon">🕒</span>
+            <span className="chart-tooltip__timestamp-time">{dateStr}</span>
+          </span>
+        )}
+      </div>
+
+      <div style={{ display: "flex", gap: "6px", alignItems: "center", marginBottom: "4px" }}>
+        <span
+          className="chart-tooltip__stage-pill"
+          style={{ background: event.badge_color, color: "#0f172a", fontWeight: 700 }}
+        >
+          {typeLabel}
+        </span>
+        <span className="pill pill--muted" style={{ fontSize: "0.7rem" }}>
+          Session #{event.session_index}
+        </span>
+        {event.is_current && (
+          <span className="pill pill--live" style={{ fontSize: "0.7rem" }}>
+            Active Run
+          </span>
+        )}
+      </div>
+
+      {/* Changes list / Diff */}
+      {event.changes && event.changes.length > 0 && (
+        <div style={{ marginTop: "4px" }}>
+          <div className="chart-tooltip__section-title" style={{ color: "#38bdf8", marginBottom: "4px" }}>
+            ⚡ What Changed:
+          </div>
+          <div
+            style={{
+              background: "rgba(15, 23, 42, 0.6)",
+              border: "1px solid rgba(148, 163, 184, 0.2)",
+              borderRadius: "6px",
+              padding: "6px 8px",
+              fontSize: "0.72rem",
+              display: "flex",
+              flexDirection: "column",
+              gap: "4px",
+            }}
+          >
+            {event.changes.map((c, i) => (
+              <div
+                key={i}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "auto 1fr auto",
+                  alignItems: "center",
+                  gap: "6px",
+                  paddingBottom: i < event.changes.length - 1 ? "4px" : "0",
+                  borderBottom: i < event.changes.length - 1 ? "1px solid rgba(255,255,255,0.06)" : "none",
+                }}
+              >
+                <code style={{ color: "#93c5fd", fontWeight: 600 }}>{c.param}</code>
+                <div style={{ display: "flex", alignItems: "center", gap: "4px", justifyContent: "flex-end" }}>
+                  <span style={{ color: "#94a3b8", textDecoration: "line-through" }}>{c.from_val}</span>
+                  <span style={{ color: "#38bdf8" }}>→</span>
+                  <span style={{ color: "#4ade80", fontWeight: 700 }}>{c.to_val}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Rationale / Context */}
+      {event.rationale && (
+        <div
+          style={{
+            marginTop: "4px",
+            background: "rgba(245, 158, 11, 0.08)",
+            border: "1px solid rgba(245, 158, 11, 0.25)",
+            borderRadius: "6px",
+            padding: "6px 8px",
+            fontSize: "0.72rem",
+            color: "#fcd34d",
+          }}
+        >
+          <strong>💡 Context:</strong> {event.rationale}
+        </div>
+      )}
+
+      {/* Session stats */}
+      {event.session_stats && (
+        <div style={{ marginTop: "4px" }}>
+          <div className="chart-tooltip__section-title" style={{ marginBottom: "4px" }}>
+            Session Performance
+          </div>
+          <div className="chart-tooltip__stat-grid">
+            <div className="chart-tooltip__stat-card">
+              <span className="chart-tooltip__stat-label">Checkpoints</span>
+              <span className="chart-tooltip__stat-value">
+                {event.session_stats.checkpoint_count ?? 0}
+              </span>
+            </div>
+            <div className="chart-tooltip__stat-card">
+              <span className="chart-tooltip__stat-label">Success Rate</span>
+              <span
+                className="chart-tooltip__stat-value"
+                style={{
+                  color: (event.session_stats.avg_success_rate ?? 0) >= 70 ? "#4ade80" : "#f1f5f9",
+                }}
+              >
+                {event.session_stats.avg_success_rate != null ? `${event.session_stats.avg_success_rate}%` : "—"}
+              </span>
+            </div>
+            <div className="chart-tooltip__stat-card">
+              <span className="chart-tooltip__stat-label">Avg Reward</span>
+              <span className="chart-tooltip__stat-value">
+                {event.session_stats.avg_reward != null ? event.session_stats.avg_reward : "—"}
+              </span>
+            </div>
+            <div className="chart-tooltip__stat-card">
+              <span className="chart-tooltip__stat-label">Avg Steps</span>
+              <span className="chart-tooltip__stat-value">
+                {event.session_stats.avg_steps != null ? Math.round(event.session_stats.avg_steps) : "—"}
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Footer */}
+      <div
+        style={{
+          marginTop: "4px",
+          paddingTop: "4px",
+          borderTop: "1px solid rgba(255,255,255,0.08)",
+          fontSize: "0.68rem",
+          color: "#64748b",
+          display: "flex",
+          justifyContent: "space-between",
+        }}
+      >
+        <span>ID: {event.session_id.slice(0, 16)}…</span>
+        {event.checkpoint_episode && <span>Episode {event.checkpoint_episode.toLocaleString()}</span>}
+      </div>
+    </div>,
+    document.body
+  );
+}
+
 function LineChart({
   data,
   rawPoints,
@@ -844,8 +1116,13 @@ function LineChart({
   formatX = (value) => String(Math.round(value)),
   useSequentialX = true,
   height = 360,
+  sessionEvents,
+  showSessionMarkers = true,
+  selectedSessionId,
+  onSelectSession,
 }: LineChartProps) {
   const [hoveredState, setHoveredState] = useState<{ point: ChartPoint; rect: DOMRect } | null>(null);
+  const [hoveredSessionState, setHoveredSessionState] = useState<{ event: SessionChangeEvent; rect: DOMRect } | null>(null);
 
   const W = 1000;
   const H = height;
@@ -921,11 +1198,14 @@ function LineChart({
 
   const hasData = data.length >= 2;
 
-  const allXValues = [
-    ...data.map((p) => p.x),
-    ...(rawPoints ? rawPoints.map((p) => p.x) : []),
-    ...(blockPoints ? blockPoints.map((p) => p.x) : []),
-  ];
+  const allXValues = useMemo(
+    () => [
+      ...data.map((p) => p.x),
+      ...(rawPoints ? rawPoints.map((p) => p.x) : []),
+      ...(blockPoints ? blockPoints.map((p) => p.x) : []),
+    ],
+    [data, rawPoints, blockPoints],
+  );
 
   const yRange = yMax - yMin || 1;
   const xMin = allXValues.length ? Math.min(...allXValues) : 0;
@@ -942,13 +1222,29 @@ function LineChart({
     : [];
   const secTicks = hasSecondary ? [secYMax, (secYMax + secYMin) / 2, secYMin] : [];
 
+  const visibleSessionEvents = useMemo(() => {
+    if (!sessionEvents || sessionEvents.length === 0) return [];
+    if (allXValues.length === 0) return [];
+    return sessionEvents.filter((m) => m.x >= xMin && m.x <= xMax);
+  }, [sessionEvents, allXValues.length, xMin, xMax]);
+
   function toSvgX(x: number, index?: number): number {
     if (useSequentialX && !rawPoints && !blockPoints) {
       if (data.length <= 1) return PAD.left + plotW / 2;
       const idx = index !== undefined ? index : data.findIndex((d) => d.x === x);
-      return PAD.left + (idx / (data.length - 1)) * plotW;
+      if (idx >= 0) return PAD.left + (idx / (data.length - 1)) * plotW;
+      let closestIdx = 0;
+      let minDiff = Infinity;
+      for (let i = 0; i < data.length; i++) {
+        const diff = Math.abs(data[i].x - x);
+        if (diff < minDiff) {
+          minDiff = diff;
+          closestIdx = i;
+        }
+      }
+      return PAD.left + (closestIdx / (data.length - 1)) * plotW;
     }
-    if (xRange === 0) return PAD.left + plotW / 2;
+    if (xMax === xMin || xRange === 0) return PAD.left + plotW / 2;
     return PAD.left + ((x - xMin) / xRange) * plotW;
   }
   function toSvgY(y: number): number {
@@ -1036,6 +1332,38 @@ function LineChart({
           </linearGradient>
         </defs>
 
+        {/* Session background shading bands */}
+        {showSessionMarkers && visibleSessionEvents.length > 0 && (
+          <g className="session-bands-layer">
+            {visibleSessionEvents.map((m, idx) => {
+              const nextM = visibleSessionEvents[idx + 1];
+              const startX = Math.max(PAD.left, toSvgX(m.x));
+              const endX = nextM ? Math.min(PAD.left + plotW, toSvgX(nextM.x)) : (PAD.left + plotW);
+              if (endX <= startX) return null;
+
+              const isSelected = selectedSessionId === m.event.session_id;
+              const isEven = m.event.session_index % 2 === 0;
+              const fill = isSelected
+                ? "rgba(56, 189, 248, 0.09)"
+                : isEven
+                ? "rgba(255, 255, 255, 0.018)"
+                : "transparent";
+
+              return (
+                <rect
+                  key={`session-band-${m.event.id}-${idx}`}
+                  x={startX}
+                  y={PAD.top}
+                  width={endX - startX}
+                  height={plotH}
+                  fill={fill}
+                  style={{ pointerEvents: "none" }}
+                />
+              );
+            })}
+          </g>
+        )}
+
         {/* Grid lines */}
         {yTicks.map((v, i) => {
           const sy = toSvgY(v);
@@ -1105,6 +1433,95 @@ function LineChart({
           </g>
         ) : null}
 
+        {/* Session boundary & model change cue lines & badges */}
+        {showSessionMarkers && visibleSessionEvents.length > 0 && (
+          <g className="session-cues-layer">
+            {visibleSessionEvents.map((m, idx) => {
+              const sx = toSvgX(m.x);
+              if (sx < PAD.left - 5 || sx > PAD.left + plotW + 5) return null;
+
+              const isModel = m.event.event_type === "model_change";
+              const isParam = m.event.event_type === "param_change";
+              const isPromo = m.event.event_type === "promotion";
+              const lineColor = m.event.badge_color || (isModel ? "#c084fc" : isParam ? "#f59e0b" : isPromo ? "#34d399" : "#38bdf8");
+              const badgeIcon = m.event.badge_icon;
+              const isSelected = selectedSessionId === m.event.session_id;
+
+              const handleActivate = (e: React.SyntheticEvent) => {
+                const rect = (e.currentTarget as Element).getBoundingClientRect();
+                setHoveredSessionState({ event: m.event, rect });
+              };
+
+              const badgeWidth = isModel ? 68 : isParam ? 64 : 44;
+              const badgeLabel = isModel ? "Model" : isParam ? "Params" : `S#${m.event.session_index}`;
+
+              return (
+                <g
+                  key={`session-cue-${m.event.id}-${idx}`}
+                  className="session-marker-cue"
+                  style={{ cursor: "pointer" }}
+                  tabIndex={0}
+                  role="graphics-symbol"
+                  aria-label={`${m.event.title}: ${m.event.summary}`}
+                  onMouseEnter={handleActivate}
+                  onMouseLeave={() => setHoveredSessionState(null)}
+                  onFocus={handleActivate}
+                  onBlur={() => setHoveredSessionState(null)}
+                  onClick={() => {
+                    if (onSelectSession) {
+                      onSelectSession(isSelected ? null : m.event.session_id);
+                    }
+                  }}
+                >
+                  {/* Vertical Cue Line */}
+                  <line
+                    x1={sx}
+                    y1={PAD.top}
+                    x2={sx}
+                    y2={PAD.top + plotH}
+                    stroke={lineColor}
+                    strokeWidth={isSelected ? 2.5 : isModel ? 2.0 : isParam ? 1.6 : 1.2}
+                    strokeDasharray={isModel ? "5 3" : isParam ? "4 3" : "2 3"}
+                    opacity={isSelected ? 1.0 : isModel ? 0.95 : isParam ? 0.85 : 0.6}
+                  />
+
+                  {/* Interactive Top Badge Pin */}
+                  <g transform={`translate(${sx}, ${PAD.top + 8})`}>
+                    <rect
+                      x={-badgeWidth / 2 - 4}
+                      y={-10}
+                      width={badgeWidth + 8}
+                      height={22}
+                      fill="transparent"
+                    />
+                    <rect
+                      x={-badgeWidth / 2}
+                      y={-8}
+                      width={badgeWidth}
+                      height={18}
+                      rx={9}
+                      fill="rgba(15, 23, 42, 0.95)"
+                      stroke={lineColor}
+                      strokeWidth={isSelected ? 2.0 : 1.2}
+                    />
+                    <text
+                      x={0}
+                      y={4.5}
+                      textAnchor="middle"
+                      fontSize={10}
+                      fontWeight="700"
+                      fill={lineColor}
+                      style={{ pointerEvents: "none" }}
+                    >
+                      {`${badgeIcon} ${badgeLabel}`}
+                    </text>
+                  </g>
+                </g>
+              );
+            })}
+          </g>
+        )}
+
         {/* Raw episode points */}
         {displayRawPoints &&
           displayRawPoints.map((p, i) => {
@@ -1127,18 +1544,31 @@ function LineChart({
             );
           })}
 
-        {/* Primary 25-episode Block Performance Line & Markers */}
-        {blockPolyline ? (
+        {/* Primary Block Performance Line & Markers */}
+        {blockPoints && blockPoints.length > 0 ? (
           <g>
-            <polyline
-              points={blockPolyline}
-              fill="none"
-              stroke="#38bdf8"
-              strokeWidth={2.8}
-              strokeLinejoin="round"
-              strokeLinecap="round"
-            />
-            {blockPoints && blockPoints.map((pt, i) => {
+            {blockPolyline ? (
+              <polyline
+                points={blockPolyline}
+                fill="none"
+                stroke="#38bdf8"
+                strokeWidth={2.8}
+                strokeLinejoin="round"
+                strokeLinecap="round"
+              />
+            ) : blockPoints.length === 1 ? (
+              <line
+                x1={PAD.left}
+                y1={toSvgY(blockPoints[0].y)}
+                x2={PAD.left + plotW}
+                y2={toSvgY(blockPoints[0].y)}
+                stroke="#38bdf8"
+                strokeWidth={1.5}
+                strokeDasharray="4 4"
+                opacity={0.65}
+              />
+            ) : null}
+            {blockPoints.map((pt, i) => {
               const cx = toSvgX(pt.x);
               const cy = toSvgY(pt.y);
               return (
@@ -1170,7 +1600,7 @@ function LineChart({
                       fill="#38bdf8"
                       style={{ pointerEvents: "none" }}
                     >
-                      {`${Math.round(pt.y)}%`}
+                      {formatY ? formatY(pt.y) : `${Math.round(pt.y)}%`}
                     </text>
                   ) : null}
                 </g>
@@ -1336,6 +1766,10 @@ function LineChart({
 
       {hoveredState ? (
         <ChartHoverPortal hoveredPoint={hoveredState.point} targetRect={hoveredState.rect} />
+      ) : null}
+
+      {hoveredSessionState ? (
+        <SessionEventHoverPortal event={hoveredSessionState.event} targetRect={hoveredSessionState.rect} />
       ) : null}
     </div>
   );
@@ -1506,14 +1940,6 @@ function buildAdvisor(params: {
     actions: ["Adjust entropy/stability settings", "Review curriculum stage"],
     reason: "No strong improvement signal detected.",
   };
-}
-
-function InfoTip({ text }: { text: string }) {
-  return (
-    <span className="info-tip" title={text} aria-label={text}>
-      i
-    </span>
-  );
 }
 
 type SymbolSpec =
@@ -2075,6 +2501,35 @@ export function calculateRollingSuccess(episodes: Partial<CanonicalEpisodeRecord
   return (successCount / validCount) * 100;
 }
 
+export function getCheckpointXValue(
+  c: CheckpointEntry,
+  xAxisMode: XAxisMode,
+  trainingStatus?: TrainingStatus | null
+): number {
+  if (xAxisMode === "timesteps") {
+    if (c.global_timestep != null && c.global_timestep > 0) {
+      return c.global_timestep;
+    }
+    const currentGlobalTimestep = trainingStatus?.current_global_timestep ?? trainingStatus?.total_timesteps ?? 0;
+    const currentStageEp = trainingStatus?.current_stage_environment_episode ?? trainingStatus?.latest_completed_environment_episode ?? trainingStatus?.total_episodes_trained ?? 0;
+    if (currentGlobalTimestep > 0 && currentStageEp > 0) {
+      const approxStepsPerEp = currentGlobalTimestep / currentStageEp;
+      return Math.round(c.checkpoint_episode * approxStepsPerEp);
+    }
+    return c.checkpoint_episode * 1000;
+  }
+  if (xAxisMode === "episode") {
+    return c.environment_episodes_total ?? c.total_training_episodes ?? c.checkpoint_episode;
+  }
+  if (xAxisMode === "runtime") {
+    return c.active_runtime_seconds_total ?? c.checkpoint_episode;
+  }
+  if (xAxisMode === "calendar") {
+    return c.recorded_at ? new Date(c.recorded_at).getTime() : c.checkpoint_episode;
+  }
+  return c.global_timestep ?? c.checkpoint_episode;
+}
+
 export function calculateBlockSuccessPoints<T extends Partial<CanonicalEpisodeRecord | TrainingEpisode>>(
   episodes: T[],
   blockSize: number = 25,
@@ -2103,8 +2558,95 @@ export function calculateBlockSuccessPoints<T extends Partial<CanonicalEpisodeRe
       blockIndex: b + 1,
       blockStartEp: b * blockSize + 1,
       blockEndEp: (b + 1) * blockSize,
+      blockSize,
       labelText: `${rate.toFixed(0)}% (ep ${b * blockSize + 1}–${(b + 1) * blockSize})`,
     });
+  }
+
+  if (validEps.length % blockSize !== 0) {
+    const remainderBlock = validEps.slice(numBlocks * blockSize);
+    const endEp = remainderBlock[remainderBlock.length - 1];
+    const xVal = getX(endEp);
+    if (xVal != null) {
+      const successes = remainderBlock.filter((ep) => calculateRawSuccessY(ep) === 100).length;
+      const rate = (successes / remainderBlock.length) * 100;
+
+      points.push({
+        x: xVal,
+        y: rate,
+        stage: endEp.curriculum_stage,
+        isBlockPoint: true,
+        blockIndex: numBlocks + 1,
+        blockStartEp: numBlocks * blockSize + 1,
+        blockEndEp: validEps.length,
+        blockSize,
+        labelText: `${rate.toFixed(0)}% (ep ${numBlocks * blockSize + 1}–${validEps.length})`,
+      });
+    }
+  }
+
+  return points;
+}
+
+export function calculateBlockAveragePoints<T extends Partial<CanonicalEpisodeRecord | TrainingEpisode>>(
+  episodes: T[],
+  getValue: (ep: T) => number | null | undefined,
+  blockSize: number = 25,
+  getX: (ep: T) => number | null,
+  formatLabel?: (avg: number, startEp: number, endEp: number) => string
+): ChartPoint[] {
+  const validEps = episodes.filter((ep) => getX(ep) != null && getValue(ep) != null && !isNaN(Number(getValue(ep))));
+  if (validEps.length === 0) return [];
+
+  const points: ChartPoint[] = [];
+  const numBlocks = Math.floor(validEps.length / blockSize);
+
+  for (let b = 0; b < numBlocks; b++) {
+    const block = validEps.slice(b * blockSize, (b + 1) * blockSize);
+    const endEp = block[block.length - 1];
+    const xVal = getX(endEp);
+    if (xVal == null) continue;
+
+    const sum = block.reduce((acc, ep) => acc + Number(getValue(ep)), 0);
+    const avg = sum / block.length;
+    const startEp = b * blockSize + 1;
+    const endEpNum = (b + 1) * blockSize;
+
+    points.push({
+      x: xVal,
+      y: avg,
+      stage: endEp.curriculum_stage,
+      isBlockPoint: true,
+      blockIndex: b + 1,
+      blockStartEp: startEp,
+      blockEndEp: endEpNum,
+      blockSize,
+      labelText: formatLabel ? formatLabel(avg, startEp, endEpNum) : `${avg.toFixed(1)} (ep ${startEp}–${endEpNum})`,
+    });
+  }
+
+  if (validEps.length % blockSize !== 0) {
+    const remainderBlock = validEps.slice(numBlocks * blockSize);
+    const endEp = remainderBlock[remainderBlock.length - 1];
+    const xVal = getX(endEp);
+    if (xVal != null) {
+      const sum = remainderBlock.reduce((acc, ep) => acc + Number(getValue(ep)), 0);
+      const avg = sum / remainderBlock.length;
+      const startEp = numBlocks * blockSize + 1;
+      const endEpNum = validEps.length;
+
+      points.push({
+        x: xVal,
+        y: avg,
+        stage: endEp.curriculum_stage,
+        isBlockPoint: true,
+        blockIndex: numBlocks + 1,
+        blockStartEp: startEp,
+        blockEndEp: endEpNum,
+        blockSize,
+        labelText: formatLabel ? formatLabel(avg, startEp, endEpNum) : `${avg.toFixed(1)} (ep ${startEp}–${endEpNum})`,
+      });
+    }
   }
 
   return points;
@@ -2153,7 +2695,7 @@ export function DiagnosticsPanel({
       try {
         localStorage.setItem("sheepdog_insights_stage_scope", "current");
         localStorage.setItem("sheepdog_insights_last_curriculum_stage", String(effectiveCurriculumStage));
-      } catch {}
+      } catch { /* ignore storage errors */ }
       return "current";
     }
 
@@ -2179,12 +2721,12 @@ export function DiagnosticsPanel({
       try {
         localStorage.setItem("sheepdog_insights_last_curriculum_stage", String(effectiveCurriculumStage));
         localStorage.setItem("sheepdog_insights_stage_scope", "current");
-      } catch {}
+      } catch { /* ignore storage errors */ }
       // When the training engine advances or switches stages (e.g. self-promotion), automatically update to the new stage
       setSelectedStageScope("current");
     }
   }, [effectiveCurriculumStage]);
-  const [smoothingWindow, setSmoothingWindow] = useState<SmoothingWindow>(() => {
+  const [smoothingWindow] = useState<SmoothingWindow>(() => {
     const saved = localStorage.getItem("sheepdog_insights_smoothing_window");
     if (saved === "25" || saved === "50" || saved === "100") {
       return Number(saved) as SmoothingWindow;
@@ -2210,6 +2752,19 @@ export function DiagnosticsPanel({
     const saved = localStorage.getItem("sheepdog_insights_layer_formal_evals");
     return saved !== null ? saved === "true" : true;
   });
+  const [layerSessionMarkers, setLayerSessionMarkers] = useState<boolean>(() => {
+    const saved = localStorage.getItem("sheepdog_insights_layer_session_markers");
+    return saved !== null ? saved === "true" : true;
+  });
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [sessionEvents, setSessionEvents] = useState<SessionChangeEvent[]>([]);
+
+  const handleToggleSessionMarkers = useCallback((val: boolean) => {
+    setLayerSessionMarkers(val);
+    try {
+      localStorage.setItem("sheepdog_insights_layer_session_markers", String(val));
+    } catch { /* ignore storage errors */ }
+  }, []);
 
   const targetStage = useMemo(() => {
     if (selectedStageScope === "current") return effectiveCurriculumStage;
@@ -2222,47 +2777,62 @@ export function DiagnosticsPanel({
   const [trainingEpisodes, setTrainingEpisodes] = useState<TrainingEpisode[]>(() => initialEpisodes ?? []);
   const lastEpisodeIdRef = useRef<number>(0);
   const isFetchingEpisodesRef = useRef<boolean>(false);
+  const pollScopeSeqRef = useRef<number>(0);
   const isLiveTraining = trainingStatus?.running ?? false;
 
   const activeRunId = trainingStatus?.run_id ?? undefined;
-  const queryScopeKey = `${selectedStageScope}_${effectiveCurriculumStage}`;
-  const prevQueryScopeKeyRef = useRef<string>(queryScopeKey);
+  const computedStageFilter =
+    selectedStageScope === "all" || selectedStageScope === "current-journey"
+      ? undefined
+      : selectedStageScope === "current"
+        ? effectiveCurriculumStage
+        : typeof selectedStageScope === "number"
+          ? selectedStageScope
+          : undefined;
+  const computedRunIdFilter =
+    selectedStageScope === "current-journey" ||
+    selectedStageScope === "current" ||
+    typeof selectedStageScope === "number"
+      ? activeRunId
+      : undefined;
 
-  useEffect(() => {
-    if (prevQueryScopeKeyRef.current !== queryScopeKey) {
-      setTrainingEpisodes([]);
-      lastEpisodeIdRef.current = 0;
-      prevQueryScopeKeyRef.current = queryScopeKey;
-    }
-  }, [queryScopeKey]);
-
-  const pollStageFilterRef = useRef<number | undefined>(undefined);
-  const pollRunIdFilterRef = useRef<string | undefined>(undefined);
+  const pollStageFilterRef = useRef<number | undefined>(computedStageFilter);
+  const pollRunIdFilterRef = useRef<string | undefined>(computedRunIdFilter);
   const pollIsLiveRef = useRef<boolean>(isLiveTraining);
 
   useEffect(() => {
-    const sf = selectedStageScope === "all" || selectedStageScope === "current-journey"
-      ? undefined
-      : selectedStageScope === "current"
-      ? effectiveCurriculumStage
-      : typeof selectedStageScope === "number"
-      ? selectedStageScope
-      : undefined;
-    const rf = (selectedStageScope === "current-journey" || selectedStageScope === "current" || typeof selectedStageScope === "number")
-      ? activeRunId
-      : undefined;
-    pollStageFilterRef.current = sf;
-    pollRunIdFilterRef.current = rf;
+    pollStageFilterRef.current = computedStageFilter;
+    pollRunIdFilterRef.current = computedRunIdFilter;
     pollIsLiveRef.current = isLiveTraining;
-  });
+  }, [computedStageFilter, computedRunIdFilter, isLiveTraining]);
+
+  const queryScopeKey = `${selectedStageScope}_${effectiveCurriculumStage}_${activeRunId ?? ""}`;
+  const prevQueryScopeKeyRef = useRef<string>(queryScopeKey);
+  const triggerPollRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    if (prevQueryScopeKeyRef.current !== queryScopeKey) {
+      pollStageFilterRef.current = computedStageFilter;
+      pollRunIdFilterRef.current = computedRunIdFilter;
+      pollScopeSeqRef.current += 1;
+      isFetchingEpisodesRef.current = false;
+      setTrainingEpisodes([]);
+      lastEpisodeIdRef.current = 0;
+      prevQueryScopeKeyRef.current = queryScopeKey;
+      if (triggerPollRef.current) {
+        triggerPollRef.current();
+      }
+    }
+  }, [queryScopeKey, computedStageFilter, computedRunIdFilter]);
 
   useEffect(() => {
     let isMounted = true;
-    let timerId: any = null;
+    let timerId: ReturnType<typeof setTimeout> | null = null;
 
     const pollEpisodes = async () => {
       if (isFetchingEpisodesRef.current) return;
       isFetchingEpisodesRef.current = true;
+      const reqScopeSeq = pollScopeSeqRef.current;
       try {
         const currentLastId = lastEpisodeIdRef.current;
 
@@ -2274,7 +2844,7 @@ export function DiagnosticsPanel({
           order: currentLastId === 0 ? "desc" : undefined,
         });
 
-        if (isMounted && res && res.episodes) {
+        if (isMounted && reqScopeSeq === pollScopeSeqRef.current && res && res.episodes) {
           const episodesSorted = [...res.episodes].sort((a, b) => a.id - b.id);
 
           if (currentLastId === 0 && episodesSorted.length > 0) {
@@ -2300,28 +2870,67 @@ export function DiagnosticsPanel({
       } catch {
         // Silently handle offline / polling exceptions
       } finally {
-        isFetchingEpisodesRef.current = false;
-        if (isMounted) {
-          const delay = pollIsLiveRef.current ? 500 : 2000;
-          timerId = setTimeout(pollEpisodes, delay);
+        if (reqScopeSeq === pollScopeSeqRef.current) {
+          isFetchingEpisodesRef.current = false;
+          if (isMounted) {
+            if (timerId) clearTimeout(timerId);
+            const delay = pollIsLiveRef.current ? 500 : 2000;
+            timerId = setTimeout(pollEpisodes, delay);
+          }
         }
       }
     };
 
-    pollEpisodes();
+    triggerPollRef.current = () => {
+      if (timerId) clearTimeout(timerId);
+      void pollEpisodes();
+    };
+
+    void pollEpisodes();
 
     return () => {
       isMounted = false;
+      triggerPollRef.current = null;
       if (timerId) clearTimeout(timerId);
     };
   }, []);
 
+  const currentStageEnvEp = trainingStatus?.current_stage_environment_episode;
   useEffect(() => {
-    if (trainingStatus && trainingStatus.total_episodes_trained === 0 && (trainingStatus.completed_episodes === 0 || trainingStatus.completed_episodes == null)) {
+    if (triggerPollRef.current) {
+      triggerPollRef.current();
+    }
+  }, [lastLiveRefreshTime, currentStageEnvEp]);
+
+  useEffect(() => {
+    let isMounted = true;
+    const fetchSessionEvents = async () => {
+      try {
+        const resp = await loadSessionEvents();
+        if (isMounted && resp && resp.events) {
+          setSessionEvents(resp.events);
+        }
+      } catch {
+        // silent fallback
+      }
+    };
+    fetchSessionEvents();
+    const interval = setInterval(fetchSessionEvents, 5000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, []);
+
+  const hasTrainingStatus = trainingStatus != null;
+  const totalEpisodesTrained = trainingStatus?.total_episodes_trained;
+  const completedEpisodes = trainingStatus?.completed_episodes;
+  useEffect(() => {
+    if (hasTrainingStatus && totalEpisodesTrained === 0 && (completedEpisodes === 0 || completedEpisodes == null)) {
       setTrainingEpisodes([]);
       lastEpisodeIdRef.current = 0;
     }
-  }, [trainingStatus?.total_episodes_trained, trainingStatus?.completed_episodes]);
+  }, [hasTrainingStatus, totalEpisodesTrained, completedEpisodes]);
 
   const minStreak = useMemo(() => {
     if (trainingStatus?.auto_promote_gate?.min_qualified_streak !== undefined) {
@@ -2433,25 +3042,92 @@ export function DiagnosticsPanel({
     return ep.global_timestep ?? ep.global_environment_episode ?? ep.episode_in_stage ?? null;
   }, [xAxisMode, trainingStatus]);
 
+  const checkpointX = useCallback((c: CheckpointEntry): number => {
+    return getCheckpointXValue(c, xAxisMode, trainingStatus);
+  }, [xAxisMode, trainingStatus]);
+
   const canonicalHistory = useMemo(() => {
     return processCanonicalHistory(trainingEpisodes, selectedStageScope, activeRunId, effectiveCurriculumStage);
   }, [trainingEpisodes, selectedStageScope, activeRunId, effectiveCurriculumStage]);
 
-  const fullRollingHistory = useMemo(() => {
-    return computeRollingTrainingSeries(canonicalHistory, smoothingWindow);
-  }, [canonicalHistory, smoothingWindow]);
+  // A bounded history window counts saved checkpoints whenever they exist.
+  // Loading faster-frequency rollout telemetry must never replace that history.
+  const filteredCheckpoints = useMemo(() => {
+    const base = selectedSessionId
+      ? stageScopedViewCheckpoints.filter((c) => c.session_id === selectedSessionId)
+      : stageScopedViewCheckpoints;
+    return viewWindow === "all" ? base : base.slice(-viewWindow);
+  }, [stageScopedViewCheckpoints, selectedSessionId, viewWindow]);
 
   const activeEpisodeSequence = useMemo(() => {
-    return selectWindowSlice(canonicalHistory, viewWindow);
-  }, [canonicalHistory, viewWindow]);
+    const scopedEpisodes = selectedSessionId
+      ? canonicalHistory.filter((ep) => ep.session_id === selectedSessionId)
+      : canonicalHistory;
+    if (viewWindow === "all") return scopedEpisodes;
+    if (filteredCheckpoints.length === 0) return selectWindowSlice(scopedEpisodes, viewWindow);
+    const firstCheckpointX = Math.min(...filteredCheckpoints.map(checkpointX));
+    // Overlay available rollouts in the selected checkpoint range, including the
+    // live tail after the latest save. Older telemetry cannot expand the window.
+    return scopedEpisodes.filter((ep) => {
+      const x = episodeX(ep);
+      return x != null && x >= firstCheckpointX;
+    });
+  }, [canonicalHistory, selectedSessionId, viewWindow, filteredCheckpoints, checkpointX, episodeX]);
+
+  const effectiveBucketSize = useMemo(() => {
+    return calculateAdaptiveBlockSize(viewWindow, activeEpisodeSequence.length);
+  }, [viewWindow, activeEpisodeSequence.length]);
 
   const episodeBuckets = useMemo(() => {
-    return buildEpisodeBuckets(activeEpisodeSequence, 25);
-  }, [activeEpisodeSequence]);
+    return buildEpisodeBuckets(activeEpisodeSequence, effectiveBucketSize);
+  }, [activeEpisodeSequence, effectiveBucketSize]);
 
-  const formalEvalMarkers = useMemo(() => {
-    return buildFormalEvalMarkers(stageScopedViewCheckpoints, selectedStageScope, xAxisMode, bestCheckpointEpisode, effectiveCurriculumStage);
-  }, [stageScopedViewCheckpoints, selectedStageScope, xAxisMode, bestCheckpointEpisode, effectiveCurriculumStage]);
+  const selectedSessionEvent = useMemo(() => {
+    if (!selectedSessionId) return null;
+    return sessionEvents.find((e) => e.session_id === selectedSessionId) ?? null;
+  }, [sessionEvents, selectedSessionId]);
+
+  const mappedSessionEvents: MappedSessionEvent[] = useMemo(() => {
+    if (!sessionEvents || sessionEvents.length === 0) return [];
+    const mapped: MappedSessionEvent[] = [];
+
+    for (const evt of sessionEvents) {
+      // SessionChangeEvent carries session_id, checkpoint_episode and global_timestep
+      // (see state/types.ts); match on those rather than fields the backend never sends.
+      const matchCp = stageScopedViewCheckpoints.find(
+        (c) =>
+          (c.session_id && c.session_id === evt.session_id) ||
+          (evt.checkpoint_episode != null && c.checkpoint_episode === evt.checkpoint_episode)
+      );
+
+      let xVal: number | null = null;
+      if (xAxisMode === "timesteps") {
+        xVal =
+          matchCp?.global_timesteps ??
+          matchCp?.global_timestep ??
+          (evt.global_timestep != null && evt.global_timestep > 0 ? evt.global_timestep : null);
+      } else if (xAxisMode === "episode") {
+        xVal =
+          matchCp?.environment_episodes_total ??
+          matchCp?.total_training_episodes ??
+          matchCp?.cumulative_environment_episodes ??
+          matchCp?.checkpoint_episode ??
+          evt.checkpoint_episode ??
+          null;
+      } else if (xAxisMode === "runtime") {
+        xVal = matchCp?.active_runtime_seconds_total ?? null;
+      } else if (xAxisMode === "calendar") {
+        const ts = matchCp?.recorded_at ?? matchCp?.evaluation_timestamp ?? evt.timestamp;
+        xVal = ts ? new Date(ts).getTime() : null;
+      }
+
+      if (xVal != null && !isNaN(xVal)) {
+        mapped.push({ event: evt, x: xVal });
+      }
+    }
+
+    return mapped.sort((a, b) => a.x - b.x);
+  }, [sessionEvents, stageScopedViewCheckpoints, xAxisMode]);
 
   const efficiencyTrend = useMemo(() => {
     return calculateEfficiencyTrend(stageScopedCheckpoints, targetStage);
@@ -2468,7 +3144,11 @@ export function DiagnosticsPanel({
     return (sum / slice.length) * 100;
   }, [stageScopedCheckpoints]);
 
-  const filteredEpisodes = activeEpisodeSequence;
+  const filteredEpisodes = useMemo(() => {
+    if (!selectedSessionId) return activeEpisodeSequence;
+    const match = activeEpisodeSequence.filter((ep) => ep.session_id === selectedSessionId);
+    return match.length > 0 ? match : activeEpisodeSequence;
+  }, [activeEpisodeSequence, selectedSessionId]);
 
   const liveMetrics = useMemo(() => {
     if (activeEpisodeSequence.length === 0) return null;
@@ -2595,10 +3275,6 @@ export function DiagnosticsPanel({
     [archivedJourneyCheckpoints],
   );
 
-  const filteredCheckpoints = useMemo(() => {
-    if (viewWindow === "all") return stageScopedViewCheckpoints;
-    return stageScopedViewCheckpoints.slice(-viewWindow);
-  }, [stageScopedViewCheckpoints, viewWindow]);
 
   const stages = useMemo(
     () => filteredCheckpoints.map((c) => getCheckpointStage(c)),
@@ -2616,31 +3292,6 @@ export function DiagnosticsPanel({
     }
     return Math.round(value).toLocaleString();
   }, [xAxisMode]);
-
-  const checkpointX = useCallback((c: CheckpointEntry): number => {
-    if (xAxisMode === "timesteps") {
-      if (c.global_timestep != null && c.global_timestep > 0) {
-        return c.global_timestep;
-      }
-      const currentGlobalTimestep = trainingStatus?.current_global_timestep ?? trainingStatus?.total_timesteps ?? 0;
-      const currentStageEp = trainingStatus?.current_stage_environment_episode ?? trainingStatus?.latest_completed_environment_episode ?? trainingStatus?.total_episodes_trained ?? 0;
-      if (currentGlobalTimestep > 0 && currentStageEp > 0) {
-        const approxStepsPerEp = currentGlobalTimestep / currentStageEp;
-        return Math.round(c.checkpoint_episode * approxStepsPerEp);
-      }
-      return c.checkpoint_episode * 1000;
-    }
-    if (xAxisMode === "episode") {
-      return c.checkpoint_episode;
-    }
-    if (xAxisMode === "runtime") {
-      return c.active_runtime_seconds_total ?? c.checkpoint_episode;
-    }
-    if (xAxisMode === "calendar") {
-      return c.recorded_at ? new Date(c.recorded_at).getTime() : c.checkpoint_episode;
-    }
-    return c.global_timestep ?? c.checkpoint_episode;
-  }, [xAxisMode, trainingStatus]);
 
   // Strictly chronological dataset construction
   const successData: ChartPoint[] = useMemo(() => {
@@ -2796,9 +3447,13 @@ export function DiagnosticsPanel({
       .filter((pt): pt is ChartPoint => pt !== null);
   }, [filteredEpisodes, episodeX]);
 
+  const effectiveBlockSize = useMemo(() => {
+    return calculateAdaptiveBlockSize(viewWindow, filteredEpisodes.length);
+  }, [viewWindow, filteredEpisodes.length]);
+
   const blockSuccessData: ChartPoint[] = useMemo(() => {
-    return calculateBlockSuccessPoints(filteredEpisodes, 25, episodeX);
-  }, [filteredEpisodes, episodeX]);
+    return calculateBlockSuccessPoints(filteredEpisodes, effectiveBlockSize, episodeX);
+  }, [filteredEpisodes, effectiveBlockSize, episodeX]);
 
   const rawRewardPoints: ChartPoint[] = useMemo(() => {
     const validEps = filteredEpisodes.filter((ep) => episodeX(ep) != null);
@@ -2839,31 +3494,64 @@ export function DiagnosticsPanel({
     });
   }, [filteredEpisodes, episodeX]);
 
+  const blockStepsData: ChartPoint[] = useMemo(() => {
+    return calculateBlockAveragePoints(
+      filteredEpisodes,
+      (ep) => (ep.steps != null && !isNaN(ep.steps) ? ep.steps : null),
+      effectiveBlockSize,
+      episodeX,
+      (avg, startEp, endEp) => `${Math.round(avg)} steps (ep ${startEp}–${endEp})`
+    );
+  }, [filteredEpisodes, effectiveBlockSize, episodeX]);
+
+  const blockRewardData: ChartPoint[] = useMemo(() => {
+    return calculateBlockAveragePoints(
+      filteredEpisodes,
+      (ep) => ep.reward,
+      effectiveBlockSize,
+      episodeX,
+      (avg, startEp, endEp) => `${avg.toFixed(1)} (ep ${startEp}–${endEp})`
+    );
+  }, [filteredEpisodes, effectiveBlockSize, episodeX]);
+
+  const blockSheepData: ChartPoint[] = useMemo(() => {
+    return calculateBlockAveragePoints(
+      filteredEpisodes,
+      (ep) => ep.sheep_penned,
+      effectiveBlockSize,
+      episodeX,
+      (avg, startEp, endEp) => `${avg.toFixed(1)} sheep (ep ${startEp}–${endEp})`
+    );
+  }, [filteredEpisodes, effectiveBlockSize, episodeX]);
+
   const rewardRange = useMemo(() => {
     const vals = [
       ...rewardData.map((d) => d.y),
       ...rawRewardPoints.map((d) => d.y),
+      ...blockRewardData.map((d) => d.y),
     ].filter((v) => !isNaN(v));
     if (!vals.length) return { min: 0, max: 1 };
     const minV = Math.min(...vals);
     const maxV = Math.max(...vals);
     const pad = (maxV - minV) * 0.12 || 1;
     return { min: minV - pad, max: maxV + pad };
-  }, [rewardData, rawRewardPoints]);
+  }, [rewardData, rawRewardPoints, blockRewardData]);
 
   const maxSheepPenned = useMemo(() => {
     const vals = [
       ...sheepData.map((d) => d.y),
       ...rawSheepPoints.map((d) => d.y),
+      ...blockSheepData.map((d) => d.y),
     ].filter((v) => !isNaN(v));
     if (!vals.length) return 1;
     return Math.max(...vals, 1);
-  }, [sheepData, rawSheepPoints]);
+  }, [sheepData, rawSheepPoints, blockSheepData]);
 
   const stepsRange = useMemo(() => {
     const vals = [
       ...stepsData.map((d) => d.y),
       ...rawStepsPoints.map((d) => d.y),
+      ...blockStepsData.map((d) => d.y),
       ...episodeBuckets.map((b) => b.avgSuccessfulSteps).filter((v): v is number => v != null && !isNaN(v) && v > 0),
     ].filter((v) => !isNaN(v) && v > 0);
     if (!vals.length) return { min: 0, max: 500 };
@@ -2871,7 +3559,7 @@ export function DiagnosticsPanel({
     const maxV = Math.max(...vals);
     const pad = (maxV - minV) * 0.15 || 30;
     return { min: Math.max(0, Math.floor(minV - pad)), max: Math.ceil(maxV + pad) };
-  }, [stepsData, rawStepsPoints, episodeBuckets]);
+  }, [stepsData, rawStepsPoints, blockStepsData, episodeBuckets]);
 
   const tableRows = useMemo(() => [...filteredCheckpoints].reverse(), [filteredCheckpoints]);
 
@@ -2930,7 +3618,6 @@ export function DiagnosticsPanel({
     ? `${latestCheckpoint.checkpoint_episode}`
     : "None";
 
-  const lastEvalTimestampRaw = latestCheckpoint?.created_timestamp || latestCheckpoint?.recorded_at || latestCheckpoint?.evaluation_timestamp || trainingStatus?.last_evaluation_time;
   const uniqueStages = useMemo(() => [...new Set(stages)].sort((a, b) => a - b), [stages]);
 
   const [activeChart, setActiveChart] = useState<ChartTab>(() => {
@@ -2939,7 +3626,7 @@ export function DiagnosticsPanel({
     if (saved === "evaluations") {
       try {
         localStorage.setItem("sheepdog_insights_active_chart", "stacked");
-      } catch {}
+      } catch { /* ignore storage errors */ }
       return "stacked";
     }
     if (saved && validCharts.includes(saved)) {
@@ -3013,7 +3700,7 @@ export function DiagnosticsPanel({
     try {
       localStorage.setItem("sheepdog_insights_stage_scope", String(selectedStageScope));
       localStorage.setItem("sheepdog_insights_last_curriculum_stage", String(effectiveCurriculumStage));
-    } catch {}
+    } catch { /* ignore storage errors */ }
   }, [selectedStageScope, effectiveCurriculumStage]);
 
   useEffect(() => {
@@ -3046,7 +3733,6 @@ export function DiagnosticsPanel({
 
   const [focusedBreakthroughCheckpoint, setFocusedBreakthroughCheckpoint] = useState<number | null>(null);
   const [advisorExplainOpen, setAdvisorExplainOpen] = useState(false);
-  const [breakthroughNotes, setBreakthroughNotes] = useState<Record<number, string>>({});
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [isOpsOpen, setIsOpsOpen] = useState(false);
 
@@ -3088,11 +3774,6 @@ export function DiagnosticsPanel({
   const stageCheckpoints = checkpoints.filter(
     (entry) => getCheckpointStage(entry) === effectiveCurriculumStage,
   );
-  const stageBestSuccessRate = stageCheckpoints.length ? Math.max(...stageCheckpoints.map((entry) => entry.success_rate)) : null;
-  const stageBestReward = stageCheckpoints.length ? Math.max(...stageCheckpoints.map((entry) => entry.average_reward)) : null;
-  const stageMedianSteps = stageCheckpoints.length
-    ? [...stageCheckpoints.map((entry) => entry.average_completion_steps)].sort((a, b) => a - b)[Math.floor(stageCheckpoints.length / 2)]
-    : null;
   const currentStageBestSuccessRate =
     stageCheckpoints.length > 0 ? Math.max(...stageCheckpoints.map((entry) => entry.success_rate)) : 0;
   const plateauKind = plateauInfo?.kind ?? null;
@@ -3158,10 +3839,10 @@ export function DiagnosticsPanel({
     [learningSignalPoints, learningSignalSmoothWindow],
   );
 
-  const rewardValues = learningSignalPoints.map((point) => point.reward);
-  const timeoutValues = learningSignalPoints.map((point) => point.timeoutRate);
-  const speedValues = learningSignalPoints.map((point) => point.completionSteps);
-  const noProgressValues = learningSignalPoints.map((point) => point.noProgressGuard);
+  const rewardValues = useMemo(() => learningSignalPoints.map((point) => point.reward), [learningSignalPoints]);
+  const timeoutValues = useMemo(() => learningSignalPoints.map((point) => point.timeoutRate), [learningSignalPoints]);
+  const speedValues = useMemo(() => learningSignalPoints.map((point) => point.completionSteps), [learningSignalPoints]);
+  const noProgressValues = useMemo(() => learningSignalPoints.map((point) => point.noProgressGuard), [learningSignalPoints]);
 
   const rewardTrend = useMemo(() => rewardTrendLabel(rewardValues), [rewardValues]);
   const timeoutTrend = useMemo(() => timeoutTrendLabel(timeoutValues), [timeoutValues]);
@@ -3190,18 +3871,27 @@ export function DiagnosticsPanel({
     learningSignalPoints[learningSignalPoints.length - 1].successRate >=
       learningSignalPoints[Math.max(0, learningSignalPoints.length - 50)].successRate - 0.02;
 
-  const rewardSignalSummary: SignalSummary = {
-    label: rewardTrend,
-    tone: rewardTrend === "Climbing" ? "good" : rewardTrend === "Declining" ? "danger" : rewardTrend === "Volatile" ? "warn" : "muted",
-  };
-  const timeoutSignalSummary: SignalSummary = {
-    label: timeoutTrend,
-    tone: timeoutTrend === "Improving" ? "good" : timeoutTrend === "Getting Worse" ? "danger" : "warn",
-  };
-  const speedSignalSummary: SignalSummary = {
-    label: speedTrend,
-    tone: speedTrend === "Getting Faster" ? "good" : speedTrend === "Slowing" ? "warn" : "muted",
-  };
+  const rewardSignalSummary = useMemo<SignalSummary>(
+    () => ({
+      label: rewardTrend,
+      tone: rewardTrend === "Climbing" ? "good" : rewardTrend === "Declining" ? "danger" : rewardTrend === "Volatile" ? "warn" : "muted",
+    }),
+    [rewardTrend],
+  );
+  const timeoutSignalSummary = useMemo<SignalSummary>(
+    () => ({
+      label: timeoutTrend,
+      tone: timeoutTrend === "Improving" ? "good" : timeoutTrend === "Getting Worse" ? "danger" : "warn",
+    }),
+    [timeoutTrend],
+  );
+  const speedSignalSummary = useMemo<SignalSummary>(
+    () => ({
+      label: speedTrend,
+      tone: speedTrend === "Getting Faster" ? "good" : speedTrend === "Slowing" ? "warn" : "muted",
+    }),
+    [speedTrend],
+  );
 
   const learningAdvisor = useMemo(
     () =>
@@ -3419,6 +4109,11 @@ export function DiagnosticsPanel({
                   </button>
                 ))}
               </div>
+              <span className="muted" style={{ fontSize: "0.7rem" }}>
+                {filteredCheckpoints.length > 0
+                  ? "Checkpoint evaluations + available live rollouts"
+                  : "Training rollouts (no checkpoint evaluations in scope)"}
+              </span>
             </div>
 
             {/* X-Axis Mode Dropdown */}
@@ -3437,6 +4132,24 @@ export function DiagnosticsPanel({
               </select>
             </div>
 
+            {/* Session Filter Dropdown */}
+            <div className="insights-filter-item">
+              <label className="view-filter__label" htmlFor="insights-session-filter">Session</label>
+              <select
+                id="insights-session-filter"
+                className="view-filter__select"
+                value={selectedSessionId ?? "all"}
+                onChange={(event) => setSelectedSessionId(event.target.value === "all" ? null : event.target.value)}
+              >
+                <option value="all">All Sessions ({sessionEvents.length})</option>
+                {sessionEvents.map((evt) => (
+                  <option key={evt.id} value={evt.session_id}>
+                    {evt.badge_icon} #{evt.session_index} · {evt.title}
+                  </option>
+                ))}
+              </select>
+            </div>
+
             {/* Layer Checkboxes */}
             <div className="insights-layer-pills" role="group" aria-label="Telemetry Layers">
               <label className="layer-pill" title="Toggle individual raw episode rollouts">
@@ -3451,6 +4164,14 @@ export function DiagnosticsPanel({
                 <input type="checkbox" checked={layerFormalEvals} onChange={(e) => setLayerFormalEvals(e.target.checked)} />
                 Formal 10-Seed Benchmark Evals
               </label>
+              <label className="layer-pill" title="Toggle visual cues for session transitions, model changes, and parameter tuning">
+                <input
+                  type="checkbox"
+                  checked={layerSessionMarkers}
+                  onChange={(e) => handleToggleSessionMarkers(e.target.checked)}
+                />
+                Session & Model Cues
+              </label>
             </div>
           </div>
         </div>
@@ -3461,6 +4182,47 @@ export function DiagnosticsPanel({
           </div>
         )}
 
+        {/* Active Session Filter Banner */}
+        {selectedSessionId && (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              background: "rgba(56, 189, 248, 0.08)",
+              border: "1px solid rgba(56, 189, 248, 0.3)",
+              borderRadius: "6px",
+              padding: "0.35rem 0.75rem",
+              marginBottom: "0.5rem",
+              fontSize: "0.78rem",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+              <span>{selectedSessionEvent?.badge_icon || "🔍"}</span>
+              <span>
+                Isolated View: <strong style={{ color: "#38bdf8" }}>{selectedSessionEvent?.title || `Session ${selectedSessionId.slice(0, 10)}`}</strong>
+                {selectedSessionEvent?.session_index ? ` (Session #${selectedSessionEvent.session_index})` : ""}
+                {selectedSessionEvent?.summary ? ` — ${selectedSessionEvent.summary}` : ""}
+              </span>
+            </div>
+            <button
+              type="button"
+              style={{
+                background: "rgba(255, 255, 255, 0.08)",
+                border: "1px solid rgba(255, 255, 255, 0.2)",
+                borderRadius: "4px",
+                color: "#f1f5f9",
+                padding: "0.15rem 0.5rem",
+                cursor: "pointer",
+                fontSize: "0.72rem",
+              }}
+              onClick={() => setSelectedSessionId(null)}
+            >
+              ✕ Show All Sessions
+            </button>
+          </div>
+        )}
+
         {/* ── Primary Graph Canvas (Fixed 270px Height, Always Visible) ── */}
         <div className="insights-graph-container">
           {(activeChart === "stacked" || activeChart === "history" || activeChart === "health" || activeChart === "seedReliability") && (
@@ -3468,6 +4230,7 @@ export function DiagnosticsPanel({
               <LineChart
                 data={successData}
                 rawPoints={layerRawEpisodes ? rawSuccessPoints : []}
+                blockPoints={blockSuccessData}
                 showPolicySnapshots={layerPolicySnapshots}
                 showFormalEvals={layerFormalEvals}
                 formatX={formatChartX}
@@ -3485,15 +4248,25 @@ export function DiagnosticsPanel({
                 secondaryLabel="Completion Steps (Right Axis · Top = Faster)"
                 formatSecondaryY={(v) => `${Math.round(v)}s`}
                 height={270}
+                sessionEvents={mappedSessionEvents}
+                showSessionMarkers={layerSessionMarkers}
+                selectedSessionId={selectedSessionId}
+                onSelectSession={setSelectedSessionId}
               />
               <ChartLegend
                 entries={[
                   { symbol: { kind: "dot", color: "rgba(56,189,248,0.7)" }, label: "Training rollout (0/100%)", detail: "individual episode outcome (100% = success, 0% = fail/timeout)" },
-                  { symbol: { kind: "line", color: "#34d399" }, label: "Formal 10-seed evaluation", detail: "deterministic 10-seed benchmark evaluation at saved checkpoint" },
+                  { symbol: { kind: "line", color: "#38bdf8" }, label: `${effectiveBlockSize}-ep rollout trend`, detail: `block average success rate across ${effectiveBlockSize} consecutive training rollouts` },
+                  { symbol: { kind: "line", color: "#34d399" }, label: filteredCheckpoints.length ? "Formal 10-seed evaluation" : "Training rollout bucket average", detail: filteredCheckpoints.length ? "deterministic 10-seed benchmark evaluation at saved checkpoint" : "training episodes only; not a formal benchmark" },
                   { symbol: { kind: "dash", color: "rgba(251,146,60,0.9)" }, label: "Avg completion steps", detail: "steps to complete penning (fewer is faster, plotted on right axis)" },
                   { symbol: { kind: "dash", color: "rgba(74,222,128,0.65)" }, label: `${Math.round(requiredThreshold * 100)}% Target`, detail: "promotion readiness gate" },
                   { symbol: { kind: "diamond", color: "#9ca3af" }, label: "Running best", detail: "points where personal best success rate was achieved" },
                   { symbol: { kind: "ring", color: "#9ca3af" }, label: "All-time best", detail: "loaded model for inference" },
+                  ...(layerSessionMarkers ? [
+                    { symbol: { kind: "dash" as const, color: "#c084fc" }, label: "🧠 Model architecture update", detail: "deep neural network structural upgrades (e.g. Net2WiderNet)" },
+                    { symbol: { kind: "dash" as const, color: "#f59e0b" }, label: "⚡ Parameter tuning", detail: "hyperparameter, reward shaping, or timeout modifications" },
+                    { symbol: { kind: "dash" as const, color: "#38bdf8" }, label: "🔄 Session boundary", detail: "training restart or session transition" },
+                  ] : []),
                   ...uniqueStages.map((s) => ({ symbol: { kind: "dot" as const, color: stageColor(s) }, label: stageLabel(s), detail: s === 0 ? "base difficulty" : `curriculum stage ${s}` })),
                 ]}
               />
@@ -3510,6 +4283,7 @@ export function DiagnosticsPanel({
               <LineChart
                 data={successData}
                 rawPoints={layerRawEpisodes ? rawSuccessPoints : []}
+                blockPoints={blockSuccessData}
                 showPolicySnapshots={layerPolicySnapshots}
                 showFormalEvals={layerFormalEvals}
                 formatX={formatChartX}
@@ -3522,13 +4296,23 @@ export function DiagnosticsPanel({
                 bestEpisode={bestCheckpointEpisode}
                 showPrevBestLabels
                 height={270}
+                sessionEvents={mappedSessionEvents}
+                showSessionMarkers={layerSessionMarkers}
+                selectedSessionId={selectedSessionId}
+                onSelectSession={setSelectedSessionId}
               />
               <ChartLegend
                 entries={[
                   { symbol: { kind: "dot", color: "rgba(56,189,248,0.7)" }, label: "Training rollout (0/100%)", detail: "individual terminal rollout result" },
-                  { symbol: { kind: "line", color: "#34d399" }, label: "Formal 10-seed evaluation", detail: "formal deterministic 10-seed benchmark evaluation at saved checkpoint" },
+                  { symbol: { kind: "line", color: "#38bdf8" }, label: `${effectiveBlockSize}-ep rollout trend`, detail: `block average success rate across ${effectiveBlockSize} consecutive training rollouts` },
+                  { symbol: { kind: "line", color: "#34d399" }, label: filteredCheckpoints.length ? "Formal 10-seed evaluation" : "Training rollout bucket average", detail: filteredCheckpoints.length ? "formal deterministic 10-seed benchmark evaluation at saved checkpoint" : "training episodes only; not a formal benchmark" },
                   { symbol: { kind: "dash", color: "rgba(74,222,128,0.65)" }, label: `${Math.round(requiredThreshold * 100)}% Target`, detail: "promotion requirement" },
                   { symbol: { kind: "ring", color: "#9ca3af" }, label: "All-time best", detail: "currently active policy" },
+                  ...(layerSessionMarkers ? [
+                    { symbol: { kind: "dash" as const, color: "#c084fc" }, label: "🧠 Model architecture update", detail: "deep neural network structural upgrades" },
+                    { symbol: { kind: "dash" as const, color: "#f59e0b" }, label: "⚡ Parameter tuning", detail: "timeout or reward modifications" },
+                    { symbol: { kind: "dash" as const, color: "#38bdf8" }, label: "🔄 Session boundary", detail: "session transition" },
+                  ] : []),
                   ...uniqueStages.map((s) => ({ symbol: { kind: "dot" as const, color: stageColor(s) }, label: stageLabel(s), detail: `curriculum stage ${s}` })),
                 ]}
               />
@@ -3545,6 +4329,7 @@ export function DiagnosticsPanel({
               <LineChart
                 data={stepsData}
                 rawPoints={layerRawEpisodes ? rawStepsPoints : []}
+                blockPoints={blockStepsData}
                 showPolicySnapshots={layerPolicySnapshots}
                 showFormalEvals={layerFormalEvals}
                 formatX={formatChartX}
@@ -3555,12 +4340,22 @@ export function DiagnosticsPanel({
                 bestEpisode={bestCheckpointEpisode}
                 label="Successful Completion Steps (Fewer Steps = Faster Herding)"
                 height={270}
+                sessionEvents={mappedSessionEvents}
+                showSessionMarkers={layerSessionMarkers}
+                selectedSessionId={selectedSessionId}
+                onSelectSession={setSelectedSessionId}
               />
               <ChartLegend
                 entries={[
                   { symbol: { kind: "dot", color: "rgba(56,189,248,0.7)" }, label: "Training rollout steps", detail: "individual episode step count" },
+                  { symbol: { kind: "line", color: "#38bdf8" }, label: `${effectiveBlockSize}-ep rollout trend`, detail: `block average steps across ${effectiveBlockSize} consecutive rollouts` },
                   { symbol: { kind: "line", color: "#fb923c" }, label: "Formal eval avg steps", detail: "benchmark evaluation average completion steps at checkpoint" },
                   { symbol: { kind: "ring", color: "#9ca3af" }, label: "Best model checkpoint", detail: "loaded policy model" },
+                  ...(layerSessionMarkers ? [
+                    { symbol: { kind: "dash" as const, color: "#c084fc" }, label: "🧠 Model architecture update", detail: "deep neural network structural upgrades" },
+                    { symbol: { kind: "dash" as const, color: "#f59e0b" }, label: "⚡ Parameter tuning", detail: "hyperparameter modifications" },
+                    { symbol: { kind: "dash" as const, color: "#38bdf8" }, label: "🔄 Session boundary", detail: "session transition" },
+                  ] : []),
                   ...uniqueStages.map((s) => ({ symbol: { kind: "dot" as const, color: stageColor(s) }, label: stageLabel(s), detail: `curriculum stage ${s}` })),
                 ]}
               />
@@ -3572,6 +4367,7 @@ export function DiagnosticsPanel({
               <LineChart
                 data={rewardData}
                 rawPoints={layerRawEpisodes ? rawRewardPoints : []}
+                blockPoints={blockRewardData}
                 showPolicySnapshots={layerPolicySnapshots}
                 showFormalEvals={layerFormalEvals}
                 formatX={formatChartX}
@@ -3581,11 +4377,21 @@ export function DiagnosticsPanel({
                 formatY={(v) => v.toFixed(1)}
                 bestEpisode={bestCheckpointEpisode}
                 height={270}
+                sessionEvents={mappedSessionEvents}
+                showSessionMarkers={layerSessionMarkers}
+                selectedSessionId={selectedSessionId}
+                onSelectSession={setSelectedSessionId}
               />
               <ChartLegend
                 entries={[
                   { symbol: { kind: "dot", color: "rgba(56,189,248,0.7)" }, label: "Training episode", detail: "raw per-episode terminal reward" },
+                  { symbol: { kind: "line", color: "#38bdf8" }, label: `${effectiveBlockSize}-ep rollout trend`, detail: `block average reward across ${effectiveBlockSize} consecutive rollouts` },
                   { symbol: { kind: "line", color: "var(--accent)" }, label: "Confidence evaluation", detail: "mean total reward per 10-seed formal evaluation" },
+                  ...(layerSessionMarkers ? [
+                    { symbol: { kind: "dash" as const, color: "#c084fc" }, label: "🧠 Model architecture update", detail: "deep neural network structural upgrades" },
+                    { symbol: { kind: "dash" as const, color: "#f59e0b" }, label: "⚡ Parameter tuning", detail: "reward shaping modifications" },
+                    { symbol: { kind: "dash" as const, color: "#38bdf8" }, label: "🔄 Session boundary", detail: "session transition" },
+                  ] : []),
                   ...uniqueStages.map((s) => ({ symbol: { kind: "dot" as const, color: stageColor(s) }, label: stageLabel(s), detail: `curriculum stage ${s}` })),
                   { symbol: { kind: "ring", color: "#9ca3af" }, label: "Best checkpoint", detail: "loaded for inference" },
                 ]}
@@ -3598,6 +4404,7 @@ export function DiagnosticsPanel({
               <LineChart
                 data={sheepData}
                 rawPoints={layerRawEpisodes ? rawSheepPoints : []}
+                blockPoints={blockSheepData}
                 showPolicySnapshots={layerPolicySnapshots}
                 showFormalEvals={layerFormalEvals}
                 formatX={formatChartX}
@@ -3607,11 +4414,21 @@ export function DiagnosticsPanel({
                 formatY={(v) => v.toFixed(1)}
                 bestEpisode={bestCheckpointEpisode}
                 height={270}
+                sessionEvents={mappedSessionEvents}
+                showSessionMarkers={layerSessionMarkers}
+                selectedSessionId={selectedSessionId}
+                onSelectSession={setSelectedSessionId}
               />
               <ChartLegend
                 entries={[
                   { symbol: { kind: "dot", color: "rgba(56,189,248,0.7)" }, label: "Training episode", detail: "raw per-episode sheep penned count" },
+                  { symbol: { kind: "line", color: "#38bdf8" }, label: `${effectiveBlockSize}-ep rollout trend`, detail: `block average sheep penned across ${effectiveBlockSize} consecutive rollouts` },
                   { symbol: { kind: "line", color: "#c084fc" }, label: "Confidence evaluation", detail: "average sheep penned per formal evaluation" },
+                  ...(layerSessionMarkers ? [
+                    { symbol: { kind: "dash" as const, color: "#c084fc" }, label: "🧠 Model architecture update", detail: "deep neural network structural upgrades" },
+                    { symbol: { kind: "dash" as const, color: "#f59e0b" }, label: "⚡ Parameter tuning", detail: "timeout and penning modifications" },
+                    { symbol: { kind: "dash" as const, color: "#38bdf8" }, label: "🔄 Session boundary", detail: "session transition" },
+                  ] : []),
                   ...uniqueStages.map((s) => ({ symbol: { kind: "dot" as const, color: stageColor(s) }, label: stageLabel(s), detail: `curriculum stage ${s}` })),
                   { symbol: { kind: "ring", color: "#9ca3af" }, label: "Best checkpoint", detail: "active model" },
                 ]}

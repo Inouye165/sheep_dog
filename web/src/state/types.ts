@@ -233,6 +233,8 @@ export interface TrainingStatus {
     message: string;
     recommendation?: string;
   } | null;
+  early_warnings_summary?: EarlyWarningsSummary;
+  early_warnings_monitoring_status?: string;
   runtime?: TrainingRuntimeSummary;
   episodes_in_stage?: number;
   stage_success_count?: number;
@@ -282,6 +284,8 @@ export interface TrainingStatus {
   evaluation_message?: string | null;
   evaluation_latest_result?: EvaluationSeedResult | null;
   evaluation_recent_results?: EvaluationSeedResult[];
+  mode?: string;
+  read_only_preview?: boolean;
 }
 
 export interface EvaluationSeedResult {
@@ -341,6 +345,57 @@ export interface TrainingRuntimeSummary {
   training_time_percentage?: number | null;
 }
 
+export interface SessionEventParamDiff {
+  param: string;
+  full_path?: string;
+  from_val: string;
+  to_val: string;
+  category?: "architecture" | "tuning" | "environment" | "rewards" | "training" | string;
+}
+
+export interface SessionEventStats {
+  checkpoint_count?: number;
+  first_episode?: number | null;
+  last_episode?: number | null;
+  first_timestep?: number | null;
+  last_timestep?: number | null;
+  avg_success_rate?: number | null;
+  avg_reward?: number | null;
+  avg_steps?: number | null;
+  training_seconds?: number | null;
+  active_seconds_total?: number | null;
+  end_reason?: string | null;
+  status?: string | null;
+}
+
+export interface SessionChangeEvent {
+  id: string;
+  session_id: string;
+  session_index: number;
+  run_id?: string | null;
+  timestamp: string;
+  timestamp_ms: number;
+  ended_at?: string | null;
+  ended_ms?: number | null;
+  checkpoint_episode?: number | null;
+  global_timestep?: number | null;
+  event_type: "model_change" | "param_change" | "session_start" | "promotion";
+  title: string;
+  summary: string;
+  changes: SessionEventParamDiff[];
+  rationale?: string | null;
+  badge_icon: string;
+  badge_color: string;
+  session_stats?: SessionEventStats;
+  is_current?: boolean;
+}
+
+export interface SessionEventsResponse {
+  events: SessionChangeEvent[];
+  current_session_id?: string | null;
+  total_sessions: number;
+}
+
 export interface AutoPromoteGateDiagnostics {
   ready?: boolean;
   decision: "pending" | "hold" | "promote" | "promote_ready" | "blocked" | string;
@@ -383,6 +438,8 @@ export interface AutoPromoteGateDiagnostics {
   step_efficiency_delta_pct?: number | null;
   recent_avg_steps?: number | null;
   step_improvement_plateaued?: boolean;
+  qualifying_tail_passed?: boolean;
+  qualifying_tail_required?: number;
   [key: string]: any;
 }
 
@@ -498,6 +555,7 @@ export interface CheckpointEntry {
   replay_mode?: string;
   total_training_episodes?: number;
   cumulative_environment_episodes?: number;
+  environment_episodes_total?: number;
   policy_version?: number;
   policy_gradient_loss?: number;
   value_loss?: number;
@@ -1129,4 +1187,440 @@ export interface StageHealthSummary {
   hyperparameter_audit: HyperparameterAuditItem[];
   prescriptive_recommendations: PrescriptiveRecommendation[];
 }
+
+export interface EarlyWarningItem {
+  id: string;
+  condition_type: "unproductive_repetition" | "success_regression" | string;
+  severity: "critical" | "warning" | "info";
+  title: string;
+  plain_language_observation: string;
+  candidate_causes: string[];
+  source_layer: "completed_evaluation" | string;
+  evidence_source: string;
+  evaluation_id?: string | null;
+  checkpoint_id?: string | null;
+  checkpoint_episode?: number | null;
+  policy_version?: number | null;
+  curriculum_stage: number;
+  completion_time: string;
+  sample_count: number;
+  metric_version?: string | null;
+  status: "active" | "acknowledged";
+  supporting_measurements: Record<string, any>;
+  compatibility_factors?: Record<string, any> | null;
+  comparison_status?: string | null;
+  replay_link?: string | null;
+  replay_step?: number | null;
+  replay_interval_id?: string | null;
+  replay_available: boolean;
+  link_explanation?: string | null;
+  acknowledged_at?: string | null;
+  acknowledged_by?: string | null;
+  first_detected_at: string;
+  last_detected_at: string;
+}
+
+export interface EarlyWarningsSummary {
+  critical_count: number;
+  warning_count: number;
+  info_count: number;
+  total_active: number;
+  total_acknowledged: number;
+  total_resolved?: number;
+  monitoring_status?: string;
+}
+
+export interface CurrentEvaluationContext {
+  evaluation_id?: string | null;
+  checkpoint_id?: string | null;
+  checkpoint_episode?: number | null;
+  policy_version?: number | null;
+  curriculum_stage: number;
+  completion_time?: string | null;
+  sample_count: number;
+  evidence_source?: string | null;
+  repetition_metrics_available: boolean;
+  repetition_metric_status: string;
+  repetition_metrics?: Record<string, any> | null;
+  comparison_status: string;
+}
+
+export interface EarlyWarningsPayload {
+  enabled: boolean;
+  is_read_only_preview: boolean;
+  mode_description: string;
+  monitored_signals: string[];
+  deferred_signals: string[];
+  current_evaluation: CurrentEvaluationContext;
+  active_warnings: EarlyWarningItem[];
+  acknowledged_warnings: EarlyWarningItem[];
+  summary: EarlyWarningsSummary;
+}
+
+export type TemporalIntervalClassification =
+  | "oscillation_loop"
+  | "stationary_hold"
+  | "productive_repositioning"
+  | "counterproductive_pressure"
+  | "unresolved_ambiguity"
+  | string;
+
+export interface ReplayEvidenceAudit {
+  has_initial_step_zero: boolean;
+  has_contiguous_frames: boolean;
+  has_recorded_debug_targets: boolean;
+  has_recorded_step_telemetry: boolean;
+  has_recorded_action_probabilities: boolean;
+  has_full_environment_config: boolean;
+  missing_environment_config_fields: string[];
+  guidance_certainty: string;
+  reconstruction_limitations: string[];
+  discount_factor_available: boolean;
+  discount_factor: number | null;
+  discount_timebase: string | null;
+  strategy_version: string | null;
+  trainer_type: string | null;
+  checkpoint_gamma: number | null;
+  evaluation_gamma: number | null;
+  gamma_mismatch: boolean;
+  telemetry_truncated: boolean;
+  telemetry_limit_steps: number | null;
+  telemetry_truncation_step: number | null;
+  recorded_fields: string[];
+  derived_fields: string[];
+  unavailable_fields: string[];
+}
+
+export interface IntervalContextWindowSummary {
+  window_type: "lead_in" | "aftermath" | string;
+  start_step: number;
+  end_step: number;
+  duration_steps: number;
+  unpenned_sheep_start: number;
+  unpenned_sheep_end: number;
+  sheep_penned_delta: number;
+  avg_route_distance_start: number;
+  avg_route_distance_end: number;
+  net_route_progress: number;
+  flock_spread_start: number;
+  flock_spread_end: number;
+  dog_role_switches: number;
+  behind_flock_alignment_start: number;
+  behind_flock_alignment_end: number;
+  summary: string;
+}
+
+export interface DogIntervalSummary {
+  dog_index: number;
+  dominant_role: string;
+  role_distribution: Record<string, number>;
+  role_switches: number;
+  start_position: [number, number];
+  end_position: [number, number];
+  net_displacement: number;
+  total_path_length: number;
+  tortuosity_ratio: number;
+  unique_positions_count: number;
+  bounding_box_width: number;
+  bounding_box_height: number;
+  bounding_box_span: number;
+  action_reversal_rate: number;
+  wait_rate: number;
+  sprint_rate: number;
+  top_actions: Array<{ action: string; count: number }>;
+  mean_distance_to_nearest_sheep: number;
+  within_sheep_vision_rate: number;
+  on_gate_or_waypoint_side_rate: number;
+  behind_flock_alignment_mean: number;
+  behind_flock_alignment_delta: number;
+  guidance_source: string;
+  guidance_certainty: string;
+  evidence_limitations: string[];
+  start_target: [number, number];
+  end_target: [number, number];
+  mean_distance_to_target: number;
+  legal_action_mask_source: string;
+  mask_type: string;
+  mean_legal_action_count: number;
+  action_probabilities_available: boolean;
+  selected_actions_available: boolean;
+  action_replacements_count: number;
+  value_estimates_available: boolean;
+}
+
+export interface SheepIntervalSummary {
+  sheep_index: number;
+  personality: string;
+  penned_at_start: boolean;
+  penned_at_end: boolean;
+  start_position: [number, number];
+  end_position: [number, number];
+  start_waypoint: [number, number];
+  end_waypoint: [number, number];
+  start_route_distance: number;
+  end_route_distance: number;
+  min_route_distance: number;
+  max_route_distance: number;
+  net_route_progress: number;
+  unique_positions_count: number;
+  bounding_box_span: number;
+  total_path_length: number;
+  position_revisit_rate: number;
+  closed_fence_adjacent_rate: number;
+  outer_wall_or_corner_rate: number;
+  packed_rate: number;
+}
+
+export interface RewardCycleRecord {
+  cycle_id: string;
+  start_step: number;
+  end_step: number;
+  duration_steps: number;
+  unpenned_sheep_count: number;
+  recurrence_type: string;
+  position_signature_matched: boolean;
+  hidden_state_matched: boolean;
+  unobserved_hidden_state_fields: string[];
+  total_reward: number;
+  discounted_return: number | null;
+  discount_factor: number | null;
+  discount_timebase: string | null;
+  discounting_status: string;
+  component_totals: Record<string, number>;
+  positive_progress_steps: number;
+  negative_progress_steps: number;
+  net_route_progress: number;
+  cycle_classification: string;
+  description: string;
+}
+
+export interface RewardIntervalSummary {
+  total_reward: number;
+  mean_step_reward: number;
+  component_totals: Record<string, number>;
+  positive_progress_reward_steps: number;
+  negative_progress_reward_steps: number;
+  zero_net_progress_with_positive_reward_steps: boolean;
+  cycles: RewardCycleRecord[];
+  has_candidate_positive_return_cycle: boolean;
+  has_exploitable_positive_cycle: boolean;
+  has_net_negative_cycle_with_positive_steps: boolean;
+  has_incomplete_cycle: boolean;
+}
+
+export interface IntervalPlainLanguageExplanation {
+  readable_label: string;
+  what_was_observed: string;
+  candidate_explanation: string;
+  supporting_evidence: string[];
+  missing_evidence_and_alternatives: string[];
+  controlled_experiment_required: string;
+  moving_away_note: string;
+}
+
+export interface TemporalInteractionInterval {
+  interval_id: string;
+  replay_id: string;
+  classification: TemporalIntervalClassification;
+  readable_label?: string;
+  start_step: number;
+  end_step: number;
+  duration_steps: number;
+  unpenned_sheep_count: number;
+  affected_dog_indices: number[];
+  affected_sheep_indices: number[];
+  avg_route_distance_start: number;
+  avg_route_distance_end: number;
+  net_route_progress: number;
+  flock_spread_start: number;
+  flock_spread_end: number;
+  no_progress_steps_start: number;
+  no_progress_steps_end: number;
+  no_progress_resets_without_best_route_gain: number;
+  collector_blind_spot_steps: number;
+  corner_target_inversion_steps: number;
+  dogs_outside_sheep_vision_steps: number;
+  lead_in: IntervalContextWindowSummary;
+  aftermath: IntervalContextWindowSummary;
+  dog_summaries: DogIntervalSummary[];
+  sheep_summaries: SheepIntervalSummary[];
+  reward_summary: RewardIntervalSummary;
+  candidate_mechanisms: string[];
+  supporting_evidence: string[];
+  alternative_explanations: string[];
+  unavailable_signals: string[];
+  guidance_certainty: string;
+  evidence_limitations: string[];
+  plain_language?: IntervalPlainLanguageExplanation;
+}
+
+export interface EpisodeTemporalAnalysis {
+  replay_id: string;
+  replay_path: string | null;
+  seed: number | null;
+  policy_name: string;
+  outcome_status: string;
+  stop_reason: string;
+  total_steps: number;
+  total_sheep: number;
+  final_penned_count: number;
+  final_unpenned_count: number;
+  pen_geometry: {
+    origin: Point;
+    width: number;
+    height: number;
+    opening: string;
+    grid_width: number;
+    grid_height: number;
+  };
+  penning_steps: Array<[number, number]>;
+  evidence_audit: ReplayEvidenceAudit;
+  intervals: TemporalInteractionInterval[];
+  unpenned_count_coverage: number[];
+  summary_notes: string[];
+}
+
+export interface LabeledObservationField {
+  index: number;
+  key: string;
+  label: string;
+  group: string;
+  value: number;
+}
+
+export interface LabeledObservationPayload {
+  available: boolean;
+  schema_status: "verified" | "unverified_schema" | "truncated" | "not_recorded" | string;
+  schema_name: string | null;
+  vector_length: number;
+  reason: string;
+  fields: LabeledObservationField[];
+}
+
+export interface StepDogDecisionEvidence {
+  dog_index: number;
+  world_step: number;
+  observation: number[] | null;
+  observation_labeled?: LabeledObservationPayload;
+  decision_action_mask: Record<string, boolean>;
+  recomputed_physical_mask: Record<string, boolean>;
+  selected_action: string;
+  executed_action: string;
+  replacement_reason: string | null;
+  action_probabilities: Record<string, number> | null;
+  logits: Record<string, number> | null;
+  value_estimate: number | null;
+  decision_mode: string;
+  policy_version: number | null;
+  checkpoint_id: string | null;
+  mask_type: string;
+  action_probabilities_source: string;
+  value_estimate_source: string;
+  capture_error?: string | null;
+}
+
+export interface StepDogEvidence {
+  dog_index: number;
+  pre_step_position: Point | null;
+  post_step_position: Point;
+  displacement: { dx: number; dy: number; distance: number } | null;
+  recorded_role: string;
+  assigned_role: string;
+  target: Point;
+  target_sheep_index: number | null;
+  target_reason: string;
+  guidance_source: string;
+  guidance_certainty: string;
+  distance_to_target: number;
+  nearest_unpenned_sheep_distance: number | null;
+  within_sheep_vision: boolean;
+  behind_flock_alignment: number;
+  on_gate_or_waypoint_side: boolean;
+  decision: StepDogDecisionEvidence | null;
+}
+
+export interface NearbyDogGeometry {
+  dog_index: number;
+  role: string;
+  distance: number;
+  within_sheep_vision: boolean;
+  dx_from_sheep: number;
+  dy_from_sheep: number;
+  alignment_to_waypoint: number;
+  on_waypoint_side: boolean;
+}
+
+export interface StepSheepEvidence {
+  sheep_index: number;
+  pre_step_position: Point | null;
+  post_step_position: Point;
+  displacement: { dx: number; dy: number; distance: number } | null;
+  penned: boolean;
+  penned_at_pre_step: boolean | null;
+  personality: string;
+  is_packed: boolean;
+  route_distance: number;
+  waypoint: Point;
+  closed_fence_adjacent: boolean;
+  outer_wall_or_corner: boolean;
+  wall_margin: number;
+  nearby_dogs: NearbyDogGeometry[];
+}
+
+export interface TemporalStepEvidence {
+  step: number;
+  has_prior_contiguous_step: boolean;
+  actions: string[];
+  unpenned_count: number;
+  penned_count: number;
+  average_distance_to_pen: number;
+  best_route_distance_so_far: number | null;
+  flock_spread: number;
+  no_progress_steps: number;
+  no_progress_reset_without_best_gain: boolean;
+  collector_blind_spot: boolean;
+  corner_target_inverted: boolean;
+  any_dog_outside_sheep_vision_oscillating: boolean;
+  guidance_source: string;
+  guidance_certainty: string;
+  legal_action_mask_source: string;
+  mask_type: string;
+  has_recorded_step_telemetry: boolean;
+  has_recorded_debug_targets: boolean;
+  telemetry_truncated: boolean;
+  reward: Record<string, number>;
+  strategy: {
+    flock_center: Point | null;
+    stray_sheep_index: number | null;
+    collector_active: boolean;
+  };
+  dogs: StepDogEvidence[];
+  sheep: StepSheepEvidence[];
+}
+
+export interface TemporalDiagnosticPayload {
+  replay_id: string;
+  sheep_vision: number;
+  action_order: string[];
+  available_reward_components: string[];
+  analysis: EpisodeTemporalAnalysis;
+  step_evidence: TemporalStepEvidence[];
+  replay?: ReplayBundle;
+}
+
+export interface TemporalDiagnosticExample {
+  replay_id: string;
+  title: string;
+  category: string;
+  seed: number | null;
+  outcome_status: string;
+  stop_reason: string;
+  penned_summary: string;
+  unpenned_counts: number[];
+  has_step_zero: boolean;
+  paired_replay_id: string | null;
+  what_to_look_for: string;
+  recommended_default: boolean;
+}
+
 

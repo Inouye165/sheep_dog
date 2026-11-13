@@ -3,6 +3,7 @@
 # pylint: disable=missing-function-docstring,missing-class-docstring,too-many-lines
 from __future__ import annotations
 
+import contextlib
 import json
 import threading
 import time
@@ -20,6 +21,29 @@ import pytest
 from sheepdog import server as server_module
 from sheepdog.config import LabConfig, TrainingConfig
 from sheepdog.server import TrainingManager, TrainingRequestHandler
+
+
+@pytest.fixture(autouse=True)
+def _reset_global_episode_stores():
+    """Ensure singleton EpisodeStore instances do not leak across isolated tmp_path tests."""
+    from sheepdog.training import episode_store as ep_mod
+
+    def _cleanup() -> None:
+        rw = getattr(ep_mod, "_global_episode_store", None)
+        if rw is not None:
+            with contextlib.suppress(Exception):
+                rw.close()
+            ep_mod._global_episode_store = None
+        ro_map = getattr(ep_mod, "_global_ro_episode_stores", None)
+        if isinstance(ro_map, dict):
+            for ro in list(ro_map.values()):
+                with contextlib.suppress(Exception):
+                    ro.close()
+            ro_map.clear()
+
+    _cleanup()
+    yield
+    _cleanup()
 
 
 def test_clear_training_restores_untrained_baseline(tmp_path: Path) -> None:
@@ -695,10 +719,12 @@ def test_startup_invalidates_stale_cross_stage_resume_session(tmp_path: Path) ->
         def __new__(cls):
             return config
 
-    with patch("sheepdog.server.LabConfig", TestConfig):
-        with patch.object(TrainingManager, "_resolve_precedence_state", return_value=run_state):
-            manager = TrainingManager()
-            status = manager.snapshot()
+    with (
+        patch("sheepdog.server.LabConfig", TestConfig),
+        patch.object(TrainingManager, "_resolve_precedence_state", return_value=run_state),
+    ):
+        manager = TrainingManager()
+        status = manager.snapshot()
 
     assert status["curriculum_stage"] == 24
     assert status["resume_available"] is False
@@ -1589,7 +1615,490 @@ def test_stage_diagnostics_endpoint(tmp_path: Path) -> None:
         assert diagnostics["zone_stats"]["top_left"]["wins"] == 1
 
 
+def test_startup_preserves_resume_session_when_history_has_higher_stage(tmp_path: Path) -> None:
+    """A stopped/paused session matching the active stage must NOT be invalidated just because history has higher stages."""
+    artifacts = tmp_path / "artifacts"
+    generated = tmp_path / "web" / "public" / "generated"
+    session_dir = artifacts / "startup"
+    artifacts.mkdir(parents=True)
+    generated.mkdir(parents=True)
+    session_dir.mkdir(parents=True)
+
+    run_state = {
+        "run_id": "run_stage26_active",
+        "active_curriculum_stage": 26,
+        "trainer_type": "maskable_ppo",
+        "policy_type": "neural",
+        "policy_mode": "neural_policy",
+        "active_checkpoint_episode": 27371,
+        "active_policy_version": 5113,
+        "observation_schema_hash": "dummy_obs",
+        "action_space_hash": "dummy_act",
+    }
+    (artifacts / "run-state.json").write_text(json.dumps(run_state), encoding="utf-8")
+    (artifacts / "stage-history.json").write_text(json.dumps({"26": 962, "27": 6}), encoding="utf-8")
+
+    session_payload = {
+        "state": "stopped",
+        "requested_at": "2026-09-22T18:55:00+00:00",
+        "remaining_episodes": 689,
+        "training_request": {
+            "episodes": 689,
+            "fast_mode": True,
+            "enable_instinct_rewards": False,
+            "curriculum_stage": 26,
+        },
+        "status": {
+            "running": False,
+            "curriculum_stage": 26,
+            "phase": "stopped",
+            "batch_total_episodes": 950,
+            "batch_completed_episodes": 260.9,
+        },
+    }
+    (session_dir / "training-session.json").write_text(
+        json.dumps(session_payload), encoding="utf-8"
+    )
+
+    config = LabConfig(
+        training=TrainingConfig(
+            output_dir=str(artifacts),
+            web_export_dir=str(generated),
+        )
+    )
+
+    class TestConfig:
+        def __new__(cls):
+            return config
+
+    with (
+        patch("sheepdog.server.LabConfig", TestConfig),
+        patch.object(TrainingManager, "_resolve_precedence_state", return_value=run_state),
+    ):
+        manager = TrainingManager()
+        status = manager.snapshot()
+
+    assert status["curriculum_stage"] == 26
+    assert status["resume_available"] is True
+    assert status["resume_remaining_episodes"] == 689
+    assert status["phase"] == "stopped"
+    assert (session_dir / "training-session.json").exists()
 
 
+def test_startup_recovers_incomplete_batch_fallback_when_session_missing(tmp_path: Path) -> None:
+    """When training-session.json is missing, reconstruct resume state from training-state.json incomplete_batch."""
+    artifacts = tmp_path / "artifacts"
+    generated = tmp_path / "web" / "public" / "generated"
+    artifacts.mkdir(parents=True)
+    generated.mkdir(parents=True)
+
+    run_state = {
+        "run_id": "run_stage26_fallback",
+        "active_curriculum_stage": 26,
+        "trainer_type": "maskable_ppo",
+        "policy_type": "neural",
+        "policy_mode": "neural_policy",
+        "active_checkpoint_episode": 27371,
+        "active_policy_version": 5113,
+        "observation_schema_hash": "dummy_obs",
+        "action_space_hash": "dummy_act",
+    }
+    (artifacts / "run-state.json").write_text(json.dumps(run_state), encoding="utf-8")
+
+    training_state = {
+        "total_episodes_trained": 27371,
+        "incomplete_batch": {
+            "batch_completed_segments": 87,
+            "batch_total_segments": 318,
+            "batch_steps_per_segment": 35849,
+            "batch_starting_checkpoint_episode": 27113,
+        },
+    }
+    (artifacts / "training-state.json").write_text(json.dumps(training_state), encoding="utf-8")
+
+    config = LabConfig(
+        training=TrainingConfig(
+            output_dir=str(artifacts),
+            web_export_dir=str(generated),
+        )
+    )
+
+    class TestConfig:
+        def __new__(cls):
+            return config
+
+    with (
+        patch("sheepdog.server.LabConfig", TestConfig),
+        patch.object(TrainingManager, "_resolve_precedence_state", return_value=run_state),
+    ):
+        manager = TrainingManager()
+        status = manager.snapshot()
+
+    assert status["curriculum_stage"] == 26
+    assert status["resume_available"] is True
+    assert status["resume_remaining_episodes"] > 0
+    assert status["resume_remaining_timesteps"] == (318 - 87) * 35849
+    assert status["resume_request"]["curriculum_stage"] == 26
+    assert status["batch_total_segments"] == 318
+    assert status["batch_completed_segments"] == 87
+
+
+def test_get_session_events_endpoint(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir(parents=True)
+    generated = tmp_path / "web" / "public" / "generated"
+    generated.mkdir(parents=True)
+
+    runtime_data = {
+        "sessions": [
+            {
+                "session_id": "session_test_1",
+                "started_at": "2026-09-29T10:00:00+00:00",
+                "status": "running",
+            }
+        ]
+    }
+    (artifacts / "training-runtime.json").write_text(json.dumps(runtime_data), encoding="utf-8")
+
+    config = LabConfig(
+        training=TrainingConfig(
+            output_dir=str(artifacts),
+            web_export_dir=str(generated),
+        )
+    )
+
+    class TestConfig:
+        def __new__(cls):
+            return config
+
+    with patch("sheepdog.server.LabConfig", TestConfig):
+        manager = TrainingManager()
+        res = manager.get_session_events()
+        assert res["total_sessions"] == 1
+        assert res["current_session_id"] == "session_test_1"
+        assert len(res["events"]) == 1
+        assert res["events"][0]["session_id"] == "session_test_1"
+
+
+def test_build_training_job_config_preserves_fields_and_user_hyperparams(
+    tmp_path: Path,
+) -> None:
+    artifacts = tmp_path / "artifacts"
+    generated = tmp_path / "web" / "public" / "generated"
+    backups = tmp_path / "backups"
+    artifacts.mkdir(parents=True)
+    generated.mkdir(parents=True)
+
+    base_config = LabConfig(
+        training=TrainingConfig(
+            output_dir=str(artifacts),
+            web_export_dir=str(generated),
+            neural_hidden_sizes=(256, 256, 256),
+            ppo_env_workers=2,
+            target_kl=0.025,
+            backup_enabled=False,
+            backup_dir=str(backups),
+            wandb_enabled=False,
+        )
+    )
+
+    class TestConfig:
+        def __new__(cls):
+            return base_config
+
+    server_module._write_user_hyperparams(
+        artifacts,
+        {
+            "training": {
+                "learning_rate": 1.23e-4,
+                "neural_hidden_sizes": [384, 192],
+            }
+        },
+    )
+
+    with patch("sheepdog.server.LabConfig", TestConfig):
+        job_cfg = server_module._build_training_job_config(
+            requested_episodes=10,
+            fast_mode=True,
+            curriculum_stage=34,
+        )
+
+    assert job_cfg.training.neural_hidden_sizes == (384, 192)
+    assert isinstance(job_cfg.training.neural_hidden_sizes, tuple)
+    assert job_cfg.training.learning_rate == pytest.approx(1.23e-4)
+    assert job_cfg.training.ppo_env_workers == 2
+    assert job_cfg.training.target_kl == pytest.approx(0.025)
+    assert job_cfg.training.backup_enabled is False
+    assert job_cfg.training.backup_dir == str(backups)
+
+
+def test_find_archived_model_and_fork_checkpoint_stages_before_archive(
+    tmp_path: Path,
+) -> None:
+    artifacts = tmp_path / "artifacts"
+    generated = tmp_path / "web" / "public" / "generated"
+    backups = tmp_path / "backups"
+    artifacts.mkdir(parents=True)
+    generated.mkdir(parents=True)
+
+    arch_stage34 = (
+        artifacts / "archive" / "journey-20261112T120000Z" / "checkpoints" / "stage34"
+    )
+    arch_stage34.mkdir(parents=True)
+    archived_zip = arch_stage34 / "stage34-best-model.zip"
+    archived_zip.write_bytes(b"PK\x03\x04archived-stage34-weights")
+
+    found = server_module._find_archived_model(
+        artifacts,
+        Path("checkpoints/stage34/stage34-best-model.zip"),
+    )
+    assert found == archived_zip
+
+    # Also verify fork_checkpoint stages live checkpoints/stage34/*.zip BEFORE archiving
+    live_stage34 = artifacts / "checkpoints" / "stage34"
+    live_stage34.mkdir(parents=True)
+    live_zip = live_stage34 / "stage34-best-model.zip"
+    live_zip.write_bytes(b"PK\x03\x04live-stage34-weights")
+
+    config = LabConfig(
+        training=TrainingConfig(
+            output_dir=str(artifacts),
+            web_export_dir=str(generated),
+            backup_enabled=False,
+            backup_dir=str(backups),
+        )
+    )
+
+    from sheepdog.checkpoints.store import (
+        get_action_space_hash,
+        get_observation_schema_hash,
+    )
+    from sheepdog.environment import ENV_CONFIG_VERSION
+    from sheepdog.rewards import REWARD_SCHEMA_VERSION
+
+    cp_payload = {
+        "checkpoint_id": "chk_stage34_ep_500",
+        "checkpoint_episode": 500,
+        "curriculum_stage": 34,
+        "policy_state_path": str(live_zip),
+        "observation_schema_hash": get_observation_schema_hash(config),
+        "action_space_hash": get_action_space_hash(),
+        "reward_schema_version": REWARD_SCHEMA_VERSION,
+        "env_config_version": ENV_CONFIG_VERSION,
+        "reward_config": {"instincts": {"curriculum_stage": 34}},
+    }
+    (artifacts / "checkpoints" / "checkpoint-000500.json").write_text(
+        json.dumps(cp_payload), encoding="utf-8"
+    )
+    (artifacts / "training-summary.json").write_text(
+        json.dumps({"checkpoints": [cp_payload]}), encoding="utf-8"
+    )
+
+    class TestConfig:
+        def __new__(cls):
+            return config
+
+    with (
+        patch("sheepdog.server.LabConfig", TestConfig),
+        patch.object(
+            TrainingManager,
+            "start",
+            return_value={"running": True, "phase": "starting"},
+        ) as mock_start,
+    ):
+        manager = TrainingManager()
+        res, status_code = manager.fork_checkpoint(
+            episode=500,
+            journey=None,
+            hyperparams_override={},
+            checkpoint_id="chk_stage34_ep_500",
+        )
+
+    assert status_code == 200
+    assert res["status"] == "success"
+    mock_start.assert_called_once()
+    forked_stage34_zip = artifacts / "checkpoints" / "stage34" / "stage34-best-model.zip"
+    assert forked_stage34_zip.exists()
+    assert forked_stage34_zip.read_bytes() == b"PK\x03\x04live-stage34-weights"
+    assert not list(artifacts.glob(".fork-staging-*.zip"))
+
+
+def test_run_training_refuses_auto_archive_when_training_state_corrupt(
+    tmp_path: Path,
+) -> None:
+    artifacts = tmp_path / "artifacts"
+    generated = tmp_path / "web" / "public" / "generated"
+    backups = tmp_path / "backups"
+    stage34_dir = artifacts / "checkpoints" / "stage34"
+    stage34_dir.mkdir(parents=True)
+    generated.mkdir(parents=True)
+
+    stage34_model = stage34_dir / "stage34-best-model.zip"
+    stage34_model.write_bytes(b"PK\x03\x04precious-stage34-model")
+    (artifacts / "training-state.json").write_text("{corrupt-json", encoding="utf-8")
+    (artifacts / "training-summary.json").write_text(
+        json.dumps({"checkpoints": [{"checkpoint_episode": 100}]}), encoding="utf-8"
+    )
+
+    config = LabConfig(
+        training=TrainingConfig(
+            output_dir=str(artifacts),
+            web_export_dir=str(generated),
+            backup_enabled=False,
+            backup_dir=str(backups),
+        )
+    )
+
+    class TestConfig:
+        def __new__(cls):
+            return config
+
+    fake_trainer = SimpleNamespace(
+        total_episodes_trained=0,
+        _loaded_state={},
+        runtime_tracker=None,
+        evaluator=None,
+    )
+
+    with (
+        patch("sheepdog.server.LabConfig", TestConfig),
+        patch("sheepdog.server.create_trainer", return_value=fake_trainer),
+    ):
+        manager = TrainingManager()
+        manager._run_training(
+            requested_episodes=5,
+            fast_mode=True,
+            total_timesteps=None,
+            enable_instinct_rewards=True,
+            curriculum_stage=34,
+            debug_reward_breakdown=False,
+            auto_promote=False,
+            promote_from_checkpoint_episode=None,
+            evaluation_mode="quick",
+            resume=False,
+        )
+        snap = manager.snapshot()
+
+    assert snap["phase"] == "error"
+    assert "Refusing to start or auto-archive" in (snap.get("error") or "")
+    assert stage34_model.exists()
+    assert stage34_model.read_bytes() == b"PK\x03\x04precious-stage34-model"
+
+
+def test_clear_busy_guard_prevents_concurrent_start_and_backup_restore(
+    tmp_path: Path,
+) -> None:
+    artifacts = tmp_path / "artifacts"
+    generated = tmp_path / "web" / "public" / "generated"
+    backups = tmp_path / "backups"
+    artifacts.mkdir(parents=True)
+    generated.mkdir(parents=True)
+
+    config = LabConfig(
+        training=TrainingConfig(
+            episodes=1,
+            checkpoint_episodes=(0,),
+            evaluation_seeds=(11,),
+            output_dir=str(artifacts),
+            web_export_dir=str(generated),
+            backup_enabled=False,
+            backup_dir=str(backups),
+        )
+    )
+
+    class TestConfig:
+        def __new__(cls):
+            return config
+
+    export_started = threading.Event()
+    release_export = threading.Event()
+
+    def slow_export(_self, _cfg):
+        export_started.set()
+        release_export.wait(timeout=5.0)
+
+    with (
+        patch("sheepdog.server.LabConfig", TestConfig),
+        patch.object(TrainingManager, "_export_untrained_baseline", slow_export),
+    ):
+        manager = TrainingManager()
+        _, clear_status = manager.clear()
+        assert clear_status == 200
+        assert export_started.wait(timeout=2.0)
+
+        with pytest.raises(ValueError, match="maintenance"):
+            manager.start(1, True)
+
+        restore_payload, restore_code = manager.restore_backup(stage=1)
+        assert restore_code == 409
+        assert "maintenance" in restore_payload["error"].lower()
+
+        release_export.set()
+        deadline = time.monotonic() + 3.0
+        while manager._maintenance_busy and time.monotonic() < deadline:
+            time.sleep(0.02)
+
+        assert manager._maintenance_busy is False
+        assert manager.snapshot()["phase"] == "idle"
+
+
+def test_readonly_preview_episodes_endpoints_do_not_create_db(
+    tmp_path: Path,
+) -> None:
+    artifacts = tmp_path / "artifacts"
+    generated = tmp_path / "web" / "public" / "generated"
+    backups = tmp_path / "backups"
+    # Intentionally do NOT create artifacts directory yet!
+    config = LabConfig(
+        training=TrainingConfig(
+            output_dir=str(artifacts),
+            web_export_dir=str(generated),
+            backup_enabled=False,
+            backup_dir=str(backups),
+        )
+    )
+
+    class TestConfig:
+        def __new__(cls):
+            return config
+
+    db_path = artifacts / "training-telemetry.sqlite"
+
+    with (
+        patch("sheepdog.server.LabConfig", TestConfig),
+        patch.object(server_module, "_READONLY_PREVIEW_MODE", True),
+    ):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), TrainingRequestHandler)
+        port = server.server_address[1]
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/training/episodes"
+            ) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                assert data == {"episodes": [], "total": 0}
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/insights/failed-episodes"
+            ) as resp:
+                failed = json.loads(resp.read().decode("utf-8"))
+                assert failed == {"episodes": []}
+            assert not db_path.exists()
+
+            # Now create a populated SQLite DB and confirm read-only preview reads it via read_only=True
+            from sheepdog.training.episode_store import EpisodeStore
+
+            rw_store = EpisodeStore(db_path)
+            rw_store.close()
+            assert db_path.exists()
+
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/training/episodes"
+            ) as resp:
+                data2 = json.loads(resp.read().decode("utf-8"))
+                assert data2["episodes"] == []
+        finally:
+            server.shutdown()
+            server.server_close()
 
 

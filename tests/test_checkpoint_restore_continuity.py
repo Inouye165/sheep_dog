@@ -42,7 +42,7 @@ def test_restore_checkpoint_populates_signature(tmp_path: Path) -> None:
         "average_completion_steps": 272.9,
         "policy_state_path": str(dummy_model),
         "policy_config": {
-            "hidden_sizes": [128, 128, 128],
+            "hidden_sizes": [256, 256, 128],
             "observation_size": 54,
             "action_size": 9,
             "env_workers": 1,
@@ -100,7 +100,7 @@ def test_maskable_ppo_trainer_recognizes_restored_state_as_compatible(tmp_path: 
         "best_model_curriculum_stage": 15,
         "best_success_rate": 1.0,
         "policy_config": {
-            "hidden_sizes": [128, 128, 128],
+            "hidden_sizes": [256, 256, 128],
             "observation_size": 54,
             "action_size": 9,
             "env_workers": 1,
@@ -131,7 +131,7 @@ def test_trainer_compatible_across_reward_scale_modifications(tmp_path: Path) ->
         "policy_state_path": str(dummy_model),
         "best_model_path": str(dummy_model),
         "policy_config": {
-            "hidden_sizes": [128, 128, 128],
+            "hidden_sizes": [256, 256, 128],
             "observation_size": 54,
             "action_size": 9,
         },
@@ -173,7 +173,7 @@ def test_policy_load_called_instead_of_initialize_when_resuming(tmp_path: Path) 
         "policy_state_path": str(dummy_model),
         "best_model_path": str(dummy_model),
         "policy_config": {
-            "hidden_sizes": [128, 128, 128],
+            "hidden_sizes": [256, 256, 128],
             "observation_size": 54,
             "action_size": 9,
         },
@@ -192,7 +192,7 @@ def test_policy_load_called_instead_of_initialize_when_resuming(tmp_path: Path) 
     trainer = MaskablePPOTrainer(config, artifacts)
 
     mock_policy = MagicMock()
-    mock_policy.config.to_dict.return_value = {"hidden_sizes": [128, 128, 128]}
+    mock_policy.config.to_dict.return_value = {"hidden_sizes": [256, 256, 128]}
     with patch.object(MaskablePPOTrainer, "POLICY_CLASS") as mock_policy_cls:
         mock_policy_cls.load.return_value = mock_policy
 
@@ -202,4 +202,49 @@ def test_policy_load_called_instead_of_initialize_when_resuming(tmp_path: Path) 
         # Assert POLICY_CLASS.load was called with the model, NOT initialize()
         mock_policy_cls.load.assert_called_once()
         mock_policy_cls.initialize.assert_not_called()
+
+
+def test_missing_best_model_falls_back_to_policy_state_before_legacy_best_model(tmp_path: Path) -> None:
+    """When best_model_path is missing, resume from policy_state_path rather than models/best-model.zip."""
+    artifacts = tmp_path / "artifacts"
+    (artifacts / "models").mkdir(parents=True)
+    (artifacts / "checkpoints" / "stage34").mkdir(parents=True)
+
+    legacy_best = artifacts / "models" / "best-model.zip"
+    legacy_best.write_bytes(b"PK\x03\x04legacy")
+    policy_ckpt = artifacts / "checkpoints" / "stage34" / "maskable-ppo-stage34-343489484.zip"
+    policy_ckpt.write_bytes(b"PK\x03\x04current")
+    missing_best = artifacts / "checkpoints" / "stage34" / "missing-best.zip"
+
+    state_payload = {
+        "total_episodes_trained": 40878,
+        "policy_state_path": str(policy_ckpt),
+        "best_model_path": str(missing_best),
+        "policy_config": {
+            "hidden_sizes": [256, 256, 128],
+            "observation_size": 54,
+            "action_size": 9,
+        },
+    }
+    (artifacts / "training-state.json").write_text(json.dumps(state_payload), encoding="utf-8")
+
+    training_cfg = TrainingConfig(
+        checkpoint_episodes=(1,),
+        total_timesteps=100,
+        output_dir=str(artifacts),
+        web_export_dir=str(tmp_path / "web"),
+    )
+    config = LabConfig(training=training_cfg)
+    trainer = MaskablePPOTrainer(config, artifacts)
+
+    mock_policy = MagicMock()
+    mock_policy.config.to_dict.return_value = {"hidden_sizes": [256, 256, 128]}
+    with patch.object(MaskablePPOTrainer, "POLICY_CLASS") as mock_policy_cls:
+        mock_policy_cls.load.return_value = mock_policy
+        trainer.train(should_stop=lambda: True)
+
+        mock_policy_cls.load.assert_called_once()
+        loaded_path = mock_policy_cls.load.call_args[0][0]
+        assert loaded_path == policy_ckpt
+
 

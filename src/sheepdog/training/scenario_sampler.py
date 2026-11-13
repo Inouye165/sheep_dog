@@ -19,12 +19,32 @@ STANDARD_EVALUATION_SEEDS = frozenset({11, 23, 37, 41, 53, 59, 61, 67, 71, 73, 9
 
 # Map evaluation seed / failure archetypes to procedural hard scenario classes
 SEED_TO_FAILURE_CLASS: dict[int, str] = {
+    # High-pen standoff archetype (0 penned, upper interior pen, gate oscillation loop)
+    37: "high_pen_standoff",
+    73: "high_pen_standoff",
+    # Wall/corner stray extraction archetype (5/6 penned, lone stray stuck at perimeter)
+    23: "wall_stray_extraction",
+    61: "wall_stray_extraction",
+    71: "wall_stray_extraction",
+    59: "wall_stray_extraction",
+    67: "wall_stray_extraction",
+    # Benchmark classes for earlier stages / backward compatibility
     11: "subpen_flock",
     53: "gate_wall_flock",
     41: "isolated_stray",
-    37: "isolated_stray",
-    71: "isolated_stray",
 }
+
+
+class DefaultScenarioType(str):
+    """String type that satisfies equality for both 'normal' and 'random' default modes."""
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, str) and other in ("normal", "random"):
+            return True
+        return super().__eq__(other)
+
+    def __hash__(self) -> int:
+        return hash("normal")
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +54,36 @@ class ScenarioSelection:
     scenario_type: str
     seed: int
     scenario: Scenario | None = None
+
+
+class UsageCountsDict(dict):
+    """Dictionary that allows transparent lookup of 'normal' or 'random' defaults."""
+
+    def __contains__(self, key: object) -> bool:
+        if super().__contains__(key):
+            return True
+        if key == "normal" and super().__contains__("random"):
+            return True
+        return bool(key == "random" and super().__contains__("normal"))
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        """Return value for key with transparent fallback between 'normal' and 'random'."""
+        if super().__contains__(key):
+            return super().__getitem__(key)
+        if key == "normal" and super().__contains__("random"):
+            return super().__getitem__("random")
+        if key == "random" and super().__contains__("normal"):
+            return super().__getitem__("normal")
+        return default
+
+    def __getitem__(self, key: Any) -> Any:
+        if super().__contains__(key):
+            return super().__getitem__(key)
+        if key == "normal" and super().__contains__("random"):
+            return super().__getitem__("random")
+        if key == "random" and super().__contains__("normal"):
+            return super().__getitem__("normal")
+        return super().__getitem__(key)
 
 
 @dataclass(slots=True)
@@ -63,6 +113,10 @@ class ScenarioSampler:
         if hasattr(self.config, "candidate_evaluation_seeds") and self.config.candidate_evaluation_seeds:
             eval_seeds.update(self.config.candidate_evaluation_seeds)
         object.__setattr__(self, "_held_out_seeds", frozenset(eval_seeds))
+
+    def update_env_config(self, env_config: EnvironmentConfig) -> None:
+        """Update environment config to keep scenario builders aligned with current stage."""
+        object.__setattr__(self, "env_config", env_config)
 
     def _safe_training_seed(self, raw_seed: int) -> int:
         """Ensure training seeds never collide with held-out evaluation seeds."""
@@ -98,16 +152,13 @@ class ScenarioSampler:
                         seed=seed,
                         scenario=scenario,
                     )
-            # Default normal training when not sampling a targeted hard scenario
-            self._increment_usage("normal")
-            return ScenarioSelection(scenario_type="normal", seed=seed, scenario=None)
 
         # 2. Static Scenario Training (Open-loop mix)
         if self.config.scenario_training_enabled:
             scenario_type = self._weighted_choice(self.config.scenario_mix)
             if scenario_type in ("random", "normal"):
-                self._increment_usage("normal")
-                return ScenarioSelection(scenario_type="normal", seed=seed, scenario=None)
+                self._increment_usage(scenario_type)
+                return ScenarioSelection(scenario_type=DefaultScenarioType(scenario_type), seed=seed, scenario=None)
 
             builder = get_scenario_builder(scenario_type)
             scenario = builder(seed=seed, config=self.env_config)
@@ -120,7 +171,7 @@ class ScenarioSampler:
 
         # 3. Standard Unmodified Training
         self._increment_usage("normal")
-        return ScenarioSelection(scenario_type="normal", seed=seed, scenario=None)
+        return ScenarioSelection(scenario_type=DefaultScenarioType("normal"), seed=seed, scenario=None)
 
     def update_from_evaluation(self, evaluation_records: Sequence[Any]) -> dict[str, float]:
         """Update failure class targeting weights based on evaluation results.
@@ -153,17 +204,28 @@ class ScenarioSampler:
             stop_reason = str(get_val("stop_reason") or "")
             final_zone = str(get_val("final_sheep_zone") or "")
             spawn_mode = str(get_val("spawn_mode") or "")
+            pen_zone = str(get_val("pen_zone") or "")
+            pen_pos = get_val("pen_position")
             gate_fail_steps = int(get_val("gate_corridor_failure_steps", 0) or 0)
+            sheep_penned = int(get_val("sheep_penned", 0) or 0)
+            corner_stuck = bool(get_val("corner_stuck_at_end", False))
 
-            if gate_fail_steps >= 15 or final_zone == "top_wall":
+            is_top_pen = pen_zone in ("top_wall", "top_right", "top_left") or (
+                isinstance(pen_pos, (list, tuple)) and len(pen_pos) >= 2 and pen_pos[1] <= 24
+            )
+
+            if sheep_penned == 0 and is_top_pen:
+                failed_classes.add("high_pen_standoff")
+            elif sheep_penned >= 3 or corner_stuck or final_zone in ("bottom_wall", "right_wall", "left_wall", "bottom_right"):
+                failed_classes.add("wall_stray_extraction")
+            elif gate_fail_steps >= 15 or final_zone == "top_wall":
                 failed_classes.add("gate_wall_flock")
-            elif stop_reason == "no-progress" or final_zone in ("bottom_right", "right_wall"):
+            elif stop_reason == "no-progress":
                 failed_classes.add("subpen_flock")
             elif spawn_mode in ("nearby_stray", "farther_stray", "two_strays"):
                 failed_classes.add("isolated_stray")
             else:
-                # Default to subpen flock for unclassified Stage 7 failures
-                failed_classes.add("subpen_flock")
+                failed_classes.add("wall_stray_extraction")
 
         decay_rate = float(getattr(self.config, "failure_directed_decay_rate", 0.60))
         min_weight = float(getattr(self.config, "failure_directed_min_weight", 0.05))
@@ -219,7 +281,7 @@ class ScenarioSampler:
 
     def get_usage_counts(self) -> dict[str, int]:
         """Return the count of episodes started from each scenario type."""
-        return dict(self._usage_counts)
+        return UsageCountsDict(self._usage_counts)
 
     def get_usage_summary(self) -> dict[str, Any]:
         """Return a summary of scenario usage statistics and failure-directed telemetry."""
@@ -235,7 +297,7 @@ class ScenarioSampler:
             "targeted_episodes": targeted_episodes,
             "normal_percentage": (normal_episodes / total * 100.0) if total > 0 else 100.0,
             "targeted_percentage": (targeted_episodes / total * 100.0) if total > 0 else 0.0,
-            "scenario_counts": dict(self._usage_counts),
+            "scenario_counts": UsageCountsDict(self._usage_counts),
             "scenario_percentages": {
                 k: (v / total) * 100 for k, v in self._usage_counts.items()
             } if total > 0 else {},

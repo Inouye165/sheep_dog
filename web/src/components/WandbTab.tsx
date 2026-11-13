@@ -16,22 +16,13 @@ interface WandbTabProps {
   onWatchReplay: (episode: number) => void;
 }
 
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
 export function WandbTab({
   checkpointIndex,
   trainingStatus,
-  effectiveConfig,
+  effectiveConfig: _effectiveConfig,
   onRefreshData,
   onWatchReplay,
 }: WandbTabProps) {
-  const rootConfig = asRecord(effectiveConfig);
-  const trainingConfig = asRecord(rootConfig?.training);
-
   const [selectedCheckpoint, setSelectedCheckpoint] = useState<CheckpointEntry | null>(null);
   const [selectedDetails, setSelectedDetails] = useState<any>(null);
   const [showForkForm, setShowForkForm] = useState(false);

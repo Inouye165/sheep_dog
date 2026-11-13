@@ -121,6 +121,18 @@ class EnvironmentConfig:
     # sheep approaching the flock or the pen) count as progress for the
     # no-progress termination check.
     count_collection_progress: bool = False
+    # Distance from gate opening where directional threshold drag applies (D_gate)
+    sheep_d_gate: float = 12.0
+    # Base approach hesitation drag coefficient (alpha_hesitation)
+    sheep_alpha_hesitation: float = 0.65
+    # Minimum angular containment arc (radians) spanned by dogs behind sheep to suppress lateral squirt (theta_containment)
+    sheep_theta_containment: float = 1.8
+    # Critical predator pressure threshold for tonic immobility / packing (P_crit)
+    sheep_p_crit: float = 8.0
+    # Velocity multiplier during leader-follower surge once threshold breached
+    sheep_surge_multiplier: float = 1.3
+    # Radius within which unpenned sheep surge toward penned centroid (R_flock)
+    sheep_surge_cohesion_radius: float = 24.0
 
 
 # Sheep spawn layout modes understood by the environment.
@@ -191,11 +203,11 @@ class RewardConfig:
     terminal_success_reward: float = 20.0
     terminal_failure_penalty: float = 12.0
     wall_pressure_penalty: float = 0.4
-    wait_penalty: float = 0.05
+    wait_penalty: float = 0.20
     sprint_cost_scale: float = 0.12
     gate_progress_scale: float = 1.6
-    gate_corridor_progress_scale: float = 0.8
-    gate_alignment_scale: float = 1.0
+    gate_corridor_progress_scale: float = 1.6
+    gate_alignment_scale: float = 1.8
     lane_crowding_penalty_scale: float = 0.9
     lane_crowding_activation_distance: float = 14.0
     lane_crowding_forward_distance: float = 6.0
@@ -222,7 +234,7 @@ class TrainingConfig:
     candidate_evaluation_seeds: tuple[int, ...] = (91, 92, 93, 94, 95)
     candidate_pool_size: int = 4
     mutation_scale: float = 0.08
-    neural_hidden_sizes: tuple[int, ...] = (128, 128, 128)
+    neural_hidden_sizes: tuple[int, ...] = (256, 256, 128)
     learning_rate: float = 1e-4
     learning_rate_final: float = 3e-5
     rollout_steps: int = 2048
@@ -264,18 +276,24 @@ class TrainingConfig:
     )
     # Failure-directed training: dynamically increase exposure to hard scenario
     # classes identified by standardized evaluation failures, with anti-forgetting decay.
-    failure_directed_training_enabled: bool = False
+    failure_directed_training_enabled: bool = True
     failure_directed_target_ratio: float = 0.25
     failure_directed_decay_rate: float = 0.60
     failure_directed_min_weight: float = 0.05
-    # Observation mode: "guided" (default) includes scripted role labels and
-    # strategy targets; "emergent" strips roles/targets so the model must learn
-    # herding purely from raw observations and reward signal.
+    # Observation mode: "guided" (default, 54 features) includes scripted role labels and
+    # strategy targets; "emergent" (50 features) strips roles/targets so the model must learn
+    # herding purely from raw observations and reward signal; "guided_gate_control" and
+    # "guided_gate_treatment" (58 features) append 4 zero-padded or explicit gate features.
     observation_mode: str = "guided"
     # Weights & Biases telemetry tracking integration toggle.
     wandb_enabled: bool = False
     # Adaptive step-size / learning rate controller toggle.
     enable_adaptive_learning: bool = True
+    # Adaptive stage (1-4) at which entropy starts being damped alongside the
+    # learning rate. 4 keeps full exploration until the 90%+ "Holding Gate"
+    # stage so plateaued policies can keep discovering new behaviour; 2 restores
+    # the legacy behaviour of damping entropy as soon as success passes 60%.
+    adaptive_entropy_damping_min_stage: int = 4
     # PPO Target KL Divergence threshold for early stopping update mini-batches.
     target_kl: float | None = 0.03
     # Automatic rollback safeguard against catastrophic policy collapse during late-stage training.
@@ -308,12 +326,19 @@ class LabConfig:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> LabConfig:
         """Construct a LabConfig from a raw dict (e.g., loaded from JSON)."""
-        rewards_payload = dict(payload["rewards"])
+        rewards_payload = dict(payload.get("rewards") or {})
         instincts_payload = rewards_payload.pop("instincts", None)
         policy_payload = payload.get("policy")
-        training_payload = dict(payload["training"])
+        training_payload = dict(payload.get("training") or {})
         if "checkpoint_episodes" in training_payload:
             training_payload["checkpoint_episodes"] = tuple(training_payload["checkpoint_episodes"])
+        if "checkpoint_timesteps" in training_payload:
+            raw_checkpoint_timesteps = training_payload["checkpoint_timesteps"]
+            training_payload["checkpoint_timesteps"] = (
+                tuple(raw_checkpoint_timesteps)
+                if raw_checkpoint_timesteps is not None
+                else ()
+            )
         if "evaluation_seeds" in training_payload:
             training_payload["evaluation_seeds"] = tuple(training_payload["evaluation_seeds"])
         candidate_seeds = training_payload.get("candidate_evaluation_seeds")
@@ -334,7 +359,7 @@ class LabConfig:
         policy = (
             PolicyConfig(**policy_payload) if isinstance(policy_payload, dict) else PolicyConfig()
         )
-        environment_payload = dict(payload["environment"])
+        environment_payload = dict(payload.get("environment") or {})
         personality_colors = environment_payload.get("sheep_personality_colors")
         if isinstance(personality_colors, dict):
             environment_payload["sheep_personality_colors"] = {

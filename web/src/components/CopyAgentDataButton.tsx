@@ -36,6 +36,12 @@ const STAGE_DESCRIPTIONS: Record<number, string> = {
   30: "3 dogs · 6 sheep · disable no-pressure cohesion",
   31: "3 dogs · 6 sheep · reduce cohesion + stronger personalities",
   32: "3 dogs · 6 sheep · lowest cohesion + strongest personalities",
+  33: "3 dogs · 6 sheep · mild personality variation (144×104)",
+  34: "3 dogs · 6 sheep · moderate personality variation + wide scatter",
+  35: "3 dogs · 6 sheep · weaker cohesion (pressure-coupled bridge)",
+  36: "3 dogs · 6 sheep · disable no-pressure cohesion",
+  37: "3 dogs · 6 sheep · reduced cohesion + stronger personalities",
+  38: "3 dogs · 6 sheep · mastery benchmark (lowest cohesion + max personalities)",
 };
 
 const PLATEAU_WINDOW = 5;
@@ -108,18 +114,27 @@ export function CopyAgentDataButton({
     apiErrorDetails: any;
     failed: boolean;
   }> | null>(null);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current) {
+        clearTimeout(copyTimerRef.current);
+      }
+    };
+  }, []);
 
   const checkpoints = checkpointIndex?.checkpoints ?? [];
   const allStages = Array.from(
     new Set([
       curriculumStage,
       ...(trainingStatus?.available_curriculum_stages ?? []),
-      ...checkpoints.map((c) => c.reward_config?.instincts?.curriculum_stage ?? c.environment_config?.curriculum_stage ?? 0)
+      ...checkpoints.map((c) => c.curriculum_stage ?? c.reward_config?.instincts?.curriculum_stage ?? c.environment_config?.curriculum_stage ?? 0)
     ])
   ).filter((s) => s !== undefined && s !== null).sort((a, b) => a - b);
 
   if (allStages.length === 0) {
-    for (let i = 0; i <= 32; i++) {
+    for (let i = 0; i <= 38; i++) {
       allStages.push(i);
     }
   }
@@ -276,7 +291,10 @@ export function CopyAgentDataButton({
 
       if (!errDetails) {
         setCopied(true);
-        setTimeout(() => {
+        if (copyTimerRef.current) {
+          clearTimeout(copyTimerRef.current);
+        }
+        copyTimerRef.current = setTimeout(() => {
           setCopied(false);
         }, 2000);
       }
@@ -554,10 +572,9 @@ function formatAgentReport(
   selectedStages: number[] = []
 ): string {
   const timestamp = new Date().toISOString();
-  const stageDesc = STAGE_DESCRIPTIONS[currentStage] ?? "Unknown Stage";
 
   const stageScoped = checkpoints.filter(
-    (c) => (c.reward_config?.instincts?.curriculum_stage ?? 0) === currentStage
+    (c) => (c.curriculum_stage ?? c.reward_config?.instincts?.curriculum_stage ?? c.environment_config?.curriculum_stage ?? 0) === currentStage
   );
   const plateau = detectPlateau(stageScoped);
 
@@ -705,7 +722,7 @@ function formatAgentReport(
   if (selectedStages && selectedStages.length > 0) {
     for (const S of selectedStages) {
       const stageCheckpoints = checkpoints.filter(
-        (c) => (c.reward_config?.instincts?.curriculum_stage ?? c.environment_config?.curriculum_stage ?? 0) === S
+        (c) => (c.curriculum_stage ?? c.reward_config?.instincts?.curriculum_stage ?? c.environment_config?.curriculum_stage ?? 0) === S
       );
 
       let latestCpEpisode: string | number = "N/A";

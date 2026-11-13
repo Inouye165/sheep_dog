@@ -18,8 +18,11 @@ import type {
   CapturePolicyConfig,
   StageBottleneckReport,
   EvaluationSummaryPayload,
-  EvaluationRecordPayload,
   StageHealthSummary,
+  SessionEventsResponse,
+  TemporalDiagnosticExample,
+  TemporalDiagnosticPayload,
+  EarlyWarningsPayload,
 } from "../state/types";
 
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL?.trim() || "";
@@ -28,16 +31,52 @@ export interface ApiError extends Error {
   status?: number;
   contentType?: string;
   isNetworkError?: boolean;
+  /** Machine-readable error code from the backend JSON body (e.g. "BACKEND_STARTING"). */
+  code?: string;
 }
 
+/** True when the backend is up but still restoring training state (HTTP 503 BACKEND_STARTING). */
+export function isBackendStartingError(error: unknown): boolean {
+  const apiError = error as ApiError | null;
+  return Boolean(apiError) && apiError?.status === 503 && apiError?.code === "BACKEND_STARTING";
+}
+
+const OFFLINE_COOLDOWN_MS = 2_000;
 let backendOfflineState = false;
+let offlineRetryAfterMs = 0;
+
+function markBackendOffline(): void {
+  backendOfflineState = true;
+  offlineRetryAfterMs = Date.now() + OFFLINE_COOLDOWN_MS;
+}
+
+function clearBackendOffline(): void {
+  backendOfflineState = false;
+  offlineRetryAfterMs = 0;
+}
+
+export function isBackendMarkedOffline(): boolean {
+  if (!backendOfflineState) {
+    return false;
+  }
+  if (Date.now() >= offlineRetryAfterMs) {
+    backendOfflineState = false;
+    offlineRetryAfterMs = 0;
+    return false;
+  }
+  return true;
+}
 
 export function getIsBackendOffline(): boolean {
-  return backendOfflineState;
+  return isBackendMarkedOffline();
 }
 
 export function setIsBackendOffline(offline: boolean): void {
-  backendOfflineState = offline;
+  if (offline) {
+    markBackendOffline();
+  } else {
+    clearBackendOffline();
+  }
 }
 
 function isJsonResponse(response: Response): boolean {
@@ -49,13 +88,18 @@ async function fetchJson<T>(path: string, init?: RequestInit, baseUrl?: string):
   const requestUrl = baseUrl ? new URL(path, baseUrl) : path;
   try {
     const response = await fetch(requestUrl, { cache: "no-store", ...init });
+    clearBackendOffline();
     if (!response.ok) {
       let errMsg = `Failed to fetch ${path}: ${response.status}`;
+      let errCode: string | undefined;
       try {
         if (isJsonResponse(response)) {
           const errJson = await response.clone().json();
           if (errJson && typeof errJson === "object" && "error" in errJson) {
             errMsg = String(errJson.error);
+          }
+          if (errJson && typeof errJson === "object" && typeof errJson.code === "string") {
+            errCode = errJson.code;
           }
         }
       } catch {
@@ -63,6 +107,7 @@ async function fetchJson<T>(path: string, init?: RequestInit, baseUrl?: string):
       }
       const error = new Error(errMsg) as ApiError;
       error.status = response.status;
+      error.code = errCode;
       throw error;
     }
 
@@ -73,11 +118,10 @@ async function fetchJson<T>(path: string, init?: RequestInit, baseUrl?: string):
       throw error;
     }
 
-    backendOfflineState = false;
     return (await response.json()) as T;
   } catch (error) {
     if (error instanceof TypeError || (error instanceof Error && error.name === "TypeError")) {
-      backendOfflineState = true;
+      markBackendOffline();
       const netErr = new Error(`Network or connection error fetching ${path}: ${error.message}`) as ApiError;
       netErr.status = 0;
       netErr.isNetworkError = true;
@@ -87,21 +131,95 @@ async function fetchJson<T>(path: string, init?: RequestInit, baseUrl?: string):
   }
 }
 
-export async function checkBackendHealth(): Promise<{ ok: boolean; service?: string; error?: string }> {
+export interface BackendHealthResult {
+  ok: boolean;
+  service?: string;
+  ready?: boolean;
+  status?: string;
+  mode?: string;
+  readOnlyPreview?: boolean;
+  starting?: boolean;
+  error?: string;
+}
+
+export async function checkBackendHealth(): Promise<BackendHealthResult> {
   try {
-    const res = await fetchJson<{ status: string; service?: string }>("/api/health", undefined, API_BASE_URL);
-    backendOfflineState = false;
-    return { ok: res.status === "ok", service: res.service };
+    const res = await fetchJson<{
+      status: string;
+      service?: string;
+      ready?: boolean;
+      mode?: string;
+      read_only_preview?: boolean;
+      code?: string;
+    }>("/api/health", undefined, API_BASE_URL);
+    clearBackendOffline();
+    const isStarting = res.status === "starting" || res.code === "BACKEND_STARTING";
+    const isReadOnly = Boolean(res.read_only_preview || res.mode === "read_only_preview");
+    return {
+      ok: res.status === "ok" || isStarting,
+      service: res.service,
+      ready: res.ready ?? res.status === "ok",
+      status: res.status,
+      mode: res.mode ?? (isReadOnly ? "read_only_preview" : "normal"),
+      readOnlyPreview: isReadOnly,
+      starting: isStarting,
+    };
   } catch (err) {
-    backendOfflineState = true;
+    if (isBackendStartingError(err)) {
+      clearBackendOffline();
+      return {
+        ok: true,
+        ready: false,
+        status: "starting",
+        starting: true,
+      };
+    }
     const fetchErr = err as ApiError;
+    if (fetchErr?.status === 404) {
+      clearBackendOffline();
+      return {
+        ok: true,
+        ready: true,
+        status: "unimplemented_health_mock",
+        mode: "normal",
+        readOnlyPreview: false,
+        starting: false,
+      };
+    }
+    if (fetchErr?.isNetworkError || fetchErr?.status === 0 || !fetchErr?.status || err instanceof TypeError) {
+      markBackendOffline();
+    }
     return { ok: false, error: fetchErr.message || String(err) };
   }
 }
 
-export async function loadCheckpointIndex(): Promise<CheckpointIndex | null> {
-  if (backendOfflineState) {
-    console.debug("[Sheepdog API] Backend server is offline; hard-stopping checkpoint index fetch.");
+// The checkpoint index grows with every checkpoint (tens of MB on long runs) and is
+// served by the same Python process that runs training. Share one in-flight request
+// between concurrent callers so a single status change doesn't trigger several
+// full downloads that compete with the trainer for CPU.
+let checkpointIndexInFlight: Promise<CheckpointIndex | null> | null = null;
+
+/** Slow fallback refresh for the checkpoint index; normal refreshes are status-driven. */
+export const CHECKPOINT_INDEX_SAFETY_REFRESH_MS = 60_000;
+
+export function loadCheckpointIndex(): Promise<CheckpointIndex | null> {
+  if (checkpointIndexInFlight) {
+    return checkpointIndexInFlight;
+  }
+  const request = loadCheckpointIndexUncached();
+  checkpointIndexInFlight = request;
+  const clear = () => {
+    if (checkpointIndexInFlight === request) {
+      checkpointIndexInFlight = null;
+    }
+  };
+  request.then(clear, clear);
+  return request;
+}
+
+async function loadCheckpointIndexUncached(): Promise<CheckpointIndex | null> {
+  if (isBackendMarkedOffline()) {
+    console.debug("[Sheepdog API] Backend server is in offline cooldown; skipping checkpoint index fetch.");
     return null;
   }
   try {
@@ -118,7 +236,7 @@ export async function loadCheckpointIndex(): Promise<CheckpointIndex | null> {
     }
     // Also treat network/connection errors (status 0 / ERR_CONNECTION_REFUSED) as not available yet.
     if (fetchError.isNetworkError || fetchError.status === 0 || !fetchError.status || error instanceof TypeError) {
-      backendOfflineState = true;
+      markBackendOffline();
       console.debug(
         `Backend server offline or unreachable on port 8000 when fetching checkpoint index (${fetchError.message || String(error)}). Treating as not available yet.`
       );
@@ -144,7 +262,7 @@ export interface LoadEpisodesOptions {
 }
 
 export async function loadTrainingEpisodes(options: LoadEpisodesOptions = {}): Promise<TrainingEpisodesResponse | null> {
-  if (backendOfflineState) {
+  if (isBackendMarkedOffline()) {
     return null;
   }
   const queryParams = new URLSearchParams();
@@ -163,14 +281,14 @@ export async function loadTrainingEpisodes(options: LoadEpisodesOptions = {}): P
   } catch (error) {
     const fetchErr = error as ApiError;
     if (fetchErr.isNetworkError || fetchErr.status === 0 || !fetchErr.status || error instanceof TypeError) {
-      backendOfflineState = true;
+      markBackendOffline();
     }
     return null;
   }
 }
 
 export async function loadFailedEpisodes(limit: number = 25): Promise<TrainingEpisode[] | null> {
-  if (backendOfflineState) {
+  if (isBackendMarkedOffline()) {
     return null;
   }
   const path = `/api/insights/failed-episodes?limit=${limit}`;
@@ -183,7 +301,7 @@ export async function loadFailedEpisodes(limit: number = 25): Promise<TrainingEp
   } catch (error) {
     const fetchErr = error as ApiError;
     if (fetchErr.isNetworkError || fetchErr.status === 0 || !fetchErr.status || error instanceof TypeError) {
-      backendOfflineState = true;
+      markBackendOffline();
     }
     return null;
   }
@@ -193,7 +311,7 @@ export async function loadRecentEvaluations(
   limit: number = 5,
   stage?: number
 ): Promise<EvaluationSummaryPayload[] | null> {
-  if (backendOfflineState) {
+  if (isBackendMarkedOffline()) {
     return null;
   }
   const query = new URLSearchParams();
@@ -208,8 +326,16 @@ export async function loadRecentEvaluations(
   } catch (error) {
     const fetchErr = error as ApiError;
     if (fetchErr.isNetworkError || fetchErr.status === 0 || !fetchErr.status || error instanceof TypeError) {
-      backendOfflineState = true;
+      markBackendOffline();
     }
+    return null;
+  }
+}
+
+export async function loadSessionEvents(): Promise<SessionEventsResponse | null> {
+  try {
+    return await fetchJson<SessionEventsResponse>("/api/insights/session-events", undefined, API_BASE_URL);
+  } catch {
     return null;
   }
 }
@@ -600,5 +726,126 @@ export async function loadStageHealth(
     return null;
   }
 }
+
+export async function loadEarlyWarnings(
+  stage?: number,
+  force?: boolean,
+): Promise<EarlyWarningsPayload | null> {
+  const queryParts: string[] = [];
+  if (stage !== undefined && stage !== null) {
+    queryParts.push(`stage=${stage}`);
+  }
+  if (force) {
+    queryParts.push("force=1");
+  }
+  const query = queryParts.length > 0 ? `?${queryParts.join("&")}` : "";
+  try {
+    return await fetchJson<EarlyWarningsPayload>(`/api/early-warnings${query}`, undefined, API_BASE_URL);
+  } catch (err) {
+    console.warn("[Sheepdog API] Failed to load early warnings:", err);
+    return null;
+  }
+}
+
+export async function acknowledgeEarlyWarning(
+  warningId: string,
+  note = "",
+): Promise<{ success: boolean; warning_id: string } | null> {
+  try {
+    return await fetchJson<{ success: boolean; warning_id: string }>(
+      "/api/early-warnings/acknowledge",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ warning_id: warningId, note }),
+      },
+      API_BASE_URL,
+    );
+  } catch (err) {
+    console.warn("[Sheepdog API] Failed to acknowledge early warning:", err);
+    return null;
+  }
+}
+
+const MAX_TEMPORAL_DIAGNOSTIC_CACHE_ENTRIES = 12;
+const temporalDiagnosticPayloadCache = new Map<string, Promise<TemporalDiagnosticPayload>>();
+const resolvedTemporalDiagnosticPayloads = new Map<string, TemporalDiagnosticPayload>();
+
+function setBoundedMapEntry<K, V>(map: Map<K, V>, key: K, value: V, maxEntries: number): void {
+  if (map.has(key)) {
+    map.delete(key);
+  } else if (map.size >= maxEntries) {
+    const oldestKey = map.keys().next().value;
+    if (oldestKey !== undefined) {
+      map.delete(oldestKey);
+    }
+  }
+  map.set(key, value);
+}
+
+export function clearTemporalDiagnosticCache(): void {
+  temporalDiagnosticPayloadCache.clear();
+  resolvedTemporalDiagnosticPayloads.clear();
+}
+
+export function hasCachedTemporalDiagnosticAnalysis(
+  replayId: string,
+  includeReplay = true,
+): boolean {
+  const cleanId = replayId.trim();
+  const cacheKey = `${cleanId}::includeReplay=${includeReplay ? "1" : "0"}`;
+  return resolvedTemporalDiagnosticPayloads.has(cacheKey);
+}
+
+export async function loadTemporalDiagnosticExamples(): Promise<TemporalDiagnosticExample[]> {
+  try {
+    const res = await fetchJson<{ examples: TemporalDiagnosticExample[] }>(
+      "/api/temporal-diagnostics/examples",
+      undefined,
+      API_BASE_URL,
+    );
+    return Array.isArray(res.examples) ? res.examples : [];
+  } catch (err) {
+    console.warn("[Sheepdog API] Failed to load temporal diagnostic examples:", err);
+    return [];
+  }
+}
+
+export async function loadTemporalDiagnosticAnalysis(
+  replayId: string,
+  options?: { includeReplay?: boolean; forceRefresh?: boolean },
+): Promise<TemporalDiagnosticPayload> {
+  const cleanId = replayId.trim();
+  const includeReplay = Boolean(options?.includeReplay);
+  const cacheKey = `${cleanId}::includeReplay=${includeReplay ? "1" : "0"}`;
+  if (!options?.forceRefresh) {
+    const cached = temporalDiagnosticPayloadCache.get(cacheKey);
+    if (cached) {
+      setBoundedMapEntry(temporalDiagnosticPayloadCache, cacheKey, cached, MAX_TEMPORAL_DIAGNOSTIC_CACHE_ENTRIES);
+      const resolved = resolvedTemporalDiagnosticPayloads.get(cacheKey);
+      if (resolved) {
+        setBoundedMapEntry(resolvedTemporalDiagnosticPayloads, cacheKey, resolved, MAX_TEMPORAL_DIAGNOSTIC_CACHE_ENTRIES);
+      }
+      return cached;
+    }
+  }
+  const query = includeReplay ? "?include_replay=1" : "";
+  const requestPromise = fetchJson<TemporalDiagnosticPayload>(
+    `/api/replays/${encodeURIComponent(cleanId)}/temporal-analysis${query}`,
+    undefined,
+    API_BASE_URL,
+  )
+    .then((payload) => {
+      setBoundedMapEntry(resolvedTemporalDiagnosticPayloads, cacheKey, payload, MAX_TEMPORAL_DIAGNOSTIC_CACHE_ENTRIES);
+      return payload;
+    })
+    .catch((err) => {
+      temporalDiagnosticPayloadCache.delete(cacheKey);
+      throw err;
+    });
+  setBoundedMapEntry(temporalDiagnosticPayloadCache, cacheKey, requestPromise, MAX_TEMPORAL_DIAGNOSTIC_CACHE_ENTRIES);
+  return requestPromise;
+}
+
 
 

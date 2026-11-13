@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   checkBackendHealth,
+  isBackendStartingError,
   loadCheckpointIndex,
+  loadTrainingStatus,
   loadTrainingStatusSafe,
   ApiError,
 } from "./api";
@@ -50,5 +52,32 @@ describe("api client network error and health check handling", () => {
     const res = await loadTrainingStatusSafe();
     expect(res.isOffline).toBe(true);
     expect(res.status).toBeNull();
+  });
+
+  it("recognizes a 503 BACKEND_STARTING response as restoring, not offline", async () => {
+    const body = { code: "BACKEND_STARTING", phase: "restoring", error: "Restoring training state (12s elapsed)" };
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 503,
+      headers: new Headers({ "content-type": "application/json" }),
+      clone: () => ({ json: async () => body }),
+      json: async () => body,
+    } as unknown as Response);
+
+    const error = await loadTrainingStatus().catch((err: unknown) => err as ApiError);
+    expect(isBackendStartingError(error)).toBe(true);
+    expect((error as ApiError).code).toBe("BACKEND_STARTING");
+    expect((error as ApiError).message).toContain("Restoring training state");
+
+    const safe = await loadTrainingStatusSafe().catch((err: unknown) => err as ApiError);
+    expect(isBackendStartingError(safe)).toBe(true);
+  });
+
+  it("does not treat other failures as backend startup", () => {
+    const generic = Object.assign(new Error("boom"), { status: 503 }) as ApiError;
+    const network = Object.assign(new Error("refused"), { status: 0, isNetworkError: true }) as ApiError;
+    expect(isBackendStartingError(generic)).toBe(false);
+    expect(isBackendStartingError(network)).toBe(false);
+    expect(isBackendStartingError(null)).toBe(false);
   });
 });

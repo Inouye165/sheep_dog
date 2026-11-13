@@ -76,6 +76,9 @@ class CheckpointMetadata:
     adaptive_lr_multiplier: float | None = None
     effective_learning_rate: float | None = None
     effective_mutation_scale: float | None = None
+    experiment_id: str | None = None
+    activation_id: str | None = None
+    change_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -99,21 +102,75 @@ def compute_seed_set_id(seeds: list[int] | tuple[int, ...]) -> str:
 class CheckpointStore:
     """Write checkpoints to disk in a predictable layout."""
 
-    def __init__(self, root: str | Path) -> None:
+    def __init__(self, root: str | Path, tracking_registry: Any | None = None) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
+        self.tracking_registry = tracking_registry
 
     def write(self, metadata: CheckpointMetadata) -> Path:
         payload = metadata.to_dict()
         legacy_path = self.root / f"checkpoint-{metadata.checkpoint_episode:06d}.json"
         if not metadata.checkpoint_id:
             atomic_write_json(legacy_path, payload)
-            return legacy_path
+            checkpoint_path = legacy_path
+        else:
+            safe_checkpoint_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", metadata.checkpoint_id)
+            checkpoint_path = self.root / f"checkpoint-{safe_checkpoint_id}.json"
+            atomic_write_json(checkpoint_path, payload)
+            atomic_write_json(legacy_path, payload)
 
-        safe_checkpoint_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", metadata.checkpoint_id)
-        checkpoint_path = self.root / f"checkpoint-{safe_checkpoint_id}.json"
-        atomic_write_json(checkpoint_path, payload)
-        atomic_write_json(legacy_path, payload)
+        if self.tracking_registry is not None:
+            try:
+                import hashlib
+                chk_sha = None
+                if checkpoint_path.exists():
+                    with open(checkpoint_path, "rb") as f:
+                        chk_sha = hashlib.sha256(f.read()).hexdigest()
+
+                measured_w_steps = getattr(metadata, "world_steps", None)
+
+                from sheepdog.tracking.registry import CheckpointRecord, classify_assistance_mode
+
+                chk_id = metadata.checkpoint_id or f"checkpoint-{metadata.checkpoint_episode:06d}"
+                rec_id = f"chk_rec_{chk_id}"
+                obs_mode = metadata.policy_config.get("observation_mode") if metadata.policy_config else None
+                assistance_mode = classify_assistance_mode(obs_mode)
+
+                chk_metadata: dict[str, Any] = {
+                    "policy_name": metadata.policy_name,
+                    "change_id": metadata.change_id,
+                }
+                if measured_w_steps is not None:
+                    chk_metadata["world_steps_status"] = "measured"
+                    w_steps = measured_w_steps
+                else:
+                    chk_metadata["world_steps_status"] = "unmeasured"
+                    w_steps = None
+
+                rec = CheckpointRecord(
+                    checkpoint_record_id=rec_id,
+                    checkpoint_id=chk_id,
+                    experiment_id=metadata.experiment_id,
+                    activation_id=metadata.activation_id,
+                    run_id=metadata.run_id,
+                    checkpoint_path=str(checkpoint_path).replace("\\", "/"),
+                    checkpoint_sha256=chk_sha,
+                    parent_checkpoint_id=metadata.parent_checkpoint_id,
+                    global_environment_episode=metadata.environment_episodes_total,
+                    checkpoint_label_episode=metadata.checkpoint_episode,
+                    policy_version=metadata.policy_version,
+                    policy_transitions=metadata.global_timestep,
+                    world_steps=w_steps,
+                    created_at=metadata.created_timestamp,
+                    assistance_mode=assistance_mode,
+                    curriculum_stage=metadata.curriculum_stage,
+                    metadata=chk_metadata,
+                )
+                self.tracking_registry.record_checkpoint(rec)
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).warning("Could not record checkpoint in tracking registry: %s", exc)
+
         return checkpoint_path
 
 
@@ -205,6 +262,7 @@ def verify_checkpoint_compatibility(checkpoint_metadata: dict[str, Any], current
         cp_env_version = "1.0"
 
     errors = []
+    warnings = []
     if cp_obs_hash != current_obs_hash:
         errors.append(
             f"Observation schema mismatch (checkpoint: {cp_obs_hash or 'legacy'}, current: {current_obs_hash[:8]})"
@@ -213,7 +271,12 @@ def verify_checkpoint_compatibility(checkpoint_metadata: dict[str, Any], current
         errors.append(
             f"Action space mismatch (checkpoint: {cp_action_hash or 'legacy'}, current: {current_action_hash[:8]})"
         )
-    if cp_reward_version != current_reward_version:
+    if cp_reward_version == "1.0" and current_reward_version == "1.1":
+        warnings.append(
+            "Reward shaping changed from 1.0 to 1.1; weights remain loadable, "
+            "but re-evaluate before comparing results or fine-tuning."
+        )
+    elif cp_reward_version != current_reward_version:
         errors.append(
             f"Reward schema version mismatch (checkpoint: {cp_reward_version or 'legacy'}, current: {current_reward_version})"
         )
@@ -248,6 +311,7 @@ def verify_checkpoint_compatibility(checkpoint_metadata: dict[str, Any], current
     return {
         "compatible": len(errors) == 0,
         "errors": errors,
+        "warnings": warnings,
         "current": {
             "observation_schema_hash": current_obs_hash,
             "action_space_hash": current_action_hash,

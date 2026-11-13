@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { ChartHoverPortal } from "./DiagnosticsPanel";
 import type { CheckpointEntry } from "../state/types";

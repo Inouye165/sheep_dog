@@ -18,6 +18,43 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def validate_telemetry_config(
+    telemetry_mode: str | None = None,
+    max_telemetry_steps: int | None = None,
+    telemetry_head_steps: int | None = None,
+    telemetry_tail_steps: int | None = None,
+) -> None:
+    """Validate capture telemetry parameters against schemas and bounds.
+
+    Raises:
+        TypeError: If an argument has an invalid type (e.g. bool instead of int, non-str mode).
+        ValueError: If telemetry_mode is not 'prefix' or 'head_tail', or any step count is negative.
+    """
+    if telemetry_mode is not None:
+        if not isinstance(telemetry_mode, str):
+            raise TypeError(
+                f"telemetry_mode must be a string, got {type(telemetry_mode).__name__}"
+            )
+        if telemetry_mode not in ("prefix", "head_tail"):
+            raise ValueError(
+                f"Invalid telemetry_mode: {telemetry_mode!r}. Must be 'prefix' or 'head_tail'."
+            )
+    for name, val in (
+        ("max_telemetry_steps", max_telemetry_steps),
+        ("telemetry_head_steps", telemetry_head_steps),
+        ("telemetry_tail_steps", telemetry_tail_steps),
+    ):
+        if val is not None:
+            if isinstance(val, bool) or not isinstance(val, int):
+                raise TypeError(
+                    f"{name} must be an integer, got {type(val).__name__}"
+                )
+            if val < 0:
+                raise ValueError(
+                    f"{name} must be non-negative, got {val}"
+                )
+
+
 @dataclass
 class CapturePolicy:
     """Configurable capture policy for training episode replays."""
@@ -30,6 +67,36 @@ class CapturePolicy:
     max_replays_per_stage: int = 50
     max_total_replays: int = 200
     max_disk_mb: float = 500.0
+    capture_step_telemetry: bool = False
+    telemetry_mode: str = "prefix"  # "prefix" or "head_tail"
+    max_telemetry_steps_per_episode: int = 1000  # Maximum world steps of step-telemetry recorded per episode (units: world steps)
+    telemetry_head_steps: int = 200  # Head retention window (world steps 1..min(H, T))
+    telemetry_tail_steps: int = 500  # Rolling tail retention window (world steps max(1, T-L+1)..T)
+
+    def __post_init__(self) -> None:
+        validate_telemetry_config(
+            telemetry_mode=self.telemetry_mode,
+            max_telemetry_steps=self.max_telemetry_steps_per_episode,
+            telemetry_head_steps=self.telemetry_head_steps,
+            telemetry_tail_steps=self.telemetry_tail_steps,
+        )
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "telemetry_mode":
+            validate_telemetry_config(telemetry_mode=value)
+        elif name in ("telemetry_head_steps", "telemetry_tail_steps", "max_telemetry_steps_per_episode"):
+            param_key = "max_telemetry_steps" if name == "max_telemetry_steps_per_episode" else name
+            validate_telemetry_config(**{param_key: value})
+        super().__setattr__(name, value)
+
+    @property
+    def max_telemetry_steps(self) -> int:
+        return self.max_telemetry_steps_per_episode
+
+    @max_telemetry_steps.setter
+    def max_telemetry_steps(self, value: int) -> None:
+        validate_telemetry_config(max_telemetry_steps=value)
+        self.max_telemetry_steps_per_episode = value
 
     def should_capture(
         self,
@@ -277,14 +344,18 @@ class AsyncReplayWriter:
 
 
 _global_replay_writer: AsyncReplayWriter | None = None
+_replay_writer_lock = threading.Lock()
 
 
 def get_replay_writer(
     output_dir: str | Path = "artifacts/replays", episode_store: Any | None = None
 ) -> AsyncReplayWriter:
     global _global_replay_writer
-    if _global_replay_writer is None:
-        _global_replay_writer = AsyncReplayWriter(
-            output_dir=output_dir, episode_store=episode_store
-        )
-    return _global_replay_writer
+    with _replay_writer_lock:
+        if _global_replay_writer is None:
+            _global_replay_writer = AsyncReplayWriter(
+                output_dir=output_dir, episode_store=episode_store
+            )
+        elif _global_replay_writer.episode_store is None and episode_store is not None:
+            _global_replay_writer.episode_store = episode_store
+        return _global_replay_writer

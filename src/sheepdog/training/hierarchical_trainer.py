@@ -39,6 +39,7 @@ from typing import Any
 
 from stable_baselines3.common.callbacks import BaseCallback
 
+from sheepdog.atomic_io import atomic_write_json
 from sheepdog.checkpoints.store import CheckpointMetadata
 from sheepdog.environment import ACTION_ORDER
 from sheepdog.policies.hierarchical import (
@@ -185,7 +186,24 @@ class HierarchicalMaskablePPOTrainer(Trainer):
             },
         }
 
+    def has_compatible_policy_state(self) -> bool:
+        """Return whether training-state.json references a compatible existing checkpoint."""
+        return self._has_compatible_policy_state()
+
     def _has_compatible_policy_state(self) -> bool:
+        raw_path = self._loaded_state.get("policy_state_path")
+        if not raw_path:
+            return False
+        p = Path(str(raw_path))
+        if not p.exists() and (p.is_absolute() or not (self.output_root / p).exists()):
+            return False
+        stored_config = self._loaded_state.get("policy_config")
+        if isinstance(stored_config, dict):
+            raw_hidden = stored_config.get("hidden_sizes")
+            if isinstance(raw_hidden, list | tuple):
+                expected_hidden = tuple(self.config.training.neural_hidden_sizes)
+                if tuple(int(v) for v in raw_hidden) != expected_hidden:
+                    return False
         stored = self._loaded_state.get("training_signature")
         if not isinstance(stored, dict):
             return False
@@ -234,7 +252,7 @@ class HierarchicalMaskablePPOTrainer(Trainer):
             "policy_config": policy.policy_config.to_dict(),
             "training_signature": self._training_signature(),
         }
-        self._state_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        atomic_write_json(self._state_path, payload)
 
     # ------------------------------------------------------------------
     # Main training loop
@@ -381,9 +399,7 @@ class HierarchicalMaskablePPOTrainer(Trainer):
             checkpoint_path = (
                 checkpoint_root / f"{self.CHECKPOINT_PREFIX}-{checkpoint_episode:06d}.json"
             )
-            checkpoint_path.write_text(
-                json.dumps(checkpoint_meta.to_dict(), indent=2), encoding="utf-8"
-            )
+            atomic_write_json(checkpoint_path, checkpoint_meta.to_dict())
             checkpoint_records.append(checkpoint_meta.to_dict())
 
             self._save_state(

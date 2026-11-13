@@ -90,15 +90,41 @@ def _step_one_sheep(
     )
 
 
-def test_pen_fearful_biases_away_from_pen() -> None:
-    # Place a sheep near the pen so the proximity-scaled repulsion is active,
-    # with a far dog so the only nontrivial vector is the personality bias.
+def test_pen_fearful_hesitates_under_gate_approach() -> None:
+    # Under dog pressure toward the gate, pen_fearful experiences higher directional drag (hesitation)
+    # than obedient sheep, resulting in less forward gate penetration.
     env_config = EnvironmentConfig(sheep=1, sheep_personality_strength=1.0)
-    pen_center = Point(
-        env_config.width - env_config.pen_width + env_config.pen_width // 2,
+    gate_entrance = Point(
+        env_config.width - env_config.pen_width,
         1 + env_config.pen_height // 2,
     )
-    sheep_position = Point(pen_center.x - 10, pen_center.y + 12)
+    # Position sheep 4 cells in front of the gate opening with a dog directly behind pushing it toward the gate
+    sheep_position = Point(gate_entrance.x - 4, gate_entrance.y)
+    rear_dog = [Point(sheep_position.x - 2, sheep_position.y)]
+    move_fearful = _step_one_sheep(
+        personality="pen_fearful",
+        strength=1.0,
+        sheep_position=sheep_position,
+        dog_positions=rear_dog,
+    )
+    move_obedient = _step_one_sheep(
+        personality="obedient",
+        strength=1.0,
+        sheep_position=sheep_position,
+        dog_positions=rear_dog,
+    )
+    # Fearful sheep should not penetrate further into the gate than obedient baseline
+    assert move_fearful.distance_to(gate_entrance) >= move_obedient.distance_to(gate_entrance)
+
+
+def test_pen_fearful_does_not_blast_radially_when_calm() -> None:
+    # Replacing radial repulsion: when calm with no dog pressure, sheep does not get launched backward
+    env_config = EnvironmentConfig(sheep=1, sheep_personality_strength=1.0)
+    gate_entrance = Point(
+        env_config.width - env_config.pen_width,
+        1 + env_config.pen_height // 2,
+    )
+    sheep_position = Point(gate_entrance.x - 3, gate_entrance.y)
     far_dog = [Point(0, env_config.height - 1)]
     move_fearful = _step_one_sheep(
         personality="pen_fearful",
@@ -106,39 +132,31 @@ def test_pen_fearful_biases_away_from_pen() -> None:
         sheep_position=sheep_position,
         dog_positions=far_dog,
     )
-    move_obedient = _step_one_sheep(
-        personality="obedient",
-        strength=1.0,
-        sheep_position=sheep_position,
-        dog_positions=far_dog,
-    )
-    # Fearful sheep should end up farther from the pen than the obedient baseline.
-    assert move_fearful.distance_to(pen_center) > move_obedient.distance_to(pen_center)
+    # Sheep should remain near its position (idling or small step), not blasted radially outward
+    assert move_fearful.distance_to(sheep_position) <= 1.5
 
 
 def test_pen_shy_biases_away_from_pen() -> None:
     env_config = EnvironmentConfig(sheep=1, sheep_personality_strength=1.0)
-    pen_center = Point(
-        env_config.width - env_config.pen_width + env_config.pen_width // 2,
+    gate_entrance = Point(
+        env_config.width - env_config.pen_width,
         1 + env_config.pen_height // 2,
     )
-    sheep_position = Point(pen_center.x - 10, pen_center.y + 12)
-    far_dog = [Point(0, env_config.height - 1)]
+    sheep_position = Point(gate_entrance.x - 4, gate_entrance.y)
+    rear_dog = [Point(sheep_position.x - 2, sheep_position.y)]
     move_shy = _step_one_sheep(
         personality="pen_shy",
         strength=1.0,
         sheep_position=sheep_position,
-        dog_positions=far_dog,
+        dog_positions=rear_dog,
     )
     move_obedient = _step_one_sheep(
         personality="obedient",
         strength=1.0,
         sheep_position=sheep_position,
-        dog_positions=far_dog,
+        dog_positions=rear_dog,
     )
-    # pen_shy sheep should end up at least as far from the pen as the
-    # obedient baseline, and typically farther.
-    assert move_shy.distance_to(pen_center) >= move_obedient.distance_to(pen_center)
+    assert move_shy.distance_to(gate_entrance) >= move_obedient.distance_to(gate_entrance)
 
 
 def test_bold_resists_distant_dog_more_than_obedient() -> None:
@@ -199,3 +217,85 @@ def test_environment_config_round_trips_with_new_field() -> None:
     # And replace() should still work.
     bumped = replace(config.environment, sheep_personality_strength=0.7)
     assert bumped.sheep_personality_strength == 0.7
+
+
+def test_leader_follower_surge_pulls_to_penned_centroid() -> None:
+    env_config = EnvironmentConfig(sheep=2, sheep_speed=1.0, sheep_personality_strength=1.0)
+    config = LabConfig(environment=env_config)
+    env = SheepdogEnvironment(config)
+    env.reset(seed=1)
+
+    # Mark sheep 0 as penned inside the pen
+    pen_inside = env.pen.center
+    env._sheep[0].position = pen_inside
+    env._sheep[0].penned = True
+    env._pen_breached = True
+
+    # Position unpenned sheep 1 near the gate
+    gate_entrance = env._gate_entrance_center()
+    outside_pos = Point(gate_entrance.x - 3, gate_entrance.y)
+    env._sheep[1].position = outside_pos
+    env._sheep[1].penned = False
+
+    # Far dogs
+    env._dogs[0].position = Point(0, 0)
+
+    # Call _move_sheep
+    env._move_sheep()
+
+    # Unpenned sheep should have surged toward the penned centroid/pen
+    new_dist = env._sheep[1].position.distance_to(pen_inside)
+    old_dist = outside_pos.distance_to(pen_inside)
+    assert new_dist < old_dist
+
+
+def test_tonic_immobility_packing_suppresses_scatter() -> None:
+    env_config = EnvironmentConfig(sheep=2, sheep_personality_strength=1.0, sheep_p_crit=4.0)
+    config = LabConfig(environment=env_config)
+    env = SheepdogEnvironment(config)
+    env.reset(seed=1)
+
+    # Escapist sheep at corner Point(0, 0) where primary flee paths are blocked and dog pressure is high
+    sheep_pos = Point(0, 0)
+    sheep = SheepState(index=0, position=sheep_pos, personality="escapist")
+    env._sheep = [sheep]
+
+    # Dogs right on top creating massive predator pressure (P > P_crit)
+    dog_positions = [Point(1, 0), Point(0, 1)]
+    flock_center = Point(5, 5)
+
+    # Step the sheep
+    env._sheep_step(
+        sheep_pos,
+        dog_positions,
+        flock_center,
+        panic_steps=3,
+        sheep=sheep,
+    )
+    # Under tonic immobility, the sheep should be marked packed
+    assert sheep.is_packed is True
+
+
+def test_flank_squirt_vs_containment_arc() -> None:
+    env_config = EnvironmentConfig(sheep=1, sheep_personality_strength=0.0, sheep_theta_containment=1.8)
+    config = LabConfig(environment=env_config)
+    env = SheepdogEnvironment(config)
+    env.reset(seed=1)
+
+    gate_entrance = env._gate_entrance_center()
+    # Sheep positioned left of the gate, so gate is to the right (+x)
+    sheep_pos = Point(gate_entrance.x - 8, gate_entrance.y)
+    sheep = SheepState(index=0, position=sheep_pos)
+
+    # Case A: Balanced containment arc (dogs behind sheep on both left and right flanks)
+    # Dogs behind at (-x) spanning both +y and -y
+    contained_dogs = [Point(sheep_pos.x - 3, sheep_pos.y - 3), Point(sheep_pos.x - 3, sheep_pos.y + 3)]
+    move_contained = env._sheep_step(
+        sheep_pos,
+        contained_dogs,
+        flock_center=None,
+        panic_steps=2,
+        sheep=sheep,
+    )
+    # Should drive forward toward gate (+x)
+    assert move_contained.x > sheep_pos.x

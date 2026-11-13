@@ -41,17 +41,41 @@ function Wait-ForTrainingShutdown {
     return $false
 }
 
+function Stop-ProcessTree {
+    param(
+        [Parameter(Mandatory = $true)][int]$Id
+    )
+
+    if ($Id -le 4) {
+        return
+    }
+
+    $children = Get-CimInstance Win32_Process -Filter "ParentProcessId = $Id" -ErrorAction SilentlyContinue
+    foreach ($child in $children) {
+        Stop-ProcessTree -Id $child.ProcessId
+    }
+
+    $process = Get-Process -Id $Id -ErrorAction SilentlyContinue
+    if ($null -ne $process) {
+        Stop-Process -Id $Id -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Stop-ProcessIfRunning {
     param(
         [Parameter(Mandatory = $true)][int]$Id
     )
+
+    if ($Id -le 4) {
+        return $false
+    }
 
     $process = Get-Process -Id $Id -ErrorAction SilentlyContinue
     if ($null -eq $process) {
         return $false
     }
 
-    Stop-Process -Id $Id -Force -ErrorAction SilentlyContinue
+    Stop-ProcessTree -Id $Id
     return $true
 }
 
@@ -60,7 +84,7 @@ function Stop-UniqueProcessIfRunning {
         [Parameter(Mandatory = $true)][int]$Id
     )
 
-    if ($stoppedPidSet.ContainsKey($Id)) {
+    if ($Id -le 4 -or $stoppedPidSet.ContainsKey($Id)) {
         return $false
     }
 
@@ -77,7 +101,8 @@ function Stop-ListenerOnPort {
     )
 
     $stopped = @()
-    $listeners = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+    $listeners = Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue |
+        Where-Object { $_.OwningProcess -gt 4 } |
         Select-Object -ExpandProperty OwningProcess -Unique
 
     foreach ($listenerPid in ($listeners | Where-Object { $_ -ne $null })) {
@@ -104,6 +129,13 @@ try {
 }
 catch {
     Write-Host 'Unable to request a graceful training stop; falling back to process shutdown.'
+}
+
+try {
+    Invoke-JsonPost -Uri "http://127.0.0.1:$backendPort/api/shutdown" | Out-Null
+    Start-Sleep -Milliseconds 500
+}
+catch {
 }
 
 if (Test-Path $pidFile) {
@@ -143,6 +175,14 @@ if (Test-Path $pidFile) {
 $stoppedByPort += Stop-ListenerOnPort -Port $backendPort
 $stoppedByPort += Stop-ListenerOnPort -Port $webPort
 
+$sheepdogProcs = Get-CimInstance Win32_Process -Filter "Name LIKE 'python%.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -like "*sheepdog.server*" }
+foreach ($proc in $sheepdogProcs) {
+    if (Stop-UniqueProcessIfRunning -Id $proc.ProcessId) {
+        $stoppedBackend = $true
+    }
+}
+
 if ($null -ne $watchdogPid) {
     Start-Sleep -Milliseconds 800
     Stop-UniqueProcessIfRunning -Id $watchdogPid | Out-Null
@@ -158,10 +198,10 @@ if (-not $stoppedBackend -and -not $stoppedWeb -and $stoppedByPort.Count -eq 0) 
 }
 
 if ($stoppedBackend) {
-    Write-Host "Stopped backend process from pid file."
+    Write-Host "Stopped backend process."
 }
 if ($stoppedWeb) {
-    Write-Host "Stopped web process from pid file."
+    Write-Host "Stopped web process."
 }
 if ($stoppedByPort.Count -gt 0) {
     $uniquePids = $stoppedByPort | Sort-Object -Unique

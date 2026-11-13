@@ -358,6 +358,9 @@ class Trainer:
             base_mutation_scale=train_config.mutation_scale,
             base_entropy_coef=train_config.entropy_coef,
             initial_curriculum_stage=current_stage,
+            entropy_damping_min_stage=getattr(
+                train_config, "adaptive_entropy_damping_min_stage", 2
+            ),
         )
         adaptive_state = adaptive_controller.get_state()
 
@@ -426,7 +429,6 @@ class Trainer:
                         should_stop=should_stop,
                     )
                 except EvaluationInterruptedError:
-                    interrupted = True
                     break
                 representative_replay_path = Path(summary.records[0].replay_path)
 

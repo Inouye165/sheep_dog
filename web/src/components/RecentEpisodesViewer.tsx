@@ -1,8 +1,7 @@
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import type { EpisodeRecord, EpisodeOutcome, CapturePolicyConfig } from "../state/types";
-import { episodeHistoryStore, formatEpisodeLabel, formatFailedEpisodeLabel, convertTrainingEpisodeToRecord } from "../lib/episodeHistoryStore";
+import { episodeHistoryStore, formatFailedEpisodeLabel } from "../lib/episodeHistoryStore";
 import {
-  loadTrainingEpisodes,
   loadFailedEpisodes,
   fetchReplayById,
   fetchCapturePolicy,
@@ -22,6 +21,13 @@ export function RecentEpisodesViewer() {
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  const episodesRef = useRef<EpisodeRecord[]>(episodes);
+  const selectedEpisodeIdRef = useRef<string | number>(selectedEpisodeId);
+  const isMountedRef = useRef<boolean>(true);
+
+  episodesRef.current = episodes;
+  selectedEpisodeIdRef.current = selectedEpisodeId;
+
   // Diagnostic info state
   const [diagnosticInfo, setDiagnosticInfo] = useState<{
     apiCount: number;
@@ -36,15 +42,13 @@ export function RecentEpisodesViewer() {
   const [isReproducing, setIsReproducing] = useState<boolean>(false);
 
   const refreshEpisodes = useCallback(async () => {
-    setEpisodes((prev) => {
-      if (prev.length === 0) {
-        setIsLoading(true);
-      }
-      return prev;
-    });
+    if (episodesRef.current.length === 0) {
+      setIsLoading(true);
+    }
     setErrorMessage(null);
     try {
       const rawList = await loadFailedEpisodes(25);
+      if (!isMountedRef.current) return;
       if (rawList && Array.isArray(rawList)) {
         const apiCount = rawList.length;
         const receivedCount = rawList.length;
@@ -54,50 +58,53 @@ export function RecentEpisodesViewer() {
           episodeHistoryStore.syncWithApiEpisodes(rawList);
         }
 
-        setEpisodes((prevEpisodes) => {
-          const storeEpisodes = episodeHistoryStore.getEpisodes();
-          const existingMap = new Map(prevEpisodes.map((ep) => [String(ep.episode_id), ep]));
-          const validRecords: EpisodeRecord[] = [];
+        const prevEpisodes = episodesRef.current;
+        const storeEpisodes = episodeHistoryStore.getEpisodes();
+        const existingMap = new Map(prevEpisodes.map((ep) => [String(ep.episode_id), ep]));
+        const validRecords: EpisodeRecord[] = [];
 
-          for (const ep of storeEpisodes) {
-            if (ep.outcome === "win") {
-              rejections.push({ epId: ep.episode_id, reason: "Episode was successful (win)" });
-              continue;
-            }
-            const existing = existingMap.get(String(ep.episode_id));
-            if (existing && existing.move_history && existing.move_history.length > 0) {
-              validRecords.push({
-                ...ep,
-                initial_state: existing.initial_state || ep.initial_state,
-                move_history: existing.move_history,
-                total_moves: existing.total_moves,
-              });
-            } else {
-              validRecords.push(ep);
-            }
+        for (const ep of storeEpisodes) {
+          if (ep.outcome === "win") {
+            rejections.push({ epId: ep.episode_id, reason: "Episode was successful (win)" });
+            continue;
           }
-
-          setDiagnosticInfo({
-            apiCount,
-            receivedCount,
-            renderedCount: validRecords.length,
-            rejections,
-          });
-
-          if (validRecords.length > 0) {
-            setSelectedEpisodeId((prev) => {
-              const exists = validRecords.some((item) => String(item.episode_id) === String(prev));
-              return exists ? prev : validRecords[0].episode_id;
+          const existing = existingMap.get(String(ep.episode_id));
+          if (existing && existing.move_history && existing.move_history.length > 0) {
+            validRecords.push({
+              ...ep,
+              initial_state: existing.initial_state || ep.initial_state,
+              move_history: existing.move_history,
+              total_moves: existing.total_moves,
             });
           } else {
-            setSelectedEpisodeId("");
+            validRecords.push(ep);
           }
+        }
 
-          return validRecords;
+        episodesRef.current = validRecords;
+        setEpisodes(validRecords);
+        setDiagnosticInfo({
+          apiCount,
+          receivedCount,
+          renderedCount: validRecords.length,
+          rejections,
         });
+
+        if (validRecords.length > 0) {
+          const currentSelected = selectedEpisodeIdRef.current;
+          const exists = validRecords.some((item) => String(item.episode_id) === String(currentSelected));
+          if (!exists) {
+            selectedEpisodeIdRef.current = validRecords[0].episode_id;
+            setSelectedEpisodeId(validRecords[0].episode_id);
+          }
+        } else {
+          selectedEpisodeIdRef.current = "";
+          setSelectedEpisodeId("");
+        }
       } else {
         const currentStore = episodeHistoryStore.getEpisodes();
         if (currentStore.length > 0) {
+          episodesRef.current = currentStore;
           setEpisodes(currentStore);
         } else if (rawList === null) {
           setErrorMessage("Failed to load recent training episodes.");
@@ -106,21 +113,26 @@ export function RecentEpisodesViewer() {
     } catch {
       // Ignore unhandled background poll errors
     } finally {
-      setIsLoading(false);
+      if (isMountedRef.current) {
+        setIsLoading(false);
+      }
     }
   }, []);
 
   const refreshPolicy = useCallback(async () => {
     const pol = await fetchCapturePolicy();
-    if (pol) {
+    if (isMountedRef.current && pol) {
       setCapturePolicy(pol);
     }
   }, []);
 
   useEffect(() => {
+    isMountedRef.current = true;
     const initialList = episodeHistoryStore.getEpisodes();
+    episodesRef.current = initialList;
     setEpisodes(initialList);
-    if (initialList.length > 0 && !selectedEpisodeId) {
+    if (initialList.length > 0 && !selectedEpisodeIdRef.current) {
+      selectedEpisodeIdRef.current = initialList[0].episode_id;
       setSelectedEpisodeId(initialList[0].episode_id);
     }
     void refreshEpisodes();
@@ -130,17 +142,44 @@ export function RecentEpisodesViewer() {
       void refreshEpisodes();
       void refreshPolicy();
     }, 4000);
-    return () => clearInterval(timer);
+    return () => {
+      isMountedRef.current = false;
+      clearInterval(timer);
+    };
   }, [refreshEpisodes, refreshPolicy]);
 
-  // Filtered episodes list (consumes backend result directly)
-  const filteredEpisodes = episodes;
+  const stageFilterOptions = useMemo(() => {
+    const stageSet = new Set<number>([7, 8, 9]);
+    for (const ep of episodes) {
+      if (typeof ep.stage === "number" && Number.isFinite(ep.stage)) {
+        stageSet.add(ep.stage);
+      }
+    }
+    return Array.from(stageSet).sort((a, b) => a - b);
+  }, [episodes]);
+
+  // Filtered episodes list
+  const filteredEpisodes = useMemo(() => {
+    return episodes.filter((ep) => {
+      if (stageFilter !== "all") {
+        if (stageFilter === "unknown") {
+          if (ep.stage != null) return false;
+        } else if (String(ep.stage) !== stageFilter) {
+          return false;
+        }
+      }
+      if (outcomeFilter !== "all" && ep.outcome !== outcomeFilter) {
+        return false;
+      }
+      return true;
+    });
+  }, [episodes, stageFilter, outcomeFilter]);
 
   // Currently selected episode object
   const currentEpisode = useMemo(() => {
-    if (!episodes || episodes.length === 0) return null;
-    return episodes.find((ep) => String(ep.episode_id) === String(selectedEpisodeId)) || episodes[0] || null;
-  }, [episodes, selectedEpisodeId]);
+    if (!filteredEpisodes || filteredEpisodes.length === 0) return null;
+    return filteredEpisodes.find((ep) => String(ep.episode_id) === String(selectedEpisodeId)) || filteredEpisodes[0] || null;
+  }, [filteredEpisodes, selectedEpisodeId]);
 
   // Reset step to 0 and pause when selected episode changes
   useEffect(() => {
@@ -150,28 +189,39 @@ export function RecentEpisodesViewer() {
 
   // Fetch authentic replay frames from backend if needed
   useEffect(() => {
+    let cancelled = false;
     if (
       currentEpisode &&
       currentEpisode.replayAvailable &&
       currentEpisode.replay_id &&
       (!currentEpisode.move_history || currentEpisode.move_history.length === 0)
     ) {
-      void fetchReplayById(currentEpisode.replay_id).then((bundle) => {
-        if (bundle && bundle.frames) {
-          const initialFrame = bundle.frames[0]?.snapshot || bundle.final_snapshot;
-          const updatedEp: EpisodeRecord = {
-            ...currentEpisode,
-            initial_state: initialFrame,
-            move_history: bundle.frames,
-            total_moves: bundle.frames.length > 0 ? bundle.frames.length - 1 : currentEpisode.total_moves,
-          };
-          episodeHistoryStore.updateEpisode(updatedEp);
-          setEpisodes((prev) =>
-            prev.map((ep) => (String(ep.episode_id) === String(updatedEp.episode_id) ? updatedEp : ep))
-          );
-        }
-      });
+      void fetchReplayById(currentEpisode.replay_id)
+        .then((bundle) => {
+          if (cancelled) return;
+          if (bundle && bundle.frames) {
+            const initialFrame = bundle.frames[0]?.snapshot || bundle.final_snapshot;
+            const updatedEp: EpisodeRecord = {
+              ...currentEpisode,
+              initial_state: initialFrame,
+              move_history: bundle.frames,
+              total_moves: bundle.frames.length > 0 ? bundle.frames.length - 1 : currentEpisode.total_moves,
+            };
+            episodeHistoryStore.updateEpisode(updatedEp);
+            setEpisodes((prev) => {
+              const next = prev.map((ep) => (String(ep.episode_id) === String(updatedEp.episode_id) ? updatedEp : ep));
+              episodesRef.current = next;
+              return next;
+            });
+          }
+        })
+        .catch(() => {
+          // Ignore background replay fetch error
+        });
     }
+    return () => {
+      cancelled = true;
+    };
   }, [currentEpisode]);
 
   // Current frame snapshot to display
@@ -484,7 +534,7 @@ export function RecentEpisodesViewer() {
       )}
 
       {/* Empty State */}
-      {!isLoading && !errorMessage && filteredEpisodes.length === 0 && (
+      {!isLoading && !errorMessage && episodes.length === 0 && (
         <div
           data-testid="empty-state"
           style={{
@@ -537,9 +587,11 @@ export function RecentEpisodesViewer() {
                   }}
                 >
                   <option value="all">All Stages</option>
-                  <option value="8">Stage 8</option>
-                  <option value="7">Stage 7</option>
-                  <option value="9">Stage 9</option>
+                  {stageFilterOptions.map((st) => (
+                    <option key={st} value={String(st)}>
+                      Stage {st}
+                    </option>
+                  ))}
                   <option value="unknown">Unknown Stage</option>
                 </select>
               </div>
@@ -599,10 +651,10 @@ export function RecentEpisodesViewer() {
                   cursor: "pointer",
                 }}
               >
-                {episodes.length === 0 ? (
+                {filteredEpisodes.length === 0 ? (
                   <option value="">No matching failed episodes with replays</option>
                 ) : (
-                  episodes.map((ep) => (
+                  filteredEpisodes.map((ep) => (
                     <option key={`ep-option-${ep.episode_id}`} value={String(ep.episode_id)}>
                       {formatFailedEpisodeLabel(ep)}
                     </option>

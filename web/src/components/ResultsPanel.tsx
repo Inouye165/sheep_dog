@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CheckpointEntry, CheckpointIndex, ReplayBundle, ReplaySnapshot } from "../state/types";
 import { loadReplay } from "../lib/api";
 import { exportResultsVideo, makeResultsVideoFileName } from "../lib/resultsVideo";
@@ -191,9 +191,18 @@ function selectEvenMilestones(stageCheckpoints: CheckpointEntry[]): CheckpointEn
   return selected.slice(0, REPLAYS_PER_STAGE);
 }
 
+function resolveCheckpointStage(checkpoint: CheckpointEntry): number {
+  return (
+    checkpoint.curriculum_stage ??
+    checkpoint.reward_config?.instincts?.curriculum_stage ??
+    checkpoint.environment_config?.curriculum_stage ??
+    0
+  );
+}
+
 function resolveStageOrder(checkpoints: CheckpointEntry[]): number[] {
   const maxStageInData = checkpoints.reduce((highest, checkpoint) => {
-    const stage = checkpoint.reward_config?.instincts?.curriculum_stage ?? 0;
+    const stage = resolveCheckpointStage(checkpoint);
     return Math.max(highest, stage);
   }, 0);
   const stageCount = Math.max(DEFAULT_STAGE_COUNT, maxStageInData);
@@ -207,7 +216,7 @@ function buildStageMilestones(
   const byStage: Record<number, CheckpointEntry[]> = {};
   const stageSet = new Set(stageOrder);
   for (const checkpoint of checkpoints) {
-    const stage = checkpoint.reward_config?.instincts?.curriculum_stage ?? 0;
+    const stage = resolveCheckpointStage(checkpoint);
     if (!stageSet.has(stage)) {
       continue;
     }
@@ -266,6 +275,15 @@ export function ResultsPanel({ checkpointIndex }: ResultsPanelProps) {
   const [exportStatus, setExportStatus] = useState<"idle" | "exporting" | "success" | "error">("idle");
   const [exportProgress, setExportProgress] = useState<number>(0);
   const [exportError, setExportError] = useState<string | null>(null);
+  const exportTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (exportTimerRef.current) {
+        clearTimeout(exportTimerRef.current);
+      }
+    };
+  }, []);
 
   const isLoadingReplays = useMemo(() => {
     if (milestoneCheckpoints.length === 0) return false;
@@ -292,7 +310,10 @@ export function ResultsPanel({ checkpointIndex }: ResultsPanelProps) {
       URL.revokeObjectURL(url);
 
       setExportStatus("success");
-      setTimeout(() => {
+      if (exportTimerRef.current) {
+        clearTimeout(exportTimerRef.current);
+      }
+      exportTimerRef.current = setTimeout(() => {
         setExportStatus("idle");
       }, 5000);
     } catch (err) {
@@ -610,11 +631,12 @@ function MilestoneCard({ checkpoint, snapshot, stage, loading, error, frameIndex
 
   function fenceSegments(snap: ReplaySnapshot) {
     const { pen } = snap;
+    if (!pen || !pen.origin) return [];
     const opening = pen.opening ?? "left";
-    const ox = pen.origin.x;
-    const oy = pen.origin.y;
-    const right = ox + pen.width;
-    const bottom = oy + pen.height;
+    const ox = pen.origin.x ?? 0;
+    const oy = pen.origin.y ?? 0;
+    const right = ox + (pen.width ?? 10);
+    const bottom = oy + (pen.height ?? 10);
     const all = [
       { side: "top", x1: ox, y1: oy, x2: right, y2: oy },
       { side: "bottom", x1: ox, y1: bottom, x2: right, y2: bottom },
@@ -663,7 +685,7 @@ function MilestoneCard({ checkpoint, snapshot, stage, loading, error, frameIndex
               />
             ))}
 
-            {snapshot.sheep.map((sheep, index) => (
+            {(snapshot.sheep ?? []).map((sheep, index) => (
               <circle
                 key={`sheep-${index}`}
                 cx={sheep.x}
@@ -675,7 +697,7 @@ function MilestoneCard({ checkpoint, snapshot, stage, loading, error, frameIndex
               />
             ))}
 
-            {snapshot.dogs.map((dog, index) => (
+            {(snapshot.dogs ?? []).map((dog, index) => (
               <circle
                 key={`dog-${index}`}
                 cx={dog.x}
@@ -697,7 +719,7 @@ function MilestoneCard({ checkpoint, snapshot, stage, loading, error, frameIndex
           <div className="milestone-card__progress-bar">
             <div
               className={`milestone-card__progress-fill ${progressTone}`}
-              style={{ width: `${(frameIndex / (totalFrames - 1)) * 100}%` }}
+              style={{ width: `${totalFrames > 1 ? (frameIndex / (totalFrames - 1)) * 100 : 0}%` }}
             />
           </div>
           <div className="milestone-card__progress-meta">

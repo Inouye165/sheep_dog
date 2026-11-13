@@ -87,6 +87,7 @@ class SheepState:
     movement_budget: float = 0.0
     recent_positions: list[Point] = field(default_factory=list)
     personality: str = "obedient"
+    is_packed: bool = False
 
 
 @dataclass(frozen=True, slots=True)

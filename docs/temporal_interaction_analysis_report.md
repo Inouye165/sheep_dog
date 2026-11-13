@@ -1,0 +1,1888 @@
+# Temporal Dog–Sheep Interaction Diagnostic Report
+
+> **Epistemic Standards & Key**:
+> - `[Recorded Observation]`: Directly serialized fact from replay frames.
+> - `[Derived Measurement]`: Computed mathematically from recorded facts (e.g. BFS legal-route distance, reversal rates).
+> - `[Uncertain Reconstruction]`: Reconstructed target/mask with explicit stated limitations.
+> - `[Hypothesized Mechanism]`: Candidate causal explanation fitting the spatial pattern; requires controlled ablation to prove.
+> - `[Cause Supported by Controlled Experiment]`: Reserved exclusively for mechanisms proven via controlled ablation against an unchanged control.
+
+## Diagnostic Capability & Provenance Summary
+
+### What the Tool Can Now Establish
+- **Passive Decision Telemetry**: Captures decision masks, selected vs executed actions, and recomputed policy distributions without altering environment transitions, re-sampling actions, or mutating RNG state.
+- **Transition Discount Timebase Semantics**: Distinguishes sequential shared-dog transitions (weight $\gamma^{k \cdot K + K - 1}$ for $K$ dogs) from joint world-step transitions (weight $\gamma^k$). Refuses to invent aligned returns when timebase is unknown, trainer is unsupported, or checkpoint/configuration gamma mismatches.
+- **Strict Reconstruction Provenance**: Verifies all 11 required TeamStrategy configuration fields, strategy implementation version (1.0.0), initial step 0 state, and frame continuity before labeling reconstruction exact; otherwise marks results estimated or uncertain with explicit missing fields.
+- **Honest Candidate Recurrence Accounting**: Distinguishes candidate position recurrences (`candidate_position_recurrence_positive_return`) from proven policy exploitation, tracking unobserved hidden state (`no_progress_steps`, panic counters, sub-step movement budgets) that frequently diverges despite matching grid coordinates.
+
+### What Historical Recordings Cannot Establish
+- **Unrecorded Policy Outputs**: Historical replays captured before this sprint lack decision-time policy logits, action probabilities, raw observation vectors, value estimates, and sub-step fractional movement budgets.
+- **Uncertain Guidance Targets**: Historical replays lacking step 0 or omitting strategy configuration parameters cannot support exact reconstruction claims and are explicitly tagged with stated limitations.
+- **Unverified Discount Alignment**: Historical replays lacking explicit transition timebase metadata cannot establish discounted return alignment; only undiscounted cumulative sums are reported.
+
+### Prior Conclusions Corrected
+- **Outcome & Stop Reason Alignment**: Episodes previously labeled as timeouts (such as seeds 61 and 41) were verified from serialized termination flags to be controlled stalls stopped by the `no-progress` termination rule.
+- **Recurrence Classification**: Prior claims of 'exploitable positive cycles' were corrected to candidate position recurrences, recognizing that identical positions frequently conceal divergent internal state.
+- **Descriptive Comparisons**: Checkpoint comparisons across different training runs are explicitly labeled descriptive comparisons rather than controlled experiments, preserving experimental rigor.
+
+### Behavioral Hypotheses Remaining Untested
+- **Flanker Target Clamping**: The hypothesis that open-field target clamping at boundaries traps sheep along walls and corners requires controlled ablation under equal compute budgets against an unchanged control.
+- **Stray Sheep Threshold (2-Sheep Blind Spot)**: The hypothesis that `TeamStrategy._stray_sheep` fails to activate when exactly 2 sheep remain unpenned requires controlled ablation against a modified threshold.
+- **Stall Counter Spread-Jitter Reset**: The hypothesis that flock-spread deltas reset `no_progress_steps` without true route-to-pen gains requires controlled ablation against best-route gating.
+
+## Episode `checkpoint-039909-seed-000061` (seed=61, outcome=`stopped`, stop_reason=`no-progress`, penned=5/6, steps=1031)
+- **[Recorded Observation] Pen Geometry**: origin=(83,88), size=14x14, opening=`top` on 144x104 field
+- **[Recorded Observation] Sheep Penning Events**: S0@step 171, S4@step 172, S1@step 211, S5@step 213, S3@step 245
+- **[Audit] Guidance Certainty**: `uncertain_reconstruction_missing_step0` (step0_present=False, contiguous_frames=True, full_env_config=False, gamma_available=False)
+- **[Derived Measurement] Diagnostic Note**: stats.oscillation_detected was False (only checks a 2-position loop in the final 4 steps), whereas temporal window analysis detected sustained multi-step oscillation.
+- **[Derived Measurement] Diagnostic Note**: no_progress_steps reset 11 time(s) during non-progress intervals without new best entry distance (triggered by flock_spread or farthest_to_flock_center deltas).
+
+### Interval `checkpoint-039909-seed-000061:steps-134-165` — `productive_repositioning` (steps 134..165, duration=32, unpenned_sheep=6, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 114..133)**: Flock advanced toward pen by +10.3 route cells (33.0->22.7); behind-flock alignment +0.27->+0.43.
+- **[Derived Measurement] Route Progress**: 22.2 -> 23.8 (net -1.7 cells), flock spread 10.1 -> 19.7, `no_progress_steps` 0 -> 8 (resets without best route gain: 8)
+- **[Derived Measurement] Aftermath (steps 166..185)**: 2 sheep penned (unpenned 6->4); avg route distance 23.5->23.0.
+- **[Hypothesized Mechanism] Candidates**: `no_progress_spread_jitter_reset`, `flanking_or_collection_repositioning`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`rear_pressure`, switches=0): pos (78, 64)->(96, 76), unique=22, span=25.6, reversals=35%, waypoint_side=0%, target=(74, 71)->(96, 75) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D1` (`left_flanker`, switches=0): pos (73, 72)->(91, 70), unique=23, span=26.0, reversals=32%, waypoint_side=34%, target=(65, 88)->(70, 57) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D2` (`collector`, switches=0): pos (63, 97)->(39, 93), unique=30, span=26.7, reversals=6%, waypoint_side=88%, target=(60, 99)->(36, 92) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`bold`): pos (79, 69)->(92, 83), route_dist 23.0->5.0 (net +18.0), fence_adj=0%, wall_corner=0%
+  - `S1` (`escapist`): pos (88, 68)->(109, 72), route_dist 20.0->29.0 (net -9.0), fence_adj=0%, wall_corner=0%
+  - `S2` (`bold`): pos (81, 73)->(109, 74), route_dist 17.0->27.0 (net -10.0), fence_adj=0%, wall_corner=0%
+  - `S3` (`bold`): pos (61, 97)->(38, 89), route_dist 33.0->48.0 (net -15.0), fence_adj=0%, wall_corner=0%
+  - `S4` (`obedient`): pos (76, 72)->(91, 82), route_dist 23.0->6.0 (net +17.0), fence_adj=0%, wall_corner=0%
+  - `S5` (`pen_fearful`): pos (84, 71)->(109, 73), route_dist 17.0->28.0 (net -11.0), fence_adj=0%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-71.30 (mean=-2.228/step, pos_progress_steps=8, neg_progress_steps=24)
+  - `Cycle incomplete_134_165` (`incomplete_cycle`): Incomplete cycle steps 134..165: trajectory ended before recurrence. [total=-71.786, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039909-seed-000061:steps-191-207` — `productive_repositioning` (steps 191..207, duration=17, unpenned_sheep=4, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 171..190)**: 1 sheep penned (unpenned 5->4); avg route distance 23.8->17.0.
+- **[Derived Measurement] Route Progress**: 15.8 -> 12.2 (net +3.5 cells), flock spread 18.4 -> 13.3, `no_progress_steps` 0 -> 0 (resets without best route gain: 3)
+- **[Derived Measurement] Aftermath (steps 208..227)**: 2 sheep penned (unpenned 4->2); avg route distance 11.0->11.0.
+- **[Hypothesized Mechanism] Candidates**: `flanking_or_collection_repositioning`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`rear_pressure`, switches=0): pos (112, 82)->(104, 98), unique=13, span=18.9, reversals=25%, waypoint_side=0%, target=(68, 84)->(84, 88) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D1` (`left_flanker`, switches=0): pos (101, 76)->(103, 100), unique=16, span=24.3, reversals=6%, waypoint_side=0%, target=(90, 80)->(71, 101) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D2` (`collector`, switches=0): pos (49, 87)->(59, 91), unique=14, span=11.7, reversals=12%, waypoint_side=0%, target=(51, 91)->(62, 96) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S1` (`escapist`): pos (101, 83)->(92, 85), route_dist 10.0->3.0 (net +7.0), fence_adj=18%, wall_corner=0%
+  - `S2` (`bold`): pos (106, 85)->(98, 98), route_dist 13.0->14.0 (net -1.0), fence_adj=6%, wall_corner=0%
+  - `S3` (`bold`): pos (54, 89)->(65, 94), route_dist 32.0->26.0 (net +6.0), fence_adj=0%, wall_corner=0%
+  - `S5` (`pen_fearful`): pos (100, 84)->(98, 90), route_dist 8.0->6.0 (net +2.0), fence_adj=76%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=+10.88 (mean=+0.640/step, pos_progress_steps=12, neg_progress_steps=5)
+  - `Cycle incomplete_191_207` (`incomplete_cycle`): Incomplete cycle steps 191..207: trajectory ended before recurrence. [total=+7.333, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039909-seed-000061:steps-245-1029` — `oscillation_loop` (steps 245..1029, duration=785, unpenned_sheep=1, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 225..244)**: Flock advanced toward pen by +6.5 route cells (11.0->4.5); behind-flock alignment +0.24->-0.31.
+- **[Derived Measurement] Route Progress**: 8.0 -> 11.0 (net -3.0 cells), flock spread 0.0 -> 0.0, `no_progress_steps` 0 -> 778 (resets without best route gain: 0)
+- **[Derived Measurement] Aftermath (steps 1030..1031)**: Route distance remained near 9.0 (net progress +1.0); 0 role switches.
+- **[Hypothesized Mechanism] Candidates**: `wrong_side_fence_overshoot`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`left_flanker`, switches=0): pos (92, 81)->(106, 99), unique=36, span=28.4, reversals=30%, waypoint_side=9%, target=(86, 82)->(102, 97) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D1` (`rear_pressure`, switches=0): pos (105, 81)->(103, 98), unique=31, span=21.8, reversals=26%, waypoint_side=26%, target=(98, 86)->(98, 101) [`uncertain_reconstruction_missing_step0`], mask=8.9 [`historical_approximate`], action_replacements=0
+  - `D2` (`collector`, switches=0): pos (107, 103)->(101, 97), unique=31, span=21.5, reversals=30%, waypoint_side=52%, target=(94, 91)->(98, 99) [`uncertain_reconstruction_missing_step0`], mask=8.9 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S2` (`bold`): pos (98, 92)->(98, 95), route_dist 8.0->11.0 (net -3.0), fence_adj=100%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-1562.15 (mean=-1.990/step, pos_progress_steps=403, neg_progress_steps=382)
+  - `Cycle cycle_265_662` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 265..662 with positive progress steps but net negative return (-783.664). Penalty dominates; not reward farming. [total=-783.664, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_662_682` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 662..682 with positive progress steps but net negative return (-41.368). Penalty dominates; not reward farming. [total=-41.368, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_682_739` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 682..739 with positive progress steps but net negative return (-118.336). Penalty dominates; not reward farming. [total=-118.336, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_739_799` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 739..799 with positive progress steps but net negative return (-123.035). Penalty dominates; not reward farming. [total=-123.035, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_827_896` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 827..896 with positive progress steps but net negative return (-146.313). Penalty dominates; not reward farming. [total=-146.313, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_896_927` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 896..927 with positive progress steps but net negative return (-66.851). Penalty dominates; not reward farming. [total=-66.851, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_951_957` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 951..957 with positive progress steps but net negative return (-12.174). Penalty dominates; not reward farming. [total=-12.174, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_958_1018` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 958..1018 with positive progress steps but net negative return (-123.346). Penalty dominates; not reward farming. [total=-123.346, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+## Episode `checkpoint-039909-seed-000041` (seed=41, outcome=`stopped`, stop_reason=`no-progress`, penned=5/6, steps=1575)
+- **[Recorded Observation] Pen Geometry**: origin=(43,88), size=14x14, opening=`top` on 144x104 field
+- **[Recorded Observation] Sheep Penning Events**: S3@step 196, S2@step 656, S4@step 745, S5@step 757, S0@step 803
+- **[Audit] Guidance Certainty**: `uncertain_reconstruction_missing_step0` (step0_present=False, contiguous_frames=True, full_env_config=False, gamma_available=False)
+- **[Derived Measurement] Diagnostic Note**: stats.oscillation_detected was False (only checks a 2-position loop in the final 4 steps), whereas temporal window analysis detected sustained multi-step oscillation.
+- **[Derived Measurement] Diagnostic Note**: no_progress_steps reset 153 time(s) during non-progress intervals without new best entry distance (triggered by flock_spread or farthest_to_flock_center deltas).
+
+### Interval `checkpoint-039909-seed-000041:steps-1-13` — `productive_repositioning` (steps 1..13, duration=13, unpenned_sheep=6, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 1..1)**: Route distance remained near 77.7 (net progress +0.0); 0 role switches.
+- **[Derived Measurement] Route Progress**: 77.7 -> 77.3 (net +0.3 cells), flock spread 17.4 -> 9.9, `no_progress_steps` 0 -> 0 (resets without best route gain: 1)
+- **[Derived Measurement] Aftermath (steps 14..33)**: Flock advanced toward pen by +13.5 route cells (77.0->63.5); behind-flock alignment +0.72->+0.42.
+- **[Hypothesized Mechanism] Candidates**: `two_sheep_collector_blind_spot`, `no_progress_spread_jitter_reset`, `flanking_or_collection_repositioning`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`left_flanker`, switches=0): pos (2, 51)->(11, 29), unique=13, span=25.6, reversals=8%, waypoint_side=15%, target=(4, 49)->(11, 42) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D1` (`right_flanker`, switches=0): pos (4, 51)->(16, 19), unique=13, span=34.2, reversals=0%, waypoint_side=23%, target=(44, 9)->(37, 16) [`uncertain_reconstruction_missing_step0`], mask=8.8 [`historical_approximate`], action_replacements=0
+  - `D2` (`rear_pressure`, switches=0): pos (6, 50)->(16, 22), unique=13, span=29.7, reversals=0%, waypoint_side=23%, target=(20, 25)->(20, 25) [`uncertain_reconstruction_missing_step0`], mask=8.8 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`escapist`): pos (7, 34)->(15, 34), route_dist 90.0->82.0 (net +8.0), fence_adj=0%, wall_corner=0%
+  - `S1` (`pen_fearful`): pos (7, 37)->(12, 38), route_dist 87.0->81.0 (net +6.0), fence_adj=0%, wall_corner=0%
+  - `S2` (`bold`): pos (9, 33)->(21, 33), route_dist 89.0->77.0 (net +12.0), fence_adj=0%, wall_corner=0%
+  - `S3` (`pen_shy`): pos (40, 25)->(33, 25), route_dist 66.0->73.0 (net -7.0), fence_adj=0%, wall_corner=0%
+  - `S4` (`pen_fearful`): pos (40, 24)->(32, 24), route_dist 67.0->75.0 (net -8.0), fence_adj=0%, wall_corner=0%
+  - `S5` (`escapist`): pos (42, 22)->(32, 23), route_dist 67.0->76.0 (net -9.0), fence_adj=0%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-21.41 (mean=-1.647/step, pos_progress_steps=11, neg_progress_steps=2)
+  - `Cycle incomplete_1_13` (`incomplete_cycle`): Incomplete cycle steps 1..13: trajectory ended before recurrence. [total=-20.087, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039909-seed-000041:steps-27-65` — `oscillation_loop` (steps 27..65, duration=39, unpenned_sheep=6, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 7..26)**: Flock advanced toward pen by +13.8 route cells (79.3->65.5); behind-flock alignment +0.38->+0.40.
+- **[Derived Measurement] Route Progress**: 64.8 -> 72.2 (net -7.3 cells), flock spread 9.1 -> 15.6, `no_progress_steps` 0 -> 10 (resets without best route gain: 10)
+- **[Derived Measurement] Aftermath (steps 66..85)**: Flock advanced toward pen by +15.3 route cells (71.8->56.5); behind-flock alignment +0.35->+0.32.
+- **[Hypothesized Mechanism] Candidates**: `no_progress_spread_jitter_reset`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`collector`, switches=0): pos (11, 43)->(21, 79), unique=36, span=38.6, reversals=8%, waypoint_side=0%, target=(11, 52)->(24, 81) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D1` (`left_flanker`, switches=0): pos (38, 27)->(2, 31), unique=39, span=36.2, reversals=0%, waypoint_side=95%, target=(17, 48)->(2, 66) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D2` (`rear_pressure`, switches=0): pos (38, 24)->(0, 28), unique=28, span=38.2, reversals=32%, waypoint_side=0%, target=(25, 32)->(8, 43) [`uncertain_reconstruction_missing_step0`], mask=8.8 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`escapist`): pos (23, 37)->(2, 43), route_dist 71.0->86.0 (net -15.0), fence_adj=0%, wall_corner=28%
+  - `S1` (`pen_fearful`): pos (13, 51)->(23, 79), route_dist 67.0->29.0 (net +38.0), fence_adj=0%, wall_corner=0%
+  - `S2` (`bold`): pos (29, 37)->(4, 43), route_dist 65.0->84.0 (net -19.0), fence_adj=0%, wall_corner=15%
+  - `S3` (`pen_shy`): pos (35, 35)->(21, 45), route_dist 61.0->65.0 (net -4.0), fence_adj=0%, wall_corner=0%
+  - `S4` (`pen_fearful`): pos (38, 32)->(21, 41), route_dist 61.0->69.0 (net -8.0), fence_adj=0%, wall_corner=0%
+  - `S5` (`escapist`): pos (37, 30)->(0, 31), route_dist 64.0->100.0 (net -36.0), fence_adj=0%, wall_corner=8%
+- **[Derived Measurement] Rewards & Cycles**: total=-120.87 (mean=-3.099/step, pos_progress_steps=10, neg_progress_steps=29)
+  - `Cycle incomplete_27_65` (`incomplete_cycle`): Incomplete cycle steps 27..65: trajectory ended before recurrence. [total=-122.514, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039909-seed-000041:steps-113-141` — `productive_repositioning` (steps 113..141, duration=29, unpenned_sheep=6, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 93..112)**: Flock advanced toward pen by +12.7 route cells (51.0->38.3); behind-flock alignment +0.27->+0.30.
+- **[Derived Measurement] Route Progress**: 37.7 -> 36.8 (net +0.8 cells), flock spread 21.1 -> 19.9, `no_progress_steps` 0 -> 11 (resets without best route gain: 6)
+- **[Derived Measurement] Aftermath (steps 142..161)**: Flock advanced toward pen by +11.8 route cells (36.3->24.5); behind-flock alignment +0.33->+0.30.
+- **[Hypothesized Mechanism] Candidates**: `no_progress_spread_jitter_reset`, `flanking_or_collection_repositioning`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`collector`, switches=0): pos (70, 77)->(76, 97), unique=22, span=23.3, reversals=36%, waypoint_side=48%, target=(70, 83)->(77, 101) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D1` (`left_flanker`, switches=0): pos (0, 77)->(0, 103), unique=27, span=26.0, reversals=7%, waypoint_side=0%, target=(21, 101)->(25, 101) [`uncertain_reconstruction_missing_step0`], mask=6.9 [`historical_approximate`], action_replacements=0
+  - `D2` (`rear_pressure`, switches=0): pos (0, 70)->(0, 94), unique=14, span=26.0, reversals=54%, waypoint_side=0%, target=(17, 78)->(21, 96) [`uncertain_reconstruction_missing_step0`], mask=7.0 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`escapist`): pos (3, 88)->(8, 101), route_dist 42.0->50.0 (net -8.0), fence_adj=0%, wall_corner=59%
+  - `S1` (`pen_fearful`): pos (68, 82)->(75, 101), route_dist 18.0->34.0 (net -16.0), fence_adj=0%, wall_corner=3%
+  - `S2` (`bold`): pos (6, 87)->(16, 100), route_dist 38.0->41.0 (net -3.0), fence_adj=0%, wall_corner=41%
+  - `S3` (`pen_shy`): pos (26, 69)->(26, 87), route_dist 36.0->18.0 (net +18.0), fence_adj=0%, wall_corner=0%
+  - `S4` (`pen_fearful`): pos (22, 69)->(23, 86), route_dist 40.0->22.0 (net +18.0), fence_adj=0%, wall_corner=0%
+  - `S5` (`escapist`): pos (0, 79)->(4, 103), route_dist 52.0->56.0 (net -4.0), fence_adj=0%, wall_corner=100%
+- **[Derived Measurement] Rewards & Cycles**: total=-18.23 (mean=-0.629/step, pos_progress_steps=13, neg_progress_steps=16)
+  - `Cycle incomplete_113_141` (`incomplete_cycle`): Incomplete cycle steps 113..141: trajectory ended before recurrence. [total=-21.088, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039909-seed-000041:steps-170-195` — `productive_repositioning` (steps 170..195, duration=26, unpenned_sheep=6, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 150..169)**: Flock advanced toward pen by +15.7 route cells (32.5->16.8); behind-flock alignment +0.33->+0.30.
+- **[Derived Measurement] Route Progress**: 15.8 -> 18.2 (net -2.3 cells), flock spread 9.1 -> 12.5, `no_progress_steps` 0 -> 9 (resets without best route gain: 6)
+- **[Derived Measurement] Aftermath (steps 196..215)**: Flock advanced toward pen by +5.2 route cells (21.8->16.6); behind-flock alignment -0.33->-0.32.
+- **[Hypothesized Mechanism] Candidates**: `wrong_side_fence_overshoot`, `corner_target_clamping_inversion`, `role_churn_target_jumping`, `no_progress_spread_jitter_reset`, `flanking_or_collection_repositioning`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`left_flanker`, switches=1): pos (60, 103)->(60, 95), unique=17, span=11.7, reversals=16%, waypoint_side=38%, target=(60, 101)->(39, 101) [`uncertain_reconstruction_missing_step0`], mask=8.3 [`historical_approximate`], action_replacements=0
+  - `D1` (`collector`, switches=2): pos (30, 103)->(12, 99), unique=25, span=20.4, reversals=8%, waypoint_side=85%, target=(40, 101)->(9, 101) [`uncertain_reconstruction_missing_step0`], mask=8.5 [`historical_approximate`], action_replacements=0
+  - `D2` (`rear_pressure`, switches=3): pos (30, 94)->(39, 99), unique=18, span=15.8, reversals=32%, waypoint_side=69%, target=(36, 96)->(35, 97) [`uncertain_reconstruction_missing_step0`], mask=8.5 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`escapist`): pos (37, 101)->(41, 102), route_dist 21.0->18.0 (net +3.0), fence_adj=85%, wall_corner=100%
+  - `S1` (`pen_fearful`): pos (58, 99)->(58, 92), route_dist 15.0->8.0 (net +7.0), fence_adj=100%, wall_corner=19%
+  - `S2` (`bold`): pos (40, 100)->(40, 103), route_dist 17.0->20.0 (net -3.0), fence_adj=35%, wall_corner=58%
+  - `S3` (`pen_shy`): pos (38, 88)->(44, 87), route_dist 7.0->1.0 (net +6.0), fence_adj=19%, wall_corner=0%
+  - `S4` (`pen_fearful`): pos (38, 89)->(41, 100), route_dist 8.0->16.0 (net -8.0), fence_adj=88%, wall_corner=4%
+  - `S5` (`escapist`): pos (30, 100)->(10, 99), route_dist 27.0->46.0 (net -19.0), fence_adj=0%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-62.22 (mean=-2.393/step, pos_progress_steps=7, neg_progress_steps=19)
+  - `Cycle incomplete_170_195` (`incomplete_cycle`): Incomplete cycle steps 170..195: trajectory ended before recurrence. [total=-67.199, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039909-seed-000041:steps-205-343` — `oscillation_loop` (steps 205..343, duration=139, unpenned_sheep=5, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 185..204)**: 1 sheep penned (unpenned 6->5); avg route distance 17.8->19.4.
+- **[Derived Measurement] Route Progress**: 19.0 -> 80.8 (net -61.8 cells), flock spread 15.0 -> 31.2, `no_progress_steps` 5 -> 51 (resets without best route gain: 47)
+- **[Derived Measurement] Aftermath (steps 344..363)**: Flock advanced toward pen by +10.2 route cells (80.4->70.2); behind-flock alignment +0.30->+0.31.
+- **[Hypothesized Mechanism] Candidates**: `corner_target_clamping_inversion`, `dog_outside_sheep_vision_loop`, `no_progress_spread_jitter_reset`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`collector`, switches=1): pos (58, 91)->(46, 87), unique=13, span=17.9, reversals=61%, waypoint_side=53%, target=(35, 101)->(42, 99) [`uncertain_reconstruction_missing_step0`], mask=7.0 [`historical_approximate`], action_replacements=0
+  - `D1` (`left_flanker`, switches=2): pos (2, 99)->(0, 13), unique=78, span=88.0, reversals=34%, waypoint_side=47%, target=(2, 101)->(18, 28) [`uncertain_reconstruction_missing_step0`], mask=7.1 [`historical_approximate`], action_replacements=0
+  - `D2` (`rear_pressure`, switches=0): pos (37, 101)->(0, 0), unique=136, span=109.0, reversals=2%, waypoint_side=85%, target=(31, 96)->(2, 67) [`uncertain_reconstruction_missing_step0`], mask=8.2 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`escapist`): pos (41, 100)->(40, 97), route_dist 16.0->14.0 (net +2.0), fence_adj=14%, wall_corner=6%
+  - `S1` (`pen_fearful`): pos (51, 87)->(29, 36), route_dist 1.0->66.0 (net -65.0), fence_adj=0%, wall_corner=0%
+  - `S2` (`bold`): pos (40, 99)->(8, 2), route_dist 16.0->121.0 (net -105.0), fence_adj=6%, wall_corner=36%
+  - `S4` (`pen_fearful`): pos (41, 90)->(30, 24), route_dist 6.0->77.0 (net -71.0), fence_adj=2%, wall_corner=11%
+  - `S5` (`escapist`): pos (0, 99)->(5, 0), route_dist 56.0->126.0 (net -70.0), fence_adj=0%, wall_corner=99%
+- **[Derived Measurement] Rewards & Cycles**: total=-506.97 (mean=-3.647/step, pos_progress_steps=32, neg_progress_steps=106)
+  - `Cycle incomplete_205_343` (`incomplete_cycle`): Incomplete cycle steps 205..343: trajectory ended before recurrence. [total=-505.843, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039909-seed-000041:steps-383-469` — `productive_repositioning` (steps 383..469, duration=87, unpenned_sheep=5, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 363..382)**: Flock advanced toward pen by +7.6 route cells (70.2->62.6); behind-flock alignment +0.31->+0.33.
+- **[Derived Measurement] Route Progress**: 62.0 -> 65.4 (net -3.4 cells), flock spread 28.4 -> 34.3, `no_progress_steps` 49 -> 77 (resets without best route gain: 30)
+- **[Derived Measurement] Aftermath (steps 470..489)**: Flock advanced toward pen by +9.0 route cells (64.6->55.6); behind-flock alignment +0.28->+0.31.
+- **[Hypothesized Mechanism] Candidates**: `corner_target_clamping_inversion`, `dog_outside_sheep_vision_loop`, `no_progress_spread_jitter_reset`, `flanking_or_collection_repositioning`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`collector`, switches=1): pos (46, 87)->(0, 81), unique=53, span=51.0, reversals=37%, waypoint_side=61%, target=(42, 101)->(18, 11) [`uncertain_reconstruction_missing_step0`], mask=7.0 [`historical_approximate`], action_replacements=0
+  - `D1` (`rear_pressure`, switches=1): pos (36, 13)->(108, 11), unique=57, span=75.3, reversals=35%, waypoint_side=66%, target=(35, 31)->(60, 45) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D2` (`left_flanker`, switches=2): pos (41, 2)->(121, 0), unique=58, span=80.4, reversals=33%, waypoint_side=38%, target=(7, 67)->(119, 2) [`uncertain_reconstruction_missing_step0`], mask=8.0 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`escapist`): pos (40, 97)->(3, 100), route_dist 14.0->54.0 (net -40.0), fence_adj=0%, wall_corner=62%
+  - `S1` (`pen_fearful`): pos (38, 37)->(52, 52), route_dist 56.0->36.0 (net +20.0), fence_adj=0%, wall_corner=0%
+  - `S2` (`bold`): pos (48, 2)->(117, 2), route_dist 86.0->147.0 (net -61.0), fence_adj=0%, wall_corner=100%
+  - `S4` (`pen_fearful`): pos (30, 33)->(48, 48), route_dist 68.0->40.0 (net +28.0), fence_adj=0%, wall_corner=0%
+  - `S5` (`escapist`): pos (43, 2)->(62, 44), route_dist 86.0->50.0 (net +36.0), fence_adj=0%, wall_corner=34%
+- **[Derived Measurement] Rewards & Cycles**: total=-223.37 (mean=-2.567/step, pos_progress_steps=14, neg_progress_steps=71)
+  - `Cycle incomplete_383_469` (`incomplete_cycle`): Incomplete cycle steps 383..469: trajectory ended before recurrence. [total=-226.328, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039909-seed-000041:steps-521-604` — `oscillation_loop` (steps 521..604, duration=84, unpenned_sheep=5, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 501..520)**: Flock advanced toward pen by +6.2 route cells (51.4->45.2); behind-flock alignment +0.36->+0.34.
+- **[Derived Measurement] Route Progress**: 44.8 -> 72.4 (net -27.6 cells), flock spread 19.9 -> 20.5, `no_progress_steps` 25 -> 16 (resets without best route gain: 40)
+- **[Derived Measurement] Aftermath (steps 605..624)**: Flock advanced toward pen by +11.4 route cells (71.6->60.2); behind-flock alignment +0.37->+0.31.
+- **[Hypothesized Mechanism] Candidates**: `no_progress_spread_jitter_reset`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`rear_pressure`, switches=1): pos (42, 71)->(72, 3), unique=78, span=78.0, reversals=6%, waypoint_side=68%, target=(34, 25)->(57, 19) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D1` (`left_flanker`, switches=1): pos (72, 15)->(70, 0), unique=59, span=41.6, reversals=33%, waypoint_side=31%, target=(61, 44)->(29, 2) [`uncertain_reconstruction_missing_step0`], mask=8.9 [`historical_approximate`], action_replacements=0
+  - `D2` (`collector`, switches=2): pos (73, 0)->(25, 44), unique=63, span=65.1, reversals=28%, waypoint_side=0%, target=(70, 2)->(25, 48) [`uncertain_reconstruction_missing_step0`], mask=8.6 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`escapist`): pos (39, 82)->(49, 32), route_dist 10.0->56.0 (net -46.0), fence_adj=0%, wall_corner=0%
+  - `S1` (`pen_fearful`): pos (58, 52)->(53, 33), route_dist 38.0->55.0 (net -17.0), fence_adj=0%, wall_corner=0%
+  - `S2` (`bold`): pos (67, 4)->(28, 46), route_dist 95.0->57.0 (net +38.0), fence_adj=0%, wall_corner=0%
+  - `S4` (`pen_fearful`): pos (55, 51)->(71, 2), route_dist 37.0->101.0 (net -64.0), fence_adj=0%, wall_corner=12%
+  - `S5` (`escapist`): pos (64, 52)->(66, 5), route_dist 44.0->93.0 (net -49.0), fence_adj=0%, wall_corner=5%
+- **[Derived Measurement] Rewards & Cycles**: total=-200.25 (mean=-2.384/step, pos_progress_steps=34, neg_progress_steps=48)
+  - `Cycle incomplete_521_604` (`incomplete_cycle`): Incomplete cycle steps 521..604: trajectory ended before recurrence. [total=-201.928, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039909-seed-000041:steps-689-700` — `productive_repositioning` (steps 689..700, duration=12, unpenned_sheep=4, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 669..688)**: Flock advanced toward pen by +7.8 route cells (40.0->32.2); behind-flock alignment +0.67->+0.67.
+- **[Derived Measurement] Route Progress**: 31.5 -> 30.2 (net +1.2 cells), flock spread 8.8 -> 9.3, `no_progress_steps` 0 -> 0 (resets without best route gain: 1)
+- **[Derived Measurement] Aftermath (steps 701..720)**: Flock advanced toward pen by +15.5 route cells (29.5->14.0); behind-flock alignment +0.71->+0.72.
+- **[Hypothesized Mechanism] Candidates**: `flanking_or_collection_repositioning`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`collector`, switches=4): pos (59, 56)->(51, 42), unique=11, span=21.5, reversals=9%, waypoint_side=42%, target=(56, 71)->(52, 46) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D1` (`rear_pressure`, switches=0): pos (42, 42)->(46, 46), unique=10, span=10.8, reversals=36%, waypoint_side=0%, target=(43, 53)->(41, 56) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D2` (`left_flanker`, switches=0): pos (39, 48)->(37, 58), unique=10, span=11.7, reversals=18%, waypoint_side=0%, target=(35, 69)->(33, 72) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`escapist`): pos (37, 52)->(35, 59), route_dist 42.0->37.0 (net +5.0), fence_adj=0%, wall_corner=0%
+  - `S1` (`pen_fearful`): pos (46, 59)->(50, 61), route_dist 29.0->27.0 (net +2.0), fence_adj=0%, wall_corner=0%
+  - `S4` (`pen_fearful`): pos (54, 70)->(45, 70), route_dist 18.0->18.0 (net +0.0), fence_adj=0%, wall_corner=0%
+  - `S5` (`escapist`): pos (51, 51)->(50, 49), route_dist 37.0->39.0 (net -2.0), fence_adj=0%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-8.13 (mean=-0.677/step, pos_progress_steps=9, neg_progress_steps=2)
+  - `Cycle incomplete_689_700` (`incomplete_cycle`): Incomplete cycle steps 689..700: trajectory ended before recurrence. [total=-10.393, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039909-seed-000041:steps-716-733` — `productive_repositioning` (steps 716..733, duration=18, unpenned_sheep=4, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 696..715)**: Flock advanced toward pen by +14.2 route cells (31.5->17.2); behind-flock alignment +0.75->+0.72.
+- **[Derived Measurement] Route Progress**: 16.2 -> 12.2 (net +4.0 cells), flock spread 6.8 -> 8.9, `no_progress_steps` 0 -> 1 (resets without best route gain: 4)
+- **[Derived Measurement] Aftermath (steps 734..753)**: 1 sheep penned (unpenned 4->3); avg route distance 11.5->9.3.
+- **[Hypothesized Mechanism] Candidates**: `wrong_side_fence_overshoot`, `flanking_or_collection_repositioning`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`left_flanker`, switches=1): pos (55, 58)->(33, 68), unique=18, span=26.1, reversals=6%, waypoint_side=6%, target=(38, 81)->(41, 74) [`uncertain_reconstruction_missing_step0`], mask=8.7 [`historical_approximate`], action_replacements=0
+  - `D1` (`rear_pressure`, switches=2): pos (54, 58)->(30, 64), unique=17, span=24.7, reversals=12%, waypoint_side=0%, target=(44, 67)->(31, 68) [`uncertain_reconstruction_missing_step0`], mask=8.7 [`historical_approximate`], action_replacements=0
+  - `D2` (`collector`, switches=2): pos (41, 68)->(65, 82), unique=17, span=29.5, reversals=6%, waypoint_side=83%, target=(44, 82)->(32, 91) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`escapist`): pos (44, 68)->(33, 72), route_dist 20.0->26.0 (net -6.0), fence_adj=0%, wall_corner=0%
+  - `S1` (`pen_fearful`): pos (52, 72)->(57, 77), route_dist 16.0->12.0 (net +4.0), fence_adj=0%, wall_corner=0%
+  - `S4` (`pen_fearful`): pos (46, 82)->(43, 87), route_dist 6.0->1.0 (net +5.0), fence_adj=44%, wall_corner=0%
+  - `S5` (`escapist`): pos (50, 65)->(45, 78), route_dist 23.0->10.0 (net +13.0), fence_adj=0%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-27.57 (mean=-1.532/step, pos_progress_steps=11, neg_progress_steps=7)
+  - `Cycle incomplete_716_733` (`incomplete_cycle`): Incomplete cycle steps 716..733: trajectory ended before recurrence. [total=-29.926, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039909-seed-000041:steps-745-756` — `oscillation_loop` (steps 745..756, duration=12, unpenned_sheep=3, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 725..744)**: Flock advanced toward pen by +7.8 route cells (14.5->6.8); behind-flock alignment +0.33->+0.61.
+- **[Derived Measurement] Route Progress**: 8.3 -> 7.0 (net +1.3 cells), flock spread 7.2 -> 5.6, `no_progress_steps` 0 -> 0 (resets without best route gain: 4)
+- **[Derived Measurement] Aftermath (steps 757..776)**: Flock route distance increased by 12.0 cells (8.5->20.5); behind-flock alignment +0.27->-0.32.
+- **[Hypothesized Mechanism] Candidates**: `two_sheep_collector_blind_spot`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`collector`, switches=2): pos (33, 78)->(31, 96), unique=12, span=18.4, reversals=0%, waypoint_side=0%, target=(37, 80)->(35, 98) [`uncertain_reconstruction_missing_step0`], mask=8.8 [`historical_approximate`], action_replacements=0
+  - `D1` (`left_flanker`, switches=2): pos (32, 72)->(40, 78), unique=11, span=12.8, reversals=9%, waypoint_side=0%, target=(46, 74)->(40, 97) [`uncertain_reconstruction_missing_step0`], mask=8.8 [`historical_approximate`], action_replacements=0
+  - `D2` (`rear_pressure`, switches=1): pos (49, 78)->(41, 76), unique=11, span=10.8, reversals=18%, waypoint_side=25%, target=(32, 93)->(36, 89) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`escapist`): pos (33, 87)->(38, 96), route_dist 11.0->15.0 (net -4.0), fence_adj=0%, wall_corner=0%
+  - `S1` (`pen_fearful`): pos (43, 75)->(40, 86), route_dist 13.0->5.0 (net +8.0), fence_adj=0%, wall_corner=0%
+  - `S5` (`escapist`): pos (43, 87)->(46, 87), route_dist 1.0->1.0 (net +0.0), fence_adj=25%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-4.69 (mean=-0.391/step, pos_progress_steps=5, neg_progress_steps=7)
+  - `Cycle incomplete_745_756` (`incomplete_cycle`): Incomplete cycle steps 745..756: trajectory ended before recurrence. [total=-10.443, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039909-seed-000041:steps-757-778` — `counterproductive_pressure` (steps 757..778, duration=22, unpenned_sheep=2, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 737..756)**: 1 sheep penned (unpenned 4->3); avg route distance 9.5->7.0.
+- **[Derived Measurement] Route Progress**: 8.5 -> 18.0 (net -9.5 cells), flock spread 4.5 -> 6.8, `no_progress_steps` 0 -> 7 (resets without best route gain: 4)
+- **[Derived Measurement] Aftermath (steps 779..798)**: Flock advanced toward pen by +9.0 route cells (17.0->8.0); behind-flock alignment +0.51->+0.62.
+- **[Hypothesized Mechanism] Candidates**: `wrong_side_fence_overshoot`, `two_sheep_collector_blind_spot`, `corner_target_clamping_inversion`, `no_progress_spread_jitter_reset`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`left_flanker`, switches=1): pos (33, 96)->(59, 103), unique=18, span=26.9, reversals=19%, waypoint_side=36%, target=(50, 90)->(52, 91) [`uncertain_reconstruction_missing_step0`], mask=6.5 [`historical_approximate`], action_replacements=0
+  - `D1` (`blocker`, switches=2): pos (40, 82)->(49, 103), unique=22, span=22.8, reversals=0%, waypoint_side=32%, target=(46, 88)->(55, 97) [`uncertain_reconstruction_missing_step0`], mask=7.7 [`historical_approximate`], action_replacements=0
+  - `D2` (`rear_pressure`, switches=0): pos (41, 78)->(37, 95), unique=21, span=25.7, reversals=5%, waypoint_side=23%, target=(41, 94)->(42, 97) [`uncertain_reconstruction_missing_step0`], mask=8.2 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`escapist`): pos (40, 96)->(41, 95), route_dist 13.0->11.0 (net +2.0), fence_adj=45%, wall_corner=50%
+  - `S1` (`pen_fearful`): pos (40, 87)->(52, 103), route_dist 4.0->25.0 (net -21.0), fence_adj=41%, wall_corner=50%
+- **[Derived Measurement] Rewards & Cycles**: total=-38.34 (mean=-1.743/step, pos_progress_steps=6, neg_progress_steps=16)
+  - `Cycle incomplete_757_778` (`incomplete_cycle`): Incomplete cycle steps 757..778: trajectory ended before recurrence. [total=-51.008, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039909-seed-000041:steps-803-1261` — `oscillation_loop` (steps 803..1261, duration=459, unpenned_sheep=1, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 783..802)**: Flock advanced toward pen by +12.0 route cells (15.5->3.5); behind-flock alignment -0.17->-0.75.
+- **[Derived Measurement] Route Progress**: 5.0 -> 58.0 (net -53.0 cells), flock spread 0.0 -> 0.0, `no_progress_steps` 8 -> 466 (resets without best route gain: 0)
+- **[Derived Measurement] Aftermath (steps 1262..1281)**: Flock advanced toward pen by +19.0 route cells (57.0->38.0); behind-flock alignment -0.11->+0.92.
+- **[Hypothesized Mechanism] Candidates**: `wrong_side_fence_overshoot`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`rear_pressure`, switches=0): pos (65, 79)->(0, 100), unique=81, span=71.2, reversals=26%, waypoint_side=27%, target=(55, 84)->(2, 98) [`uncertain_reconstruction_missing_step0`], mask=8.5 [`historical_approximate`], action_replacements=0
+  - `D1` (`left_flanker`, switches=0): pos (58, 103)->(1, 101), unique=80, span=72.4, reversals=28%, waypoint_side=16%, target=(54, 91)->(2, 98) [`uncertain_reconstruction_missing_step0`], mask=8.7 [`historical_approximate`], action_replacements=0
+  - `D2` (`collector`, switches=0): pos (67, 91)->(0, 102), unique=84, span=69.6, reversals=19%, waypoint_side=61%, target=(41, 78)->(2, 98) [`uncertain_reconstruction_missing_step0`], mask=8.5 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S1` (`pen_fearful`): pos (58, 89)->(0, 101), route_dist 5.0->58.0 (net -53.0), fence_adj=90%, wall_corner=14%
+- **[Derived Measurement] Rewards & Cycles**: total=-1154.96 (mean=-2.516/step, pos_progress_steps=203, neg_progress_steps=246)
+  - `Cycle cycle_829_909` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 829..909 with positive progress steps but net negative return (-168.257). Penalty dominates; not reward farming. [total=-168.257, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_909_949` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 909..949 with positive progress steps but net negative return (-85.037). Penalty dominates; not reward farming. [total=-85.037, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_953_973` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 953..973 with positive progress steps but net negative return (-44.180). Penalty dominates; not reward farming. [total=-44.180, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_983_1146` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 983..1146 with positive progress steps but net negative return (-339.112). Penalty dominates; not reward farming. [total=-339.112, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1198_1200` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1198..1200 with positive progress steps but net negative return (-5.224). Penalty dominates; not reward farming. [total=-5.224, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039909-seed-000041:steps-1295-1442` — `oscillation_loop` (steps 1295..1442, duration=148, unpenned_sheep=1, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 1275..1294)**: Flock advanced toward pen by +21.0 route cells (44.0->23.0); behind-flock alignment +0.95->+0.84.
+- **[Derived Measurement] Route Progress**: 21.0 -> 95.0 (net -74.0 cells), flock spread 0.0 -> 0.0, `no_progress_steps` 500 -> 647 (resets without best route gain: 0)
+- **[Derived Measurement] Aftermath (steps 1443..1462)**: Flock advanced toward pen by +18.0 route cells (94.0->76.0); behind-flock alignment +0.98->+0.99.
+- **[Hypothesized Mechanism] Candidates**: `corner_target_clamping_inversion`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`rear_pressure`, switches=0): pos (26, 94)->(143, 103), unique=126, span=117.8, reversals=9%, waypoint_side=71%, target=(28, 98)->(141, 98) [`uncertain_reconstruction_missing_step0`], mask=7.1 [`historical_approximate`], action_replacements=0
+  - `D1` (`left_flanker`, switches=0): pos (30, 103)->(143, 101), unique=61, span=113.1, reversals=52%, waypoint_side=11%, target=(32, 101)->(137, 97) [`uncertain_reconstruction_missing_step0`], mask=6.2 [`historical_approximate`], action_replacements=0
+  - `D2` (`collector`, switches=0): pos (28, 97)->(143, 102), unique=132, span=116.1, reversals=9%, waypoint_side=77%, target=(30, 98)->(139, 98) [`uncertain_reconstruction_missing_step0`], mask=7.3 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S1` (`pen_fearful`): pos (34, 98)->(136, 101), route_dist 21.0->95.0 (net -74.0), fence_adj=30%, wall_corner=74%
+- **[Derived Measurement] Rewards & Cycles**: total=-639.55 (mean=-4.321/step, pos_progress_steps=34, neg_progress_steps=106)
+  - `Cycle incomplete_1295_1442` (`incomplete_cycle`): Incomplete cycle steps 1295..1442: trajectory ended before recurrence. [total=-644.162, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039909-seed-000041:steps-1533-1575` — `oscillation_loop` (steps 1533..1575, duration=43, unpenned_sheep=1, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 1513..1532)**: Flock advanced toward pen by +13.0 route cells (27.0->14.0); behind-flock alignment +0.99->+0.37.
+- **[Derived Measurement] Route Progress**: 13.0 -> 14.0 (net -1.0 cells), flock spread 0.0 -> 0.0, `no_progress_steps` 738 -> 780 (resets without best route gain: 0)
+- **[Derived Measurement] Aftermath (steps 1575..1575)**: Route distance remained near 14.0 (net progress +0.0); 0 role switches.
+- **[Hypothesized Mechanism] Candidates**: `wrong_side_fence_overshoot`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`rear_pressure`, switches=0): pos (59, 101)->(65, 97), unique=15, span=10.0, reversals=14%, waypoint_side=28%, target=(58, 101)->(58, 101) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D1` (`left_flanker`, switches=0): pos (69, 101)->(67, 97), unique=15, span=11.7, reversals=29%, waypoint_side=16%, target=(62, 98)->(62, 97) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D2` (`collector`, switches=0): pos (60, 98)->(62, 94), unique=13, span=10.8, reversals=29%, waypoint_side=53%, target=(58, 100)->(58, 99) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S1` (`pen_fearful`): pos (58, 97)->(58, 98), route_dist 13.0->14.0 (net -1.0), fence_adj=100%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-102.74 (mean=-2.389/step, pos_progress_steps=22, neg_progress_steps=21)
+  - `Cycle incomplete_1533_1575` (`incomplete_cycle`): Incomplete cycle steps 1533..1575: trajectory ended before recurrence. [total=-102.532, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+## Episode `checkpoint-039911-seed-000041` (seed=41, outcome=`success`, stop_reason=`success`, penned=6/6, steps=977)
+- **[Recorded Observation] Pen Geometry**: origin=(43,88), size=14x14, opening=`top` on 144x104 field
+- **[Recorded Observation] Sheep Penning Events**: S2@step 228, S4@step 229, S3@step 887, S5@step 947, S1@step 956, S0@step 977
+- **[Audit] Guidance Certainty**: `uncertain_reconstruction_missing_step0` (step0_present=False, contiguous_frames=True, full_env_config=False, gamma_available=False)
+- **[Derived Measurement] Diagnostic Note**: stats.oscillation_detected was False (only checks a 2-position loop in the final 4 steps), whereas temporal window analysis detected sustained multi-step oscillation.
+- **[Derived Measurement] Diagnostic Note**: no_progress_steps reset 182 time(s) during non-progress intervals without new best entry distance (triggered by flock_spread or farthest_to_flock_center deltas).
+
+### Interval `checkpoint-039911-seed-000041:steps-1-13` — `productive_repositioning` (steps 1..13, duration=13, unpenned_sheep=6, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 1..1)**: Route distance remained near 77.7 (net progress +0.0); 0 role switches.
+- **[Derived Measurement] Route Progress**: 77.7 -> 77.3 (net +0.3 cells), flock spread 17.4 -> 9.9, `no_progress_steps` 0 -> 0 (resets without best route gain: 1)
+- **[Derived Measurement] Aftermath (steps 14..33)**: Flock advanced toward pen by +14.2 route cells (77.0->62.8); behind-flock alignment +0.72->+0.35.
+- **[Hypothesized Mechanism] Candidates**: `two_sheep_collector_blind_spot`, `no_progress_spread_jitter_reset`, `flanking_or_collection_repositioning`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`left_flanker`, switches=0): pos (2, 51)->(11, 29), unique=13, span=25.6, reversals=8%, waypoint_side=15%, target=(4, 49)->(11, 42) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D1` (`right_flanker`, switches=0): pos (4, 51)->(16, 19), unique=13, span=34.2, reversals=0%, waypoint_side=23%, target=(44, 9)->(37, 16) [`uncertain_reconstruction_missing_step0`], mask=8.8 [`historical_approximate`], action_replacements=0
+  - `D2` (`rear_pressure`, switches=0): pos (6, 50)->(16, 22), unique=13, span=29.7, reversals=0%, waypoint_side=23%, target=(20, 25)->(20, 25) [`uncertain_reconstruction_missing_step0`], mask=8.8 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`escapist`): pos (7, 34)->(15, 34), route_dist 90.0->82.0 (net +8.0), fence_adj=0%, wall_corner=0%
+  - `S1` (`pen_fearful`): pos (7, 37)->(12, 38), route_dist 87.0->81.0 (net +6.0), fence_adj=0%, wall_corner=0%
+  - `S2` (`bold`): pos (9, 33)->(21, 33), route_dist 89.0->77.0 (net +12.0), fence_adj=0%, wall_corner=0%
+  - `S3` (`pen_shy`): pos (40, 25)->(33, 25), route_dist 66.0->73.0 (net -7.0), fence_adj=0%, wall_corner=0%
+  - `S4` (`pen_fearful`): pos (40, 24)->(32, 24), route_dist 67.0->75.0 (net -8.0), fence_adj=0%, wall_corner=0%
+  - `S5` (`escapist`): pos (42, 22)->(32, 23), route_dist 67.0->76.0 (net -9.0), fence_adj=0%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-21.15 (mean=-1.627/step, pos_progress_steps=11, neg_progress_steps=2)
+  - `Cycle incomplete_1_13` (`incomplete_cycle`): Incomplete cycle steps 1..13: trajectory ended before recurrence. [total=-19.831, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039911-seed-000041:steps-30-41` — `productive_repositioning` (steps 30..41, duration=12, unpenned_sheep=6, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 10..29)**: Flock advanced toward pen by +14.8 route cells (79.0->64.2); behind-flock alignment +0.52->+0.28.
+- **[Derived Measurement] Route Progress**: 63.7 -> 62.5 (net +1.2 cells), flock spread 9.2 -> 14.6, `no_progress_steps` 0 -> 0 (resets without best route gain: 2)
+- **[Derived Measurement] Aftermath (steps 42..61)**: Flock advanced toward pen by +7.8 route cells (62.0->54.2); behind-flock alignment +0.19->+0.28.
+- **[Hypothesized Mechanism] Candidates**: `flanking_or_collection_repositioning`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`collector`, switches=0): pos (11, 47)->(7, 61), unique=10, span=14.6, reversals=18%, waypoint_side=0%, target=(10, 56)->(11, 66) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D1` (`left_flanker`, switches=0): pos (36, 31)->(32, 35), unique=8, span=8.9, reversals=27%, waypoint_side=92%, target=(16, 51)->(9, 60) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D2` (`rear_pressure`, switches=0): pos (36, 26)->(36, 28), unique=6, span=8.2, reversals=27%, waypoint_side=0%, target=(24, 35)->(22, 39) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`escapist`): pos (24, 37)->(16, 39), route_dist 70.0->76.0 (net -6.0), fence_adj=0%, wall_corner=0%
+  - `S1` (`pen_fearful`): pos (12, 55)->(14, 64), route_dist 64.0->53.0 (net +11.0), fence_adj=0%, wall_corner=0%
+  - `S2` (`bold`): pos (26, 36)->(15, 36), route_dist 69.0->80.0 (net -11.0), fence_adj=0%, wall_corner=0%
+  - `S3` (`pen_shy`): pos (34, 39)->(34, 48), route_dist 58.0->49.0 (net +9.0), fence_adj=0%, wall_corner=0%
+  - `S4` (`pen_fearful`): pos (37, 36)->(41, 39), route_dist 58.0->51.0 (net +7.0), fence_adj=0%, wall_corner=0%
+  - `S5` (`escapist`): pos (35, 33)->(34, 31), route_dist 63.0->66.0 (net -3.0), fence_adj=0%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-37.30 (mean=-3.109/step, pos_progress_steps=2, neg_progress_steps=10)
+  - `Cycle incomplete_30_41` (`incomplete_cycle`): Incomplete cycle steps 30..41: trajectory ended before recurrence. [total=-38.120, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039911-seed-000041:steps-82-189` — `productive_repositioning` (steps 82..189, duration=108, unpenned_sheep=6, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 62..81)**: Flock advanced toward pen by +9.5 route cells (53.8->44.3); behind-flock alignment +0.27->+0.23.
+- **[Derived Measurement] Route Progress**: 44.2 -> 37.8 (net +6.3 cells), flock spread 11.4 -> 25.7, `no_progress_steps` 0 -> 12 (resets without best route gain: 24)
+- **[Derived Measurement] Aftermath (steps 190..209)**: Flock advanced toward pen by +4.3 route cells (37.7->33.3); behind-flock alignment +0.41->+0.01.
+- **[Hypothesized Mechanism] Candidates**: `flanking_or_collection_repositioning`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`collector`, switches=0): pos (44, 69)->(143, 73), unique=104, span=99.2, reversals=3%, waypoint_side=81%, target=(47, 71)->(141, 75) [`uncertain_reconstruction_missing_step0`], mask=8.9 [`historical_approximate`], action_replacements=0
+  - `D1` (`left_flanker`, switches=0): pos (44, 33)->(22, 53), unique=73, span=56.6, reversals=31%, waypoint_side=31%, target=(26, 62)->(70, 46) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D2` (`rear_pressure`, switches=0): pos (44, 30)->(66, 68), unique=70, span=51.6, reversals=37%, waypoint_side=0%, target=(36, 44)->(74, 75) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`escapist`): pos (32, 42)->(16, 54), route_dist 57.0->61.0 (net -4.0), fence_adj=0%, wall_corner=0%
+  - `S1` (`pen_fearful`): pos (46, 69)->(139, 75), route_dist 19.0->96.0 (net -77.0), fence_adj=0%, wall_corner=9%
+  - `S2` (`bold`): pos (33, 41)->(63, 79), route_dist 57.0->16.0 (net +41.0), fence_adj=0%, wall_corner=0%
+  - `S3` (`pen_shy`): pos (41, 52)->(64, 80), route_dist 38.0->16.0 (net +22.0), fence_adj=0%, wall_corner=0%
+  - `S4` (`pen_fearful`): pos (43, 51)->(63, 80), route_dist 37.0->15.0 (net +22.0), fence_adj=0%, wall_corner=0%
+  - `S5` (`escapist`): pos (47, 31)->(71, 80), route_dist 57.0->23.0 (net +34.0), fence_adj=0%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-185.59 (mean=-1.718/step, pos_progress_steps=37, neg_progress_steps=71)
+  - `Cycle incomplete_82_189` (`incomplete_cycle`): Incomplete cycle steps 82..189: trajectory ended before recurrence. [total=-185.678, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039911-seed-000041:steps-200-227` — `productive_repositioning` (steps 200..227, duration=28, unpenned_sheep=6, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 180..199)**: Flock advanced toward pen by +4.3 route cells (39.3->35.0); behind-flock alignment +0.51->+0.40.
+- **[Derived Measurement] Route Progress**: 34.8 -> 34.0 (net +0.8 cells), flock spread 26.5 -> 30.7, `no_progress_steps` 5 -> 4 (resets without best route gain: 5)
+- **[Derived Measurement] Aftermath (steps 228..247)**: 1 sheep penned (unpenned 5->4); avg route distance 39.6->55.8.
+- **[Hypothesized Mechanism] Candidates**: `dog_outside_sheep_vision_loop`, `role_churn_target_jumping`, `no_progress_spread_jitter_reset`, `flanking_or_collection_repositioning`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`collector`, switches=4): pos (135, 77)->(137, 98), unique=25, span=24.2, reversals=11%, waypoint_side=21%, target=(134, 78)->(135, 101) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D1` (`left_flanker`, switches=4): pos (12, 57)->(8, 45), unique=21, span=21.6, reversals=22%, waypoint_side=36%, target=(37, 78)->(29, 80) [`uncertain_reconstruction_missing_step0`], mask=8.7 [`historical_approximate`], action_replacements=0
+  - `D2` (`rear_pressure`, switches=0): pos (72, 72)->(59, 74), unique=20, span=25.0, reversals=26%, waypoint_side=0%, target=(66, 74)->(63, 76) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`escapist`): pos (5, 54)->(8, 32), route_dist 72.0->91.0 (net -19.0), fence_adj=0%, wall_corner=0%
+  - `S1` (`pen_fearful`): pos (131, 78)->(132, 100), route_dist 85.0->90.0 (net -5.0), fence_adj=0%, wall_corner=0%
+  - `S2` (`bold`): pos (62, 85)->(56, 87), route_dist 9.0->1.0 (net +8.0), fence_adj=21%, wall_corner=0%
+  - `S3` (`pen_shy`): pos (65, 83)->(58, 86), route_dist 14.0->4.0 (net +10.0), fence_adj=0%, wall_corner=0%
+  - `S4` (`pen_fearful`): pos (63, 84)->(54, 86), route_dist 11.0->2.0 (net +9.0), fence_adj=0%, wall_corner=0%
+  - `S5` (`escapist`): pos (71, 85)->(70, 88), route_dist 18.0->16.0 (net +2.0), fence_adj=0%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-34.30 (mean=-1.225/step, pos_progress_steps=11, neg_progress_steps=16)
+  - `Cycle incomplete_200_227` (`incomplete_cycle`): Incomplete cycle steps 200..227: trajectory ended before recurrence. [total=-34.502, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039911-seed-000041:steps-229-310` — `oscillation_loop` (steps 229..310, duration=82, unpenned_sheep=4, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 209..228)**: 1 sheep penned (unpenned 6->5); avg route distance 33.3->39.6.
+- **[Derived Measurement] Route Progress**: 49.8 -> 56.0 (net -6.2 cells), flock spread 41.7 -> 30.5, `no_progress_steps` 2 -> 0 (resets without best route gain: 24)
+- **[Derived Measurement] Aftermath (steps 311..330)**: Route distance remained near 54.0 (net progress +1.8); 0 role switches.
+- **[Hypothesized Mechanism] Candidates**: `corner_target_clamping_inversion`, `dog_outside_sheep_vision_loop`, `no_progress_spread_jitter_reset`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`left_flanker`, switches=5): pos (133, 98)->(85, 91), unique=53, span=52.0, reversals=36%, waypoint_side=11%, target=(26, 79)->(78, 90) [`uncertain_reconstruction_missing_step0`], mask=8.6 [`historical_approximate`], action_replacements=0
+  - `D1` (`collector`, switches=5): pos (8, 39)->(4, 20), unique=42, span=39.8, reversals=37%, waypoint_side=9%, target=(7, 30)->(8, 80) [`uncertain_reconstruction_missing_step0`], mask=8.1 [`historical_approximate`], action_replacements=0
+  - `D2` (`rear_pressure`, switches=0): pos (59, 82)->(43, 36), unique=75, span=71.6, reversals=9%, waypoint_side=68%, target=(64, 75)->(38, 42) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`escapist`): pos (9, 31)->(13, 8), route_dist 91.0->110.0 (net -19.0), fence_adj=0%, wall_corner=57%
+  - `S1` (`pen_fearful`): pos (131, 101)->(74, 88), route_dist 90.0->20.0 (net +70.0), fence_adj=0%, wall_corner=15%
+  - `S3` (`pen_shy`): pos (58, 88)->(43, 34), route_dist 4.0->54.0 (net -50.0), fence_adj=6%, wall_corner=0%
+  - `S5` (`escapist`): pos (69, 87)->(37, 54), route_dist 14.0->40.0 (net -26.0), fence_adj=0%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-150.84 (mean=-1.839/step, pos_progress_steps=32, neg_progress_steps=50)
+  - `Cycle incomplete_229_310` (`incomplete_cycle`): Incomplete cycle steps 229..310: trajectory ended before recurrence. [total=-140.493, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039911-seed-000041:steps-316-405` — `oscillation_loop` (steps 316..405, duration=90, unpenned_sheep=4, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 296..315)**: Flock advanced toward pen by +2.8 route cells (57.2->54.5); behind-flock alignment +0.07->+0.26.
+- **[Derived Measurement] Route Progress**: 54.0 -> 69.5 (net -15.5 cells), flock spread 29.4 -> 20.3, `no_progress_steps` 0 -> 0 (resets without best route gain: 25)
+- **[Derived Measurement] Aftermath (steps 406..425)**: Flock advanced toward pen by +8.0 route cells (68.8->60.8); behind-flock alignment +0.31->+0.35.
+- **[Hypothesized Mechanism] Candidates**: `no_progress_spread_jitter_reset`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`collector`, switches=2): pos (79, 89)->(34, 53), unique=73, span=65.7, reversals=19%, waypoint_side=56%, target=(71, 89)->(33, 53) [`uncertain_reconstruction_missing_step0`], mask=8.8 [`historical_approximate`], action_replacements=0
+  - `D1` (`rear_pressure`, switches=1): pos (4, 24)->(68, 3), unique=70, span=71.3, reversals=22%, waypoint_side=18%, target=(7, 79)->(56, 20) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D2` (`left_flanker`, switches=1): pos (43, 30)->(66, 0), unique=63, span=43.1, reversals=27%, waypoint_side=71%, target=(36, 42)->(28, 2) [`uncertain_reconstruction_missing_step0`], mask=8.6 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`escapist`): pos (13, 14)->(59, 3), route_dist 104.0->88.0 (net +16.0), fence_adj=0%, wall_corner=46%
+  - `S1` (`pen_fearful`): pos (67, 87)->(35, 50), route_dist 12.0->46.0 (net -34.0), fence_adj=0%, wall_corner=0%
+  - `S3` (`pen_shy`): pos (43, 28)->(68, 13), route_dist 60.0->87.0 (net -27.0), fence_adj=0%, wall_corner=58%
+  - `S5` (`escapist`): pos (37, 54)->(47, 31), route_dist 40.0->57.0 (net -17.0), fence_adj=0%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-137.84 (mean=-1.532/step, pos_progress_steps=52, neg_progress_steps=37)
+  - `Cycle incomplete_316_405` (`incomplete_cycle`): Incomplete cycle steps 316..405: trajectory ended before recurrence. [total=-138.776, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039911-seed-000041:steps-439-487` — `oscillation_loop` (steps 439..487, duration=49, unpenned_sheep=4, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 419..438)**: Flock advanced toward pen by +3.8 route cells (62.2->58.5); behind-flock alignment +0.34->+0.30.
+- **[Derived Measurement] Route Progress**: 58.5 -> 63.5 (net -5.0 cells), flock spread 24.2 -> 27.9, `no_progress_steps` 16 -> 14 (resets without best route gain: 25)
+- **[Derived Measurement] Aftermath (steps 488..507)**: Flock advanced toward pen by +3.5 route cells (63.5->60.0); behind-flock alignment +0.34->+0.36.
+- **[Hypothesized Mechanism] Candidates**: `dog_outside_sheep_vision_loop`, `no_progress_spread_jitter_reset`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`collector`, switches=0): pos (40, 74)->(29, 99), unique=36, span=34.1, reversals=25%, waypoint_side=53%, target=(38, 77)->(23, 93) [`uncertain_reconstruction_missing_step0`], mask=7.8 [`historical_approximate`], action_replacements=0
+  - `D1` (`rear_pressure`, switches=0): pos (30, 4)->(10, 8), unique=22, span=24.7, reversals=38%, waypoint_side=100%, target=(38, 30)->(22, 39) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D2` (`left_flanker`, switches=0): pos (28, 15)->(6, 17), unique=22, span=25.3, reversals=42%, waypoint_side=0%, target=(15, 61)->(2, 74) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`escapist`): pos (26, 2)->(10, 0), route_dist 103.0->121.0 (net -18.0), fence_adj=0%, wall_corner=100%
+  - `S1` (`pen_fearful`): pos (40, 76)->(25, 90), route_dist 15.0->22.0 (net -7.0), fence_adj=0%, wall_corner=18%
+  - `S3` (`pen_shy`): pos (49, 27)->(35, 40), route_dist 61.0->56.0 (net +5.0), fence_adj=0%, wall_corner=0%
+  - `S5` (`escapist`): pos (51, 33)->(35, 41), route_dist 55.0->55.0 (net +0.0), fence_adj=0%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-133.70 (mean=-2.729/step, pos_progress_steps=15, neg_progress_steps=34)
+  - `Cycle incomplete_439_487` (`incomplete_cycle`): Incomplete cycle steps 439..487: trajectory ended before recurrence. [total=-130.624, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039911-seed-000041:steps-501-592` — `oscillation_loop` (steps 501..592, duration=92, unpenned_sheep=4, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 481..500)**: Flock advanced toward pen by +3.5 route cells (65.0->61.5); behind-flock alignment +0.34->+0.35.
+- **[Derived Measurement] Route Progress**: 61.0 -> 77.0 (net -16.0 cells), flock spread 23.6 -> 9.4, `no_progress_steps` 0 -> 0 (resets without best route gain: 9)
+- **[Derived Measurement] Aftermath (steps 593..612)**: Flock advanced toward pen by +9.2 route cells (76.2->67.0); behind-flock alignment +0.92->+0.79.
+- **[Hypothesized Mechanism] Candidates**: `corner_target_clamping_inversion`, `no_progress_spread_jitter_reset`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`left_flanker`, switches=7): pos (29, 87)->(33, 4), unique=90, span=87.8, reversals=2%, waypoint_side=86%, target=(3, 67)->(25, 29) [`uncertain_reconstruction_missing_step0`], mask=8.8 [`historical_approximate`], action_replacements=0
+  - `D1` (`collector`, switches=2): pos (12, 0)->(21, 0), unique=58, span=57.1, reversals=24%, waypoint_side=1%, target=(17, 2)->(24, 2) [`uncertain_reconstruction_missing_step0`], mask=7.2 [`historical_approximate`], action_replacements=0
+  - `D2` (`rear_pressure`, switches=4): pos (18, 7)->(38, 8), unique=68, span=49.5, reversals=32%, waypoint_side=78%, target=(26, 36)->(34, 12) [`uncertain_reconstruction_missing_step0`], mask=8.8 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`escapist`): pos (20, 0)->(36, 16), route_dist 111.0->79.0 (net +32.0), fence_adj=0%, wall_corner=72%
+  - `S1` (`pen_fearful`): pos (25, 76)->(26, 5), route_dist 30.0->100.0 (net -70.0), fence_adj=0%, wall_corner=8%
+  - `S3` (`pen_shy`): pos (38, 40)->(45, 23), route_dist 53.0->65.0 (net -12.0), fence_adj=0%, wall_corner=0%
+  - `S5` (`escapist`): pos (40, 41)->(44, 24), route_dist 50.0->64.0 (net -14.0), fence_adj=0%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-100.99 (mean=-1.098/step, pos_progress_steps=45, neg_progress_steps=45)
+  - `Cycle incomplete_501_592` (`incomplete_cycle`): Incomplete cycle steps 501..592: trajectory ended before recurrence. [total=-103.089, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039911-seed-000041:steps-678-755` — `oscillation_loop` (steps 678..755, duration=78, unpenned_sheep=4, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 658..677)**: Flock advanced toward pen by +8.8 route cells (43.2->34.5); behind-flock alignment +0.71->+0.55.
+- **[Derived Measurement] Route Progress**: 34.0 -> 55.2 (net -21.2 cells), flock spread 12.3 -> 29.3, `no_progress_steps` 0 -> 34 (resets without best route gain: 18)
+- **[Derived Measurement] Aftermath (steps 756..775)**: Flock advanced toward pen by +6.5 route cells (54.5->48.0); behind-flock alignment +0.35->+0.29.
+- **[Hypothesized Mechanism] Candidates**: `corner_target_clamping_inversion`, `dog_outside_sheep_vision_loop`, `role_churn_target_jumping`, `no_progress_spread_jitter_reset`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`rear_pressure`, switches=10): pos (35, 44)->(29, 14), unique=52, span=39.8, reversals=30%, waypoint_side=40%, target=(31, 57)->(21, 50) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D1` (`rear_pressure`, switches=8): pos (33, 43)->(33, 2), unique=52, span=51.6, reversals=27%, waypoint_side=64%, target=(20, 76)->(36, 2) [`uncertain_reconstruction_missing_step0`], mask=8.8 [`historical_approximate`], action_replacements=0
+  - `D2` (`collector`, switches=5): pos (24, 72)->(2, 103), unique=52, span=39.2, reversals=31%, waypoint_side=37%, target=(22, 79)->(2, 86) [`uncertain_reconstruction_missing_step0`], mask=7.4 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`escapist`): pos (24, 78)->(1, 94), route_dist 29.0->50.0 (net -21.0), fence_adj=0%, wall_corner=71%
+  - `S1` (`pen_fearful`): pos (36, 43)->(35, 3), route_dist 52.0->93.0 (net -41.0), fence_adj=0%, wall_corner=13%
+  - `S3` (`pen_shy`): pos (43, 63)->(32, 60), route_dist 25.0->39.0 (net -14.0), fence_adj=0%, wall_corner=0%
+  - `S5` (`escapist`): pos (39, 62)->(31, 61), route_dist 30.0->39.0 (net -9.0), fence_adj=0%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-246.76 (mean=-3.164/step, pos_progress_steps=19, neg_progress_steps=59)
+  - `Cycle incomplete_678_755` (`incomplete_cycle`): Incomplete cycle steps 678..755: trajectory ended before recurrence. [total=-248.968, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039911-seed-000041:steps-770-815` — `productive_repositioning` (steps 770..815, duration=46, unpenned_sheep=4, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 750..769)**: Flock advanced toward pen by +6.8 route cells (56.8->50.0); behind-flock alignment +0.37->+0.30.
+- **[Derived Measurement] Route Progress**: 49.2 -> 46.0 (net +3.2 cells), flock spread 27.2 -> 28.5, `no_progress_steps` 29 -> 24 (resets without best route gain: 25)
+- **[Derived Measurement] Aftermath (steps 816..835)**: Flock advanced toward pen by +5.5 route cells (45.8->40.2); behind-flock alignment +0.28->+0.22.
+- **[Hypothesized Mechanism] Candidates**: `role_churn_target_jumping`, `flanking_or_collection_repositioning`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`rear_pressure`, switches=0): pos (37, 20)->(47, 24), unique=20, span=14.1, reversals=24%, waypoint_side=80%, target=(24, 53)->(28, 53) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D1` (`collector`, switches=11): pos (39, 10)->(47, 11), unique=29, span=19.7, reversals=18%, waypoint_side=37%, target=(42, 10)->(2, 88) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D2` (`left_flanker`, switches=11): pos (0, 103)->(2, 103), unique=2, span=2.0, reversals=100%, waypoint_side=0%, target=(2, 87)->(2, 96) [`uncertain_reconstruction_missing_step0`], mask=6.0 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`escapist`): pos (2, 94)->(1, 94), route_dist 49.0->50.0 (net -1.0), fence_adj=0%, wall_corner=100%
+  - `S1` (`pen_fearful`): pos (41, 12)->(47, 13), route_dist 78.0->75.0 (net +3.0), fence_adj=0%, wall_corner=0%
+  - `S3` (`pen_shy`): pos (35, 60)->(42, 60), route_dist 36.0->29.0 (net +7.0), fence_adj=0%, wall_corner=0%
+  - `S5` (`escapist`): pos (36, 61)->(40, 61), route_dist 34.0->30.0 (net +4.0), fence_adj=0%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-46.13 (mean=-1.003/step, pos_progress_steps=24, neg_progress_steps=19)
+  - `Cycle incomplete_770_815` (`incomplete_cycle`): Incomplete cycle steps 770..815: trajectory ended before recurrence. [total=-48.881, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039911-seed-000041:steps-828-853` — `productive_repositioning` (steps 828..853, duration=26, unpenned_sheep=4, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 808..827)**: Flock advanced toward pen by +5.8 route cells (47.8->42.0); behind-flock alignment +0.34->+0.30.
+- **[Derived Measurement] Route Progress**: 41.5 -> 40.0 (net +1.5 cells), flock spread 25.3 -> 26.4, `no_progress_steps` 17 -> 10 (resets without best route gain: 17)
+- **[Derived Measurement] Aftermath (steps 854..873)**: Flock advanced toward pen by +7.5 route cells (39.0->31.5); behind-flock alignment +0.12->-0.00.
+- **[Hypothesized Mechanism] Candidates**: `corner_target_clamping_inversion`, `flanking_or_collection_repositioning`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`rear_pressure`, switches=1): pos (49, 32)->(43, 40), unique=15, span=11.7, reversals=32%, waypoint_side=81%, target=(30, 56)->(4, 91) [`uncertain_reconstruction_missing_step0`], mask=8.8 [`historical_approximate`], action_replacements=0
+  - `D1` (`left_flanker`, switches=1): pos (47, 24)->(45, 55), unique=24, span=31.3, reversals=4%, waypoint_side=23%, target=(5, 89)->(29, 58) [`uncertain_reconstruction_missing_step0`], mask=8.8 [`historical_approximate`], action_replacements=0
+  - `D2` (`collector`, switches=0): pos (0, 103)->(2, 103), unique=2, span=2.0, reversals=100%, waypoint_side=0%, target=(2, 96)->(2, 96) [`uncertain_reconstruction_missing_step0`], mask=6.0 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`escapist`): pos (2, 94)->(1, 94), route_dist 49.0->50.0 (net -1.0), fence_adj=0%, wall_corner=100%
+  - `S1` (`pen_fearful`): pos (47, 26)->(46, 24), route_dist 62.0->64.0 (net -2.0), fence_adj=0%, wall_corner=0%
+  - `S3` (`pen_shy`): pos (43, 60)->(41, 66), route_dist 28.0->24.0 (net +4.0), fence_adj=0%, wall_corner=0%
+  - `S5` (`escapist`): pos (43, 61)->(42, 67), route_dist 27.0->22.0 (net +5.0), fence_adj=0%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-40.38 (mean=-1.553/step, pos_progress_steps=12, neg_progress_steps=14)
+  - `Cycle incomplete_828_853` (`incomplete_cycle`): Incomplete cycle steps 828..853: trajectory ended before recurrence. [total=-42.080, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039911-seed-000041:steps-888-922` — `productive_repositioning` (steps 888..922, duration=35, unpenned_sheep=3, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 868..887)**: 1 sheep penned (unpenned 4->3); avg route distance 34.0->33.0.
+- **[Derived Measurement] Route Progress**: 32.0 -> 35.7 (net -3.7 cells), flock spread 28.3 -> 22.5, `no_progress_steps` 0 -> 0 (resets without best route gain: 7)
+- **[Derived Measurement] Aftermath (steps 923..942)**: Flock advanced toward pen by +17.3 route cells (34.3->17.0); behind-flock alignment +0.21->+0.13.
+- **[Hypothesized Mechanism] Candidates**: `dog_outside_sheep_vision_loop`, `role_churn_target_jumping`, `no_progress_spread_jitter_reset`, `flanking_or_collection_repositioning`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`left_flanker`, switches=5): pos (45, 38)->(57, 50), unique=28, span=21.3, reversals=24%, waypoint_side=26%, target=(47, 41)->(7, 92) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D1` (`rear_pressure`, switches=0): pos (43, 77)->(57, 48), unique=27, span=39.4, reversals=21%, waypoint_side=6%, target=(25, 74)->(29, 62) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D2` (`collector`, switches=5): pos (0, 103)->(0, 75), unique=16, span=28.1, reversals=29%, waypoint_side=0%, target=(29, 101)->(2, 76) [`uncertain_reconstruction_missing_step0`], mask=6.9 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`escapist`): pos (2, 94)->(4, 74), route_dist 49.0->53.0 (net -4.0), fence_adj=0%, wall_corner=37%
+  - `S1` (`pen_fearful`): pos (45, 44)->(57, 52), route_dist 44.0->37.0 (net +7.0), fence_adj=0%, wall_corner=0%
+  - `S5` (`escapist`): pos (41, 87)->(40, 74), route_dist 3.0->17.0 (net -14.0), fence_adj=6%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-62.30 (mean=-1.780/step, pos_progress_steps=12, neg_progress_steps=23)
+  - `Cycle incomplete_888_922` (`incomplete_cycle`): Incomplete cycle steps 888..922: trajectory ended before recurrence. [total=-63.719, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+## Episode `checkpoint-039903-seed-000053` (seed=53, outcome=`stopped`, stop_reason=`no-progress`, penned=4/6, steps=1120)
+- **[Recorded Observation] Pen Geometry**: origin=(117,88), size=14x14, opening=`top` on 144x104 field
+- **[Recorded Observation] Sheep Penning Events**: S3@step 251, S1@step 258, S4@step 258, S0@step 332
+- **[Audit] Guidance Certainty**: `uncertain_reconstruction_missing_step0` (step0_present=False, contiguous_frames=True, full_env_config=False, gamma_available=False)
+- **[Derived Measurement] Diagnostic Note**: no_progress_steps reset 22 time(s) during non-progress intervals without new best entry distance (triggered by flock_spread or farthest_to_flock_center deltas).
+
+### Interval `checkpoint-039903-seed-000053:steps-16-41` — `productive_repositioning` (steps 16..41, duration=26, unpenned_sheep=6, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 1..15)**: Flock advanced toward pen by +10.3 route cells (113.0->102.7); behind-flock alignment +0.46->+0.38.
+- **[Derived Measurement] Route Progress**: 102.2 -> 99.5 (net +2.7 cells), flock spread 62.3 -> 42.8, `no_progress_steps` 0 -> 0 (resets without best route gain: 0)
+- **[Derived Measurement] Aftermath (steps 42..61)**: Flock advanced toward pen by +8.7 route cells (98.8->90.2); behind-flock alignment +0.28->+0.36.
+- **[Hypothesized Mechanism] Candidates**: `dog_outside_sheep_vision_loop`, `flanking_or_collection_repositioning`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`collector`, switches=0): pos (8, 81)->(30, 77), unique=21, span=22.8, reversals=20%, waypoint_side=0%, target=(16, 93)->(35, 87) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D1` (`left_flanker`, switches=0): pos (4, 29)->(32, 23), unique=18, span=28.6, reversals=32%, waypoint_side=0%, target=(6, 101)->(27, 78) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D2` (`rear_pressure`, switches=0): pos (20, 55)->(38, 51), unique=13, span=18.4, reversals=56%, waypoint_side=0%, target=(68, 31)->(69, 28) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`bold`): pos (22, 8)->(47, 8), route_dist 175.0->150.0 (net +25.0), fence_adj=0%, wall_corner=0%
+  - `S1` (`pen_fearful`): pos (119, 9)->(95, 10), route_dist 79.0->100.0 (net -21.0), fence_adj=0%, wall_corner=0%
+  - `S2` (`pen_shy`): pos (18, 90)->(38, 85), route_dist 103.0->82.0 (net +21.0), fence_adj=0%, wall_corner=0%
+  - `S3` (`escapist`): pos (127, 87)->(115, 74), route_dist 1.0->16.0 (net -15.0), fence_adj=0%, wall_corner=0%
+  - `S4` (`escapist`): pos (24, 7)->(49, 7), route_dist 174.0->149.0 (net +25.0), fence_adj=0%, wall_corner=0%
+  - `S5` (`pen_shy`): pos (119, 7)->(96, 9), route_dist 81.0->100.0 (net -19.0), fence_adj=0%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-39.60 (mean=-1.523/step, pos_progress_steps=26, neg_progress_steps=0)
+  - `Cycle incomplete_16_41` (`incomplete_cycle`): Incomplete cycle steps 16..41: trajectory ended before recurrence. [total=-39.137, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039903-seed-000053:steps-76-90` — `productive_repositioning` (steps 76..90, duration=15, unpenned_sheep=6, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 56..75)**: Flock advanced toward pen by +8.7 route cells (92.8->84.2); behind-flock alignment +0.31->+0.48.
+- **[Derived Measurement] Route Progress**: 83.8 -> 82.0 (net +1.8 cells), flock spread 22.5 -> 18.9, `no_progress_steps` 0 -> 0 (resets without best route gain: 0)
+- **[Derived Measurement] Aftermath (steps 91..110)**: Flock advanced toward pen by +6.7 route cells (81.5->74.8); behind-flock alignment +0.38->+0.34.
+- **[Hypothesized Mechanism] Candidates**: `flanking_or_collection_repositioning`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`collector`, switches=0): pos (64, 85)->(78, 83), unique=13, span=14.6, reversals=14%, waypoint_side=0%, target=(66, 85)->(84, 85) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D1` (`left_flanker`, switches=0): pos (50, 31)->(60, 33), unique=8, span=10.2, reversals=57%, waypoint_side=0%, target=(52, 69)->(58, 64) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D2` (`rear_pressure`, switches=0): pos (58, 21)->(68, 23), unique=8, span=10.2, reversals=57%, waypoint_side=0%, target=(74, 39)->(76, 38) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`bold`): pos (61, 27)->(70, 32), route_dist 117.0->103.0 (net +14.0), fence_adj=0%, wall_corner=0%
+  - `S1` (`pen_fearful`): pos (86, 36)->(85, 38), route_dist 83.0->82.0 (net +1.0), fence_adj=0%, wall_corner=0%
+  - `S2` (`pen_shy`): pos (69, 83)->(83, 83), route_dist 53.0->39.0 (net +14.0), fence_adj=0%, wall_corner=0%
+  - `S3` (`escapist`): pos (95, 59)->(89, 51), route_dist 51.0->65.0 (net -14.0), fence_adj=0%, wall_corner=0%
+  - `S4` (`escapist`): pos (69, 20)->(70, 11), route_dist 116.0->124.0 (net -8.0), fence_adj=0%, wall_corner=0%
+  - `S5` (`pen_shy`): pos (87, 35)->(86, 40), route_dist 83.0->79.0 (net +4.0), fence_adj=0%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-22.18 (mean=-1.479/step, pos_progress_steps=5, neg_progress_steps=10)
+  - `Cycle incomplete_76_90` (`incomplete_cycle`): Incomplete cycle steps 76..90: trajectory ended before recurrence. [total=-23.069, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039903-seed-000053:steps-155-170` — `productive_repositioning` (steps 155..170, duration=16, unpenned_sheep=6, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 135..154)**: Flock advanced toward pen by +4.2 route cells (60.2->56.0); behind-flock alignment +0.29->+0.33.
+- **[Derived Measurement] Route Progress**: 55.5 -> 52.8 (net +2.7 cells), flock spread 15.2 -> 10.7, `no_progress_steps` 0 -> 0 (resets without best route gain: 0)
+- **[Derived Measurement] Aftermath (steps 171..190)**: Flock advanced toward pen by +13.7 route cells (52.2->38.5); behind-flock alignment +0.67->+0.59.
+- **[Hypothesized Mechanism] Candidates**: `two_sheep_collector_blind_spot`, `role_churn_target_jumping`, `flanking_or_collection_repositioning`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`left_flanker`, switches=2): pos (111, 69)->(81, 65), unique=13, span=32.2, reversals=20%, waypoint_side=50%, target=(76, 73)->(81, 70) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D1` (`rear_pressure`, switches=0): pos (84, 47)->(84, 53), unique=7, span=6.3, reversals=60%, waypoint_side=0%, target=(91, 50)->(91, 52) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D2` (`collector`, switches=4): pos (82, 23)->(88, 35), unique=12, span=14.4, reversals=33%, waypoint_side=0%, target=(84, 25)->(109, 42) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`bold`): pos (104, 55)->(103, 52), route_dist 46.0->50.0 (net -4.0), fence_adj=0%, wall_corner=0%
+  - `S1` (`pen_fearful`): pos (87, 60)->(90, 63), route_dist 58.0->52.0 (net +6.0), fence_adj=0%, wall_corner=0%
+  - `S2` (`pen_shy`): pos (119, 62)->(111, 61), route_dist 26.0->33.0 (net -7.0), fence_adj=0%, wall_corner=0%
+  - `S3` (`escapist`): pos (89, 62)->(92, 61), route_dist 54.0->52.0 (net +2.0), fence_adj=0%, wall_corner=0%
+  - `S4` (`escapist`): pos (86, 28)->(88, 41), route_dist 91.0->76.0 (net +15.0), fence_adj=0%, wall_corner=0%
+  - `S5` (`pen_shy`): pos (88, 59)->(90, 61), route_dist 58.0->54.0 (net +4.0), fence_adj=0%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=+9.74 (mean=+0.609/step, pos_progress_steps=16, neg_progress_steps=0)
+  - `Cycle incomplete_155_170` (`incomplete_cycle`): Incomplete cycle steps 155..170: trajectory ended before recurrence. [total=+7.720, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039903-seed-000053:steps-258-311` — `oscillation_loop` (steps 258..311, duration=54, unpenned_sheep=3, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 238..257)**: 1 sheep penned (unpenned 6->5); avg route distance 15.2->3.2.
+- **[Derived Measurement] Route Progress**: 4.3 -> 15.3 (net -11.0 cells), flock spread 1.7 -> 10.1, `no_progress_steps` 0 -> 11 (resets without best route gain: 21)
+- **[Derived Measurement] Aftermath (steps 312..331)**: Flock advanced toward pen by +6.3 route cells (14.3->8.0); behind-flock alignment +0.03->-0.21.
+- **[Hypothesized Mechanism] Candidates**: `wrong_side_fence_overshoot`, `corner_target_clamping_inversion`, `role_churn_target_jumping`, `no_progress_spread_jitter_reset`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`left_flanker`, switches=8): pos (129, 79)->(141, 85), unique=36, span=24.4, reversals=13%, waypoint_side=33%, target=(126, 81)->(141, 84) [`uncertain_reconstruction_missing_step0`], mask=8.7 [`historical_approximate`], action_replacements=0
+  - `D1` (`rear_pressure`, switches=4): pos (132, 81)->(140, 91), unique=36, span=24.4, reversals=25%, waypoint_side=54%, target=(135, 82)->(134, 101) [`uncertain_reconstruction_missing_step0`], mask=8.3 [`historical_approximate`], action_replacements=0
+  - `D2` (`blocker`, switches=5): pos (124, 87)->(110, 103), unique=33, span=35.8, reversals=15%, waypoint_side=37%, target=(128, 89)->(113, 101) [`uncertain_reconstruction_missing_step0`], mask=7.1 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`bold`): pos (132, 86)->(136, 91), route_dist 4.0->11.0 (net -7.0), fence_adj=20%, wall_corner=6%
+  - `S2` (`pen_shy`): pos (132, 90)->(115, 100), route_dist 6.0->16.0 (net -10.0), fence_adj=100%, wall_corner=69%
+  - `S5` (`pen_shy`): pos (132, 87)->(135, 100), route_dist 3.0->19.0 (net -16.0), fence_adj=56%, wall_corner=26%
+- **[Derived Measurement] Rewards & Cycles**: total=-109.67 (mean=-2.031/step, pos_progress_steps=20, neg_progress_steps=32)
+  - `Cycle incomplete_258_311` (`incomplete_cycle`): Incomplete cycle steps 258..311: trajectory ended before recurrence. [total=-128.905, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039903-seed-000053:steps-343-1120` — `oscillation_loop` (steps 343..1120, duration=778, unpenned_sheep=2, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 323..342)**: 1 sheep penned (unpenned 3->2); avg route distance 10.3->6.5.
+- **[Derived Measurement] Route Progress**: 5.5 -> 4.5 (net +1.0 cells), flock spread 8.7 -> 8.5, `no_progress_steps` 7 -> 780 (resets without best route gain: 1)
+- **[Derived Measurement] Aftermath (steps 1120..1120)**: Route distance remained near 4.5 (net progress +0.0); 0 role switches.
+- **[Hypothesized Mechanism] Candidates**: `two_sheep_collector_blind_spot`, `dog_outside_sheep_vision_loop`, `no_progress_spread_jitter_reset`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`blocker`, switches=0): pos (139, 103)->(137, 103), unique=2, span=2.0, reversals=100%, waypoint_side=0%, target=(121, 88)->(121, 88) [`uncertain_reconstruction_missing_step0`], mask=7.0 [`historical_approximate`], action_replacements=0
+  - `D1` (`rear_pressure`, switches=0): pos (136, 75)->(134, 75), unique=4, span=6.0, reversals=64%, waypoint_side=0%, target=(124, 86)->(124, 86) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D2` (`left_flanker`, switches=0): pos (104, 85)->(106, 77), unique=10, span=10.8, reversals=76%, waypoint_side=0%, target=(112, 90)->(112, 90) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S2` (`pen_shy`): pos (115, 91)->(115, 89), route_dist 7.0->5.0 (net +2.0), fence_adj=100%, wall_corner=0%
+  - `S5` (`pen_shy`): pos (132, 88)->(132, 88), route_dist 4.0->4.0 (net +0.0), fence_adj=100%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-1818.20 (mean=-2.337/step, pos_progress_steps=238, neg_progress_steps=235)
+  - `Cycle cycle_346_374` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 346..374 with positive progress steps but net negative return (-67.604). Penalty dominates; not reward farming. [total=-67.604, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_374_378` (`net_negative_cycle`): Complete cycle steps 374..378 with net negative return (-9.380) and zero positive progress. [total=-9.380, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_378_406` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 378..406 with positive progress steps but net negative return (-66.881). Penalty dominates; not reward farming. [total=-66.881, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_406_426` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 406..426 with positive progress steps but net negative return (-48.404). Penalty dominates; not reward farming. [total=-48.404, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_426_466` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 426..466 with positive progress steps but net negative return (-96.761). Penalty dominates; not reward farming. [total=-96.761, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_466_486` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 466..486 with positive progress steps but net negative return (-47.582). Penalty dominates; not reward farming. [total=-47.582, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_486_506` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 486..506 with positive progress steps but net negative return (-47.573). Penalty dominates; not reward farming. [total=-47.573, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_506_532` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 506..532 with positive progress steps but net negative return (-61.733). Penalty dominates; not reward farming. [total=-61.733, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_532_552` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 532..552 with positive progress steps but net negative return (-48.880). Penalty dominates; not reward farming. [total=-48.880, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_552_554` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 552..554 with positive progress steps but net negative return (-4.845). Penalty dominates; not reward farming. [total=-4.845, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_554_558` (`net_negative_cycle`): Complete cycle steps 554..558 with net negative return (-9.380) and zero positive progress. [total=-9.380, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_558_560` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 558..560 with positive progress steps but net negative return (-4.845). Penalty dominates; not reward farming. [total=-4.845, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_560_566` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 560..566 with positive progress steps but net negative return (-14.139). Penalty dominates; not reward farming. [total=-14.139, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_566_586` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 566..586 with positive progress steps but net negative return (-48.413). Penalty dominates; not reward farming. [total=-48.413, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_586_606` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 586..606 with positive progress steps but net negative return (-47.582). Penalty dominates; not reward farming. [total=-47.582, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_606_612` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 606..612 with positive progress steps but net negative return (-14.250). Penalty dominates; not reward farming. [total=-14.250, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_612_614` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 612..614 with positive progress steps but net negative return (-4.845). Penalty dominates; not reward farming. [total=-4.845, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_614_618` (`net_negative_cycle`): Complete cycle steps 614..618 with net negative return (-9.380) and zero positive progress. [total=-9.380, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_618_620` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 618..620 with positive progress steps but net negative return (-4.845). Penalty dominates; not reward farming. [total=-4.845, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_620_626` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 620..626 with positive progress steps but net negative return (-14.139). Penalty dominates; not reward farming. [total=-14.139, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_626_646` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 626..646 with positive progress steps but net negative return (-48.728). Penalty dominates; not reward farming. [total=-48.728, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_646_654` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 646..654 with positive progress steps but net negative return (-18.744). Penalty dominates; not reward farming. [total=-18.744, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_654_658` (`net_negative_cycle`): Complete cycle steps 654..658 with net negative return (-9.380) and zero positive progress. [total=-9.380, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_658_660` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 658..660 with positive progress steps but net negative return (-4.845). Penalty dominates; not reward farming. [total=-4.845, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_660_666` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 660..666 with positive progress steps but net negative return (-13.994). Penalty dominates; not reward farming. [total=-13.994, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_666_672` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 666..672 with positive progress steps but net negative return (-14.104). Penalty dominates; not reward farming. [total=-14.104, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_672_674` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 672..674 with positive progress steps but net negative return (-4.845). Penalty dominates; not reward farming. [total=-4.845, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_674_678` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 674..678 with positive progress steps but net negative return (-9.235). Penalty dominates; not reward farming. [total=-9.235, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_678_680` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 678..680 with positive progress steps but net negative return (-4.845). Penalty dominates; not reward farming. [total=-4.845, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_680_686` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 680..686 with positive progress steps but net negative return (-13.994). Penalty dominates; not reward farming. [total=-13.994, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_686_692` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 686..692 with positive progress steps but net negative return (-14.104). Penalty dominates; not reward farming. [total=-14.104, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_692_698` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 692..698 with positive progress steps but net negative return (-13.875). Penalty dominates; not reward farming. [total=-13.875, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_698_714` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 698..714 with positive progress steps but net negative return (-37.028). Penalty dominates; not reward farming. [total=-37.028, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_714_720` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 714..720 with positive progress steps but net negative return (-13.875). Penalty dominates; not reward farming. [total=-13.875, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_720_726` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 720..726 with positive progress steps but net negative return (-13.994). Penalty dominates; not reward farming. [total=-13.994, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_726_732` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 726..732 with positive progress steps but net negative return (-14.104). Penalty dominates; not reward farming. [total=-14.104, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_732_734` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 732..734 with positive progress steps but net negative return (-4.845). Penalty dominates; not reward farming. [total=-4.845, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_734_738` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 734..738 with positive progress steps but net negative return (-9.235). Penalty dominates; not reward farming. [total=-9.235, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_738_740` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 738..740 with positive progress steps but net negative return (-4.845). Penalty dominates; not reward farming. [total=-4.845, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_740_746` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 740..746 with positive progress steps but net negative return (-13.994). Penalty dominates; not reward farming. [total=-13.994, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_746_752` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 746..752 with positive progress steps but net negative return (-14.104). Penalty dominates; not reward farming. [total=-14.104, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_752_758` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 752..758 with positive progress steps but net negative return (-13.875). Penalty dominates; not reward farming. [total=-13.875, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_758_778` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 758..778 with positive progress steps but net negative return (-46.408). Penalty dominates; not reward farming. [total=-46.408, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_778_798` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 778..798 with positive progress steps but net negative return (-46.408). Penalty dominates; not reward farming. [total=-46.408, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_798_820` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 798..820 with positive progress steps but net negative return (-50.903). Penalty dominates; not reward farming. [total=-50.903, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_820_826` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 820..826 with positive progress steps but net negative return (-13.994). Penalty dominates; not reward farming. [total=-13.994, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_826_838` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 826..838 with positive progress steps but net negative return (-28.184). Penalty dominates; not reward farming. [total=-28.184, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_838_840` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 838..840 with positive progress steps but net negative return (-4.845). Penalty dominates; not reward farming. [total=-4.845, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_841_843` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 841..843 with positive progress steps but net negative return (-4.503). Penalty dominates; not reward farming. [total=-4.503, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_843_849` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 843..849 with positive progress steps but net negative return (-13.900). Penalty dominates; not reward farming. [total=-13.900, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_849_855` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 849..855 with positive progress steps but net negative return (-13.986). Penalty dominates; not reward farming. [total=-13.986, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_855_857` (`net_negative_cycle`): Complete cycle steps 855..857 with net negative return (-4.648) and zero positive progress. [total=-4.648, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_857_861` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 857..861 with positive progress steps but net negative return (-8.877). Penalty dominates; not reward farming. [total=-8.877, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_861_863` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 861..863 with positive progress steps but net negative return (-4.503). Penalty dominates; not reward farming. [total=-4.503, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_863_869` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 863..869 with positive progress steps but net negative return (-13.609). Penalty dominates; not reward farming. [total=-13.609, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_869_875` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 869..875 with positive progress steps but net negative return (-13.490). Penalty dominates; not reward farming. [total=-13.490, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_875_877` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 875..877 with positive progress steps but net negative return (-4.503). Penalty dominates; not reward farming. [total=-4.503, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_877_881` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 877..881 with positive progress steps but net negative return (-8.877). Penalty dominates; not reward farming. [total=-8.877, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_881_883` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 881..883 with positive progress steps but net negative return (-4.503). Penalty dominates; not reward farming. [total=-4.503, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_883_889` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 883..889 with positive progress steps but net negative return (-13.609). Penalty dominates; not reward farming. [total=-13.609, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_889_895` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 889..895 with positive progress steps but net negative return (-13.490). Penalty dominates; not reward farming. [total=-13.490, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_895_897` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 895..897 with positive progress steps but net negative return (-4.503). Penalty dominates; not reward farming. [total=-4.503, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_897_901` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 897..901 with positive progress steps but net negative return (-8.877). Penalty dominates; not reward farming. [total=-8.877, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_901_903` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 901..903 with positive progress steps but net negative return (-4.503). Penalty dominates; not reward farming. [total=-4.503, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_903_909` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 903..909 with positive progress steps but net negative return (-13.609). Penalty dominates; not reward farming. [total=-13.609, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_909_915` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 909..915 with positive progress steps but net negative return (-13.490). Penalty dominates; not reward farming. [total=-13.490, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_915_917` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 915..917 with positive progress steps but net negative return (-4.503). Penalty dominates; not reward farming. [total=-4.503, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_917_921` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 917..921 with positive progress steps but net negative return (-8.877). Penalty dominates; not reward farming. [total=-8.877, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_921_923` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 921..923 with positive progress steps but net negative return (-4.503). Penalty dominates; not reward farming. [total=-4.503, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_923_929` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 923..929 with positive progress steps but net negative return (-13.609). Penalty dominates; not reward farming. [total=-13.609, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_929_935` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 929..935 with positive progress steps but net negative return (-13.490). Penalty dominates; not reward farming. [total=-13.490, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_935_937` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 935..937 with positive progress steps but net negative return (-4.503). Penalty dominates; not reward farming. [total=-4.503, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_937_941` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 937..941 with positive progress steps but net negative return (-8.877). Penalty dominates; not reward farming. [total=-8.877, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_941_943` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 941..943 with positive progress steps but net negative return (-4.503). Penalty dominates; not reward farming. [total=-4.503, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_943_949` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 943..949 with positive progress steps but net negative return (-13.609). Penalty dominates; not reward farming. [total=-13.609, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_949_955` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 949..955 with positive progress steps but net negative return (-13.490). Penalty dominates; not reward farming. [total=-13.490, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_955_957` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 955..957 with positive progress steps but net negative return (-4.503). Penalty dominates; not reward farming. [total=-4.503, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_957_961` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 957..961 with positive progress steps but net negative return (-8.877). Penalty dominates; not reward farming. [total=-8.877, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_961_963` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 961..963 with positive progress steps but net negative return (-4.503). Penalty dominates; not reward farming. [total=-4.503, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_963_969` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 963..969 with positive progress steps but net negative return (-13.609). Penalty dominates; not reward farming. [total=-13.609, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_969_975` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 969..975 with positive progress steps but net negative return (-13.490). Penalty dominates; not reward farming. [total=-13.490, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_975_977` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 975..977 with positive progress steps but net negative return (-4.503). Penalty dominates; not reward farming. [total=-4.503, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_977_981` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 977..981 with positive progress steps but net negative return (-8.877). Penalty dominates; not reward farming. [total=-8.877, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_981_983` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 981..983 with positive progress steps but net negative return (-4.503). Penalty dominates; not reward farming. [total=-4.503, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_983_989` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 983..989 with positive progress steps but net negative return (-13.609). Penalty dominates; not reward farming. [total=-13.609, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_989_995` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 989..995 with positive progress steps but net negative return (-13.490). Penalty dominates; not reward farming. [total=-13.490, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_995_997` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 995..997 with positive progress steps but net negative return (-4.503). Penalty dominates; not reward farming. [total=-4.503, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_997_1001` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 997..1001 with positive progress steps but net negative return (-8.877). Penalty dominates; not reward farming. [total=-8.877, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1001_1003` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1001..1003 with positive progress steps but net negative return (-4.503). Penalty dominates; not reward farming. [total=-4.503, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1003_1009` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1003..1009 with positive progress steps but net negative return (-13.609). Penalty dominates; not reward farming. [total=-13.609, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1009_1015` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1009..1015 with positive progress steps but net negative return (-13.490). Penalty dominates; not reward farming. [total=-13.490, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1015_1017` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1015..1017 with positive progress steps but net negative return (-4.503). Penalty dominates; not reward farming. [total=-4.503, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1017_1021` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1017..1021 with positive progress steps but net negative return (-8.877). Penalty dominates; not reward farming. [total=-8.877, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1021_1023` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1021..1023 with positive progress steps but net negative return (-4.503). Penalty dominates; not reward farming. [total=-4.503, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1023_1029` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1023..1029 with positive progress steps but net negative return (-13.609). Penalty dominates; not reward farming. [total=-13.609, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1029_1035` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1029..1035 with positive progress steps but net negative return (-13.490). Penalty dominates; not reward farming. [total=-13.490, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1035_1037` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1035..1037 with positive progress steps but net negative return (-4.503). Penalty dominates; not reward farming. [total=-4.503, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1037_1041` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1037..1041 with positive progress steps but net negative return (-8.877). Penalty dominates; not reward farming. [total=-8.877, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1041_1043` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1041..1043 with positive progress steps but net negative return (-4.503). Penalty dominates; not reward farming. [total=-4.503, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1043_1049` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1043..1049 with positive progress steps but net negative return (-13.609). Penalty dominates; not reward farming. [total=-13.609, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1049_1055` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1049..1055 with positive progress steps but net negative return (-13.490). Penalty dominates; not reward farming. [total=-13.490, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1055_1057` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1055..1057 with positive progress steps but net negative return (-4.503). Penalty dominates; not reward farming. [total=-4.503, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1057_1061` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1057..1061 with positive progress steps but net negative return (-8.877). Penalty dominates; not reward farming. [total=-8.877, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1061_1063` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1061..1063 with positive progress steps but net negative return (-4.503). Penalty dominates; not reward farming. [total=-4.503, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1063_1069` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1063..1069 with positive progress steps but net negative return (-13.609). Penalty dominates; not reward farming. [total=-13.609, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1069_1075` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1069..1075 with positive progress steps but net negative return (-13.490). Penalty dominates; not reward farming. [total=-13.490, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1075_1077` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1075..1077 with positive progress steps but net negative return (-4.503). Penalty dominates; not reward farming. [total=-4.503, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1077_1081` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1077..1081 with positive progress steps but net negative return (-8.877). Penalty dominates; not reward farming. [total=-8.877, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1081_1083` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1081..1083 with positive progress steps but net negative return (-4.503). Penalty dominates; not reward farming. [total=-4.503, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1083_1089` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1083..1089 with positive progress steps but net negative return (-13.609). Penalty dominates; not reward farming. [total=-13.609, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1089_1095` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1089..1095 with positive progress steps but net negative return (-13.490). Penalty dominates; not reward farming. [total=-13.490, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1095_1097` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1095..1097 with positive progress steps but net negative return (-4.503). Penalty dominates; not reward farming. [total=-4.503, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1097_1101` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1097..1101 with positive progress steps but net negative return (-8.877). Penalty dominates; not reward farming. [total=-8.877, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1101_1103` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1101..1103 with positive progress steps but net negative return (-4.503). Penalty dominates; not reward farming. [total=-4.503, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1103_1109` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1103..1109 with positive progress steps but net negative return (-13.609). Penalty dominates; not reward farming. [total=-13.609, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1109_1115` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1109..1115 with positive progress steps but net negative return (-13.490). Penalty dominates; not reward farming. [total=-13.490, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1115_1117` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1115..1117 with positive progress steps but net negative return (-4.503). Penalty dominates; not reward farming. [total=-4.503, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1118_1120` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1118..1120 with positive progress steps but net negative return (-16.500). Penalty dominates; not reward farming. [total=-16.500, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+## Episode `checkpoint-039897-seed-000023` (seed=23, outcome=`timeout`, stop_reason=`timeout`, penned=3/6, steps=2320)
+- **[Recorded Observation] Pen Geometry**: origin=(124,40), size=14x14, opening=`bottom` on 144x104 field
+- **[Recorded Observation] Sheep Penning Events**: S2@step 509, S1@step 512, S3@step 518
+- **[Audit] Guidance Certainty**: `uncertain_reconstruction_missing_step0` (step0_present=False, contiguous_frames=True, full_env_config=False, gamma_available=False)
+- **[Derived Measurement] Diagnostic Note**: stats.oscillation_detected was False (only checks a 2-position loop in the final 4 steps), whereas temporal window analysis detected sustained multi-step oscillation.
+- **[Derived Measurement] Diagnostic Note**: no_progress_steps reset 941 time(s) during non-progress intervals without new best entry distance (triggered by flock_spread or farthest_to_flock_center deltas).
+
+### Interval `checkpoint-039897-seed-000023:steps-18-46` — `productive_repositioning` (steps 18..46, duration=29, unpenned_sheep=6, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 1..17)**: Flock advanced toward pen by +6.7 route cells (82.5->75.8); behind-flock alignment +0.99->+0.91.
+- **[Derived Measurement] Route Progress**: 75.3 -> 74.7 (net +0.7 cells), flock spread 35.0 -> 22.4, `no_progress_steps` 0 -> 0 (resets without best route gain: 0)
+- **[Derived Measurement] Aftermath (steps 47..66)**: Flock advanced toward pen by +7.7 route cells (74.7->67.0); behind-flock alignment +0.64->+0.65.
+- **[Hypothesized Mechanism] Candidates**: `two_sheep_collector_blind_spot`, `role_churn_target_jumping`, `flanking_or_collection_repositioning`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`left_flanker`, switches=3): pos (24, 79)->(40, 59), unique=24, span=28.8, reversals=14%, waypoint_side=0%, target=(70, 84)->(62, 43) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D1` (`left_flanker`, switches=4): pos (28, 58)->(40, 74), unique=21, span=28.6, reversals=25%, waypoint_side=0%, target=(66, 45)->(66, 69) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D2` (`collector`, switches=5): pos (32, 35)->(46, 7), unique=24, span=39.4, reversals=18%, waypoint_side=7%, target=(107, 8)->(49, 11) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`pen_shy`): pos (62, 44)->(62, 50), route_dist 73.0->67.0 (net +6.0), fence_adj=0%, wall_corner=0%
+  - `S1` (`pen_fearful`): pos (105, 11)->(88, 22), route_dist 63.0->69.0 (net -6.0), fence_adj=0%, wall_corner=0%
+  - `S2` (`bold`): pos (62, 67)->(64, 51), route_dist 76.0->64.0 (net +12.0), fence_adj=0%, wall_corner=0%
+  - `S3` (`pen_fearful`): pos (47, 20)->(51, 14), route_dist 112.0->114.0 (net -2.0), fence_adj=0%, wall_corner=0%
+  - `S4` (`obedient`): pos (115, 59)->(87, 59), route_dist 15.0->43.0 (net -28.0), fence_adj=0%, wall_corner=0%
+  - `S5` (`bold`): pos (28, 70)->(45, 65), route_dist 113.0->91.0 (net +22.0), fence_adj=0%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-43.73 (mean=-1.508/step, pos_progress_steps=14, neg_progress_steps=15)
+  - `Cycle incomplete_18_46` (`incomplete_cycle`): Incomplete cycle steps 18..46: trajectory ended before recurrence. [total=-45.116, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039897-seed-000023:steps-139-437` — `productive_repositioning` (steps 139..437, duration=299, unpenned_sheep=6, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 119..138)**: Flock advanced toward pen by +13.3 route cells (34.5->21.2); behind-flock alignment +0.53->+0.66.
+- **[Derived Measurement] Route Progress**: 20.2 -> 25.2 (net -5.0 cells), flock spread 2.4 -> 6.9, `no_progress_steps` 0 -> 0 (resets without best route gain: 119)
+- **[Derived Measurement] Aftermath (steps 438..457)**: Flock advanced toward pen by +10.7 route cells (24.3->13.7); behind-flock alignment +0.38->+0.34.
+- **[Hypothesized Mechanism] Candidates**: `role_churn_target_jumping`, `no_progress_spread_jitter_reset`, `flanking_or_collection_repositioning`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`collector`, switches=41): pos (110, 37)->(123, 36), unique=165, span=61.9, reversals=26%, waypoint_side=35%, target=(112, 42)->(123, 38) [`uncertain_reconstruction_missing_step0`], mask=8.9 [`historical_approximate`], action_replacements=0
+  - `D1` (`rear_pressure`, switches=10): pos (114, 48)->(142, 28), unique=113, span=52.5, reversals=34%, waypoint_side=36%, target=(116, 37)->(138, 31) [`uncertain_reconstruction_missing_step0`], mask=8.5 [`historical_approximate`], action_replacements=0
+  - `D2` (`left_flanker`, switches=39): pos (110, 46)->(130, 34), unique=188, span=66.6, reversals=27%, waypoint_side=39%, target=(116, 47)->(128, 35) [`uncertain_reconstruction_missing_step0`], mask=8.7 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`pen_shy`): pos (117, 41)->(133, 30), route_dist 21.0->33.0 (net -12.0), fence_adj=14%, wall_corner=7%
+  - `S1` (`pen_fearful`): pos (118, 40)->(143, 31), route_dist 21.0->30.0 (net -9.0), fence_adj=33%, wall_corner=16%
+  - `S2` (`bold`): pos (118, 42)->(141, 34), route_dist 19.0->25.0 (net -6.0), fence_adj=29%, wall_corner=16%
+  - `S3` (`pen_fearful`): pos (116, 40)->(141, 36), route_dist 23.0->23.0 (net +0.0), fence_adj=0%, wall_corner=54%
+  - `S4` (`obedient`): pos (114, 42)->(140, 43), route_dist 23.0->15.0 (net +8.0), fence_adj=32%, wall_corner=5%
+  - `S5` (`bold`): pos (118, 47)->(126, 36), route_dist 14.0->25.0 (net -11.0), fence_adj=30%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-421.81 (mean=-1.411/step, pos_progress_steps=145, neg_progress_steps=147)
+  - `Cycle incomplete_139_437` (`incomplete_cycle`): Incomplete cycle steps 139..437: trajectory ended before recurrence. [total=-427.821, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039897-seed-000023:steps-450-500` — `productive_repositioning` (steps 450..500, duration=51, unpenned_sheep=6, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 430..449)**: Flock advanced toward pen by +9.3 route cells (26.0->16.7); behind-flock alignment +0.30->+0.72.
+- **[Derived Measurement] Route Progress**: 16.0 -> 12.0 (net +4.0 cells), flock spread 7.5 -> 11.7, `no_progress_steps` 3 -> 0 (resets without best route gain: 15)
+- **[Derived Measurement] Aftermath (steps 501..520)**: 3 sheep penned (unpenned 6->3); avg route distance 12.0->12.3.
+- **[Hypothesized Mechanism] Candidates**: `two_sheep_collector_blind_spot`, `role_churn_target_jumping`, `flanking_or_collection_repositioning`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`left_flanker`, switches=7): pos (139, 28)->(119, 36), unique=44, span=39.6, reversals=16%, waypoint_side=39%, target=(129, 43)->(126, 34) [`uncertain_reconstruction_missing_step0`], mask=8.7 [`historical_approximate`], action_replacements=0
+  - `D1` (`rear_pressure`, switches=8): pos (143, 42)->(121, 68), unique=44, span=43.9, reversals=14%, waypoint_side=4%, target=(135, 53)->(125, 57) [`uncertain_reconstruction_missing_step0`], mask=7.9 [`historical_approximate`], action_replacements=0
+  - `D2` (`collector`, switches=9): pos (135, 38)->(141, 54), unique=32, span=34.9, reversals=24%, waypoint_side=43%, target=(139, 39)->(141, 68) [`uncertain_reconstruction_missing_step0`], mask=7.9 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`pen_shy`): pos (135, 29)->(115, 47), route_dist 32.0->17.0 (net +15.0), fence_adj=24%, wall_corner=0%
+  - `S1` (`pen_fearful`): pos (143, 44)->(138, 58), route_dist 17.0->6.0 (net +11.0), fence_adj=0%, wall_corner=51%
+  - `S2` (`bold`): pos (141, 47)->(136, 56), route_dist 12.0->3.0 (net +9.0), fence_adj=4%, wall_corner=37%
+  - `S3` (`pen_fearful`): pos (141, 49)->(134, 60), route_dist 10.0->7.0 (net +3.0), fence_adj=0%, wall_corner=39%
+  - `S4` (`obedient`): pos (139, 53)->(120, 60), route_dist 4.0->11.0 (net -7.0), fence_adj=4%, wall_corner=0%
+  - `S5` (`bold`): pos (137, 38)->(129, 36), route_dist 21.0->28.0 (net -7.0), fence_adj=6%, wall_corner=47%
+- **[Derived Measurement] Rewards & Cycles**: total=-76.52 (mean=-1.500/step, pos_progress_steps=31, neg_progress_steps=20)
+  - `Cycle incomplete_450_500` (`incomplete_cycle`): Incomplete cycle steps 450..500: trajectory ended before recurrence. [total=-76.061, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039897-seed-000023:steps-518-2320` — `oscillation_loop` (steps 518..2320, duration=1803, unpenned_sheep=3, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 498..517)**: 2 sheep penned (unpenned 6->4); avg route distance 12.2->9.5.
+- **[Derived Measurement] Route Progress**: 12.0 -> 14.0 (net -2.0 cells), flock spread 8.0 -> 6.3, `no_progress_steps` 0 -> 1 (resets without best route gain: 807)
+- **[Derived Measurement] Aftermath (steps 2320..2320)**: Route distance remained near 14.0 (net progress +0.0); 0 role switches.
+- **[Hypothesized Mechanism] Candidates**: `dog_outside_sheep_vision_loop`, `role_churn_target_jumping`, `no_progress_spread_jitter_reset`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`collector`, switches=0): pos (133, 28)->(131, 26), unique=8, span=6.3, reversals=45%, waypoint_side=5%, target=(136, 36)->(133, 36) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D1` (`blocker`, switches=359): pos (133, 72)->(121, 66), unique=10, span=17.0, reversals=20%, waypoint_side=5%, target=(127, 50)->(121, 50) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D2` (`rear_pressure`, switches=359): pos (131, 66)->(119, 66), unique=24, span=20.0, reversals=20%, waypoint_side=10%, target=(124, 52)->(127, 50) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`pen_shy`): pos (122, 50)->(122, 51), route_dist 7.0->6.0 (net +1.0), fence_adj=85%, wall_corner=0%
+  - `S4` (`obedient`): pos (122, 51)->(122, 48), route_dist 6.0->9.0 (net -3.0), fence_adj=100%, wall_corner=0%
+  - `S5` (`bold`): pos (135, 38)->(130, 38), route_dist 23.0->27.0 (net -4.0), fence_adj=100%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-1576.58 (mean=-0.874/step, pos_progress_steps=632, neg_progress_steps=726)
+  - `Cycle cycle_552_572` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 552..572 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_572_592` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 572..592 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_592_612` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 592..612 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_612_632` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 612..632 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_632_652` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 632..652 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_652_672` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 652..672 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_672_692` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 672..692 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_692_712` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 692..712 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_712_732` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 712..732 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_732_752` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 732..752 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_752_772` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 752..772 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_772_792` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 772..792 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_792_812` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 792..812 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_812_832` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 812..832 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_832_852` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 832..852 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_852_872` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 852..872 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_872_892` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 872..892 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_892_912` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 892..912 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_912_932` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 912..932 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_932_952` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 932..952 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_952_972` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 952..972 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_972_992` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 972..992 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_992_1012` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 992..1012 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1012_1032` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1012..1032 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1032_1052` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1032..1052 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1052_1072` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1052..1072 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1072_1092` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1072..1092 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1092_1112` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1092..1112 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1112_1132` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1112..1132 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1132_1152` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1132..1152 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1152_1172` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1152..1172 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1172_1192` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1172..1192 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1192_1212` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1192..1212 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1212_1232` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1212..1232 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1232_1252` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1232..1252 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1252_1272` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1252..1272 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1272_1292` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1272..1292 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1292_1312` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1292..1312 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1312_1332` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1312..1332 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1332_1352` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1332..1352 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1352_1372` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1352..1372 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1372_1392` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1372..1392 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1392_1412` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1392..1412 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1412_1432` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1412..1432 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1432_1452` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1432..1452 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1452_1472` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1452..1472 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1472_1492` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1472..1492 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1492_1512` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1492..1512 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1512_1532` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1512..1532 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1532_1552` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1532..1552 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1552_1572` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1552..1572 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1572_1592` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1572..1592 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1592_1612` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1592..1612 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1612_1632` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1612..1632 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1632_1652` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1632..1652 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1652_1672` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1652..1672 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1672_1692` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1672..1692 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1692_1712` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1692..1712 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1712_1732` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1712..1732 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1732_1752` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1732..1752 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1752_1772` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1752..1772 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1772_1792` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1772..1792 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1792_1812` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1792..1812 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1812_1832` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1812..1832 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1832_1852` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1832..1852 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1852_1872` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1852..1872 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1872_1892` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1872..1892 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1892_1912` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1892..1912 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1912_1932` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1912..1932 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1932_1952` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1932..1952 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1952_1972` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1952..1972 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1972_1992` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1972..1992 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1992_2012` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1992..2012 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2012_2032` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2012..2032 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2032_2052` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2032..2052 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2052_2072` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2052..2072 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2072_2092` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2072..2092 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2092_2112` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2092..2112 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2112_2132` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2112..2132 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2132_2152` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2132..2152 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2152_2172` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2152..2172 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2172_2192` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2172..2192 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2192_2212` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2192..2212 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2212_2232` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2212..2232 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2232_2252` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2232..2252 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2252_2272` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2252..2272 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2272_2292` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2272..2292 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2292_2312` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2292..2312 with positive progress steps but net negative return (-17.361). Penalty dominates; not reward farming. [total=-17.361, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2315_2319` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2315..2319 with positive progress steps but net negative return (-3.315). Penalty dominates; not reward farming. [total=-3.315, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+## Episode `checkpoint-039909-seed-000073` (seed=73, outcome=`timeout`, stop_reason=`timeout`, penned=2/6, steps=2320)
+- **[Recorded Observation] Pen Geometry**: origin=(128,73), size=14x14, opening=`left` on 144x104 field
+- **[Recorded Observation] Sheep Penning Events**: S4@step 2316, S0@step 2319
+- **[Audit] Guidance Certainty**: `uncertain_reconstruction_missing_step0` (step0_present=False, contiguous_frames=True, full_env_config=False, gamma_available=False)
+- **[Derived Measurement] Diagnostic Note**: stats.oscillation_detected was False (only checks a 2-position loop in the final 4 steps), whereas temporal window analysis detected sustained multi-step oscillation.
+- **[Derived Measurement] Diagnostic Note**: no_progress_steps reset 889 time(s) during non-progress intervals without new best entry distance (triggered by flock_spread or farthest_to_flock_center deltas).
+
+### Interval `checkpoint-039909-seed-000073:steps-1-2132` — `oscillation_loop` (steps 1..2132, duration=2132, unpenned_sheep=6, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 1..1)**: Route distance remained near 66.5 (net progress +0.0); 0 role switches.
+- **[Derived Measurement] Route Progress**: 66.5 -> 97.5 (net -31.0 cells), flock spread 38.1 -> 16.3, `no_progress_steps` 0 -> 1 (resets without best route gain: 883)
+- **[Derived Measurement] Aftermath (steps 2133..2152)**: Flock advanced toward pen by +13.0 route cells (97.0->84.0); behind-flock alignment +0.58->+0.48.
+- **[Hypothesized Mechanism] Candidates**: `corner_target_clamping_inversion`, `dog_outside_sheep_vision_loop`, `no_progress_spread_jitter_reset`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`left_flanker`, switches=0): pos (5, 54)->(22, 92), unique=84, span=67.7, reversals=91%, waypoint_side=2%, target=(59, 36)->(31, 79) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D1` (`rear_pressure`, switches=0): pos (8, 55)->(38, 49), unique=87, span=54.4, reversals=85%, waypoint_side=0%, target=(100, 32)->(46, 56) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D2` (`collector`, switches=0): pos (6, 50)->(22, 99), unique=78, span=74.3, reversals=95%, waypoint_side=1%, target=(10, 40)->(26, 101) [`uncertain_reconstruction_missing_step0`], mask=8.9 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`pen_shy`): pos (133, 31)->(58, 54), route_dist 49.0->89.0 (net -40.0), fence_adj=0%, wall_corner=0%
+  - `S1` (`escapist`): pos (120, 20)->(53, 52), route_dist 61.0->96.0 (net -35.0), fence_adj=0%, wall_corner=0%
+  - `S2` (`escapist`): pos (12, 38)->(28, 103), route_dist 151.0->117.0 (net +34.0), fence_adj=0%, wall_corner=98%
+  - `S3` (`bold`): pos (111, 10)->(56, 52), route_dist 80.0->93.0 (net -13.0), fence_adj=0%, wall_corner=0%
+  - `S4` (`obedient`): pos (112, 50)->(54, 52), route_dist 39.0->95.0 (net -56.0), fence_adj=0%, wall_corner=0%
+  - `S5` (`pen_shy`): pos (114, 68)->(55, 51), route_dist 19.0->95.0 (net -76.0), fence_adj=0%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-3261.11 (mean=-1.530/step, pos_progress_steps=1070, neg_progress_steps=1059)
+  - `Cycle cycle_161_165` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 161..165 with positive progress steps but net negative return (-6.370). Penalty dominates; not reward farming. [total=-6.370, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_165_167` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 165..167 with positive progress steps but net negative return (-3.119). Penalty dominates; not reward farming. [total=-3.119, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_175_179` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 175..179 with positive progress steps but net negative return (-6.075). Penalty dominates; not reward farming. [total=-6.075, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_179_183` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 179..183 with positive progress steps but net negative return (-6.041). Penalty dominates; not reward farming. [total=-6.041, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_188_448` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 188..448 with positive progress steps but net negative return (-398.299). Penalty dominates; not reward farming. [total=-398.299, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_454_456` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 454..456 with positive progress steps but net negative return (-2.966). Penalty dominates; not reward farming. [total=-2.966, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_473_475` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 473..475 with positive progress steps but net negative return (-3.032). Penalty dominates; not reward farming. [total=-3.032, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_488_490` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 488..490 with positive progress steps but net negative return (-2.967). Penalty dominates; not reward farming. [total=-2.967, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_496_500` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 496..500 with positive progress steps but net negative return (-5.921). Penalty dominates; not reward farming. [total=-5.921, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_513_515` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 513..515 with positive progress steps but net negative return (-3.024). Penalty dominates; not reward farming. [total=-3.024, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_520_522` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 520..522 with positive progress steps but net negative return (-2.956). Penalty dominates; not reward farming. [total=-2.956, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_524_530` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 524..530 with positive progress steps but net negative return (-9.297). Penalty dominates; not reward farming. [total=-9.297, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_530_532` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 530..532 with positive progress steps but net negative return (-3.027). Penalty dominates; not reward farming. [total=-3.027, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_532_584` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 532..584 with positive progress steps but net negative return (-79.274). Penalty dominates; not reward farming. [total=-79.274, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_584_732` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 584..732 with positive progress steps but net negative return (-225.617). Penalty dominates; not reward farming. [total=-225.617, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_732_918` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 732..918 with positive progress steps but net negative return (-285.603). Penalty dominates; not reward farming. [total=-285.603, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_919_949` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 919..949 with positive progress steps but net negative return (-45.458). Penalty dominates; not reward farming. [total=-45.458, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_949_973` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 949..973 with positive progress steps but net negative return (-36.635). Penalty dominates; not reward farming. [total=-36.635, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_986_988` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 986..988 with positive progress steps but net negative return (-2.997). Penalty dominates; not reward farming. [total=-2.997, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1011_1013` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1011..1013 with positive progress steps but net negative return (-3.207). Penalty dominates; not reward farming. [total=-3.207, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1023_1037` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1023..1037 with positive progress steps but net negative return (-21.372). Penalty dominates; not reward farming. [total=-21.372, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1037_1039` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1037..1039 with positive progress steps but net negative return (-3.029). Penalty dominates; not reward farming. [total=-3.029, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1039_1041` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1039..1041 with positive progress steps but net negative return (-3.194). Penalty dominates; not reward farming. [total=-3.194, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1045_1051` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1045..1051 with positive progress steps but net negative return (-8.962). Penalty dominates; not reward farming. [total=-8.962, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1057_1071` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1057..1071 with positive progress steps but net negative return (-21.200). Penalty dominates; not reward farming. [total=-21.200, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1072_1074` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1072..1074 with positive progress steps but net negative return (-2.967). Penalty dominates; not reward farming. [total=-2.967, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1074_1250` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1074..1250 with positive progress steps but net negative return (-271.144). Penalty dominates; not reward farming. [total=-271.144, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1250_1252` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1250..1252 with positive progress steps but net negative return (-2.954). Penalty dominates; not reward farming. [total=-2.954, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1256_1264` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1256..1264 with positive progress steps but net negative return (-12.164). Penalty dominates; not reward farming. [total=-12.164, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1264_1266` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1264..1266 with positive progress steps but net negative return (-3.039). Penalty dominates; not reward farming. [total=-3.039, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1266_1274` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1266..1274 with positive progress steps but net negative return (-12.074). Penalty dominates; not reward farming. [total=-12.074, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1274_1276` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1274..1276 with positive progress steps but net negative return (-2.954). Penalty dominates; not reward farming. [total=-2.954, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1276_1280` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1276..1280 with positive progress steps but net negative return (-6.178). Penalty dominates; not reward farming. [total=-6.178, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1280_1286` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1280..1286 with positive progress steps but net negative return (-8.979). Penalty dominates; not reward farming. [total=-8.979, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1287_1289` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1287..1289 with positive progress steps but net negative return (-3.065). Penalty dominates; not reward farming. [total=-3.065, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1301_1303` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1301..1303 with positive progress steps but net negative return (-3.028). Penalty dominates; not reward farming. [total=-3.028, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1303_1307` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1303..1307 with positive progress steps but net negative return (-6.208). Penalty dominates; not reward farming. [total=-6.208, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1311_1319` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1311..1319 with positive progress steps but net negative return (-12.057). Penalty dominates; not reward farming. [total=-12.057, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1319_1321` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1319..1321 with positive progress steps but net negative return (-3.144). Penalty dominates; not reward farming. [total=-3.144, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1327_1329` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1327..1329 with positive progress steps but net negative return (-2.966). Penalty dominates; not reward farming. [total=-2.966, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1334_1336` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1334..1336 with positive progress steps but net negative return (-2.953). Penalty dominates; not reward farming. [total=-2.953, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1353_1355` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1353..1355 with positive progress steps but net negative return (-3.008). Penalty dominates; not reward farming. [total=-3.008, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1357_1371` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1357..1371 with positive progress steps but net negative return (-22.016). Penalty dominates; not reward farming. [total=-22.016, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1382_1388` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1382..1388 with positive progress steps but net negative return (-8.931). Penalty dominates; not reward farming. [total=-8.931, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1393_1395` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1393..1395 with positive progress steps but net negative return (-3.037). Penalty dominates; not reward farming. [total=-3.037, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1395_1411` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1395..1411 with positive progress steps but net negative return (-24.613). Penalty dominates; not reward farming. [total=-24.613, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1411_1433` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1411..1433 with positive progress steps but net negative return (-33.737). Penalty dominates; not reward farming. [total=-33.737, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1438_1582` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1438..1582 with positive progress steps but net negative return (-219.688). Penalty dominates; not reward farming. [total=-219.688, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1583_1599` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1583..1599 with positive progress steps but net negative return (-24.520). Penalty dominates; not reward farming. [total=-24.520, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1616_1622` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1616..1622 with positive progress steps but net negative return (-9.125). Penalty dominates; not reward farming. [total=-9.125, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1623_1625` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1623..1625 with positive progress steps but net negative return (-3.122). Penalty dominates; not reward farming. [total=-3.122, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1631_1633` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1631..1633 with positive progress steps but net negative return (-2.984). Penalty dominates; not reward farming. [total=-2.984, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1640_1642` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1640..1642 with positive progress steps but net negative return (-3.212). Penalty dominates; not reward farming. [total=-3.212, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1648_1654` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1648..1654 with positive progress steps but net negative return (-9.070). Penalty dominates; not reward farming. [total=-9.070, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1667_1669` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1667..1669 with positive progress steps but net negative return (-3.112). Penalty dominates; not reward farming. [total=-3.112, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1675_1681` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1675..1681 with positive progress steps but net negative return (-8.511). Penalty dominates; not reward farming. [total=-8.511, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1681_1685` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1681..1685 with positive progress steps but net negative return (-5.535). Penalty dominates; not reward farming. [total=-5.535, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1685_1695` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1685..1695 with positive progress steps but net negative return (-15.225). Penalty dominates; not reward farming. [total=-15.225, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1699_1701` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1699..1701 with positive progress steps but net negative return (-3.193). Penalty dominates; not reward farming. [total=-3.193, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1704_1706` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1704..1706 with positive progress steps but net negative return (-2.960). Penalty dominates; not reward farming. [total=-2.960, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1723_1725` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1723..1725 with positive progress steps but net negative return (-3.100). Penalty dominates; not reward farming. [total=-3.100, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1725_1727` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1725..1727 with positive progress steps but net negative return (-2.944). Penalty dominates; not reward farming. [total=-2.944, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1747_1761` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1747..1761 with positive progress steps but net negative return (-21.192). Penalty dominates; not reward farming. [total=-21.192, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1777_1781` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1777..1781 with positive progress steps but net negative return (-5.747). Penalty dominates; not reward farming. [total=-5.747, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1782_1784` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1782..1784 with positive progress steps but net negative return (-2.965). Penalty dominates; not reward farming. [total=-2.965, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1784_1788` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1784..1788 with positive progress steps but net negative return (-5.494). Penalty dominates; not reward farming. [total=-5.494, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1792_1794` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1792..1794 with positive progress steps but net negative return (-2.991). Penalty dominates; not reward farming. [total=-2.991, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1794_1798` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1794..1798 with positive progress steps but net negative return (-6.246). Penalty dominates; not reward farming. [total=-6.246, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1798_1802` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1798..1802 with positive progress steps but net negative return (-6.176). Penalty dominates; not reward farming. [total=-6.176, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1802_1812` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1802..1812 with positive progress steps but net negative return (-15.080). Penalty dominates; not reward farming. [total=-15.080, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1812_1814` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1812..1814 with positive progress steps but net negative return (-3.085). Penalty dominates; not reward farming. [total=-3.085, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1814_1816` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1814..1816 with positive progress steps but net negative return (-2.963). Penalty dominates; not reward farming. [total=-2.963, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1816_1822` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1816..1822 with positive progress steps but net negative return (-9.083). Penalty dominates; not reward farming. [total=-9.083, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1822_1830` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1822..1830 with positive progress steps but net negative return (-12.068). Penalty dominates; not reward farming. [total=-12.068, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1830_1832` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1830..1832 with positive progress steps but net negative return (-3.034). Penalty dominates; not reward farming. [total=-3.034, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1832_1848` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1832..1848 with positive progress steps but net negative return (-24.692). Penalty dominates; not reward farming. [total=-24.692, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1848_1852` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1848..1852 with positive progress steps but net negative return (-6.048). Penalty dominates; not reward farming. [total=-6.048, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1852_1858` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1852..1858 with positive progress steps but net negative return (-8.919). Penalty dominates; not reward farming. [total=-8.919, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1858_1860` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1858..1860 with positive progress steps but net negative return (-3.000). Penalty dominates; not reward farming. [total=-3.000, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1890_1892` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1890..1892 with positive progress steps but net negative return (-3.030). Penalty dominates; not reward farming. [total=-3.030, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1902_1904` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1902..1904 with positive progress steps but net negative return (-2.957). Penalty dominates; not reward farming. [total=-2.957, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1904_1906` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1904..1906 with positive progress steps but net negative return (-2.950). Penalty dominates; not reward farming. [total=-2.950, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1909_1911` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1909..1911 with positive progress steps but net negative return (-3.120). Penalty dominates; not reward farming. [total=-3.120, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1919_1921` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1919..1921 with positive progress steps but net negative return (-3.065). Penalty dominates; not reward farming. [total=-3.065, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1926_1928` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1926..1928 with positive progress steps but net negative return (-2.965). Penalty dominates; not reward farming. [total=-2.965, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1929_1949` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1929..1949 with positive progress steps but net negative return (-30.070). Penalty dominates; not reward farming. [total=-30.070, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1951_1953` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1951..1953 with positive progress steps but net negative return (-3.161). Penalty dominates; not reward farming. [total=-3.161, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1953_1967` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1953..1967 with positive progress steps but net negative return (-21.039). Penalty dominates; not reward farming. [total=-21.039, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1994_1998` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1994..1998 with positive progress steps but net negative return (-6.150). Penalty dominates; not reward farming. [total=-6.150, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1999_2003` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1999..2003 with positive progress steps but net negative return (-6.386). Penalty dominates; not reward farming. [total=-6.386, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2003_2005` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2003..2005 with positive progress steps but net negative return (-3.182). Penalty dominates; not reward farming. [total=-3.182, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2029_2031` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2029..2031 with positive progress steps but net negative return (-3.223). Penalty dominates; not reward farming. [total=-3.223, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2035_2055` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2035..2055 with positive progress steps but net negative return (-30.743). Penalty dominates; not reward farming. [total=-30.743, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2059_2061` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2059..2061 with positive progress steps but net negative return (-3.107). Penalty dominates; not reward farming. [total=-3.107, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2067_2071` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2067..2071 with positive progress steps but net negative return (-6.094). Penalty dominates; not reward farming. [total=-6.094, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2097_2103` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2097..2103 with positive progress steps but net negative return (-9.084). Penalty dominates; not reward farming. [total=-9.084, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2103_2107` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2103..2107 with positive progress steps but net negative return (-6.103). Penalty dominates; not reward farming. [total=-6.103, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039909-seed-000073:steps-2172-2186` — `productive_repositioning` (steps 2172..2186, duration=15, unpenned_sheep=6, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 2152..2171)**: Flock advanced toward pen by +12.8 route cells (84.0->71.2); behind-flock alignment +0.48->+0.20.
+- **[Derived Measurement] Route Progress**: 70.8 -> 68.5 (net +2.3 cells), flock spread 12.7 -> 14.9, `no_progress_steps` 0 -> 4 (resets without best route gain: 5)
+- **[Derived Measurement] Aftermath (steps 2187..2206)**: Flock advanced toward pen by +11.5 route cells (67.8->56.3); behind-flock alignment +0.26->+0.22.
+- **[Hypothesized Mechanism] Candidates**: `dog_outside_sheep_vision_loop`, `role_churn_target_jumping`, `flanking_or_collection_repositioning`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`rear_pressure`, switches=1): pos (44, 98)->(52, 74), unique=13, span=25.3, reversals=21%, waypoint_side=0%, target=(48, 89)->(64, 67) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D1` (`collector`, switches=5): pos (76, 53)->(92, 51), unique=13, span=17.1, reversals=29%, waypoint_side=0%, target=(60, 69)->(99, 53) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D2` (`left_flanker`, switches=5): pos (48, 101)->(52, 97), unique=8, span=7.2, reversals=43%, waypoint_side=0%, target=(55, 101)->(50, 89) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`pen_shy`): pos (61, 68)->(61, 66), route_dist 72.0->74.0 (net -2.0), fence_adj=0%, wall_corner=0%
+  - `S1` (`escapist`): pos (84, 55)->(98, 55), route_dist 62.0->48.0 (net +14.0), fence_adj=0%, wall_corner=0%
+  - `S2` (`escapist`): pos (58, 101)->(62, 99), route_dist 85.0->79.0 (net +6.0), fence_adj=0%, wall_corner=87%
+  - `S3` (`bold`): pos (63, 72)->(62, 67), route_dist 66.0->72.0 (net -6.0), fence_adj=0%, wall_corner=0%
+  - `S4` (`obedient`): pos (66, 69)->(66, 70), route_dist 66.0->65.0 (net +1.0), fence_adj=0%, wall_corner=0%
+  - `S5` (`pen_shy`): pos (55, 72)->(60, 68), route_dist 74.0->73.0 (net +1.0), fence_adj=0%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-37.43 (mean=-2.496/step, pos_progress_steps=11, neg_progress_steps=4)
+  - `Cycle incomplete_2172_2186` (`incomplete_cycle`): Incomplete cycle steps 2172..2186: trajectory ended before recurrence. [total=-35.592, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039909-seed-000073:steps-2297-2311` — `productive_repositioning` (steps 2297..2311, duration=15, unpenned_sheep=6, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 2277..2296)**: Flock advanced toward pen by +9.0 route cells (21.3->12.3); behind-flock alignment +0.33->+0.36.
+- **[Derived Measurement] Route Progress**: 11.5 -> 10.8 (net +0.7 cells), flock spread 8.0 -> 7.9, `no_progress_steps` 0 -> 1 (resets without best route gain: 1)
+- **[Derived Measurement] Aftermath (steps 2312..2320)**: 2 sheep penned (unpenned 6->4); avg route distance 10.3->8.2.
+- **[Hypothesized Mechanism] Candidates**: `role_churn_target_jumping`, `no_progress_spread_jitter_reset`, `flanking_or_collection_repositioning`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`left_flanker`, switches=3): pos (104, 76)->(116, 80), unique=15, span=18.4, reversals=14%, waypoint_side=13%, target=(115, 90)->(130, 96) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D1` (`collector`, switches=3): pos (133, 103)->(117, 103), unique=10, span=18.0, reversals=36%, waypoint_side=7%, target=(130, 101)->(114, 101) [`uncertain_reconstruction_missing_step0`], mask=7.0 [`historical_approximate`], action_replacements=0
+  - `D2` (`rear_pressure`, switches=2): pos (106, 83)->(112, 75), unique=14, span=12.8, reversals=29%, waypoint_side=13%, target=(130, 97)->(116, 90) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`pen_shy`): pos (122, 79)->(125, 81), route_dist 6.0->3.0 (net +3.0), fence_adj=0%, wall_corner=0%
+  - `S1` (`escapist`): pos (127, 101)->(116, 98), route_dist 16.0->24.0 (net -8.0), fence_adj=0%, wall_corner=80%
+  - `S2` (`escapist`): pos (107, 77)->(116, 72), route_dist 21.0->13.0 (net +8.0), fence_adj=0%, wall_corner=0%
+  - `S3` (`bold`): pos (121, 89)->(120, 90), route_dist 10.0->12.0 (net -2.0), fence_adj=0%, wall_corner=0%
+  - `S4` (`obedient`): pos (121, 83)->(126, 85), route_dist 7.0->2.0 (net +5.0), fence_adj=0%, wall_corner=0%
+  - `S5` (`pen_shy`): pos (121, 88)->(121, 90), route_dist 9.0->11.0 (net -2.0), fence_adj=0%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-15.31 (mean=-1.021/step, pos_progress_steps=5, neg_progress_steps=9)
+  - `Cycle incomplete_2297_2311` (`incomplete_cycle`): Incomplete cycle steps 2297..2311: trajectory ended before recurrence. [total=-18.836, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+## Episode `checkpoint-039911-seed-000073` (seed=73, outcome=`success`, stop_reason=`success`, penned=6/6, steps=793)
+- **[Recorded Observation] Pen Geometry**: origin=(128,73), size=14x14, opening=`left` on 144x104 field
+- **[Recorded Observation] Sheep Penning Events**: S1@step 392, S0@step 409, S4@step 409, S3@step 413, S5@step 556, S2@step 793
+- **[Audit] Guidance Certainty**: `uncertain_reconstruction_missing_step0` (step0_present=False, contiguous_frames=True, full_env_config=False, gamma_available=False)
+- **[Derived Measurement] Diagnostic Note**: no_progress_steps reset 102 time(s) during non-progress intervals without new best entry distance (triggered by flock_spread or farthest_to_flock_center deltas).
+
+### Interval `checkpoint-039911-seed-000073:steps-1-233` — `oscillation_loop` (steps 1..233, duration=233, unpenned_sheep=6, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 1..1)**: Route distance remained near 66.5 (net progress +0.0); 0 role switches.
+- **[Derived Measurement] Route Progress**: 66.5 -> 97.3 (net -30.8 cells), flock spread 38.1 -> 15.0, `no_progress_steps` 0 -> 0 (resets without best route gain: 64)
+- **[Derived Measurement] Aftermath (steps 234..253)**: Flock advanced toward pen by +10.2 route cells (97.3->87.2); behind-flock alignment +0.41->+0.31.
+- **[Hypothesized Mechanism] Candidates**: `corner_target_clamping_inversion`, `dog_outside_sheep_vision_loop`, `no_progress_spread_jitter_reset`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`left_flanker`, switches=0): pos (5, 54)->(30, 91), unique=88, span=73.4, reversals=56%, waypoint_side=20%, target=(59, 36)->(32, 79) [`uncertain_reconstruction_missing_step0`], mask=8.5 [`historical_approximate`], action_replacements=0
+  - `D1` (`rear_pressure`, switches=0): pos (8, 55)->(32, 75), unique=80, span=54.9, reversals=65%, waypoint_side=1%, target=(100, 32)->(46, 57) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D2` (`collector`, switches=0): pos (6, 50)->(28, 100), unique=93, span=79.8, reversals=56%, waypoint_side=15%, target=(10, 40)->(34, 101) [`uncertain_reconstruction_missing_step0`], mask=8.4 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`pen_shy`): pos (133, 31)->(57, 54), route_dist 49.0->90.0 (net -41.0), fence_adj=0%, wall_corner=0%
+  - `S1` (`escapist`): pos (120, 20)->(51, 51), route_dist 61.0->99.0 (net -38.0), fence_adj=0%, wall_corner=0%
+  - `S2` (`escapist`): pos (12, 38)->(36, 102), route_dist 151.0->108.0 (net +43.0), fence_adj=0%, wall_corner=91%
+  - `S3` (`bold`): pos (111, 10)->(51, 53), route_dist 80.0->97.0 (net -17.0), fence_adj=0%, wall_corner=0%
+  - `S4` (`obedient`): pos (112, 50)->(52, 52), route_dist 39.0->97.0 (net -58.0), fence_adj=0%, wall_corner=0%
+  - `S5` (`pen_shy`): pos (114, 68)->(55, 53), route_dist 19.0->93.0 (net -74.0), fence_adj=0%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-333.96 (mean=-1.433/step, pos_progress_steps=121, neg_progress_steps=111)
+  - `Cycle cycle_159_161` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 159..161 with positive progress steps but net negative return (-2.855). Penalty dominates; not reward farming. [total=-2.855, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_190_194` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 190..194 with positive progress steps but net negative return (-5.855). Penalty dominates; not reward farming. [total=-5.855, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_213_219` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 213..219 with positive progress steps but net negative return (-8.682). Penalty dominates; not reward farming. [total=-8.682, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039911-seed-000073:steps-376-387` — `productive_repositioning` (steps 376..387, duration=12, unpenned_sheep=6, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 356..375)**: Flock advanced toward pen by +8.0 route cells (28.0->20.0); behind-flock alignment -0.28->-0.40.
+- **[Derived Measurement] Route Progress**: 19.5 -> 18.2 (net +1.3 cells), flock spread 11.7 -> 12.0, `no_progress_steps` 0 -> 0 (resets without best route gain: 0)
+- **[Derived Measurement] Aftermath (steps 388..407)**: 1 sheep penned (unpenned 6->5); avg route distance 17.7->10.0.
+- **[Hypothesized Mechanism] Candidates**: `wrong_side_fence_overshoot`, `corner_target_clamping_inversion`, `flanking_or_collection_repositioning`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`left_flanker`, switches=0): pos (139, 95)->(141, 88), unique=8, span=7.3, reversals=36%, waypoint_side=75%, target=(99, 96)->(101, 97) [`uncertain_reconstruction_missing_step0`], mask=8.5 [`historical_approximate`], action_replacements=0
+  - `D1` (`rear_pressure`, switches=0): pos (104, 71)->(114, 65), unique=11, span=11.7, reversals=36%, waypoint_side=0%, target=(110, 77)->(112, 78) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D2` (`collector`, switches=0): pos (143, 90)->(143, 79), unique=11, span=12.0, reversals=18%, waypoint_side=67%, target=(141, 91)->(141, 76) [`uncertain_reconstruction_missing_step0`], mask=5.8 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`pen_shy`): pos (105, 84)->(106, 84), route_dist 23.0->22.0 (net +1.0), fence_adj=0%, wall_corner=0%
+  - `S1` (`escapist`): pos (116, 72)->(123, 73), route_dist 13.0->5.0 (net +8.0), fence_adj=0%, wall_corner=0%
+  - `S2` (`escapist`): pos (143, 88)->(143, 77), route_dist 19.0->25.0 (net -6.0), fence_adj=100%, wall_corner=100%
+  - `S3` (`bold`): pos (106, 82)->(107, 86), route_dist 22.0->21.0 (net +1.0), fence_adj=0%, wall_corner=0%
+  - `S4` (`obedient`): pos (112, 78)->(113, 84), route_dist 16.0->15.0 (net +1.0), fence_adj=0%, wall_corner=0%
+  - `S5` (`pen_shy`): pos (104, 83)->(107, 85), route_dist 24.0->21.0 (net +3.0), fence_adj=0%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-29.49 (mean=-2.457/step, pos_progress_steps=6, neg_progress_steps=4)
+  - `Cycle incomplete_376_387` (`incomplete_cycle`): Incomplete cycle steps 376..387: trajectory ended before recurrence. [total=-29.499, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039911-seed-000073:steps-413-467` — `counterproductive_pressure` (steps 413..467, duration=55, unpenned_sheep=2, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 393..412)**: 2 sheep penned (unpenned 5->3); avg route distance 17.2->17.0.
+- **[Derived Measurement] Route Progress**: 25.0 -> 48.0 (net -23.0 cells), flock spread 22.6 -> 9.9, `no_progress_steps` 2 -> 0 (resets without best route gain: 27)
+- **[Derived Measurement] Aftermath (steps 468..487)**: Flock advanced toward pen by +5.5 route cells (47.5->42.0); behind-flock alignment +0.92->+0.83.
+- **[Hypothesized Mechanism] Candidates**: `two_sheep_collector_blind_spot`, `dog_outside_sheep_vision_loop`, `no_progress_spread_jitter_reset`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`left_flanker`, switches=1): pos (125, 98)->(143, 10), unique=52, span=93.0, reversals=13%, waypoint_side=9%, target=(109, 96)->(133, 29) [`uncertain_reconstruction_missing_step0`], mask=8.8 [`historical_approximate`], action_replacements=0
+  - `D1` (`rear_pressure`, switches=1): pos (120, 79)->(142, 17), unique=43, span=79.7, reversals=20%, waypoint_side=9%, target=(127, 70)->(141, 33) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D2` (`right_flanker`, switches=1): pos (143, 49)->(141, 13), unique=49, span=43.2, reversals=13%, waypoint_side=69%, target=(141, 46)->(119, 33) [`uncertain_reconstruction_missing_step0`], mask=7.4 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S2` (`escapist`): pos (143, 47)->(141, 27), route_dist 43.0->61.0 (net -18.0), fence_adj=0%, wall_corner=100%
+  - `S5` (`pen_shy`): pos (122, 87)->(126, 40), route_dist 7.0->35.0 (net -28.0), fence_adj=0%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-154.33 (mean=-2.806/step, pos_progress_steps=18, neg_progress_steps=37)
+  - `Cycle incomplete_413_467` (`incomplete_cycle`): Incomplete cycle steps 413..467: trajectory ended before recurrence. [total=-151.301, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039911-seed-000073:steps-477-515` — `unresolved_ambiguity` (steps 477..515, duration=39, unpenned_sheep=2, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 457..476)**: Flock advanced toward pen by +5.0 route cells (49.0->44.0); behind-flock alignment +0.91->+0.86.
+- **[Derived Measurement] Route Progress**: 43.5 -> 40.0 (net +3.5 cells), flock spread 8.2 -> 9.5, `no_progress_steps` 0 -> 15 (resets without best route gain: 11)
+- **[Derived Measurement] Aftermath (steps 516..535)**: Flock advanced toward pen by +10.5 route cells (39.5->29.0); behind-flock alignment +0.81->+0.76.
+- **[Hypothesized Mechanism] Candidates**: `two_sheep_collector_blind_spot`, `dog_outside_sheep_vision_loop`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`rear_pressure`, switches=0): pos (143, 18)->(141, 30), unique=10, span=12.2, reversals=53%, waypoint_side=0%, target=(133, 34)->(130, 38) [`uncertain_reconstruction_missing_step0`], mask=7.7 [`historical_approximate`], action_replacements=0
+  - `D1` (`right_flanker`, switches=0): pos (142, 25)->(140, 31), unique=8, span=10.2, reversals=71%, waypoint_side=0%, target=(141, 38)->(141, 42) [`uncertain_reconstruction_missing_step0`], mask=8.9 [`historical_approximate`], action_replacements=0
+  - `D2` (`left_flanker`, switches=0): pos (139, 23)->(137, 31), unique=9, span=10.0, reversals=58%, waypoint_side=0%, target=(122, 38)->(118, 42) [`uncertain_reconstruction_missing_step0`], mask=8.9 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S2` (`escapist`): pos (141, 37)->(139, 46), route_dist 51.0->40.0 (net +11.0), fence_adj=0%, wall_corner=28%
+  - `S5` (`pen_shy`): pos (125, 40)->(121, 40), route_dist 36.0->40.0 (net -4.0), fence_adj=0%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-92.16 (mean=-2.363/step, pos_progress_steps=23, neg_progress_steps=12)
+  - `Cycle cycle_496_499` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 496..499 with positive progress steps but net negative return (-9.922). Penalty dominates; not reward farming. [total=-9.922, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_501_506` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 501..506 with positive progress steps but net negative return (-16.180). Penalty dominates; not reward farming. [total=-16.180, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_506_511` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 506..511 with positive progress steps but net negative return (-15.778). Penalty dominates; not reward farming. [total=-15.778, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039911-seed-000073:steps-564-699` — `oscillation_loop` (steps 564..699, duration=136, unpenned_sheep=1, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 544..563)**: 1 sheep penned (unpenned 2->1); avg route distance 19.5->3.0.
+- **[Derived Measurement] Route Progress**: 2.0 -> 84.0 (net -82.0 cells), flock spread 0.0 -> 0.0, `no_progress_steps` 0 -> 134 (resets without best route gain: 0)
+- **[Derived Measurement] Aftermath (steps 700..719)**: Flock advanced toward pen by +19.0 route cells (83.0->64.0); behind-flock alignment +0.90->+0.97.
+- **[Hypothesized Mechanism] Candidates**: `dog_outside_sheep_vision_loop`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`collector`, switches=0): pos (127, 68)->(110, 0), unique=126, span=105.1, reversals=6%, waypoint_side=68%, target=(127, 69)->(112, 2) [`uncertain_reconstruction_missing_step0`], mask=8.4 [`historical_approximate`], action_replacements=0
+  - `D1` (`rear_pressure`, switches=0): pos (131, 65)->(113, 0), unique=69, span=90.0, reversals=48%, waypoint_side=5%, target=(127, 67)->(112, 2) [`uncertain_reconstruction_missing_step0`], mask=8.0 [`historical_approximate`], action_replacements=0
+  - `D2` (`left_flanker`, switches=0): pos (129, 65)->(109, 0), unique=98, span=91.5, reversals=4%, waypoint_side=65%, target=(123, 71)->(108, 4) [`uncertain_reconstruction_missing_step0`], mask=8.2 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S2` (`escapist`): pos (127, 72)->(112, 5), route_dist 2.0->84.0 (net -82.0), fence_adj=2%, wall_corner=16%
+- **[Derived Measurement] Rewards & Cycles**: total=-599.39 (mean=-4.407/step, pos_progress_steps=19, neg_progress_steps=95)
+  - `Cycle incomplete_564_699` (`incomplete_cycle`): Incomplete cycle steps 564..699: trajectory ended before recurrence. [total=-602.438, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039911-seed-000073:steps-774-790` — `productive_repositioning` (steps 774..790, duration=17, unpenned_sheep=1, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 754..773)**: Flock advanced toward pen by +21.0 route cells (29.0->8.0); behind-flock alignment +0.91->+0.60.
+- **[Derived Measurement] Route Progress**: 6.0 -> 4.0 (net +2.0 cells), flock spread 0.0 -> 0.0, `no_progress_steps` 209 -> 225 (resets without best route gain: 0)
+- **[Derived Measurement] Aftermath (steps 791..793)**: 1 sheep penned (unpenned 1->0); avg route distance 2.0->0.0.
+- **[Hypothesized Mechanism] Candidates**: `flanking_or_collection_repositioning`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`collector`, switches=0): pos (118, 73)->(126, 79), unique=14, span=16.1, reversals=12%, waypoint_side=41%, target=(118, 74)->(123, 80) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D1` (`rear_pressure`, switches=0): pos (120, 68)->(123, 84), unique=16, span=21.5, reversals=6%, waypoint_side=35%, target=(116, 72)->(121, 84) [`uncertain_reconstruction_missing_step0`], mask=8.6 [`historical_approximate`], action_replacements=0
+  - `D2` (`left_flanker`, switches=0): pos (117, 76)->(137, 88), unique=17, span=24.4, reversals=0%, waypoint_side=18%, target=(116, 80)->(129, 84) [`uncertain_reconstruction_missing_step0`], mask=8.5 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S2` (`escapist`): pos (122, 76)->(124, 80), route_dist 6.0->4.0 (net +2.0), fence_adj=0%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-18.26 (mean=-1.074/step, pos_progress_steps=5, neg_progress_steps=2)
+  - `Cycle incomplete_774_790` (`incomplete_cycle`): Incomplete cycle steps 774..790: trajectory ended before recurrence. [total=-19.209, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+## Episode `checkpoint-039911-seed-000071` (seed=71, outcome=`timeout`, stop_reason=`timeout`, penned=0/6, steps=2320)
+- **[Recorded Observation] Pen Geometry**: origin=(68,1), size=14x14, opening=`bottom` on 144x104 field
+- **[Recorded Observation] Sheep Penning Events**: None (0 sheep penned)
+- **[Audit] Guidance Certainty**: `uncertain_reconstruction_missing_step0` (step0_present=False, contiguous_frames=True, full_env_config=False, gamma_available=False)
+- **[Derived Measurement] Diagnostic Note**: no_progress_steps reset 957 time(s) during non-progress intervals without new best entry distance (triggered by flock_spread or farthest_to_flock_center deltas).
+
+### Interval `checkpoint-039911-seed-000071:steps-41-193` — `oscillation_loop` (steps 41..193, duration=153, unpenned_sheep=6, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 21..40)**: Flock advanced toward pen by +16.0 route cells (71.2->55.2); behind-flock alignment +0.83->+0.92.
+- **[Derived Measurement] Route Progress**: 54.2 -> 74.2 (net -20.0 cells), flock spread 48.0 -> 15.8, `no_progress_steps` 0 -> 29 (resets without best route gain: 28)
+- **[Derived Measurement] Aftermath (steps 194..213)**: Flock advanced toward pen by +6.0 route cells (73.8->67.8); behind-flock alignment +0.92->+0.97.
+- **[Hypothesized Mechanism] Candidates**: `corner_target_clamping_inversion`, `no_progress_spread_jitter_reset`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`collector`, switches=0): pos (14, 101)->(139, 103), unique=131, span=129.0, reversals=12%, waypoint_side=43%, target=(15, 101)->(136, 101) [`uncertain_reconstruction_missing_step0`], mask=7.1 [`historical_approximate`], action_replacements=0
+  - `D1` (`left_flanker`, switches=0): pos (48, 103)->(139, 87), unique=63, span=100.6, reversals=58%, waypoint_side=10%, target=(118, 89)->(122, 48) [`uncertain_reconstruction_missing_step0`], mask=7.8 [`historical_approximate`], action_replacements=0
+  - `D2` (`rear_pressure`, switches=0): pos (20, 81)->(132, 99), unique=73, span=121.3, reversals=52%, waypoint_side=78%, target=(63, 42)->(107, 71) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`pen_fearful`): pos (42, 15)->(97, 60), route_dist 27.0->62.0 (net -35.0), fence_adj=0%, wall_corner=0%
+  - `S1` (`pen_shy`): pos (95, 11)->(97, 58), route_dist 19.0->60.0 (net -41.0), fence_adj=0%, wall_corner=0%
+  - `S2` (`escapist`): pos (18, 103)->(133, 103), route_dist 139.0->141.0 (net -2.0), fence_adj=0%, wall_corner=100%
+  - `S3` (`pen_fearful`): pos (109, 79)->(95, 59), route_dist 93.0->59.0 (net +34.0), fence_adj=0%, wall_corner=0%
+  - `S4` (`pen_shy`): pos (43, 15)->(96, 60), route_dist 26.0->61.0 (net -35.0), fence_adj=0%, wall_corner=0%
+  - `S5` (`obedient`): pos (96, 10)->(99, 58), route_dist 21.0->62.0 (net -41.0), fence_adj=0%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-171.99 (mean=-1.124/step, pos_progress_steps=70, neg_progress_steps=77)
+  - `Cycle incomplete_41_193` (`incomplete_cycle`): Incomplete cycle steps 41..193: trajectory ended before recurrence. [total=-176.187, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039911-seed-000071:steps-252-2320` — `oscillation_loop` (steps 252..2320, duration=2069, unpenned_sheep=6, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 232..251)**: Flock advanced toward pen by +5.2 route cells (63.0->57.8); behind-flock alignment +0.97->+0.91.
+- **[Derived Measurement] Route Progress**: 57.7 -> 88.2 (net -30.5 cells), flock spread 14.7 -> 16.0, `no_progress_steps` 20 -> 0 (resets without best route gain: 929)
+- **[Derived Measurement] Aftermath (steps 2320..2320)**: Route distance remained near 88.2 (net progress +0.0); 0 role switches.
+- **[Hypothesized Mechanism] Candidates**: `corner_target_clamping_inversion`, `no_progress_spread_jitter_reset`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`collector`, switches=0): pos (77, 103)->(3, 103), unique=52, span=76.0, reversals=98%, waypoint_side=99%, target=(73, 101)->(2, 101) [`uncertain_reconstruction_missing_step0`], mask=6.0 [`historical_approximate`], action_replacements=0
+  - `D1` (`left_flanker`, switches=2): pos (95, 89)->(13, 103), unique=52, span=85.2, reversals=97%, waypoint_side=48%, target=(94, 66)->(53, 87) [`uncertain_reconstruction_missing_step0`], mask=7.0 [`historical_approximate`], action_replacements=0
+  - `D2` (`rear_pressure`, switches=2): pos (84, 97)->(2, 101), unique=57, span=84.6, reversals=97%, waypoint_side=98%, target=(108, 44)->(30, 72) [`uncertain_reconstruction_missing_step0`], mask=8.0 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`pen_fearful`): pos (92, 53)->(41, 61), route_dist 50.0->74.0 (net -24.0), fence_adj=0%, wall_corner=0%
+  - `S1` (`pen_shy`): pos (93, 54)->(40, 62), route_dist 52.0->76.0 (net -24.0), fence_adj=0%, wall_corner=0%
+  - `S2` (`escapist`): pos (74, 103)->(0, 102), route_dist 89.0->156.0 (net -67.0), fence_adj=0%, wall_corner=100%
+  - `S3` (`pen_fearful`): pos (93, 53)->(42, 62), route_dist 51.0->74.0 (net -23.0), fence_adj=0%, wall_corner=0%
+  - `S4` (`pen_shy`): pos (94, 53)->(41, 60), route_dist 52.0->73.0 (net -21.0), fence_adj=0%, wall_corner=0%
+  - `S5` (`obedient`): pos (92, 55)->(39, 61), route_dist 52.0->76.0 (net -24.0), fence_adj=0%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-2155.96 (mean=-1.042/step, pos_progress_steps=1006, neg_progress_steps=1062)
+  - `Cycle cycle_342_344` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 342..344 with positive progress steps but net negative return (-1.986). Penalty dominates; not reward farming. [total=-1.986, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_363_365` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 363..365 with positive progress steps but net negative return (-2.226). Penalty dominates; not reward farming. [total=-2.226, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_365_367` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 365..367 with positive progress steps but net negative return (-2.308). Penalty dominates; not reward farming. [total=-2.308, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_370_372` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 370..372 with positive progress steps but net negative return (-2.231). Penalty dominates; not reward farming. [total=-2.231, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_372_374` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 372..374 with positive progress steps but net negative return (-2.494). Penalty dominates; not reward farming. [total=-2.494, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_379_381` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 379..381 with positive progress steps but net negative return (-2.242). Penalty dominates; not reward farming. [total=-2.242, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_381_391` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 381..391 with positive progress steps but net negative return (-11.467). Penalty dominates; not reward farming. [total=-11.467, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_392_394` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 392..394 with positive progress steps but net negative return (-2.303). Penalty dominates; not reward farming. [total=-2.303, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_404_406` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 404..406 with positive progress steps but net negative return (-2.432). Penalty dominates; not reward farming. [total=-2.432, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_411_413` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 411..413 with positive progress steps but net negative return (-2.235). Penalty dominates; not reward farming. [total=-2.235, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_419_465` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 419..465 with positive progress steps but net negative return (-41.504). Penalty dominates; not reward farming. [total=-41.504, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_473_475` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 473..475 with positive progress steps but net negative return (-1.794). Penalty dominates; not reward farming. [total=-1.794, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_485_491` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 485..491 with positive progress steps but net negative return (-5.266). Penalty dominates; not reward farming. [total=-5.266, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_491_493` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 491..493 with positive progress steps but net negative return (-1.737). Penalty dominates; not reward farming. [total=-1.737, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_493_495` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 493..495 with positive progress steps but net negative return (-1.741). Penalty dominates; not reward farming. [total=-1.741, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_499_501` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 499..501 with positive progress steps but net negative return (-1.737). Penalty dominates; not reward farming. [total=-1.737, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_502_504` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 502..504 with positive progress steps but net negative return (-1.950). Penalty dominates; not reward farming. [total=-1.950, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_525_527` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 525..527 with positive progress steps but net negative return (-1.736). Penalty dominates; not reward farming. [total=-1.736, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_533_549` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 533..549 with positive progress steps but net negative return (-14.745). Penalty dominates; not reward farming. [total=-14.745, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_563_567` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 563..567 with positive progress steps but net negative return (-3.601). Penalty dominates; not reward farming. [total=-3.601, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_578_580` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 578..580 with positive progress steps but net negative return (-1.732). Penalty dominates; not reward farming. [total=-1.732, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_600_614` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 600..614 with positive progress steps but net negative return (-12.878). Penalty dominates; not reward farming. [total=-12.878, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_614_1118` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 614..1118 with positive progress steps but net negative return (-461.538). Penalty dominates; not reward farming. [total=-461.538, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1118_1136` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1118..1136 with positive progress steps but net negative return (-16.196). Penalty dominates; not reward farming. [total=-16.196, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1136_1144` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1136..1144 with positive progress steps but net negative return (-7.084). Penalty dominates; not reward farming. [total=-7.084, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1151_1153` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1151..1153 with positive progress steps but net negative return (-1.733). Penalty dominates; not reward farming. [total=-1.733, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1162_1170` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1162..1170 with positive progress steps but net negative return (-7.399). Penalty dominates; not reward farming. [total=-7.399, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1173_1177` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1173..1177 with positive progress steps but net negative return (-3.535). Penalty dominates; not reward farming. [total=-3.535, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1195_1203` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1195..1203 with positive progress steps but net negative return (-7.293). Penalty dominates; not reward farming. [total=-7.293, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1219_1225` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1219..1225 with positive progress steps but net negative return (-5.343). Penalty dominates; not reward farming. [total=-5.343, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1227_1665` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1227..1665 with positive progress steps but net negative return (-402.412). Penalty dominates; not reward farming. [total=-402.412, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1721_1723` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1721..1723 with positive progress steps but net negative return (-1.751). Penalty dominates; not reward farming. [total=-1.751, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1723_1725` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1723..1725 with positive progress steps but net negative return (-1.789). Penalty dominates; not reward farming. [total=-1.789, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1728_1730` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1728..1730 with positive progress steps but net negative return (-1.728). Penalty dominates; not reward farming. [total=-1.728, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1734_1752` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1734..1752 with positive progress steps but net negative return (-16.338). Penalty dominates; not reward farming. [total=-16.338, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1759_1765` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1759..1765 with positive progress steps but net negative return (-5.468). Penalty dominates; not reward farming. [total=-5.468, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1765_1767` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1765..1767 with positive progress steps but net negative return (-1.799). Penalty dominates; not reward farming. [total=-1.799, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1767_1775` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1767..1775 with positive progress steps but net negative return (-7.208). Penalty dominates; not reward farming. [total=-7.208, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1777_1783` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1777..1783 with positive progress steps but net negative return (-5.510). Penalty dominates; not reward farming. [total=-5.510, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1789_1791` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1789..1791 with positive progress steps but net negative return (-1.999). Penalty dominates; not reward farming. [total=-1.999, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1797_1799` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1797..1799 with positive progress steps but net negative return (-1.800). Penalty dominates; not reward farming. [total=-1.800, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1809_1815` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1809..1815 with positive progress steps but net negative return (-5.273). Penalty dominates; not reward farming. [total=-5.273, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1815_1817` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1815..1817 with positive progress steps but net negative return (-1.733). Penalty dominates; not reward farming. [total=-1.733, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1838_1840` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1838..1840 with positive progress steps but net negative return (-1.923). Penalty dominates; not reward farming. [total=-1.923, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1840_1844` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1840..1844 with positive progress steps but net negative return (-3.803). Penalty dominates; not reward farming. [total=-3.803, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1865_1885` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1865..1885 with positive progress steps but net negative return (-17.927). Penalty dominates; not reward farming. [total=-17.927, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1905_1909` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1905..1909 with positive progress steps but net negative return (-3.475). Penalty dominates; not reward farming. [total=-3.475, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1921_1933` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1921..1933 with positive progress steps but net negative return (-10.804). Penalty dominates; not reward farming. [total=-10.804, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1935_1941` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1935..1941 with positive progress steps but net negative return (-5.421). Penalty dominates; not reward farming. [total=-5.421, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1943_1945` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1943..1945 with positive progress steps but net negative return (-1.883). Penalty dominates; not reward farming. [total=-1.883, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1948_1950` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1948..1950 with positive progress steps but net negative return (-1.880). Penalty dominates; not reward farming. [total=-1.880, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1959_1975` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1959..1975 with positive progress steps but net negative return (-14.610). Penalty dominates; not reward farming. [total=-14.610, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2011_2025` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2011..2025 with positive progress steps but net negative return (-12.460). Penalty dominates; not reward farming. [total=-12.460, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2026_2028` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2026..2028 with positive progress steps but net negative return (-2.004). Penalty dominates; not reward farming. [total=-2.004, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2028_2030` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2028..2030 with positive progress steps but net negative return (-1.732). Penalty dominates; not reward farming. [total=-1.732, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2033_2035` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2033..2035 with positive progress steps but net negative return (-1.929). Penalty dominates; not reward farming. [total=-1.929, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2070_2072` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2070..2072 with positive progress steps but net negative return (-1.953). Penalty dominates; not reward farming. [total=-1.953, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2079_2083` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2079..2083 with positive progress steps but net negative return (-3.627). Penalty dominates; not reward farming. [total=-3.627, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2085_2089` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2085..2089 with positive progress steps but net negative return (-3.602). Penalty dominates; not reward farming. [total=-3.602, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2098_2100` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2098..2100 with positive progress steps but net negative return (-1.924). Penalty dominates; not reward farming. [total=-1.924, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2101_2105` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2101..2105 with positive progress steps but net negative return (-3.591). Penalty dominates; not reward farming. [total=-3.591, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2107_2113` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2107..2113 with positive progress steps but net negative return (-5.346). Penalty dominates; not reward farming. [total=-5.346, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2128_2130` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2128..2130 with positive progress steps but net negative return (-1.798). Penalty dominates; not reward farming. [total=-1.798, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2153_2155` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2153..2155 with positive progress steps but net negative return (-1.883). Penalty dominates; not reward farming. [total=-1.883, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2168_2170` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2168..2170 with positive progress steps but net negative return (-1.799). Penalty dominates; not reward farming. [total=-1.799, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2170_2174` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2170..2174 with positive progress steps but net negative return (-3.537). Penalty dominates; not reward farming. [total=-3.537, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2178_2180` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2178..2180 with positive progress steps but net negative return (-1.799). Penalty dominates; not reward farming. [total=-1.799, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2190_2192` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2190..2192 with positive progress steps but net negative return (-1.794). Penalty dominates; not reward farming. [total=-1.794, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2194_2198` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2194..2198 with positive progress steps but net negative return (-3.881). Penalty dominates; not reward farming. [total=-3.881, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2198_2200` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2198..2200 with positive progress steps but net negative return (-1.799). Penalty dominates; not reward farming. [total=-1.799, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2203_2205` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2203..2205 with positive progress steps but net negative return (-1.733). Penalty dominates; not reward farming. [total=-1.733, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2210_2212` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2210..2212 with positive progress steps but net negative return (-1.859). Penalty dominates; not reward farming. [total=-1.859, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2222_2224` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2222..2224 with positive progress steps but net negative return (-1.937). Penalty dominates; not reward farming. [total=-1.937, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2228_2232` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2228..2232 with positive progress steps but net negative return (-3.531). Penalty dominates; not reward farming. [total=-3.531, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2233_2237` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2233..2237 with positive progress steps but net negative return (-3.654). Penalty dominates; not reward farming. [total=-3.654, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2262_2266` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2262..2266 with positive progress steps but net negative return (-3.958). Penalty dominates; not reward farming. [total=-3.958, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2271_2275` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2271..2275 with positive progress steps but net negative return (-3.602). Penalty dominates; not reward farming. [total=-3.602, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2283_2285` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2283..2285 with positive progress steps but net negative return (-1.859). Penalty dominates; not reward farming. [total=-1.859, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2298_2300` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2298..2300 with positive progress steps but net negative return (-1.863). Penalty dominates; not reward farming. [total=-1.863, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2300_2302` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2300..2302 with positive progress steps but net negative return (-1.800). Penalty dominates; not reward farming. [total=-1.800, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2315_2317` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2315..2317 with positive progress steps but net negative return (-1.732). Penalty dominates; not reward farming. [total=-1.732, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_2317_2319` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 2317..2319 with positive progress steps but net negative return (-1.877). Penalty dominates; not reward farming. [total=-1.877, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+## Episode `checkpoint-039910-seed-000071` (seed=71, outcome=`success`, stop_reason=`success`, penned=6/6, steps=1598)
+- **[Recorded Observation] Pen Geometry**: origin=(68,1), size=14x14, opening=`bottom` on 144x104 field
+- **[Recorded Observation] Sheep Penning Events**: S2@step 1429, S5@step 1493, S0@step 1547, S1@step 1550, S3@step 1578, S4@step 1598
+- **[Audit] Guidance Certainty**: `uncertain_reconstruction_missing_step0` (step0_present=False, contiguous_frames=True, full_env_config=False, gamma_available=False)
+- **[Derived Measurement] Diagnostic Note**: stats.oscillation_detected was False (only checks a 2-position loop in the final 4 steps), whereas temporal window analysis detected sustained multi-step oscillation.
+- **[Derived Measurement] Diagnostic Note**: no_progress_steps reset 517 time(s) during non-progress intervals without new best entry distance (triggered by flock_spread or farthest_to_flock_center deltas).
+
+### Interval `checkpoint-039910-seed-000071:steps-41-1349` — `counterproductive_pressure` (steps 41..1349, duration=1309, unpenned_sheep=6, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 21..40)**: Flock advanced toward pen by +16.0 route cells (71.2->55.2); behind-flock alignment +0.82->+0.91.
+- **[Derived Measurement] Route Progress**: 54.2 -> 46.7 (net +7.5 cells), flock spread 48.0 -> 8.5, `no_progress_steps` 0 -> 124 (resets without best route gain: 468)
+- **[Derived Measurement] Aftermath (steps 1350..1369)**: Flock advanced toward pen by +6.7 route cells (46.0->39.3); behind-flock alignment +0.87->+0.79.
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`collector`, switches=0): pos (12, 99)->(65, 79), unique=85, span=60.0, reversals=90%, waypoint_side=1%, target=(15, 101)->(68, 78) [`uncertain_reconstruction_missing_step0`], mask=8.1 [`historical_approximate`], action_replacements=0
+  - `D1` (`left_flanker`, switches=0): pos (46, 103)->(70, 79), unique=53, span=38.4, reversals=92%, waypoint_side=49%, target=(118, 89)->(73, 66) [`uncertain_reconstruction_missing_step0`], mask=8.9 [`historical_approximate`], action_replacements=0
+  - `D2` (`rear_pressure`, switches=0): pos (22, 79)->(62, 73), unique=61, span=48.3, reversals=86%, waypoint_side=97%, target=(63, 42)->(58, 59) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`pen_fearful`): pos (42, 15)->(54, 51), route_dist 27.0->51.0 (net -24.0), fence_adj=0%, wall_corner=0%
+  - `S1` (`pen_shy`): pos (95, 11)->(64, 51), route_dist 19.0->41.0 (net -22.0), fence_adj=0%, wall_corner=0%
+  - `S2` (`escapist`): pos (18, 103)->(66, 75), route_dist 139.0->63.0 (net +76.0), fence_adj=0%, wall_corner=5%
+  - `S3` (`pen_fearful`): pos (109, 79)->(58, 51), route_dist 93.0->47.0 (net +46.0), fence_adj=0%, wall_corner=0%
+  - `S4` (`pen_shy`): pos (43, 15)->(65, 51), route_dist 26.0->40.0 (net -14.0), fence_adj=0%, wall_corner=0%
+  - `S5` (`obedient`): pos (96, 10)->(67, 51), route_dist 21.0->38.0 (net -17.0), fence_adj=0%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-1014.75 (mean=-0.775/step, pos_progress_steps=693, neg_progress_steps=616)
+  - `Cycle cycle_145_147` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 145..147 with positive progress steps but net negative return (-1.859). Penalty dominates; not reward farming. [total=-1.859, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_152_156` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 152..156 with positive progress steps but net negative return (-3.833). Penalty dominates; not reward farming. [total=-3.833, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_156_158` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 156..158 with positive progress steps but net negative return (-1.870). Penalty dominates; not reward farming. [total=-1.870, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_158_164` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 158..164 with positive progress steps but net negative return (-5.794). Penalty dominates; not reward farming. [total=-5.794, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_173_179` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 173..179 with positive progress steps but net negative return (-5.829). Penalty dominates; not reward farming. [total=-5.829, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_179_181` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 179..181 with positive progress steps but net negative return (-1.963). Penalty dominates; not reward farming. [total=-1.963, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_187_189` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 187..189 with positive progress steps but net negative return (-1.931). Penalty dominates; not reward farming. [total=-1.931, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_194_198` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 194..198 with positive progress steps but net negative return (-3.809). Penalty dominates; not reward farming. [total=-3.809, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_198_200` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 198..200 with positive progress steps but net negative return (-1.949). Penalty dominates; not reward farming. [total=-1.949, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_219_221` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 219..221 with positive progress steps but net negative return (-1.928). Penalty dominates; not reward farming. [total=-1.928, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_225_227` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 225..227 with positive progress steps but net negative return (-1.882). Penalty dominates; not reward farming. [total=-1.882, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_243_245` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 243..245 with positive progress steps but net negative return (-1.932). Penalty dominates; not reward farming. [total=-1.932, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_270_272` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 270..272 with positive progress steps but net negative return (-1.869). Penalty dominates; not reward farming. [total=-1.869, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_272_274` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 272..274 with positive progress steps but net negative return (-1.941). Penalty dominates; not reward farming. [total=-1.941, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_301_303` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 301..303 with positive progress steps but net negative return (-1.879). Penalty dominates; not reward farming. [total=-1.879, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_322_324` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 322..324 with positive progress steps but net negative return (-1.936). Penalty dominates; not reward farming. [total=-1.936, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_328_330` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 328..330 with positive progress steps but net negative return (-1.961). Penalty dominates; not reward farming. [total=-1.961, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_335_337` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 335..337 with positive progress steps but net negative return (-1.860). Penalty dominates; not reward farming. [total=-1.860, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_337_339` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 337..339 with positive progress steps but net negative return (-1.865). Penalty dominates; not reward farming. [total=-1.865, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_362_364` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 362..364 with positive progress steps but net negative return (-1.956). Penalty dominates; not reward farming. [total=-1.956, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_370_372` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 370..372 with positive progress steps but net negative return (-1.871). Penalty dominates; not reward farming. [total=-1.871, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_412_414` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 412..414 with positive progress steps but net negative return (-1.955). Penalty dominates; not reward farming. [total=-1.955, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_431_433` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 431..433 with positive progress steps but net negative return (-1.845). Penalty dominates; not reward farming. [total=-1.845, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_469_471` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 469..471 with positive progress steps but net negative return (-1.943). Penalty dominates; not reward farming. [total=-1.943, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_504_506` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 504..506 with positive progress steps but net negative return (-2.023). Penalty dominates; not reward farming. [total=-2.023, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_523_525` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 523..525 with positive progress steps but net negative return (-1.922). Penalty dominates; not reward farming. [total=-1.922, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_536_538` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 536..538 with positive progress steps but net negative return (-1.913). Penalty dominates; not reward farming. [total=-1.913, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_549_551` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 549..551 with positive progress steps but net negative return (-1.872). Penalty dominates; not reward farming. [total=-1.872, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_551_553` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 551..553 with positive progress steps but net negative return (-1.869). Penalty dominates; not reward farming. [total=-1.869, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_556_562` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 556..562 with positive progress steps but net negative return (-5.685). Penalty dominates; not reward farming. [total=-5.685, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_571_573` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 571..573 with positive progress steps but net negative return (-1.891). Penalty dominates; not reward farming. [total=-1.891, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_589_591` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 589..591 with positive progress steps but net negative return (-1.959). Penalty dominates; not reward farming. [total=-1.959, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_593_595` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 593..595 with positive progress steps but net negative return (-1.850). Penalty dominates; not reward farming. [total=-1.850, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_602_604` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 602..604 with positive progress steps but net negative return (-1.866). Penalty dominates; not reward farming. [total=-1.866, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_640_642` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 640..642 with positive progress steps but net negative return (-1.865). Penalty dominates; not reward farming. [total=-1.865, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_754_756` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 754..756 with positive progress steps but net negative return (-1.702). Penalty dominates; not reward farming. [total=-1.702, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_786_788` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 786..788 with positive progress steps but net negative return (-1.577). Penalty dominates; not reward farming. [total=-1.577, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_814_816` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 814..816 with positive progress steps but net negative return (-1.624). Penalty dominates; not reward farming. [total=-1.624, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_822_824` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 822..824 with positive progress steps but net negative return (-1.611). Penalty dominates; not reward farming. [total=-1.611, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_825_829` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 825..829 with positive progress steps but net negative return (-3.431). Penalty dominates; not reward farming. [total=-3.431, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_838_840` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 838..840 with positive progress steps but net negative return (-1.629). Penalty dominates; not reward farming. [total=-1.629, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_844_846` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 844..846 with positive progress steps but net negative return (-1.650). Penalty dominates; not reward farming. [total=-1.650, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_849_851` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 849..851 with positive progress steps but net negative return (-1.609). Penalty dominates; not reward farming. [total=-1.609, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_863_865` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 863..865 with positive progress steps but net negative return (-1.607). Penalty dominates; not reward farming. [total=-1.607, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_912_914` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 912..914 with positive progress steps but net negative return (-1.652). Penalty dominates; not reward farming. [total=-1.652, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_950_952` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 950..952 with positive progress steps but net negative return (-1.626). Penalty dominates; not reward farming. [total=-1.626, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_954_956` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 954..956 with positive progress steps but net negative return (-1.647). Penalty dominates; not reward farming. [total=-1.647, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_981_983` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 981..983 with positive progress steps but net negative return (-1.626). Penalty dominates; not reward farming. [total=-1.626, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1052_1054` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1052..1054 with positive progress steps but net negative return (-1.626). Penalty dominates; not reward farming. [total=-1.626, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1088_1090` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1088..1090 with positive progress steps but net negative return (-1.626). Penalty dominates; not reward farming. [total=-1.626, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1108_1110` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1108..1110 with positive progress steps but net negative return (-1.641). Penalty dominates; not reward farming. [total=-1.641, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1160_1162` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1160..1162 with positive progress steps but net negative return (-1.629). Penalty dominates; not reward farming. [total=-1.629, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1180_1182` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1180..1182 with positive progress steps but net negative return (-1.626). Penalty dominates; not reward farming. [total=-1.626, discounted=None, timebase=None, status=discount_factor_unavailable]
+  - `Cycle cycle_1218_1220` (`net_negative_cycle_with_positive_steps`): Complete cycle steps 1218..1220 with positive progress steps but net negative return (-1.626). Penalty dominates; not reward farming. [total=-1.626, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039910-seed-000071:steps-1402-1426` — `productive_repositioning` (steps 1402..1426, duration=25, unpenned_sheep=6, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 1382..1401)**: Flock advanced toward pen by +14.2 route cells (31.3->17.2); behind-flock alignment +0.48->-0.14.
+- **[Derived Measurement] Route Progress**: 16.2 -> 16.3 (net -0.2 cells), flock spread 9.2 -> 11.4, `no_progress_steps` 73 -> 73 (resets without best route gain: 10)
+- **[Derived Measurement] Aftermath (steps 1427..1446)**: 1 sheep penned (unpenned 6->5); avg route distance 15.5->20.6.
+- **[Hypothesized Mechanism] Candidates**: `wrong_side_fence_overshoot`, `two_sheep_collector_blind_spot`, `no_progress_spread_jitter_reset`, `flanking_or_collection_repositioning`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`right_flanker`, switches=2): pos (69, 27)->(49, 6), unique=21, span=30.4, reversals=12%, waypoint_side=60%, target=(49, 12)->(57, 15) [`uncertain_reconstruction_missing_step0`], mask=8.9 [`historical_approximate`], action_replacements=0
+  - `D1` (`collector`, switches=1): pos (72, 31)->(78, 19), unique=20, span=14.4, reversals=17%, waypoint_side=0%, target=(73, 36)->(80, 20) [`uncertain_reconstruction_missing_step0`], mask=8.9 [`historical_approximate`], action_replacements=0
+  - `D2` (`rear_pressure`, switches=1): pos (66, 27)->(78, 23), unique=18, span=17.0, reversals=21%, waypoint_side=64%, target=(57, 28)->(61, 30) [`uncertain_reconstruction_missing_step0`], mask=8.9 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`pen_fearful`): pos (53, 32)->(55, 24), route_dist 33.0->23.0 (net +10.0), fence_adj=0%, wall_corner=0%
+  - `S1` (`pen_shy`): pos (62, 17)->(53, 10), route_dist 9.0->21.0 (net -12.0), fence_adj=0%, wall_corner=0%
+  - `S2` (`escapist`): pos (69, 25)->(78, 17), route_dist 11.0->3.0 (net +8.0), fence_adj=0%, wall_corner=0%
+  - `S3` (`pen_fearful`): pos (52, 32)->(54, 25), route_dist 34.0->25.0 (net +9.0), fence_adj=0%, wall_corner=0%
+  - `S4` (`pen_shy`): pos (64, 16)->(63, 6), route_dist 6.0->15.0 (net -9.0), fence_adj=0%, wall_corner=0%
+  - `S5` (`obedient`): pos (66, 16)->(66, 7), route_dist 4.0->11.0 (net -7.0), fence_adj=96%, wall_corner=4%
+- **[Derived Measurement] Rewards & Cycles**: total=-54.24 (mean=-2.169/step, pos_progress_steps=17, neg_progress_steps=8)
+  - `Cycle incomplete_1402_1426` (`incomplete_cycle`): Incomplete cycle steps 1402..1426: trajectory ended before recurrence. [total=-56.492, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039910-seed-000071:steps-1429-1492` — `oscillation_loop` (steps 1429..1492, duration=64, unpenned_sheep=5, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 1409..1428)**: Route distance remained near 14.7 (net progress +1.0); 4 role switches.
+- **[Derived Measurement] Route Progress**: 17.0 -> 21.4 (net -4.4 cells), flock spread 8.6 -> 20.8, `no_progress_steps` 70 -> 95 (resets without best route gain: 16)
+- **[Derived Measurement] Aftermath (steps 1493..1512)**: Flock advanced toward pen by +2.5 route cells (26.0->23.5); behind-flock alignment -0.22->-0.24.
+- **[Hypothesized Mechanism] Candidates**: `wrong_side_fence_overshoot`, `two_sheep_collector_blind_spot`, `no_progress_spread_jitter_reset`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`left_flanker`, switches=3): pos (51, 10)->(76, 31), unique=47, span=41.0, reversals=21%, waypoint_side=34%, target=(58, 15)->(53, 32) [`uncertain_reconstruction_missing_step0`], mask=8.8 [`historical_approximate`], action_replacements=0
+  - `D1` (`collector`, switches=3): pos (78, 16)->(7, 3), unique=64, span=72.2, reversals=0%, waypoint_side=95%, target=(80, 15)->(4, 2) [`uncertain_reconstruction_missing_step0`], mask=8.8 [`historical_approximate`], action_replacements=0
+  - `D2` (`left_flanker`, switches=1): pos (78, 21)->(64, 3), unique=48, span=45.6, reversals=24%, waypoint_side=38%, target=(62, 29)->(49, 9) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`pen_fearful`): pos (56, 23)->(66, 15), route_dist 21.0->3.0 (net +18.0), fence_adj=8%, wall_corner=0%
+  - `S1` (`pen_shy`): pos (53, 13)->(63, 14), route_dist 18.0->7.0 (net +11.0), fence_adj=3%, wall_corner=0%
+  - `S3` (`pen_fearful`): pos (56, 24)->(64, 0), route_dist 22.0->20.0 (net +2.0), fence_adj=0%, wall_corner=28%
+  - `S4` (`pen_shy`): pos (63, 7)->(5, 3), route_dist 14.0->76.0 (net -62.0), fence_adj=0%, wall_corner=0%
+  - `S5` (`obedient`): pos (66, 8)->(68, 15), route_dist 10.0->1.0 (net +9.0), fence_adj=61%, wall_corner=8%
+- **[Derived Measurement] Rewards & Cycles**: total=-172.10 (mean=-2.689/step, pos_progress_steps=9, neg_progress_steps=55)
+  - `Cycle incomplete_1429_1492` (`incomplete_cycle`): Incomplete cycle steps 1429..1492: trajectory ended before recurrence. [total=-181.782, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039910-seed-000071:steps-1493-1524` — `productive_repositioning` (steps 1493..1524, duration=32, unpenned_sheep=4, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 1473..1492)**: Route distance remained near 21.4 (net progress +0.6); 0 role switches.
+- **[Derived Measurement] Route Progress**: 26.0 -> 23.0 (net +3.0 cells), flock spread 24.1 -> 23.7, `no_progress_steps` 94 -> 87 (resets without best route gain: 19)
+- **[Derived Measurement] Aftermath (steps 1525..1544)**: Flock advanced toward pen by +5.5 route cells (22.5->17.0); behind-flock alignment -0.21->-0.16.
+- **[Hypothesized Mechanism] Candidates**: `flanking_or_collection_repositioning`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`left_flanker`, switches=0): pos (74, 31)->(80, 35), unique=13, span=10.8, reversals=48%, waypoint_side=0%, target=(53, 33)->(52, 41) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D1` (`collector`, switches=0): pos (6, 3)->(0, 18), unique=18, span=19.0, reversals=42%, waypoint_side=22%, target=(3, 2)->(6, 22) [`uncertain_reconstruction_missing_step0`], mask=7.3 [`historical_approximate`], action_replacements=0
+  - `D2` (`rear_pressure`, switches=0): pos (62, 3)->(66, 5), unique=5, span=4.5, reversals=61%, waypoint_side=50%, target=(49, 9)->(48, 14) [`uncertain_reconstruction_missing_step0`], mask=8.1 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S0` (`pen_fearful`): pos (67, 15)->(71, 16), route_dist 2.0->2.0 (net +0.0), fence_adj=16%, wall_corner=0%
+  - `S1` (`pen_shy`): pos (63, 15)->(65, 17), route_dist 6.0->6.0 (net +0.0), fence_adj=0%, wall_corner=0%
+  - `S3` (`pen_fearful`): pos (65, 0)->(65, 0), route_dist 19.0->19.0 (net +0.0), fence_adj=0%, wall_corner=100%
+  - `S4` (`pen_shy`): pos (4, 3)->(9, 20), route_dist 77.0->65.0 (net +12.0), fence_adj=0%, wall_corner=66%
+- **[Derived Measurement] Rewards & Cycles**: total=-21.45 (mean=-0.670/step, pos_progress_steps=21, neg_progress_steps=10)
+  - `Cycle incomplete_1493_1524` (`incomplete_cycle`): Incomplete cycle steps 1493..1524: trajectory ended before recurrence. [total=-22.497, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+### Interval `checkpoint-039910-seed-000071:steps-1560-1572` — `productive_repositioning` (steps 1560..1572, duration=13, unpenned_sheep=2, guidance=`uncertain_reconstruction_missing_step0`)
+- **[Derived Measurement] Lead-in (steps 1540..1559)**: 2 sheep penned (unpenned 4->2); avg route distance 18.0->16.5.
+- **[Derived Measurement] Route Progress**: 15.5 -> 14.5 (net +1.0 cells), flock spread 11.3 -> 12.8, `no_progress_steps` 51 -> 53 (resets without best route gain: 4)
+- **[Derived Measurement] Aftermath (steps 1573..1592)**: 1 sheep penned (unpenned 2->1); avg route distance 13.5->4.0.
+- **[Hypothesized Mechanism] Candidates**: `two_sheep_collector_blind_spot`, `no_progress_spread_jitter_reset`, `flanking_or_collection_repositioning`
+- **Per-Dog Behavior & Decision Evidence**:
+  - `D0` (`left_flanker`, switches=0): pos (70, 23)->(88, 25), unique=12, span=18.1, reversals=8%, waypoint_side=0%, target=(55, 32)->(83, 37) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D1` (`right_flanker`, switches=0): pos (36, 10)->(42, 12), unique=10, span=8.9, reversals=25%, waypoint_side=0%, target=(55, 4)->(49, 3) [`uncertain_reconstruction_missing_step0`], mask=9.0 [`historical_approximate`], action_replacements=0
+  - `D2` (`rear_pressure`, switches=0): pos (62, 12)->(78, 16), unique=12, span=16.5, reversals=8%, waypoint_side=54%, target=(51, 18)->(62, 24) [`uncertain_reconstruction_missing_step0`], mask=8.5 [`historical_approximate`], action_replacements=0
+- **Unpenned Sheep Responses**:
+  - `S3` (`pen_fearful`): pos (67, 15)->(79, 19), route_dist 2.0->5.0 (net -3.0), fence_adj=15%, wall_corner=0%
+  - `S4` (`pen_shy`): pos (45, 20)->(54, 24), route_dist 29.0->24.0 (net +5.0), fence_adj=0%, wall_corner=0%
+- **[Derived Measurement] Rewards & Cycles**: total=-11.42 (mean=-0.879/step, pos_progress_steps=9, neg_progress_steps=4)
+  - `Cycle incomplete_1560_1572` (`incomplete_cycle`): Incomplete cycle steps 1560..1572: trajectory ended before recurrence. [total=-13.203, discounted=None, timebase=None, status=discount_factor_unavailable]
+- **[Uncertain Reconstruction] Evidence Limitations**:
+  - Guidance targets are uncertain estimates (uncertain_reconstruction_missing_step0); historical replay lacked full config, step 0, or verified strategy version.
+  - Action masks are historical approximations computed without sub-step fractional movement budget.
+  - Policy action probabilities and logits were not recorded; action selection confidence is unavailable.
+- **[Alternative Hypothesis] Alternative Explanations**:
+  - [Alternative Hypothesis: Action Distribution Ambiguity] Because policy action probabilities/logits and raw observations were not recorded in this replay, we cannot distinguish from replay data alone whether action cycling was driven by near-tied policy logits (memoryless observation aliasing) or strong policy preference toward current features.
+  - [Alternative Hypothesis: Guidance Uncertainty] Role targets are reconstructed estimates (uncertain_reconstruction_missing_step0); if historical weights, unrecorded initial strategy state, or non-default options were active, actual target coordinates may differ.
+
+## Descriptive Checkpoint Comparisons (Not Controlled Experiments)
+
+### `checkpoint-039909-seed-000041` (fail) vs. `checkpoint-039911-seed-000041` (recovery, seed=41)
+- Recovery episode (checkpoint-039911-seed-000041) executed productive repositioning in steps 1..13 (6 unpenned sheep), followed by: Flock advanced toward pen by +14.2 route cells (77.0->62.8); behind-flock alignment +0.72->+0.35.
+- Failure episode (checkpoint-039909-seed-000041) remained in 'oscillation_loop' during steps 1533..1575 (43 steps, 1 unpenned sheep, net route progress -1.0).
+- Recovery completed all 6 sheep at step 977, whereas failure ended at step 1575 (no-progress) with 1 unpenned sheep.
+- Both episodes encountered candidate mechanism 'corner_target_clamping_inversion'.
+- Both episodes encountered candidate mechanism 'dog_outside_sheep_vision_loop'.
+- Both episodes encountered candidate mechanism 'flanking_or_collection_repositioning'.
+- Both episodes encountered candidate mechanism 'no_progress_spread_jitter_reset'.
+- Both episodes encountered candidate mechanism 'role_churn_target_jumping'.
+- Both episodes encountered candidate mechanism 'two_sheep_collector_blind_spot'.
+
+### `checkpoint-039909-seed-000073` (fail) vs. `checkpoint-039911-seed-000073` (recovery, seed=73)
+- Recovery episode (checkpoint-039911-seed-000073) executed productive repositioning in steps 376..387 (6 unpenned sheep), followed by: 1 sheep penned (unpenned 6->5); avg route distance 17.7->10.0.
+- Failure episode (checkpoint-039909-seed-000073) remained in 'productive_repositioning' during steps 2297..2311 (15 steps, 6 unpenned sheep, net route progress +0.7).
+- Recovery completed all 6 sheep at step 793, whereas failure ended at step 2320 (timeout) with 4 unpenned sheep.
+- Both episodes encountered candidate mechanism 'corner_target_clamping_inversion'.
+- Both episodes encountered candidate mechanism 'dog_outside_sheep_vision_loop'.
+- Both episodes encountered candidate mechanism 'flanking_or_collection_repositioning'.
+- Both episodes encountered candidate mechanism 'no_progress_spread_jitter_reset'.
+
+### `checkpoint-039911-seed-000071` (fail) vs. `checkpoint-039910-seed-000071` (recovery, seed=71)
+- Recovery episode (checkpoint-039910-seed-000071) executed productive repositioning in steps 1402..1426 (6 unpenned sheep), followed by: 1 sheep penned (unpenned 6->5); avg route distance 15.5->20.6.
+- Failure episode (checkpoint-039911-seed-000071) remained in 'oscillation_loop' during steps 252..2320 (2069 steps, 6 unpenned sheep, net route progress -30.5).
+- Recovery completed all 6 sheep at step 1598, whereas failure ended at step 2320 (timeout) with 6 unpenned sheep.
+- Both episodes encountered candidate mechanism 'no_progress_spread_jitter_reset'.
+
+## Unavailable Source Recordings (Historical Files Pruned or Missing)
+
+- **`diag_stage34_ep139_seed146_t1793983025`**: Source replay recording is not present on disk in `artifacts/replays/` or `artifacts/evaluations/replays/`. Under project evidence standards (AGENTS.md), missing recordings cannot be fabricated or presented as newly regenerated evidence. Prior observational notes for this episode are preserved as historical references only.

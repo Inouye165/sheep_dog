@@ -29,6 +29,14 @@ ROLE_ORDER: tuple[DogRole, ...] = (
 MAX_SHEEP_SLOTS: int = 6  # highest sheep count used in any curriculum stage
 HERD_DOG_SLOTS: int = 3  # highest dog count used in any curriculum stage
 
+GATE_FEATURE_NAMES: tuple[str, ...] = (
+    "gate_center_dx",
+    "gate_center_dy",
+    "gate_normal_x",
+    "gate_normal_y",
+)
+GATE_OBSERVATION_SCHEMA_VERSION: str = "guided_gate_v1"
+
 
 @dataclass(frozen=True, slots=True)
 class DogObservation:
@@ -99,7 +107,7 @@ class RoleAwareObservationBuilder:
                 dog.position.distance_to(flock_center) / diagonal,
                 dog.position.distance_to(assignment.target) / diagonal,
                 environment._flock_spread() / diagonal,
-                environment._average_distance_to_pen() / diagonal,
+                min(1.0, environment._average_distance_to_pen() / diagonal),
                 dog.position.x / max(1, environment.env_config.width - 1),
                 (environment.env_config.width - 1 - dog.position.x)
                 / max(1, environment.env_config.width - 1),
@@ -396,7 +404,7 @@ class EmergentObservationBuilder:
                 dog.position.distance_to(pen_center) / diagonal,
                 dog.position.distance_to(flock_center) / diagonal,
                 environment._flock_spread() / diagonal,  # pylint: disable=protected-access
-                environment._average_distance_to_pen() / diagonal,  # pylint: disable=protected-access
+                min(1.0, environment._average_distance_to_pen() / diagonal),  # pylint: disable=protected-access
                 dog.position.x / max(1, environment.env_config.width - 1),
                 (environment.env_config.width - 1 - dog.position.x)
                 / max(1, environment.env_config.width - 1),
@@ -529,3 +537,64 @@ class EmergentObservationBuilder:
                 (point.y - origin.y) / max(1, environment.env_config.height - 1),
             )
         )
+
+
+class GateAwareObservationBuilder(RoleAwareObservationBuilder):
+    """Extend the 54-feature role-aware builder with 4 explicit gate features."""
+
+    def __init__(self, *, zero_gate_features: bool = False) -> None:
+        self.zero_gate_features = bool(zero_gate_features)
+
+    def build(self, environment: SheepdogEnvironment, dog_index: int) -> DogObservation:
+        """Return a 58-feature observation vector appending gate features or zeros."""
+        base = super().build(environment, dog_index)
+        if self.zero_gate_features:
+            gate_values = (0.0, 0.0, 0.0, 0.0)
+        else:
+            dog = environment.dogs[dog_index]
+            gate_center = environment._gate_entrance_center()
+            vx, vy = environment._gate_vector_into_pen()
+            gate_normal_x = 0.0 if vx == 0.0 else float(-vx)
+            gate_normal_y = 0.0 if vy == 0.0 else float(-vy)
+            width_denom = max(1, environment.env_config.width - 1)
+            height_denom = max(1, environment.env_config.height - 1)
+            gate_center_dx = max(
+                -1.0,
+                min(1.0, (gate_center.x - dog.position.x) / width_denom),
+            )
+            gate_center_dy = max(
+                -1.0,
+                min(1.0, (gate_center.y - dog.position.y) / height_denom),
+            )
+            gate_values = (
+                float(gate_center_dx),
+                float(gate_center_dy),
+                gate_normal_x,
+                gate_normal_y,
+            )
+        return DogObservation(
+            dog_index=base.dog_index,
+            role=base.role,
+            feature_names=base.feature_names + GATE_FEATURE_NAMES,
+            values=base.values + gate_values,
+            metadata={
+                **base.metadata,
+                "observation_schema_version": GATE_OBSERVATION_SCHEMA_VERSION,
+                "zero_gate_features": self.zero_gate_features,
+            },
+        )
+
+
+def build_observation_builder(
+    observation_mode: str,
+) -> RoleAwareObservationBuilder | EmergentObservationBuilder:
+    """Return the observation builder corresponding to *observation_mode*."""
+    if observation_mode == "guided":
+        return RoleAwareObservationBuilder()
+    if observation_mode == "emergent":
+        return EmergentObservationBuilder()
+    if observation_mode == "guided_gate_control":
+        return GateAwareObservationBuilder(zero_gate_features=True)
+    if observation_mode == "guided_gate_treatment":
+        return GateAwareObservationBuilder(zero_gate_features=False)
+    raise ValueError(f"Unsupported observation_mode: {observation_mode!r}")

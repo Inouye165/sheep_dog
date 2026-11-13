@@ -95,12 +95,19 @@ class AdaptiveStepController:
         ema_alpha: float = 0.40,
         debounce_required_hits: int = 2,
         initial_curriculum_stage: int = 1,
+        breakthrough_fast_attack: bool = True,
+        entropy_damping_min_stage: int = 2,
     ) -> None:
         self.base_learning_rate = float(base_learning_rate)
         self.base_mutation_scale = float(base_mutation_scale)
         self.base_entropy_coef = float(base_entropy_coef)
         self.ema_alpha = float(ema_alpha)
         self.debounce_required_hits = max(1, int(debounce_required_hits))
+        self.breakthrough_fast_attack = bool(breakthrough_fast_attack)
+        # Entropy (exploration) is only damped once the adaptive stage reaches this
+        # value; below it the base entropy is kept so a plateaued policy can still
+        # explore its way out of local optima (e.g. dogs idling on "wait").
+        self.entropy_damping_min_stage = max(1, int(entropy_damping_min_stage))
 
         self.current_stage: int = 1
         self.curriculum_stage: int = int(initial_curriculum_stage)
@@ -164,35 +171,66 @@ class AdaptiveStepController:
             self.reset_for_curriculum_stage(current_curriculum_stage)
             return self.get_state()
 
-        # 2. Update smoothed exponential moving average
+        # 2. Update smoothed exponential moving average with asymmetric adaptation
         eval_success = max(0.0, min(1.0, float(eval_success_rate)))
         if self.ema_success_rate == 0.0 and self.current_stage == 1 and self.consecutive_hits == 0:
             self.ema_success_rate = eval_success
         else:
+            # Asymmetric adaptation: adapt faster on improvement to catch breakthroughs,
+            # but decay more smoothly during dips to avoid knee-jerk loss of stabilization.
+            alpha = (
+                max(self.ema_alpha, 0.50)
+                if eval_success >= self.ema_success_rate
+                else min(self.ema_alpha, 0.25)
+            )
             self.ema_success_rate = (
-                self.ema_alpha * eval_success + (1.0 - self.ema_alpha) * self.ema_success_rate
+                alpha * eval_success + (1.0 - alpha) * self.ema_success_rate
             )
 
         # 3. Determine proposed target stage based on raw and smoothed success
         raw_target = _target_stage_for_success(eval_success)
         ema_target = _target_stage_for_success(self.ema_success_rate)
-        proposed_target = min(raw_target, ema_target)
+
+        # Breakthrough fast-attack protection:
+        # A score of >= 90% is auto-promotion caliber evidence.
+        # Immediately target Stage 4 (Holding Gate: 0.50x LR, 0.005 entropy) to lock in
+        # fragile policy weights and prevent high-learning-rate destruction during subsequent PPO updates.
+        if self.breakthrough_fast_attack and eval_success >= 0.90:
+            proposed_target = 4
+        elif self.breakthrough_fast_attack and eval_success >= 0.75:
+            proposed_target = max(3, ema_target)
+        elif self.breakthrough_fast_attack and eval_success >= 0.60:
+            proposed_target = max(2, ema_target)
+        else:
+            proposed_target = min(raw_target, ema_target)
 
         # 4. Debounce transitions
         if proposed_target > self.current_stage:
-            # Accumulate confirmation count towards stepping up
-            if proposed_target >= self.pending_target_stage:
-                self.consecutive_hits += 1
-                self.pending_target_stage = min(proposed_target, max(self.pending_target_stage, self.current_stage + 1))
-            else:
-                self.pending_target_stage = proposed_target
-                self.consecutive_hits = 1
-
-            if self.consecutive_hits >= self.debounce_required_hits:
-                # Step up by at most 1 stage at a time for conservative progression
-                self.current_stage = min(self.current_stage + 1, proposed_target)
+            # Breakthrough immediate lock: on >=90% (or 75%+ when already at stage 2),
+            # advance immediately to damp learning rate before the next training segment.
+            if self.breakthrough_fast_attack and (
+                proposed_target == 4
+                or (proposed_target == 3 and self.current_stage >= 2)
+            ):
+                self.current_stage = proposed_target
                 self.consecutive_hits = 0
                 self.pending_target_stage = self.current_stage
+            else:
+                # Accumulate confirmation count towards stepping up
+                if proposed_target >= self.pending_target_stage:
+                    self.consecutive_hits += 1
+                    self.pending_target_stage = min(
+                        proposed_target,
+                        max(self.pending_target_stage, self.current_stage + 1),
+                    )
+                else:
+                    self.pending_target_stage = proposed_target
+                    self.consecutive_hits = 1
+
+                if self.consecutive_hits >= self.debounce_required_hits:
+                    self.current_stage = min(self.current_stage + 1, proposed_target)
+                    self.consecutive_hits = 0
+                    self.pending_target_stage = self.current_stage
         elif proposed_target < self.current_stage:
             # Performance degraded: release step size smoothly (at most 1 stage per check)
             self.current_stage = max(1, self.current_stage - 1)
@@ -220,7 +258,10 @@ class AdaptiveStepController:
 
         effective_lr = self.base_learning_rate * multiplier
         effective_mutation = self.base_mutation_scale * multiplier
-        effective_entropy = self.base_entropy_coef * multiplier
+        entropy_multiplier = (
+            multiplier if self.current_stage >= self.entropy_damping_min_stage else 1.0
+        )
+        effective_entropy = self.base_entropy_coef * entropy_multiplier
 
         return AdaptiveStepState(
             stage=self.current_stage,

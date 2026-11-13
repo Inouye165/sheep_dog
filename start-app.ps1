@@ -15,8 +15,13 @@ $watchdogScript = Join-Path $artifactDir 'watch-service-health.ps1'
 $pidFile = Join-Path $artifactDir 'pids.json'
 $backendPort = 8000
 $webPort = 5173
-$backendStartupTimeoutSeconds = 180
-$webStartupTimeoutSeconds = 45
+# Large runs can spend several minutes restoring training state before the API binds its port.
+# Exceeding this is only a warning while the backend process is still alive.
+$backendStartupTimeoutSeconds = 900
+$webStartupTimeoutSeconds = 60
+# Readiness probe: 503 + Retry-After while training state restores, 200 once the API is usable.
+$backendReadyUrl = "http://127.0.0.1:$backendPort/api/ready"
+$webUrl = "http://127.0.0.1:$webPort/"
 
 New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
 
@@ -26,7 +31,7 @@ function Test-HttpReady {
     )
 
     try {
-        $null = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 2
+        $null = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 3
         return $true
     }
     catch {
@@ -51,33 +56,54 @@ function Get-LogTail {
 }
 
 function Wait-ForService {
+    # Returns $true when ready. Throws immediately if the process exits. On timeout, throws
+    # unless -AllowSlowStart is set and the process is still alive, in which case it warns
+    # and returns $false so the caller can leave the service running.
     param(
         [Parameter(Mandatory = $true)][int]$ProcessId,
         [Parameter(Mandatory = $true)][string]$Name,
         [Parameter(Mandatory = $true)][string]$Url,
         [Parameter(Mandatory = $true)][string]$StdOutLog,
         [Parameter(Mandatory = $true)][string]$StdErrLog,
-        [int]$TimeoutSeconds = 30
+        [int]$TimeoutSeconds = 30,
+        [switch]$AllowSlowStart
     )
 
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    $nextProgressAt = 15
     $processExited = $false
-    while ((Get-Date) -lt $deadline) {
+    # Back off during long waits (0.25s growing to 5s) so probes don't hammer the service.
+    $pollMs = 250
+    while ($timer.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
         if (Test-HttpReady -Url $Url) {
-            return
+            return $true
         }
 
-        if (-not $processExited) {
-            $processExited = $null -eq (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)
+        if ($null -eq (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) {
+            # Fail fast instead of burning the whole timeout on a crashed process.
+            $processExited = $true
+            break
         }
 
-        Start-Sleep -Milliseconds 250
+        if ($timer.Elapsed.TotalSeconds -ge $nextProgressAt) {
+            Write-Host ("  ...{0} still starting ({1:n0}s elapsed)" -f $Name, $timer.Elapsed.TotalSeconds)
+            $nextProgressAt += 15
+        }
+
+        Start-Sleep -Milliseconds $pollMs
+        $pollMs = [Math]::Min([int]($pollMs * 1.5), 5000)
+    }
+
+    if (-not $processExited -and $AllowSlowStart) {
+        Write-Warning "$Name is still initializing after ${TimeoutSeconds}s; its process is alive, so it was left running. Watch: $StdOutLog"
+        return $false
     }
 
     $outTail = Get-LogTail -Path $StdOutLog
     $errTail = Get-LogTail -Path $StdErrLog
-    $processStatus = if ($processExited) { 'launcher process exited' } else { 'launcher process still running' }
-    throw "$Name did not become ready at $Url within $TimeoutSeconds seconds ($processStatus).`n--- $Name stdout ---`n$outTail`n--- $Name stderr ---`n$errTail"
+    $processStatus = if ($processExited) { 'process exited' } else { 'process still running' }
+    $elapsedText = [int]$timer.Elapsed.TotalSeconds
+    throw "$Name did not become ready at $Url ($processStatus after ${elapsedText}s).`n--- $Name stdout ---`n$outTail`n--- $Name stderr ---`n$errTail"
 }
 
 function Get-ListenerPid {
@@ -86,6 +112,7 @@ function Get-ListenerPid {
     )
 
     $listenerPid = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+        Where-Object { $_.OwningProcess -gt 4 } |
         Select-Object -First 1 -ExpandProperty OwningProcess
     if ($null -eq $listenerPid) {
         return $null
@@ -133,6 +160,7 @@ function Get-ListenerPid {
     param([Parameter(Mandatory = $true)][int]$Port)
 
     $listenerPid = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+        Where-Object { $_.OwningProcess -gt 4 } |
         Select-Object -First 1 -ExpandProperty OwningProcess
     if ($null -eq $listenerPid) {
         return $null
@@ -221,6 +249,10 @@ function Stop-ProcessTree {
         [Parameter(Mandatory = $true)][int]$Id
     )
 
+    if ($Id -le 4) {
+        return
+    }
+
     $children = Get-CimInstance Win32_Process -Filter "ParentProcessId = $Id" -ErrorAction SilentlyContinue
     foreach ($child in $children) {
         Stop-ProcessTree -Id $child.ProcessId
@@ -245,7 +277,8 @@ function Stop-ListenerOnPort {
         [Parameter(Mandatory = $true)][int]$Port
     )
 
-    $listeners = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+    $listeners = Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue |
+        Where-Object { $_.OwningProcess -gt 4 } |
         Select-Object -ExpandProperty OwningProcess -Unique
     foreach ($listenerPid in ($listeners | Where-Object { $_ -ne $null })) {
         Stop-ProcessIfRunning -Id $listenerPid
@@ -476,7 +509,7 @@ $resumeTraining = Get-ResumeTrainingRequest -SessionState (Get-TrainingSessionSt
 Ensure-WatchdogScript -Path $watchdogScript
 Set-Content -Path $watchdogLog -Value ("{0}`tWATCHDOG_READY" -f (Get-Date).ToString('o')) -Encoding UTF8
 
-Write-Host 'Starting backend API on http://127.0.0.1:8000'
+Write-Host "Starting backend API on http://127.0.0.1:$backendPort"
 $backend = Start-ManagedProcess `
     -FilePath $pythonExe `
     -Arguments @('-u', '-m', 'sheepdog.server') `
@@ -484,25 +517,40 @@ $backend = Start-ManagedProcess `
     -StandardOutput $backendOut `
     -StandardError $backendErr
 
-Write-Host 'Starting web viewer on http://127.0.0.1:5173'
+# The web server only proxies /api, so it is started and verified independently of the backend.
+# --strictPort makes Vite fail loudly instead of silently moving to another port.
+Write-Host "Starting web viewer on $webUrl"
 $web = Start-ManagedProcess `
     -FilePath $npmCmd `
-    -Arguments @('run', 'dev', '--', '--host', '127.0.0.1', '--port', '5173') `
+    -Arguments @('run', 'dev', '--', '--host', '127.0.0.1', '--port', "$webPort", '--strictPort') `
     -WorkingDirectory $webDir `
     -StandardOutput $webOut `
     -StandardError $webErr
 
 try {
-    Write-Host "Waiting for backend readiness (timeout ${backendStartupTimeoutSeconds}s)..."
-    Wait-ForService `
+    Write-Host "Waiting for web readiness (timeout ${webStartupTimeoutSeconds}s)..."
+    $null = Wait-ForService `
+        -ProcessId $web.Id `
+        -Name 'Web viewer' `
+        -Url $webUrl `
+        -StdOutLog $webOut `
+        -StdErrLog $webErr `
+        -TimeoutSeconds $webStartupTimeoutSeconds
+    Write-Host ("Web ready after {0:n1}s." -f $startupTimer.Elapsed.TotalSeconds)
+
+    Write-Host "Waiting for backend readiness (up to ${backendStartupTimeoutSeconds}s; restoring training state can take a few minutes)..."
+    $backendReady = Wait-ForService `
         -ProcessId $backend.Id `
         -Name 'Backend API' `
-        -Url "http://127.0.0.1:$backendPort/api/training/status" `
+        -Url $backendReadyUrl `
         -StdOutLog $backendOut `
         -StdErrLog $backendErr `
-        -TimeoutSeconds $backendStartupTimeoutSeconds
-    Write-Host ("Backend ready after {0:n1}s." -f $startupTimer.Elapsed.TotalSeconds)
-    if ($null -ne $resumeTraining) {
+        -TimeoutSeconds $backendStartupTimeoutSeconds `
+        -AllowSlowStart
+    if ($backendReady) {
+        Write-Host ("Backend ready after {0:n1}s total." -f $startupTimer.Elapsed.TotalSeconds)
+    }
+    if ($backendReady -and $null -ne $resumeTraining) {
         Write-Host "Resuming training with $($resumeTraining.remainingEpisodes) remaining episodes..."
         try {
             $resumeResponse = Invoke-JsonPost -Uri "http://127.0.0.1:$backendPort/api/training/start" -Body $resumeTraining.request
@@ -514,16 +562,9 @@ try {
             Write-Warning "Could not resume saved training session: $_"
         }
     }
-
-    Write-Host "Waiting for web readiness (timeout ${webStartupTimeoutSeconds}s)..."
-    Wait-ForService `
-        -ProcessId $web.Id `
-        -Name 'Web viewer' `
-        -Url "http://127.0.0.1:$webPort/" `
-        -StdOutLog $webOut `
-        -StdErrLog $webErr `
-        -TimeoutSeconds $webStartupTimeoutSeconds
-    Write-Host ("Web ready after {0:n1}s total." -f $startupTimer.Elapsed.TotalSeconds)
+    elseif ($null -ne $resumeTraining) {
+        Write-Warning 'Backend was not ready yet, so the saved training session was not resumed. Resume it from the UI once the backend is up.'
+    }
 }
 catch {
     Write-Host 'Startup failed. Cleaning up launched services...'
@@ -539,8 +580,8 @@ $webListenerPid = Get-ListenerPid -Port $webPort
 $watchdog = Start-ServiceWatchdog `
     -BackendPort $backendPort `
     -WebPort $webPort `
-    -BackendUrl "http://127.0.0.1:$backendPort/api/training/status" `
-    -WebUrl "http://127.0.0.1:$webPort/" `
+    -BackendUrl $backendReadyUrl `
+    -WebUrl $webUrl `
     -ScriptPath $watchdogScript `
     -LogPath $watchdogLog
 

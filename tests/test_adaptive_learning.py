@@ -50,6 +50,7 @@ def test_debounce_protects_against_single_fluke():
         base_learning_rate=1e-4,
         debounce_required_hits=2,
         initial_curriculum_stage=1,
+        breakthrough_fast_attack=False,
     )
     # 1. Start with 0.50 (stage 1)
     s1 = controller.update(0.50, current_curriculum_stage=1)
@@ -62,6 +63,30 @@ def test_debounce_protects_against_single_fluke():
     # 3. Second 0.90 hit confirms improvement, advances conservatively to stage 2
     s3 = controller.update(0.90, current_curriculum_stage=1)
     assert s3.stage >= 2
+
+
+def test_breakthrough_fast_attack_immediately_protects_100_percent_success():
+    controller = AdaptiveStepController(
+        base_learning_rate=1e-4,
+        initial_curriculum_stage=1,
+    )
+    # Start in low performance (Stage 1)
+    s1 = controller.update(0.40, current_curriculum_stage=1)
+    assert s1.stage == 1
+
+    # When policy hits 100% (or >=90%), it immediately advances to Stage 4 (Holding Gate: 0.50x LR)
+    s2 = controller.update(1.00, current_curriculum_stage=1)
+    assert s2.stage == 4
+    assert s2.multiplier == 0.50
+    assert "Stage 4 of 4" in s2.label
+    assert s2.effective_learning_rate == pytest.approx(5e-5)
+    assert s2.effective_entropy_coef == pytest.approx(0.005)
+
+    # If next checkpoint drops to 70%, it steps down smoothly to Stage 3 rather than collapsing to Stage 1
+    s3 = controller.update(0.70, current_curriculum_stage=1)
+    assert s3.stage == 3
+    assert s3.multiplier == 0.65
+
 
 
 def test_stage_progression_with_sustained_high_success():
@@ -195,3 +220,30 @@ def test_graceful_asymmetric_recovery_on_performance_drop():
     state_after_drop_2 = controller.update(0.30, 1)
     assert state_after_drop_2.stage == 1
     assert state_after_drop_2.multiplier == 1.0
+
+
+def test_entropy_damping_can_be_deferred_until_holding_gate():
+    controller = AdaptiveStepController(
+        base_learning_rate=1e-4,
+        base_entropy_coef=0.02,
+        debounce_required_hits=1,
+        initial_curriculum_stage=33,
+        entropy_damping_min_stage=4,
+    )
+    # Stage 3 (Refining): learning rate is damped, exploration is not.
+    controller.update(0.80, 33)
+    state = controller.update(0.80, 33)
+    assert state.stage == 3
+    assert state.effective_learning_rate == pytest.approx(1e-4 * 0.65)
+    assert state.effective_entropy_coef == pytest.approx(0.02)
+
+    # Stage 4 (Holding Gate): entropy is damped to lock in the near-mastered policy.
+    state = controller.update(0.95, 33)
+    assert state.stage == 4
+    assert state.effective_entropy_coef == pytest.approx(0.02 * 0.50)
+
+
+def test_training_config_defers_entropy_damping_by_default():
+    from sheepdog.config import TrainingConfig
+
+    assert TrainingConfig().adaptive_entropy_damping_min_stage == 4

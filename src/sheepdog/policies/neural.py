@@ -13,12 +13,16 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import torch
+from gymnasium import spaces
 from sb3_contrib import MaskablePPO
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnv
+from torch import nn
 
 from sheepdog.atomic_io import atomic_replace
 from sheepdog.config import LabConfig
 from sheepdog.environment import ACTION_ORDER
+from sheepdog.observations import GATE_OBSERVATION_SCHEMA_VERSION
 from sheepdog.policies.base import Action
 from sheepdog.training.rl_env import SheepdogRLAdapter
 
@@ -77,27 +81,46 @@ class NeuralPolicyConfig:
     observation_size: int
     action_size: int = len(ACTION_ORDER)
     env_workers: int = 1
+    observation_mode: str | None = None
+    observation_schema_version: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict."""
-        return {
+        payload: dict[str, Any] = {
             "hidden_sizes": list(self.hidden_sizes),
             "observation_size": self.observation_size,
             "action_size": self.action_size,
             "env_workers": self.env_workers,
         }
+        if self.observation_mode is not None:
+            payload["observation_mode"] = self.observation_mode
+        if self.observation_schema_version is not None:
+            payload["observation_schema_version"] = self.observation_schema_version
+        return payload
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any] | None, observation_size: int) -> NeuralPolicyConfig:
+    def from_dict(
+        cls,
+        payload: dict[str, Any] | None,
+        observation_size: int,
+        default_hidden_sizes: tuple[int, ...] | None = None,
+    ) -> NeuralPolicyConfig:
         """Reconstruct a NeuralPolicyConfig from persisted state."""
+        fallback = default_hidden_sizes if default_hidden_sizes is not None else LabConfig().training.neural_hidden_sizes
         if not payload:
-            return cls(hidden_sizes=(128, 128, 128), observation_size=observation_size)
-        hidden_sizes = payload.get("hidden_sizes", (128, 128, 128))
+            return cls(hidden_sizes=tuple(fallback), observation_size=observation_size)
+        hidden_sizes = payload.get("hidden_sizes", fallback)
+        raw_obs_mode = payload.get("observation_mode")
+        raw_schema_version = payload.get("observation_schema_version")
         return cls(
             hidden_sizes=tuple(int(value) for value in hidden_sizes),
             observation_size=int(payload.get("observation_size", observation_size)),
             action_size=int(payload.get("action_size", len(ACTION_ORDER))),
             env_workers=max(1, int(payload.get("env_workers", 1))),
+            observation_mode=str(raw_obs_mode) if raw_obs_mode is not None else None,
+            observation_schema_version=(
+                str(raw_schema_version) if raw_schema_version is not None else None
+            ),
         )
 
 
@@ -107,22 +130,206 @@ class NeuralPolicy:
     name = "neural_policy"
     trainer_type = "maskable_ppo"
     policy_type = "neural"
+    discount_timebase = "sequential_shared_dog"
 
-    def __init__(self, model: MaskablePPO, model_path: Path, config: NeuralPolicyConfig) -> None:
+    def __init__(
+        self,
+        model: MaskablePPO,
+        model_path: Path,
+        config: NeuralPolicyConfig,
+        *,
+        checkpoint_gamma: float | None = None,
+    ) -> None:
         self.model = model
         self.model_path = Path(model_path)
         self.config = config
         self.policy_version: int | None = None
+        self.latest_decision_telemetry: list[dict[str, Any]] | None = None
+        if checkpoint_gamma is not None:
+            self._checkpoint_gamma: float | None = float(checkpoint_gamma)
+        elif hasattr(model, "gamma") and isinstance(model.gamma, int | float):
+            self._checkpoint_gamma = float(model.gamma)
+        else:
+            self._checkpoint_gamma = None
+
+    @property
+    def checkpoint_gamma(self) -> float | None:
+        """Return the training discount factor gamma stored with the model."""
+        if self._checkpoint_gamma is not None:
+            return self._checkpoint_gamma
+        if hasattr(self.model, "gamma") and isinstance(self.model.gamma, int | float):
+            return float(self.model.gamma)
+        return None
+
+    def live_training_parameters(self) -> dict[str, Any]:
+        """Return a snapshot of the live SB3 model, rollout buffer, and optimizer parameters."""
+        model = self.model
+        rollout_buffer = getattr(model, "rollout_buffer", None)
+        optimizer_lrs: list[float] = []
+        if hasattr(model, "policy") and hasattr(model.policy, "optimizer"):
+            optimizer_lrs = [
+                float(group.get("lr", 0.0))
+                for group in getattr(model.policy.optimizer, "param_groups", ())
+            ]
+        return {
+            "gamma": float(model.gamma) if hasattr(model, "gamma") and isinstance(model.gamma, int | float) else None,
+            "rollout_buffer_gamma": (
+                float(rollout_buffer.gamma)
+                if rollout_buffer is not None and hasattr(rollout_buffer, "gamma") and isinstance(rollout_buffer.gamma, int | float)
+                else None
+            ),
+            "gae_lambda": (
+                float(model.gae_lambda)
+                if hasattr(model, "gae_lambda") and isinstance(model.gae_lambda, int | float)
+                else None
+            ),
+            "rollout_buffer_gae_lambda": (
+                float(rollout_buffer.gae_lambda)
+                if rollout_buffer is not None and hasattr(rollout_buffer, "gae_lambda") and isinstance(rollout_buffer.gae_lambda, int | float)
+                else None
+            ),
+            "ent_coef": (
+                float(model.ent_coef)
+                if hasattr(model, "ent_coef") and isinstance(model.ent_coef, int | float)
+                else None
+            ),
+            "vf_coef": (
+                float(model.vf_coef)
+                if hasattr(model, "vf_coef") and isinstance(model.vf_coef, int | float)
+                else None
+            ),
+            "batch_size": (
+                int(model.batch_size)
+                if hasattr(model, "batch_size") and isinstance(model.batch_size, int | float)
+                else None
+            ),
+            "n_steps": (
+                int(model.n_steps)
+                if hasattr(model, "n_steps") and isinstance(model.n_steps, int | float)
+                else None
+            ),
+            "target_kl": (
+                float(model.target_kl)
+                if hasattr(model, "target_kl") and isinstance(model.target_kl, int | float)
+                else None
+            ),
+            "learning_rate": (
+                float(model.learning_rate)
+                if hasattr(model, "learning_rate") and isinstance(model.learning_rate, int | float)
+                else None
+            ),
+            "optimizer_learning_rates": optimizer_lrs,
+            "seed": (
+                int(model.seed)
+                if hasattr(model, "seed") and isinstance(model.seed, int)
+                else None
+            ),
+            "rollout_buffer_pos": (
+                int(rollout_buffer.pos)
+                if rollout_buffer is not None and hasattr(rollout_buffer, "pos") and isinstance(rollout_buffer.pos, int)
+                else None
+            ),
+            "rollout_buffer_full": (
+                bool(rollout_buffer.full)
+                if rollout_buffer is not None and hasattr(rollout_buffer, "full")
+                else None
+            ),
+            "n_updates": (
+                int(model._n_updates)
+                if hasattr(model, "_n_updates") and isinstance(model._n_updates, int)
+                else None
+            ),
+            "num_timesteps": (
+                int(model.num_timesteps)
+                if hasattr(model, "num_timesteps") and isinstance(model.num_timesteps, int)
+                else None
+            ),
+        }
+
+    def configure_for_training(
+        self,
+        config: LabConfig,
+        *,
+        effective_learning_rate: float | None = None,
+        effective_entropy_coef: float | None = None,
+        reset_rollout_buffer: bool = True,
+        set_seed: bool = False,
+    ) -> dict[str, Any]:
+        """Apply training hyperparameters explicitly to a loaded or initialized SB3 model.
+
+        Stable-Baselines3 ``MaskablePPO.load()`` restores ``gamma``, ``gae_lambda``,
+        ``ent_coef``, ``learning_rate``, ``seed``, and ``rollout_buffer`` parameters
+        from the checkpoint archive. When resuming training under controlled
+        hyperparameter overrides, both the model attributes and the live
+        ``rollout_buffer``/optimizer state must be updated before ``learn()``.
+        """
+        train_cfg = config.training
+        gamma = float(train_cfg.gamma)
+        gae_lambda = float(train_cfg.gae_lambda)
+        ent_coef = float(
+            effective_entropy_coef
+            if effective_entropy_coef is not None
+            else train_cfg.entropy_coef
+        )
+        vf_coef = float(train_cfg.value_coef)
+        batch_size = int(train_cfg.batch_size)
+        target_kl = getattr(train_cfg, "target_kl", None)
+        learning_rate = float(
+            effective_learning_rate
+            if effective_learning_rate is not None
+            else train_cfg.learning_rate
+        )
+
+        self.model.gamma = gamma
+        self.model.gae_lambda = gae_lambda
+        self.model.ent_coef = ent_coef
+        self.model.vf_coef = vf_coef
+        self.model.batch_size = batch_size
+        self.model.target_kl = float(target_kl) if target_kl is not None else None
+        self.model.learning_rate = learning_rate
+        self.model.lr_schedule = lambda _, _lr=learning_rate: _lr
+
+        if hasattr(self.model, "policy") and hasattr(self.model.policy, "optimizer"):
+            for param_group in getattr(self.model.policy.optimizer, "param_groups", ()):
+                param_group["lr"] = learning_rate
+
+        rollout_buffer = getattr(self.model, "rollout_buffer", None)
+        if rollout_buffer is not None:
+            if hasattr(rollout_buffer, "gamma"):
+                rollout_buffer.gamma = gamma
+            if hasattr(rollout_buffer, "gae_lambda"):
+                rollout_buffer.gae_lambda = gae_lambda
+            if reset_rollout_buffer and hasattr(rollout_buffer, "reset"):
+                rollout_buffer.reset()
+        if reset_rollout_buffer and hasattr(self.model, "_last_obs"):
+            self.model._last_obs = None
+
+        if set_seed:
+            train_seed = int(train_cfg.train_seed)
+            self.model.seed = train_seed
+            if hasattr(self.model, "set_random_seed"):
+                self.model.set_random_seed(train_seed)
+
+        self._checkpoint_gamma = gamma
+        return self.live_training_parameters()
 
     @classmethod
     def initialize(cls, config: LabConfig) -> NeuralPolicy:
         """Create a fresh, untrained neural policy with vectorized environments."""
         vec_env, env_workers, _backend = _build_vec_env(config)
         observation_size = int(vec_env.observation_space.shape[0])
+        obs_mode = config.training.observation_mode
+        schema_version = (
+            GATE_OBSERVATION_SCHEMA_VERSION
+            if obs_mode in {"guided_gate_control", "guided_gate_treatment"}
+            else None
+        )
         policy_config = NeuralPolicyConfig(
             hidden_sizes=tuple(config.training.neural_hidden_sizes),
             observation_size=observation_size,
             env_workers=env_workers,
+            observation_mode=obs_mode,
+            observation_schema_version=schema_version,
         )
         has_tensorboard = tensorboard_available()
         tb_dir = (Path(config.training.output_dir) / "tb_logs") if config.training.output_dir and has_tensorboard else None
@@ -168,7 +375,54 @@ class NeuralPolicy:
             model.tensorboard_log = str(tb_dir)
         else:
             model.tensorboard_log = None
-        loaded_pconfig = NeuralPolicyConfig.from_dict(policy_config, observation_size)
+        loaded_pconfig = NeuralPolicyConfig.from_dict(
+            policy_config,
+            observation_size,
+            default_hidden_sizes=tuple(config.training.neural_hidden_sizes),
+        )
+        model_obs_shape = getattr(model.observation_space, "shape", None)
+        if not model_obs_shape or int(model_obs_shape[0]) != observation_size:
+            raise ValueError(
+                f"Incompatible observation size: model expects {model_obs_shape}, "
+                f"target configuration expects ({observation_size},)"
+            )
+        if loaded_pconfig.observation_size != observation_size:
+            raise ValueError(
+                f"Incompatible policy_config observation_size: "
+                f"{loaded_pconfig.observation_size} != {observation_size}"
+            )
+        target_obs_mode = config.training.observation_mode
+        if (
+            loaded_pconfig.observation_mode is not None
+            and loaded_pconfig.observation_mode != target_obs_mode
+        ):
+            raise ValueError(
+                f"Incompatible observation_mode: checkpoint policy_config has "
+                f"{loaded_pconfig.observation_mode!r}, target configuration has {target_obs_mode!r}"
+            )
+        expected_schema_version = (
+            GATE_OBSERVATION_SCHEMA_VERSION
+            if target_obs_mode in {"guided_gate_control", "guided_gate_treatment"}
+            else None
+        )
+        if (
+            loaded_pconfig.observation_schema_version is not None
+            and expected_schema_version is not None
+            and loaded_pconfig.observation_schema_version != expected_schema_version
+        ):
+            raise ValueError(
+                f"Incompatible observation_schema_version: checkpoint policy_config has "
+                f"{loaded_pconfig.observation_schema_version!r}, expected {expected_schema_version!r}"
+            )
+        if (
+            loaded_pconfig.observation_schema_version is not None
+            and expected_schema_version is None
+            and target_obs_mode in {"guided", "emergent"}
+        ):
+            raise ValueError(
+                f"Incompatible observation_schema_version: checkpoint policy_config has "
+                f"{loaded_pconfig.observation_schema_version!r}, incompatible with {target_obs_mode!r}"
+            )
         expected_arch = tuple(config.training.neural_hidden_sizes)
         if loaded_pconfig.hidden_sizes != expected_arch:
             raise ValueError(
@@ -240,14 +494,38 @@ class NeuralPolicy:
             return False
 
     def select_actions(self, environment: object, deterministic: bool = True) -> list[Action]:
-        """Return one action per dog based on the neural model's predictions."""
+        """Return one action per dog based on the neural model's predictions.
+
+        Capture is completely passive: the identical inference path (self.model.predict)
+        is executed regardless of whether capture is on or off.
+
+        Telemetric Diagnostics & Equivalence Assumptions:
+        - When capture_step_telemetry is True, policy logits, action probabilities, and value
+          estimates are collected via a separate read-only diagnostic evaluation
+          (model.policy.get_distribution and model.policy.predict_values) inside torch.no_grad().
+        - These values are explicitly identified as "recomputed_diagnostic_forward_pass" rather
+          than original decision outputs, because Stable-Baselines3 predict() returns only the
+          action indices and does not expose internal intermediate tensors.
+        - Equivalence assumption: For standard feedforward (MLP) architectures in eval mode,
+          recomputed logits and value predictions are bitwise identical to the tensors evaluated
+          inside predict(). For stochastic action selection, the action was chosen during the
+          predict() call; recomputed probabilities reflect the categorical distribution but
+          do not consume any additional random numbers.
+        - If extraction fails (e.g. torch OOM or unsupported custom head), the exception is caught,
+          recorded in capture_error, and the selected action is strictly preserved without reselection.
+        - Telemetry payload size is bounded to fixed action-order dictionaries (9 actions max),
+          ensuring storage and memory remain strictly bounded.
+        """
         actions: list[Action] = []
+        decision_records: list[dict[str, Any]] = []
         reserved_positions: set[object] = set()
+        capture_telemetry = bool(getattr(environment, "capture_step_telemetry", False))
         if hasattr(environment, "prepare_policy_step"):
             environment.prepare_policy_step()
         for dog_index in range(environment.dog_count):
+            obs_obj = environment.build_observation_for_dog(dog_index)
             observation = np.asarray(
-                environment.build_observation_for_dog(dog_index).values,
+                obs_obj.values,
                 dtype=np.float32,
             )
             mask_map = environment.action_mask_for_dog(
@@ -255,6 +533,8 @@ class NeuralPolicy:
                 reserved_positions=reserved_positions,
             )
             action_masks = np.asarray([mask_map[action] for action in ACTION_ORDER], dtype=bool)
+
+            # Normal single-pass action selection: identical whether capture is on or off
             action_index, _state = self.model.predict(
                 observation,
                 action_masks=action_masks,
@@ -263,6 +543,74 @@ class NeuralPolicy:
             action = ACTION_ORDER[int(action_index)]
             actions.append(action)
             reserved_positions.add(environment.project_dog_action(dog_index, action))
+
+            if capture_telemetry:
+                logits_dict: dict[str, float] | None = None
+                probs_dict: dict[str, float] | None = None
+                value_est: float | None = None
+                capture_error: str | None = None
+
+                # Passive telemetry extraction: observe tensors from model.policy without sampling or RNG consumption
+                if hasattr(self.model, "policy"):
+                    try:
+                        import torch
+
+                        with torch.no_grad():
+                            obs_tensor, _ = self.model.policy.obs_to_tensor(observation.reshape(1, -1))
+                            masks_tensor = torch.as_tensor(
+                                action_masks.reshape(1, -1),
+                                device=self.model.policy.device,
+                            )
+                            distribution = self.model.policy.get_distribution(
+                                obs_tensor, action_masks=masks_tensor
+                            )
+                            raw_logits = distribution.distribution.logits.detach().cpu().numpy().reshape(-1)
+                            probs = distribution.distribution.probs.detach().cpu().numpy().reshape(-1)
+                            logits_dict = {act: float(raw_logits[i]) for i, act in enumerate(ACTION_ORDER)}
+                            probs_dict = {act: float(probs[i]) for i, act in enumerate(ACTION_ORDER)}
+                            val_tensor = self.model.policy.predict_values(obs_tensor)
+                            value_est = float(val_tensor.detach().cpu().numpy().reshape(-1)[0])
+                    except Exception as ex:
+                        capture_error = f"telemetry_extraction_failed: {type(ex).__name__}: {ex}"
+                else:
+                    capture_error = "unsupported_model_type_no_policy_attribute"
+
+                physical_mask = environment.action_mask_for_dog(
+                    dog_index,
+                    policy_mode="neural_policy",
+                    reserved_positions=reserved_positions,
+                )
+                decision_records.append({
+                    "dog_index": dog_index,
+                    "world_step": getattr(environment, "step_count", 0),
+                    "observation": observation.tolist(),
+                    "decision_action_mask": {act: bool(mask_map[act]) for act in ACTION_ORDER},
+                    "recomputed_physical_mask": {
+                        act: bool(physical_mask.get(act, False)) for act in ACTION_ORDER
+                    },
+                    "selected_action": action,
+                    "executed_action": action,
+                    "replacement_reason": None,
+                    "action_probabilities": probs_dict,
+                    "logits": logits_dict,
+                    "value_estimate": value_est,
+                    "action_probabilities_source": (
+                        "recomputed_diagnostic_forward_pass" if probs_dict is not None else None
+                    ),
+                    "value_estimate_source": (
+                        "recomputed_diagnostic_forward_pass" if value_est is not None else None
+                    ),
+                    "decision_mode": "deterministic" if deterministic else "sampled",
+                    "policy_version": self.policy_version,
+                    "checkpoint_id": (
+                        str(self.model_path.stem)
+                        if self.model_path and str(self.model_path) != "."
+                        else None
+                    ),
+                    "mask_type": "actual_decision_time",
+                    "capture_error": capture_error,
+                })
+        self.latest_decision_telemetry = decision_records if capture_telemetry else None
         return actions
 
     def score_actions(self, observation: np.ndarray, action_mask: np.ndarray) -> np.ndarray:
@@ -277,3 +625,184 @@ class NeuralPolicy:
         logits = distribution.distribution.logits.detach().cpu().numpy().reshape(-1)
         logits[~action_mask.astype(bool)] = -np.inf
         return logits
+
+
+def _expand_linear_layer_inputs(
+    layer: nn.Linear,
+    old_dim: int,
+    new_dim: int,
+) -> nn.Linear:
+    """Return a new Linear layer with *new_dim* inputs, preserving [:old_dim] and zero-padding [old_dim:new_dim]."""
+    if layer.in_features != old_dim:
+        raise ValueError(
+            f"Expected Linear.in_features={old_dim}, got {layer.in_features}"
+        )
+    expanded = nn.Linear(
+        in_features=new_dim,
+        out_features=layer.out_features,
+        bias=layer.bias is not None,
+        device=layer.weight.device,
+        dtype=layer.weight.dtype,
+    )
+    with torch.no_grad():
+        expanded.weight.zero_()
+        expanded.weight[:, :old_dim].copy_(layer.weight)
+        if layer.bias is not None:
+            expanded.bias.copy_(layer.bias)
+    return expanded
+
+
+def _expand_extractor_linear_layers(
+    module: nn.Module | None,
+    prefix: str,
+    old_dim: int,
+    new_dim: int,
+    expanded_names: list[str],
+    seen_ids: set[int],
+) -> None:
+    """Update *_features_dim* and expand any first-layer Linear modules inside *module*."""
+    if module is None or id(module) in seen_ids:
+        return
+    seen_ids.add(id(module))
+    if getattr(module, "_features_dim", None) == old_dim:
+        module._features_dim = new_dim
+    for attr_name, child in list(module.named_children()):
+        if isinstance(child, nn.Linear) and child.in_features == old_dim:
+            setattr(module, attr_name, _expand_linear_layer_inputs(child, old_dim, new_dim))
+            expanded_names.append(f"{prefix}.{attr_name}")
+        elif isinstance(child, nn.Sequential):
+            for idx, sub in enumerate(child):
+                if isinstance(sub, nn.Linear) and sub.in_features == old_dim:
+                    child[idx] = _expand_linear_layer_inputs(sub, old_dim, new_dim)
+                    expanded_names.append(f"{prefix}.{attr_name}.{idx}")
+                    break
+
+
+def expand_policy_observation_inputs(
+    source_path: str | Path,
+    output_path: str | Path,
+    *,
+    old_dim: int = 54,
+    new_dim: int = 58,
+    learning_rate: float | None = None,
+) -> dict[str, Any]:
+    """Expand a MaskablePPO checkpoint from *old_dim* to *new_dim* inputs and save atomically.
+
+    Preserves all existing weights ``[:, :old_dim]`` and biases bit-for-bit,
+    initializes ``[:, old_dim:new_dim]`` to exact ``0.0``, resets the optimizer
+    with fresh empty state bound to the new parameters (approximate continuation),
+    updates observation spaces and rollout buffer to ``(new_dim,)``, and writes
+    atomically to *output_path* without modifying *source_path*.
+    """
+    if new_dim <= old_dim:
+        raise ValueError(f"new_dim ({new_dim}) must be greater than old_dim ({old_dim})")
+    resolved_source = Path(source_path).resolve()
+    resolved_output = Path(output_path)
+    if resolved_output.suffix != ".zip":
+        resolved_output = resolved_output.with_suffix(".zip")
+    if resolved_source == resolved_output.resolve():
+        raise ValueError("output_path must differ from source_path to avoid overwriting parent checkpoint")
+
+    model = MaskablePPO.load(str(resolved_source), device="cpu")
+    obs_shape = getattr(model.observation_space, "shape", None)
+    if not obs_shape or len(obs_shape) != 1 or int(obs_shape[0]) != old_dim:
+        raise ValueError(
+            f"Expected source observation_space shape ({old_dim},), got {obs_shape}"
+        )
+
+    policy = model.policy
+    expanded_layers: list[str] = []
+    seen_extractor_ids: set[int] = set()
+    for ext_name in ("features_extractor", "pi_features_extractor", "vf_features_extractor"):
+        _expand_extractor_linear_layers(
+            getattr(policy, ext_name, None),
+            ext_name,
+            old_dim,
+            new_dim,
+            expanded_layers,
+            seen_extractor_ids,
+        )
+
+    mlp_extractor = getattr(policy, "mlp_extractor", None)
+    if mlp_extractor is None:
+        raise ValueError("Policy has no mlp_extractor to expand")
+
+    for net_name in ("policy_net", "value_net", "shared_net"):
+        net = getattr(mlp_extractor, net_name, None)
+        if (
+            isinstance(net, nn.Sequential)
+            and len(net) > 0
+            and isinstance(net[0], nn.Linear)
+            and net[0].in_features == old_dim
+        ):
+            net[0] = _expand_linear_layer_inputs(net[0], old_dim, new_dim)
+            expanded_layers.append(f"mlp_extractor.{net_name}.0")
+
+    if not expanded_layers:
+        raise ValueError(f"No input Linear layers with in_features={old_dim} found to expand")
+
+    low_val = float(np.min(model.observation_space.low))
+    high_val = float(np.max(model.observation_space.high))
+    new_obs_space = spaces.Box(
+        low=low_val,
+        high=high_val,
+        shape=(new_dim,),
+        dtype=np.float32,
+    )
+    model.observation_space = new_obs_space
+    policy.observation_space = new_obs_space
+
+    if getattr(model, "rollout_buffer", None) is not None and getattr(model, "rollout_buffer_class", None) is not None:
+        model.rollout_buffer = model.rollout_buffer_class(
+            model.n_steps,
+            new_obs_space,
+            model.action_space,
+            device=model.device,
+            gamma=model.gamma,
+            gae_lambda=model.gae_lambda,
+            n_envs=model.n_envs,
+        )
+
+    if learning_rate is not None:
+        effective_lr = float(learning_rate)
+    elif callable(model.learning_rate):
+        effective_lr = float(model.learning_rate(1.0))
+    else:
+        effective_lr = float(model.learning_rate)
+
+    optimizer_kwargs = dict(getattr(policy, "optimizer_kwargs", {}) or {})
+    policy.optimizer = policy.optimizer_class(
+        policy.parameters(),
+        lr=effective_lr,
+        **optimizer_kwargs,
+    )
+
+    hidden_sizes = tuple(
+        int(v)
+        for v in (
+            model.policy_kwargs.get("net_arch", ())
+            if isinstance(getattr(model, "policy_kwargs", None), dict)
+            else ()
+        )
+    )
+    wrapper = NeuralPolicy(
+        model=model,
+        model_path=resolved_output,
+        config=NeuralPolicyConfig(
+            hidden_sizes=hidden_sizes,
+            observation_size=new_dim,
+            action_size=int(model.action_space.n),
+            env_workers=int(getattr(model, "n_envs", 1)),
+        ),
+    )
+    saved_path = wrapper.save(resolved_output)
+    return {
+        "source_path": str(resolved_source),
+        "output_path": str(saved_path),
+        "old_dim": old_dim,
+        "new_dim": new_dim,
+        "expanded_layers": expanded_layers,
+        "optimizer_reset": True,
+        "continuation_mode": "approximate_adam_state_reset",
+        "learning_rate": effective_lr,
+    }

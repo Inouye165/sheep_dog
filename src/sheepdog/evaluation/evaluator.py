@@ -4,23 +4,24 @@ from __future__ import annotations
 
 import contextlib
 import csv
+import hashlib
+import io
 import json
+import logging
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from statistics import fmean
-from typing import Any, Callable
+from typing import Any
 
+from sheepdog.atomic_io import atomic_write_json, atomic_write_text
 from sheepdog.config import LabConfig
 from sheepdog.environment import EpisodeResult, SheepdogEnvironment
+from sheepdog.evaluation.retention import EvaluationReplayRetentionManager
 from sheepdog.policies.base import Policy
 from sheepdog.replay.store import ReplayStore
+from sheepdog.training.replay_writer import validate_telemetry_config
 from sheepdog.training.runtime import TrainingRuntimeTracker
-from sheepdog.evaluation.retention import EvaluationReplayRetentionManager
-
-
-import logging
-import types
-from sheepdog.atomic_io import atomic_write_json
 
 logger = logging.getLogger(__name__)
 
@@ -196,7 +197,7 @@ class EvaluationSummary:
 class Evaluator:
     """Run checkpoint comparisons on fixed evaluation seeds."""
 
-    def __init__(self, config: LabConfig, output_root: str | Path) -> None:
+    def __init__(self, config: LabConfig, output_root: str | Path, tracking_registry: Any | None = None) -> None:
         self.config = config
         self.output_root = Path(output_root)
         self.output_root.mkdir(parents=True, exist_ok=True)
@@ -205,6 +206,7 @@ class Evaluator:
         self.runtime_tracker: TrainingRuntimeTracker | None = None
         self._evaluation_count = 0
         self.progress_callback: Callable[[dict[str, Any]], None] | None = None
+        self.tracking_registry = tracking_registry
 
     def evaluate(
         self,
@@ -214,16 +216,38 @@ class Evaluator:
         deterministic: bool = True,
         *,
         capture_replays: bool = True,
+        capture_step_telemetry: bool = True,
         evaluation_mode: str = "confidence",
         run_id: str | None = None,
         checkpoint_id: str | None = None,
         policy_version: int | None = None,
         curriculum_stage: int | None = None,
         evaluation_index: int | None = None,
+        max_telemetry_steps: int = 1000,
+        telemetry_mode: str = "prefix",
+        telemetry_head_steps: int = 200,
+        telemetry_tail_steps: int = 500,
+        max_telemetry_steps_per_episode: int | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
         should_stop: Callable[[], bool] | None = None,
+        experiment_id: str | None = None,
+        activation_id: str | None = None,
+        checkpoint_record_id: str | None = None,
+        tracking_registry: Any | None = None,
     ) -> tuple[EvaluationSummary, Path, Path]:
         """Run the policy on each seed and optionally capture full replays."""
+        effective_max = (
+            max_telemetry_steps_per_episode
+            if max_telemetry_steps_per_episode is not None
+            else max_telemetry_steps
+        )
+        validate_telemetry_config(
+            telemetry_mode=telemetry_mode,
+            max_telemetry_steps=effective_max,
+            telemetry_head_steps=telemetry_head_steps,
+            telemetry_tail_steps=telemetry_tail_steps,
+        )
+        max_telemetry_steps = effective_max
         if evaluation_index is not None:
             eval_idx = int(evaluation_index)
             self._evaluation_count = max(self._evaluation_count, eval_idx)
@@ -445,7 +469,14 @@ class Evaluator:
                         "evaluation_recent_results": list(recent_results),
                     })
 
-            environment = SheepdogEnvironment(self.config)
+            environment = SheepdogEnvironment(
+                self.config,
+                capture_step_telemetry=capture_step_telemetry,
+                telemetry_mode=telemetry_mode,
+                max_telemetry_steps=max_telemetry_steps,
+                telemetry_head_steps=telemetry_head_steps,
+                telemetry_tail_steps=telemetry_tail_steps,
+            )
             capture_phase = (
                 self.runtime_tracker.phase("replay_capture")
                 if capture_replays and self.runtime_tracker is not None
@@ -457,6 +488,11 @@ class Evaluator:
                     seed,
                     capture_replay=capture_replays,
                     deterministic=deterministic,
+                    capture_step_telemetry=capture_step_telemetry,
+                    max_telemetry_steps=max_telemetry_steps,
+                    telemetry_mode=telemetry_mode,
+                    telemetry_head_steps=telemetry_head_steps,
+                    telemetry_tail_steps=telemetry_tail_steps,
                 )
             results.append(result)
 
@@ -515,6 +551,23 @@ class Evaluator:
                 trainer_type=getattr(policy, "trainer_type", None),
                 policy_type=getattr(policy, "policy_type", None),
             )
+            # Explicit, verified trainer/checkpoint discount semantics
+            explicit_timebase = getattr(policy, "discount_timebase", None)
+            if explicit_timebase is not None:
+                discount_timebase = explicit_timebase
+            elif trainer_type == "maskable_ppo":
+                discount_timebase = "sequential_shared_dog"
+            elif trainer_type == "joint_maskable_ppo":
+                discount_timebase = "joint_world_step"
+            else:
+                # Unsupported or non-RL trainer (e.g. hill_climb, baseline, heuristic)
+                discount_timebase = None
+
+            eval_gamma = float(self.config.training.gamma)
+            chk_gamma = getattr(policy, "checkpoint_gamma", None)
+            gamma_mismatch = bool(chk_gamma is not None and abs(chk_gamma - eval_gamma) > 1e-6)
+            effective_gamma = chk_gamma if chk_gamma is not None else eval_gamma
+
             replay_path: Path | None = None
             if capture_replays:
                 serialization_phase = (
@@ -523,28 +576,83 @@ class Evaluator:
                     else contextlib.nullcontext()
                 )
                 with serialization_phase:
+                    T_steps = int(result.stats.steps)
+                    H_steps = max(0, int(telemetry_head_steps))
+                    L_steps = max(0, int(telemetry_tail_steps))
+                    if telemetry_mode == "head_tail":
+                        tail_start = max(1, T_steps - L_steps + 1) if L_steps > 0 else T_steps + 1
+                        has_gap = tail_start > H_steps + 1
+                        count_omitted = (tail_start - 1 - H_steps) if has_gap else 0
+                        count_detailed = (T_steps - count_omitted) if capture_step_telemetry else 0
+                        is_truncated = False
+                        telemetry_coverage = {
+                            "mode": telemetry_mode,
+                            "total_steps": T_steps,
+                            "captured_detailed_steps": count_detailed,
+                            "omitted_steps_count": count_omitted,
+                            "retained_head_range": [1, min(H_steps, T_steps)] if (H_steps > 0 and capture_step_telemetry) else None,
+                            "retained_tail_range": [tail_start, T_steps] if (L_steps > 0 and tail_start <= T_steps and capture_step_telemetry) else None,
+                            "omitted_range": [H_steps + 1, tail_start - 1] if has_gap else None,
+                            "telemetry_truncated": is_truncated,
+                            "complete_decision_coverage": (tail_start <= H_steps + 1) and capture_step_telemetry,
+                        }
+                    else:
+                        is_truncated = any(
+                            isinstance(f.step_telemetry, dict) and bool(f.step_telemetry.get("telemetry_truncated"))
+                            for f in result.replay
+                        )
+                        count_detailed = min(T_steps, max_telemetry_steps) if capture_step_telemetry else 0
+                        count_omitted = (T_steps - count_detailed) if capture_step_telemetry else 0
+                        telemetry_coverage = {
+                            "mode": telemetry_mode,
+                            "total_steps": T_steps,
+                            "captured_detailed_steps": count_detailed,
+                            "omitted_steps_count": count_omitted,
+                            "retained_head_range": [1, min(max_telemetry_steps, T_steps)] if (max_telemetry_steps > 0 and capture_step_telemetry) else None,
+                            "retained_tail_range": None,
+                            "omitted_range": [max_telemetry_steps + 1, T_steps] if is_truncated else None,
+                            "telemetry_truncated": is_truncated,
+                            "complete_decision_coverage": (max_telemetry_steps >= T_steps) and capture_step_telemetry,
+                        }
+
                     replay_path = self.replay_store.write(
                         f"checkpoint-{checkpoint_episode:06d}-seed-{seed:06d}.json",
                         {
                     "seed": result.seed,
+                    "checkpoint_episode": checkpoint_episode,
+                    "checkpoint_id": active_checkpoint_id,
+                    "run_id": active_run_id,
+                    "policy_version": active_policy_version,
+                    "evaluation_mode": eval_mode_label,
                     "policy_name": result.policy_name,
                     "trainer_type": trainer_type,
                     "policy_type": policy_type,
                     "policy_mode": result.policy_name,
                     "replay_mode": replay_mode,
                     "environment": {
-                        "dogs": self.config.environment.dogs,
-                        "sheep": self.config.environment.sheep,
-                        "width": self.config.environment.width,
-                        "height": self.config.environment.height,
+                        **asdict(self.config.environment),
                         "curriculum_stage": self.config.rewards.instincts.curriculum_stage,
                         "enable_instinct_rewards": (
                             self.config.rewards.instincts.enable_instinct_rewards
                         ),
                     },
+                    "strategy_version": "1.0.0",
+                    "discount_timebase": discount_timebase,
+                    "discount_factor": effective_gamma if discount_timebase is not None else None,
+                    "checkpoint_gamma": chk_gamma,
+                    "evaluation_gamma": eval_gamma,
+                    "gamma_mismatch": gamma_mismatch,
+                    "dog_count": int(self.config.environment.dogs),
+                    "telemetry_mode": telemetry_mode,
+                    "telemetry_head_steps": H_steps if telemetry_mode == "head_tail" else None,
+                    "telemetry_tail_steps": L_steps if telemetry_mode == "head_tail" else None,
+                    "telemetry_truncated": is_truncated,
+                    "telemetry_limit_steps": max_telemetry_steps if (telemetry_mode == "prefix" and capture_step_telemetry) else None,
+                    "telemetry_coverage": telemetry_coverage,
+                    "initial_snapshot": result.initial_snapshot.to_dict() if getattr(result, "initial_snapshot", None) else None,
                     "final_snapshot": result.final_snapshot.to_dict(),
                     "stats": asdict(result.stats),
-                        "frames": [frame.to_dict() for frame in result.replay],
+                    "frames": [frame.to_dict() for frame in result.replay],
                         },
                     )
                     if replay_path is not None:
@@ -678,13 +786,75 @@ class Evaluator:
 
         json_path = self.output_root / f"{artifact_name}.json"
         csv_path = self.output_root / f"{artifact_name}.csv"
-        with json_path.open("w", encoding="utf-8") as handle:
-            json.dump(summary.to_dict(), handle, indent=2)
-        with csv_path.open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=list(records[0].to_dict().keys()))
+        atomic_write_json(json_path, summary.to_dict())
+        csv_buffer = io.StringIO()
+        if records:
+            writer = csv.DictWriter(
+                csv_buffer,
+                fieldnames=list(records[0].to_dict().keys()),
+                lineterminator="\n",
+            )
             writer.writeheader()
             for record in records:
                 writer.writerow(record.to_dict())
+        atomic_write_text(csv_path, csv_buffer.getvalue())
+
+        # Record evaluation in tracking registry if available
+        active_registry = tracking_registry or self.tracking_registry
+        if active_registry is not None:
+            try:
+                from sheepdog.tracking.registry import EvaluationRecordEntry
+
+                p_state_path = getattr(policy, "policy_state_path", None)
+                model_sha = None
+                if p_state_path and Path(p_state_path).exists():
+                    with open(p_state_path, "rb") as f:
+                        model_sha = hashlib.sha256(f.read()).hexdigest()
+
+                chk_rec_id = checkpoint_record_id or (
+                    f"chk_rec_{summary.checkpoint_id}" if summary.checkpoint_id else None
+                )
+
+                from sheepdog.tracking.registry import classify_assistance_mode
+
+                obs_mode = (
+                    getattr(getattr(self.config, "training", None), "observation_mode", None)
+                    or getattr(self.config.environment, "observation_mode", None)
+                    or getattr(policy, "observation_mode", None)
+                )
+                assistance_mode = classify_assistance_mode(obs_mode)
+
+                eval_entry = EvaluationRecordEntry(
+                    registry_eval_id=f"eval_reg_{artifact_name}",
+                    legacy_evaluation_id=summary.evaluation_id,
+                    source_file=str(json_path).replace("\\", "/"),
+                    experiment_id=experiment_id or summary.run_id,
+                    checkpoint_id=summary.checkpoint_id or f"checkpoint-{checkpoint_episode:06d}",
+                    checkpoint_record_id=chk_rec_id,
+                    evaluated_at=summary.evaluation_timestamp or evaluation_timestamp,
+                    evaluation_mode=summary.evaluation_mode,
+                    assistance_mode=assistance_mode,
+                    model_path=str(p_state_path) if p_state_path else None,
+                    model_sha256=model_sha,
+                    environment_config_hash=summary.environment_config_hash,
+                    seed_set_id=summary.evaluation_seed_set_id,
+                    seed_count=summary.evaluation_seed_count,
+                    seeds=list(seeds),
+                    success_rate=summary.success_rate,
+                    average_reward=summary.average_reward,
+                    average_steps=summary.average_completion_steps,
+                    average_sheep_penned=summary.average_sheep_penned,
+                    timeout_rate=summary.timeout_rate,
+                    stopped_rate=summary.stopped_rate,
+                    per_seed_results=[r.to_dict() for r in records],
+                    diagnostics={"pinned": summary.pinned, "retention_status": summary.retention_status},
+                    replay_paths=[str(p).replace("\\", "/") for p in saved_replay_paths],
+                    provenance_notes=f"Evaluated by Evaluator at episode {checkpoint_episode}",
+                    metadata={"activation_id": activation_id, "checkpoint_record_id": chk_rec_id},
+                )
+                active_registry.record_evaluation(eval_entry)
+            except Exception as exc:
+                logger.warning("Could not record evaluation in tracking registry: %s", exc)
 
         # Clean up the inprogress file since evaluation completed fully
         if inprogress_path.exists():
@@ -722,6 +892,8 @@ class Evaluator:
 
         return summary, json_path, csv_path
 
+    evaluate_policy = evaluate
+
     def export_replay(
         self,
         policy: Policy,
@@ -758,11 +930,13 @@ class Evaluator:
                 f"checkpoint-{checkpoint_episode:06d}-seed-{seed:06d}.json",
                 {
                     "seed": result.seed,
+                    "checkpoint_episode": checkpoint_episode,
                     "policy_name": result.policy_name,
                     "trainer_type": trainer_type,
                     "policy_type": policy_type,
                     "replay_mode": replay_mode,
                     "environment": self.config.to_dict()["environment"],
+                    "initial_snapshot": result.initial_snapshot.to_dict() if getattr(result, "initial_snapshot", None) else None,
                     "final_snapshot": result.final_snapshot.to_dict(),
                     "stats": asdict(result.stats),
                     "frames": [frame.to_dict() for frame in result.replay],

@@ -62,12 +62,18 @@ class HierarchicalNeuralPolicyConfig:
         cls,
         payload: dict[str, Any] | None,
         observation_size: int,
+        default_hidden_sizes: tuple[int, ...] | None = None,
     ) -> HierarchicalNeuralPolicyConfig:
         """Reconstruct a HierarchicalNeuralPolicyConfig from persisted state."""
+        fallback = (
+            default_hidden_sizes
+            if default_hidden_sizes is not None
+            else LabConfig().training.neural_hidden_sizes
+        )
         if not payload:
-            return cls(hidden_sizes=(128, 128, 128), observation_size=observation_size)
+            return cls(hidden_sizes=tuple(fallback), observation_size=observation_size)
         return cls(
-            hidden_sizes=tuple(int(v) for v in payload.get("hidden_sizes", (128, 128, 128))),
+            hidden_sizes=tuple(int(v) for v in payload.get("hidden_sizes", fallback)),
             observation_size=int(payload.get("observation_size", observation_size)),
             action_size=int(payload.get("action_size", len(ACTION_ORDER))),
         )
@@ -163,7 +169,9 @@ class ShepherdNeuralDogPolicy:
         resolved_path = Path(path)
         model = MaskablePPO.load(str(resolved_path), env=adapter)
         loaded_pconfig = HierarchicalNeuralPolicyConfig.from_dict(
-            policy_config_dict, observation_size
+            policy_config_dict,
+            observation_size,
+            default_hidden_sizes=tuple(config.training.neural_hidden_sizes),
         )
         expected_arch = tuple(config.training.neural_hidden_sizes)
         if loaded_pconfig.hidden_sizes != expected_arch:

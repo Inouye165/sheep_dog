@@ -13,9 +13,11 @@ import shutil
 import sqlite3
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+from sheepdog.tracking.schema import apply_migrations
 from sheepdog.training.spatial_analytics import (
     ALL_ZONES,
     CORNER_ZONES,
@@ -33,9 +35,10 @@ class EpisodeStore:
         self,
         db_path: str | Path = "artifacts/training-telemetry.sqlite",
         max_queue_size: int = 10000,
+        read_only: bool = False,
     ) -> None:
         self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.read_only = bool(read_only)
         self._queue: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize=max_queue_size)
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -45,8 +48,10 @@ class EpisodeStore:
         self.last_error: str | None = None
         self._busy: bool = False
 
-        self._init_db()
-        self.start_worker()
+        if not self.read_only:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            self._init_db()
+            self.start_worker()
 
     def _handle_corrupt_database(self, open_conn: sqlite3.Connection | None = None) -> sqlite3.Connection:
         """Self-heal a malformed SQLite database by archiving the corrupted file and creating a fresh one."""
@@ -76,26 +81,52 @@ class EpisodeStore:
         self._ensure_schema(conn)
         return conn
 
-    def _get_connection(self) -> sqlite3.Connection:
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn: sqlite3.Connection | None = None
-        try:
-            conn = sqlite3.connect(str(self.db_path), timeout=30.0)
+    def _open_connection(self) -> sqlite3.Connection:
+        if self.read_only:
+            conn = sqlite3.connect(
+                f"{self.db_path.resolve().as_uri()}?mode=ro",
+                uri=True,
+                timeout=10.0,
+            )
             conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL;")
-            conn.execute("PRAGMA synchronous=NORMAL;")
+            return conn
+
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn_rw: sqlite3.Connection | None = None
+        try:
+            conn_rw = sqlite3.connect(str(self.db_path), timeout=30.0)
+            conn_rw.row_factory = sqlite3.Row
+            conn_rw.execute("PRAGMA journal_mode=WAL;")
+            conn_rw.execute("PRAGMA synchronous=NORMAL;")
 
             # Self-healing schema check: auto-recreate table if database file was recreated on disk
-            tables = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            tables = {
+                row["name"]
+                for row in conn_rw.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
             if "training_episodes" not in tables:
-                self._ensure_schema(conn)
+                self._ensure_schema(conn_rw)
             else:
-                conn.execute("SELECT 1 FROM training_episodes LIMIT 1;").fetchall()
-            return conn
+                conn_rw.execute("SELECT 1 FROM training_episodes LIMIT 1;").fetchall()
+            return conn_rw
         except sqlite3.DatabaseError as exc:
             if "malformed" in str(exc).lower() or "not a database" in str(exc).lower():
-                return self._handle_corrupt_database(conn)
+                return self._handle_corrupt_database(conn_rw)
+            if conn_rw is not None:
+                with contextlib.suppress(Exception):
+                    conn_rw.close()
             raise
+
+    @contextlib.contextmanager
+    def _get_connection(self) -> Iterator[sqlite3.Connection]:
+        conn = self._open_connection()
+        try:
+            yield conn
+        finally:
+            with contextlib.suppress(Exception):
+                conn.close()
 
     def _ensure_schema(self, conn: sqlite3.Connection) -> None:
         conn.execute(
@@ -177,6 +208,7 @@ class EpisodeStore:
         for idx_sql in indexes:
             with contextlib.suppress(sqlite3.OperationalError):
                 conn.execute(idx_sql)
+        apply_migrations(conn)
         conn.commit()
 
     def _init_db(self) -> None:
@@ -184,6 +216,8 @@ class EpisodeStore:
             self._ensure_schema(conn)
 
     def start_worker(self) -> None:
+        if self.read_only:
+            return
         with self._lock:
             if self._worker_thread is None or not self._worker_thread.is_alive():
                 self._stop_event.clear()
@@ -194,7 +228,7 @@ class EpisodeStore:
 
     def add_episode(self, episode_data: dict[str, Any]) -> None:
         """Enqueue an episode record for asynchronous persistence without blocking training."""
-        if not episode_data:
+        if self.read_only or not episode_data:
             return
         try:
             self._queue.put_nowait(episode_data)
@@ -348,6 +382,8 @@ class EpisodeStore:
         event_key persisted by telemetry.py, matching on the replay_id column
         is the most reliable way to find the right record.
         """
+        if self.read_only:
+            return False
         self.flush()
         if not replay_id and not event_key and episode_id is None:
             return False
@@ -405,7 +441,8 @@ class EpisodeStore:
             except sqlite3.DatabaseError as exc:
                 if "malformed" in str(exc).lower():
                     logger.warning("Malformed database encountered during update_replay_info; initiating self-healing recovery.")
-                    self._handle_corrupt_database()
+                    with contextlib.suppress(Exception):
+                        self._handle_corrupt_database().close()
                 self.error_count += 1
                 self.last_error = str(exc)
                 logger.error("Failed to update replay info in SQLite: %s", exc)
@@ -424,6 +461,8 @@ class EpisodeStore:
         Verifies actual file existence on disk for each candidate. If a file is missing on disk,
         updates SQLite row status to 'pruned' and excludes it from results.
         """
+        if self.read_only and not self.db_path.exists():
+            return []
         self.flush()
         target_limit = min(max(1, limit), 500)
         sql = """
@@ -467,21 +506,22 @@ class EpisodeStore:
                     else:
                         stale_ids.append(r["id"])
 
-                # Update status of verified available files & mark pruned files
-                promoted_ids = [r["id"] for r in valid_episodes]
-                if promoted_ids:
-                    placeholders = ",".join("?" * len(promoted_ids))
-                    conn.execute(
-                        f"UPDATE training_episodes SET capture_status = 'available' WHERE id IN ({placeholders}) AND capture_status != 'available'",
-                        promoted_ids,
-                    )
-                if stale_ids:
-                    placeholders = ",".join("?" * len(stale_ids))
-                    conn.execute(
-                        f"UPDATE training_episodes SET replay_available = 0, capture_status = 'pruned' WHERE id IN ({placeholders})",
-                        stale_ids,
-                    )
-                conn.commit()
+                if not self.read_only:
+                    # Update status of verified available files & mark pruned files
+                    promoted_ids = [r["id"] for r in valid_episodes]
+                    if promoted_ids:
+                        placeholders = ",".join("?" * len(promoted_ids))
+                        conn.execute(
+                            f"UPDATE training_episodes SET capture_status = 'available' WHERE id IN ({placeholders}) AND capture_status != 'available'",
+                            promoted_ids,
+                        )
+                    if stale_ids:
+                        placeholders = ",".join("?" * len(stale_ids))
+                        conn.execute(
+                            f"UPDATE training_episodes SET replay_available = 0, capture_status = 'pruned' WHERE id IN ({placeholders})",
+                            stale_ids,
+                        )
+                    conn.commit()
 
                 return valid_episodes
         except Exception as exc:
@@ -492,6 +532,8 @@ class EpisodeStore:
 
     def get_episode_by_id_or_replay_id(self, identifier: str | int) -> dict[str, Any] | None:
         """Fetch a single episode record by ID, replay_id, or event_key."""
+        if self.read_only and not self.db_path.exists():
+            return None
         self.flush()
         sql = """
         SELECT * FROM training_episodes
@@ -525,6 +567,8 @@ class EpisodeStore:
 
         Never prunes checkpoint-evaluation replays. Updates SQLite row status to 'pruned' and replay_available=0.
         """
+        if self.read_only:
+            return 0
         self.flush()
         pruned_count = 0
         try:
@@ -604,8 +648,10 @@ class EpisodeStore:
         return pruned_count
 
     def _worker_loop(self) -> None:
+        if self.read_only:
+            return
         try:
-            conn = self._get_connection()
+            conn = self._open_connection()
         except Exception as exc:
             self.error_count += 1
             self.last_error = str(exc)
@@ -650,13 +696,20 @@ class EpisodeStore:
 
     def flush(self) -> None:
         """Synchronously write all pending queued episodes to SQLite."""
+        if self.read_only:
+            return
         while not self._queue.empty() or self._busy:
             batch: list[dict[str, Any]] = []
+            saw_sentinel = False
             while True:
                 try:
                     record = self._queue.get_nowait()
-                    if record is not None:
-                        batch.append(record)
+                    if record is None:
+                        with contextlib.suppress(queue.Full):
+                            self._queue.put_nowait(None)
+                        saw_sentinel = True
+                        break
+                    batch.append(record)
                 except queue.Empty:
                     break
 
@@ -668,10 +721,16 @@ class EpisodeStore:
                     self.error_count += 1
                     self.last_error = str(exc)
                     logger.error("Failed to flush pending episodes to SQLite: %s", exc)
+            if saw_sentinel:
+                while self._busy:
+                    time.sleep(0.01)
+                break
             if self._busy:
                 time.sleep(0.01)
 
     def close(self) -> None:
+        if self.read_only:
+            return
         self.flush()
         self._stop_event.set()
         with contextlib.suppress(queue.Full):
@@ -687,18 +746,25 @@ class EpisodeStore:
 
     def get_max_episode(self, run_id: str | None = None) -> int:
         """Return the highest global_environment_episode persisted in the database."""
+        if self.read_only and not self.db_path.exists():
+            return 0
         with self._lock:
-            conn = self._get_connection()
-            if run_id:
-                row = conn.execute(
-                    "SELECT MAX(global_environment_episode) FROM training_episodes WHERE run_id = ?",
-                    (run_id,),
-                ).fetchone()
-            else:
-                row = conn.execute(
-                    "SELECT MAX(global_environment_episode) FROM training_episodes"
-                ).fetchone()
-            return int(row[0]) if row and row[0] is not None else 0
+            try:
+                with self._get_connection() as conn:
+                    if run_id:
+                        row = conn.execute(
+                            "SELECT MAX(global_environment_episode) FROM training_episodes WHERE run_id = ?",
+                            (run_id,),
+                        ).fetchone()
+                    else:
+                        row = conn.execute(
+                            "SELECT MAX(global_environment_episode) FROM training_episodes"
+                        ).fetchone()
+                    return int(row[0]) if row and row[0] is not None else 0
+            except sqlite3.OperationalError:
+                if self.read_only:
+                    return 0
+                raise
 
     def get_episodes(
         self,
@@ -710,6 +776,16 @@ class EpisodeStore:
         order: str | None = None,
     ) -> dict[str, Any]:
         """Query episodes for Insights API with support for pagination and stage filtering."""
+        if self.read_only and not self.db_path.exists():
+            return {
+                "episodes": [],
+                "latest_id": after_id or 0,
+                "next_after_id": after_id or 0,
+                "has_more": False,
+                "oldest_available_timestamp": None,
+                "total_matching": 0,
+                "max_id": 0,
+            }
         limit = min(max(1, limit), 5000)
         conditions: list[str] = []
         params: list[Any] = []
@@ -812,6 +888,23 @@ class EpisodeStore:
         run_id: str | None = None,
     ) -> dict[str, Any]:
         """Aggregate telemetry window statistics cleanly from SQLite."""
+        if self.read_only and not self.db_path.exists():
+            return {
+                "window_count": 0,
+                "success_count": 0,
+                "failure_count": 0,
+                "stopped_count": 0,
+                "timeout_count": 0,
+                "success_rate": None,
+                "current_stage_environment_episode": None,
+                "latest_completed_environment_episode": None,
+                "latest_completed_episode_id": None,
+                "latest_episode_completed_at": None,
+                "latest_episode_reward": None,
+                "latest_episode_result": None,
+                "dropped_count": self.dropped_count,
+                "error_count": self.error_count,
+            }
         self.flush()
         conditions: list[str] = []
         params: list[Any] = []
@@ -860,10 +953,15 @@ class EpisodeStore:
                         latest_reward = l_row["reward"]
                         latest_result = l_row["result"]
 
-                max_stage_env_ep_sql = "SELECT MAX(global_environment_episode) FROM training_episodes"
                 if stage is not None:
-                    max_stage_env_ep_sql += f" WHERE curriculum_stage = {stage}"
-                max_cursor = conn.execute(max_stage_env_ep_sql)
+                    max_cursor = conn.execute(
+                        "SELECT MAX(global_environment_episode) FROM training_episodes WHERE curriculum_stage = ?",
+                        (stage,),
+                    )
+                else:
+                    max_cursor = conn.execute(
+                        "SELECT MAX(global_environment_episode) FROM training_episodes"
+                    )
                 max_res = max_cursor.fetchone()
                 current_stage_env_ep = max_res[0] if max_res else None
         except Exception as exc:
@@ -917,6 +1015,43 @@ class EpisodeStore:
         run_id: str | None = None,
     ) -> dict[str, Any]:
         """Aggregate full historical spatial telemetry and bottleneck metrics for a curriculum stage."""
+        if self.read_only and not self.db_path.exists():
+            empty_zones: dict[str, dict[str, Any]] = {
+                z: {
+                    "zone": z,
+                    "total": 0,
+                    "wins": 0,
+                    "win_rate": 0.0,
+                    "timeouts": 0,
+                    "stopped": 0,
+                    "trapped_at_end": 0,
+                    "avg_steps": 0.0,
+                    "avg_corner_pct": 0.0,
+                    "avg_wall_pct": 0.0,
+                    "is_corner": z in CORNER_ZONES,
+                    "is_wall": z in WALL_ZONES,
+                }
+                for z in ALL_ZONES
+            }
+            return {
+                "curriculum_stage": stage,
+                "total_episodes": 0,
+                "success_count": 0,
+                "timeout_count": 0,
+                "stopped_count": 0,
+                "corner_stuck_count": 0,
+                "overall_success_rate": 0.0,
+                "avg_steps": 0.0,
+                "avg_corner_time_pct": 0.0,
+                "avg_wall_time_pct": 0.0,
+                "earliest_timestamp": None,
+                "latest_timestamp": None,
+                "zone_stats": empty_zones,
+                "pen_stats": {},
+                "setup_stats": {},
+                "terminal_failure_heatmap": {},
+                "insights": [],
+            }
         self.flush()
         conditions = ["curriculum_stage = ?"]
         params: list[Any] = [stage]
@@ -1113,20 +1248,35 @@ class EpisodeStore:
 
     def clear_store(self) -> None:
         """Clear all stored training episodes (for explicit journey resets)."""
+        if self.read_only:
+            return
         self.flush()
         with self._get_connection() as conn:
             conn.execute("DELETE FROM training_episodes;")
             conn.commit()
 
 
+_episode_store_lock = threading.Lock()
 _global_episode_store: EpisodeStore | None = None
+_global_ro_episode_stores: dict[Path, EpisodeStore] = {}
 
 
-def get_episode_store(db_path: str | Path = "artifacts/training-telemetry.sqlite") -> EpisodeStore:
+def get_episode_store(
+    db_path: str | Path = "artifacts/training-telemetry.sqlite",
+    read_only: bool = False,
+) -> EpisodeStore:
     global _global_episode_store
-    if _global_episode_store is None:
-        _global_episode_store = EpisodeStore(db_path=db_path)
-    return _global_episode_store
+    resolved_path = Path(db_path).resolve()
+    with _episode_store_lock:
+        if read_only:
+            store = _global_ro_episode_stores.get(resolved_path)
+            if store is None:
+                store = EpisodeStore(db_path=db_path, read_only=True)
+                _global_ro_episode_stores[resolved_path] = store
+            return store
+        if _global_episode_store is None:
+            _global_episode_store = EpisodeStore(db_path=db_path, read_only=False)
+        return _global_episode_store
 
 
 @atexit.register

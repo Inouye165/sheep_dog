@@ -7,6 +7,7 @@ from statistics import fmean
 
 from sheepdog.config import EnvironmentConfig
 from sheepdog.entities import DogRole, DogState, Pen, Point, SheepState
+from sheepdog.pen_navigation import pen_navigation
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +39,8 @@ _LATERAL_DEAD_ZONE: int = 3
 class TeamStrategy:
     """Assign dynamic cooperative roles from current flock state."""
 
+    VERSION: str = "1.0.0"
+
     def __init__(self, width: int, height: int, config: EnvironmentConfig | None = None) -> None:
         self._width = width
         self._height = height
@@ -48,6 +51,11 @@ class TeamStrategy:
         # across the pen centre line (the primary cause of dog oscillation).
         self._sticky_pen_dx: int = 1
         self._sticky_pen_dy: int = 0
+
+    def reset(self) -> None:
+        """Reset per-episode sticky pen-approach state."""
+        self._sticky_pen_dx = 1
+        self._sticky_pen_dy = 0
 
     def assign_roles(
         self,
@@ -67,7 +75,7 @@ class TeamStrategy:
         average_distance_to_pen = fmean(
             animal.position.distance_to(pen.center) for animal in unpenned
         )
-        stray = self._stray_sheep(unpenned, flock_center, flock_spread)
+        stray = self._stray_sheep(unpenned, flock_center, flock_spread, pen=pen)
         # Blocker is only useful once the flock is close enough to the gate
         # that an escape guard provides real benefit.  Using the raw pen
         # diagonal (max(w,h)+4) was far too broad: for an 18×18 pen it fired
@@ -85,17 +93,26 @@ class TeamStrategy:
             wall_pressure=wall_pressure,
         )
 
-        pen_dx_raw = self._axis_sign(pen.center.x - flock_center.x)
-        pen_dy_raw = self._axis_sign(pen.center.y - flock_center.y)
+        navigation = pen_navigation(pen, self._width, self._height)
+        anchor = (
+            min(unpenned, key=lambda animal: animal.position.distance_to(flock_center)).position
+            if flock_center in navigation.fences
+            else flock_center
+        )
+        approach_target = navigation.target(anchor)
+        pen_dx_raw = self._axis_sign(approach_target.x - flock_center.x)
+        pen_dy_raw = self._axis_sign(approach_target.y - flock_center.y)
         # Only move the sticky direction when the flock is clearly outside the
-        # dead zone.  Within ±_LATERAL_DEAD_ZONE cells of the pen centre line,
+        # dead zone.  Within ±_LATERAL_DEAD_ZONE cells of the approach line,
         # keep the last known direction to prevent the lateral axis from
         # flipping every step and bouncing LEFT/RIGHT flanker targets.
-        if abs(pen.center.x - flock_center.x) >= _LATERAL_DEAD_ZONE:
+        if abs(approach_target.x - flock_center.x) >= _LATERAL_DEAD_ZONE:
             self._sticky_pen_dx = pen_dx_raw
         elif self._sticky_pen_dx == 0:
             self._sticky_pen_dx = pen_dx_raw or 1
-        if abs(pen.center.y - flock_center.y) >= _LATERAL_DEAD_ZONE:
+        if abs(approach_target.y - flock_center.y) >= _LATERAL_DEAD_ZONE:
+            self._sticky_pen_dy = pen_dy_raw
+        if approach_target != pen.center:
             self._sticky_pen_dy = pen_dy_raw
         # pen_dx drives the rear-target offset (how far behind the flock to stand).
         # Use the raw horizontal sign so we don't add a false horizontal offset when
@@ -235,11 +252,26 @@ class TeamStrategy:
         sheep: list[SheepState],
         flock_center: Point,
         flock_spread: float,
+        pen: Pen | None = None,
     ) -> SheepState | None:
         if not sheep:
             return None
         if len(sheep) == 1:
             return sheep[0]
+        if len(sheep) == 2:
+            s0, s1 = sheep[0], sheep[1]
+            sep = s0.position.distance_to(s1.position)
+            clustering_dist = max(8.0, 5.0)
+            if sep > clustering_dist:
+                if pen is not None:
+                    d0 = s0.position.distance_to(pen.center)
+                    d1 = s1.position.distance_to(pen.center)
+                    if d0 > d1:
+                        return s0
+                    if d1 > d0:
+                        return s1
+                return max(sheep, key=lambda s: (s.position.distance_to(flock_center), s.index))
+            return None
         threshold = max(5.0, flock_spread + 2.0)
         furthest = max(sheep, key=lambda animal: animal.position.distance_to(flock_center))
         nearest_neighbor = min(
@@ -263,11 +295,30 @@ class TeamStrategy:
         dx = self._axis_sign(stray_position.x - flock_center.x)
         dy = self._axis_sign(stray_position.y - flock_center.y)
         if dx == 0 and dy == 0 and pen is not None:
-            dx = self._axis_sign(stray_position.x - pen.center.x)
-            dy = self._axis_sign(stray_position.y - pen.center.y)
+            target = pen_navigation(pen, self._width, self._height).target(stray_position)
+            dx = self._axis_sign(stray_position.x - target.x)
+            dy = self._axis_sign(stray_position.y - target.y)
         if dx == 0 and dy == 0:
             dx = 1
-        return Point(stray_position.x + dx * 2, stray_position.y + dy * 2).clamp(
+
+        tx = stray_position.x + dx * 2
+        ty = stray_position.y + dy * 2
+
+        if self._wall_margin(stray_position) <= 3:
+            # Back off 3-4 cells into the open field away from the nearest boundary
+            # so the collector dog does not press the sheep into the wall and gives
+            # it room to turn and escape inward.
+            if stray_position.x <= 3:
+                tx = stray_position.x + 3
+            elif (self._width - 1 - stray_position.x) <= 3:
+                tx = stray_position.x - 3
+
+            if stray_position.y <= 3:
+                ty = stray_position.y + 3
+            elif (self._height - 1 - stray_position.y) <= 3:
+                ty = stray_position.y - 3
+
+        return Point(tx, ty).clamp(
             self._width,
             self._height,
         )
@@ -328,11 +379,18 @@ class TeamStrategy:
         # Saturate the hold ramp so it cannot dominate truly bad fits.
         ramp = min(hold_steps, self._config.role_minimum_hold_steps) * 0.5
         cap = self._config.role_stickiness_distance
+
+        if hold_steps > 150:
+            stagnation_penalty = min(15.0, (hold_steps - 150) * 0.25)
+            effective_bonus = max(-5.0, bonus + ramp - stagnation_penalty)
+        else:
+            effective_bonus = bonus + ramp
+
         if distance > cap * 2.0:
             # Dog has drifted very far from its current target; let a fresh
             # assignment win so the team doesn't strand a role-holder.
             return distance
-        return max(0.0, distance - bonus - ramp)
+        return max(0.0, distance - effective_bonus)
 
     def _role_stickiness_bonus(self, role: DogRole) -> float:
         if role in {DogRole.LEFT_FLANKER, DogRole.RIGHT_FLANKER}:

@@ -488,6 +488,7 @@ export async function exportResultsVideo(
   const totalFrames = plan.totalFrames;
 
   let worker: Worker | null = null;
+  let workerUrl: string | null = null;
   try {
     const workerCode = `
       self.onmessage = function(e) {
@@ -497,44 +498,56 @@ export async function exportResultsVideo(
       };
     `;
     const blob = new Blob([workerCode], { type: "application/javascript" });
-    worker = new Worker(URL.createObjectURL(blob));
+    workerUrl = URL.createObjectURL(blob);
+    worker = new Worker(workerUrl);
   } catch (e) {
+    if (workerUrl) {
+      URL.revokeObjectURL(workerUrl);
+      workerUrl = null;
+    }
     console.warn("Failed to create background worker timer, falling back to main-thread timer:", e);
   }
 
-  const startTime = performance.now();
-  for (let f = 0; f < totalFrames; f++) {
-    drawResultsVideoFrame(ctx, gridMilestones, replays, f, plan);
+  try {
+    const startTime = performance.now();
+    for (let f = 0; f < totalFrames; f++) {
+      drawResultsVideoFrame(ctx, gridMilestones, replays, f, plan);
 
-    if (onProgress) {
-      onProgress((f + 1) / totalFrames);
-    }
-
-    const nextFrameTime = startTime + (f + 1) * frameDurationMs;
-    const now = performance.now();
-    const delay = nextFrameTime - now;
-
-    if (delay > 0) {
-      if (worker) {
-        await new Promise<void>((resolve) => {
-          worker!.onmessage = () => resolve();
-          worker!.postMessage({ delay });
-        });
-      } else {
-        await new Promise((resolve) => setTimeout(resolve, delay));
+      if (onProgress) {
+        onProgress((f + 1) / totalFrames);
       }
-    } else {
-      // Yield to the event loop to keep the UI responsive
-      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const nextFrameTime = startTime + (f + 1) * frameDurationMs;
+      const now = performance.now();
+      const delay = nextFrameTime - now;
+
+      if (delay > 0) {
+        if (worker) {
+          await new Promise<void>((resolve) => {
+            worker!.onmessage = () => resolve();
+            worker!.postMessage({ delay });
+          });
+        } else {
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+      } else {
+        // Yield to the event loop to keep the UI responsive
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
     }
+  } finally {
+    if (worker) {
+      worker.terminate();
+    }
+    if (workerUrl) {
+      URL.revokeObjectURL(workerUrl);
+      workerUrl = null;
+    }
+    if (recorder.state !== "inactive") {
+      recorder.stop();
+    }
+    stream.getTracks().forEach((track) => track.stop());
   }
-
-  if (worker) {
-    worker.terminate();
-  }
-
-  recorder.stop();
-  stream.getTracks().forEach((track) => track.stop());
 
   return recordPromise;
 }

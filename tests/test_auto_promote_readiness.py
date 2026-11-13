@@ -87,13 +87,13 @@ def test_insufficient_history_collecting_evidence(tmp_path: Path):
 
 def test_six_evaluations_minimum_boundary(tmp_path: Path):
     """At 6 evaluations: 5/6 (83.3% >= 75%) passes; 4/6 (66.7% < 75%) is blocked."""
-    # Case A: 5/6 qualifying with average >= 90%
+    # Case A: 5/6 qualifying with average >= 90% and qualifying tail [ep 50, ep 60]
     evals_pass = [
         _make_eval_payload(10, stage=4, success_rate=0.9),
         _make_eval_payload(20, stage=4, success_rate=1.0),
-        _make_eval_payload(30, stage=4, success_rate=0.9),
+        _make_eval_payload(30, stage=4, success_rate=0.8),  # 1 non-qualifying earlier in window
         _make_eval_payload(40, stage=4, success_rate=1.0),
-        _make_eval_payload(50, stage=4, success_rate=0.8),  # 1 non-qualifying
+        _make_eval_payload(50, stage=4, success_rate=1.0),
         _make_eval_payload(60, stage=4, success_rate=1.0),
     ]
     _setup_eval_dir(tmp_path, evals_pass)
@@ -103,6 +103,7 @@ def test_six_evaluations_minimum_boundary(tmp_path: Path):
     assert res_pass["status_text"] == "READY TO PROMOTE"
     assert res_pass["qualified_evaluations"] == 5
     assert res_pass["qualified_evaluations_required"] == 5  # ceil(6 * 0.75) = 5
+    assert res_pass["qualifying_tail_passed"] is True
 
     # Case B: 4/6 qualifying (blocked)
     tmp_b = tmp_path / "case_b"
@@ -121,6 +122,43 @@ def test_six_evaluations_minimum_boundary(tmp_path: Path):
     assert res_block["status_text"] == "NOT READY"
     assert res_block["qualified_evaluations"] == 4
     assert res_block["qualified_evaluations_required"] == 5
+
+
+def test_two_checkpoint_tail_blocks_unstable_bounce(tmp_path: Path):
+    """Even if 5/6 evaluations qualify and recent average is >= 90%, a non-qualifying 2nd-to-last evaluation blocks promotion."""
+    evals = [
+        _make_eval_payload(10, stage=4, success_rate=0.9),
+        _make_eval_payload(20, stage=4, success_rate=1.0),
+        _make_eval_payload(30, stage=4, success_rate=1.0),
+        _make_eval_payload(40, stage=4, success_rate=1.0),
+        _make_eval_payload(50, stage=4, success_rate=0.8),  # 2nd to last dip
+        _make_eval_payload(60, stage=4, success_rate=1.0),
+    ]
+    _setup_eval_dir(tmp_path, evals)
+    res = compute_promotion_gate_snapshot(tmp_path, target_ep=60)
+    assert res["ready"] is False
+    assert res["decision"] == "blocked"
+    assert res["qualifying_tail_passed"] is False
+    assert any("Recent stability tail not met" in r for r in res["blocking_reasons"])
+
+
+def test_aggregate_seed_failures_block_promotion(tmp_path: Path):
+    """Seed failing in 3 non-consecutive formal evaluations across the window blocks promotion."""
+    # Seed 71 fails in episodes 10, 30, 40 (3 non-consecutive failures in 6 evals)
+    evals = [
+        _make_eval_payload(10, stage=4, success_rate=0.9, failed_seeds=[71]),
+        _make_eval_payload(20, stage=4, success_rate=1.0, failed_seeds=[]),
+        _make_eval_payload(30, stage=4, success_rate=0.9, failed_seeds=[71]),
+        _make_eval_payload(40, stage=4, success_rate=0.9, failed_seeds=[71]),
+        _make_eval_payload(50, stage=4, success_rate=1.0, failed_seeds=[]),
+        _make_eval_payload(60, stage=4, success_rate=1.0, failed_seeds=[]),
+    ]
+    _setup_eval_dir(tmp_path, evals)
+    res = compute_promotion_gate_snapshot(tmp_path, target_ep=60)
+    assert res["ready"] is False
+    assert res["persistent_seed_failure"] is True
+    assert res["blocking_seed"] == 71
+    assert any("Seed 71 failed in 3 of the last 6 formal evaluations" in r for r in res["blocking_reasons"])
 
 
 def test_eight_evaluation_window_consistency(tmp_path: Path):

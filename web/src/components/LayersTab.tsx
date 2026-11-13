@@ -309,24 +309,6 @@ const LAYER_COMPARISON = [
   { name: "Transformer (Attention)", used: false, icon: "◈", color: "#ec4899", strength: "Dynamic context-aware weighting. Handles variable-length sets.", weakness: "Heavy compute. Overkill for small fixed-size vectors.", whenToUse: "Variable agent counts or very large observation sets." },
 ];
 
-function Pill({ label, color, bg }: { label: string; color: string; bg: string }) {
-  return (
-    <span style={{
-      fontSize: "0.68rem",
-      padding: "0.18rem 0.6rem",
-      borderRadius: "999px",
-      background: bg,
-      border: "1px solid " + color + "30",
-      color,
-      fontWeight: "600",
-      textTransform: "uppercase" as const,
-      letterSpacing: "0.05em"
-    }}>
-      {label}
-    </span>
-  );
-}
-
 function SectionBox({ accent, title, children }: { accent: string; title: string; children: React.ReactNode }) {
   return (
     <div style={{

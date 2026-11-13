@@ -1,7 +1,7 @@
 import json
-import pytest
 from pathlib import Path
-from sheepdog.training.stage_health import compute_stage_health_summary, _build_empty_summary
+
+from sheepdog.training.stage_health import _build_empty_summary, compute_stage_health_summary
 
 
 def test_empty_stage_health():

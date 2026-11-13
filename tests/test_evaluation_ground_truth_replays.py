@@ -6,8 +6,6 @@ import gzip
 import json
 from pathlib import Path
 
-import pytest
-
 from sheepdog.config import LabConfig
 from sheepdog.evaluation.evaluator import Evaluator
 from sheepdog.policies.heuristic import InstinctOnlyPolicy

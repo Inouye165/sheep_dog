@@ -9,7 +9,7 @@ from sheepdog.config import InstinctRewardConfig, RewardConfig
 
 Position = tuple[float, float]
 
-REWARD_SCHEMA_VERSION = "1.0"
+REWARD_SCHEMA_VERSION = "1.1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +43,7 @@ class RewardBreakdown:
     total: float = 0.0
     farthest_sheep_progress: float = 0.0
     stray_ignore_penalty: float = 0.0
+    stray_approach_progress: float = 0.0
 
     def to_dict(self) -> dict[str, float]:
         """Serialize to a plain dict."""
@@ -57,6 +58,10 @@ class RewardInputs:
     reward terms; when omitted (or when instincts are disabled in the
     reward config) those terms remain zero and legacy reward behavior
     is unchanged.
+
+    Environment steps supply route_progress_delta to keep target progress
+    consistent with entry routing, and entry_stall_steps after the activation
+    window to suppress repeatable positive positioning bonuses.
     """
 
     previous_average_distance: float
@@ -89,6 +94,8 @@ class RewardInputs:
     current_farthest_distance: float = 0.0
     previous_dog_positions: tuple[Position, ...] = field(default_factory=tuple)
     previous_sheep_positions: tuple[Position, ...] = field(default_factory=tuple)
+    route_progress_delta: float | None = None
+    entry_stall_steps: int = 0
 
 
 def _distance(a: Position, b: Position) -> float:
@@ -234,7 +241,8 @@ class RewardComputer:
             + instincts["overpressure_penalty"]
             + instincts["split_flock_penalty"]
         )
-        total += farthest_sheep_progress + stray_ignore_penalty
+        stray_approach_progress = self._compute_approach_progress(inputs)
+        total += farthest_sheep_progress + stray_ignore_penalty + stray_approach_progress
         total = max(-15.0, total)
         return RewardBreakdown(
             progress_to_pen=progress_to_pen,
@@ -264,6 +272,7 @@ class RewardComputer:
             total=total,
             farthest_sheep_progress=farthest_sheep_progress,
             stray_ignore_penalty=stray_ignore_penalty,
+            stray_approach_progress=stray_approach_progress,
         )
 
     def _compute_instincts(self, inputs: RewardInputs) -> dict[str, float]:
@@ -306,20 +315,25 @@ class RewardComputer:
         dog_count = max(1, len(inputs.dog_positions))
         pressure_zone *= instinct_config.pressure_zone_weight / dog_count
         safe_pressure *= instinct_config.safe_pressure_weight / dog_count
+        if inputs.entry_stall_steps > 0:
+            pressure_zone = min(0.0, pressure_zone)
+            safe_pressure = min(0.0, safe_pressure)
 
         grouping_delta = inputs.previous_flock_spread - inputs.current_flock_spread
         grouping = grouping_delta * instinct_config.grouping_weight
 
         target_progress = 0.0
-        if inputs.previous_flock_centroid is not None:
+        if inputs.route_progress_delta is not None:
+            target_progress = inputs.route_progress_delta * instinct_config.target_progress_weight
+        elif inputs.previous_flock_centroid is not None:
             previous_distance = _distance(inputs.previous_flock_centroid, target)
             current_distance = _distance(flock, target)
             target_progress = (
                 previous_distance - current_distance
             ) * instinct_config.target_progress_weight
-            # Cap the contribution so a single large flock movement cannot
-            # override safe-pressure and overpressure signals.
-            target_progress = max(-1.5, min(1.5, target_progress))
+        # Cap the contribution so a single large flock movement cannot
+        # override safe-pressure and overpressure signals.
+        target_progress = max(-1.5, min(1.5, target_progress))
 
         scatter_delta = inputs.current_flock_spread - inputs.previous_flock_spread
         if scatter_delta > instinct_config.chaos_scatter_delta:
@@ -397,21 +411,46 @@ class RewardComputer:
                         effective_min_dog_dist = min(30.0, min_dog_dist)
                         stray_penalty -= effective_min_dog_dist * (si_scale * 10.0)
 
-                        # Dense approach progress reward: localized distance-based multiplier
-                        # when moving toward isolated farther_stray sheep or distant unpenned cluster.
-                        if inputs.previous_dog_positions:
-                            prev_min_dog_dist = min(_distance(dog, farthest_sheep) for dog in inputs.previous_dog_positions)
-                            progress = prev_min_dog_dist - min_dog_dist
-                            # Localized distance-based multiplier: increases as the sheep is more isolated or distant
-                            isolation_multiplier = max(1.0, dist_to_centroid / 8.0) if dist_to_centroid > 8.0 else max(1.0, max_dist / 10.0)
-                            # Progress reward is scaled by the stray ignore penalty scale
-                            stray_approach_reward = progress * (si_scale * 20.0) * isolation_multiplier
-                            stray_penalty += stray_approach_reward
-
             # Cap the overall stray penalty to avoid catastrophic policy updates
             stray_penalty = max(-15.0, stray_penalty)
 
         return farthest_progress, stray_penalty
+
+    @staticmethod
+    def _approach_potential(
+        dogs: tuple[Position, ...], sheep: tuple[Position, ...]
+    ) -> float:
+        """Return bounded mean nearest-dog distance with a smooth far-field gradient."""
+        distances = [min(_distance(dog, animal) for dog in dogs) for animal in sheep]
+        return sum(distance / (30.0 + distance) for distance in distances) / len(distances)
+
+    def _compute_approach_progress(self, inputs: RewardInputs) -> float:
+        """Reward signed changes in a bounded state potential.
+
+        Undiscounted progress sums to zero around a closed state loop. This is
+        not discount-correct potential-based shaping. No isolation multiplier,
+        target selection, or one-sided clipping is applied to the difference.
+        """
+        scale = self._config.stray_ignore_penalty_scale
+        if (
+            scale == 0.0
+            or not inputs.previous_dog_positions
+            or not inputs.dog_positions
+            or not inputs.previous_sheep_positions
+            or not inputs.sheep_positions
+            or inputs.newly_penned > 0
+            or inputs.terminated
+            or inputs.timeout
+            or inputs.success
+        ):
+            return 0.0
+        previous = self._approach_potential(
+            inputs.previous_dog_positions, inputs.previous_sheep_positions
+        )
+        current = self._approach_potential(inputs.dog_positions, inputs.sheep_positions)
+        # At the saved stage-34 scale (0.013), absolute progress is at most 0.26.
+        # Skip penning transitions to avoid bonuses from removing sheep slots.
+        return (previous - current) * scale * 20.0
 
     def _lane_crowding_penalty(self, inputs: RewardInputs) -> float:
         target = inputs.target_position

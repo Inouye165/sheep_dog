@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { DiagnosticsPanel } from "./DiagnosticsPanel";
 import type { CheckpointIndex, TrainingStatus } from "../state/types";
@@ -721,4 +721,470 @@ describe("DiagnosticsPanel Live Insights & Telemetry", () => {
     expect(screen.queryByText(/FORMAL EVALUATION \(STAGE 8 TARGET/i)).toBeNull();
     expect(screen.getAllByText(/Awaiting Checkpoints/i).length).toBeGreaterThan(0);
   });
+
+  it("calculateBlockSuccessPoints generates trailing in-progress block when remainder > 0", async () => {
+    const { calculateBlockSuccessPoints } = await import("./DiagnosticsPanel");
+    // 58 episodes: 25 in block 1, 25 in block 2, 8 in trailing block 3
+    const episodes = Array.from({ length: 58 }, (_, i) => {
+      const epNum = i + 1;
+      const isSuccess = epNum % 2 === 0;
+      return {
+        id: epNum,
+        run_id: "run_active_123",
+        global_environment_episode: epNum,
+        curriculum_stage: 1,
+        reward: isSuccess ? 100 : -10,
+        result: isSuccess ? "SUCCESS" : "STOPPED",
+        success: isSuccess,
+        global_timestep: epNum * 100,
+      };
+    });
+
+    const points = calculateBlockSuccessPoints(episodes as any, 25, (ep) => ep.global_environment_episode ?? null);
+    expect(points.length).toBe(3);
+    // Block 1: 1-25 (12 successes out of 25 = 48%)
+    expect(points[0].x).toBe(25);
+    expect(points[0].blockStartEp).toBe(1);
+    expect(points[0].blockEndEp).toBe(25);
+    expect(points[0].y).toBe(48);
+
+    // Block 2: 26-50 (13 successes out of 25 = 52%)
+    expect(points[1].x).toBe(50);
+    expect(points[1].blockStartEp).toBe(26);
+    expect(points[1].blockEndEp).toBe(50);
+    expect(points[1].y).toBe(52);
+
+    // Block 3 (trailing remainder): 51-58 (8 episodes: 52, 54, 56, 58 are even -> 4 successes = 50%)
+    expect(points[2].x).toBe(58);
+    expect(points[2].blockStartEp).toBe(51);
+    expect(points[2].blockEndEp).toBe(58);
+    expect(points[2].y).toBe(50);
+  });
+
+  it("calculateBlockAveragePoints calculates metric averages for steps, reward, sheep with remainder blocks", async () => {
+    const { calculateBlockAveragePoints } = await import("./DiagnosticsPanel");
+    const episodes = Array.from({ length: 30 }, (_, i) => ({
+      id: i + 1,
+      global_environment_episode: i + 1,
+      curriculum_stage: 1,
+      reward: (i + 1) * 10,
+    }));
+
+    const points = calculateBlockAveragePoints(
+      episodes as any,
+      (ep) => ep.reward,
+      25,
+      (ep) => ep.global_environment_episode ?? null,
+      (avg, start, end) => `${avg.toFixed(1)} (ep ${start}-${end})`
+    );
+    expect(points.length).toBe(2);
+    // Block 1 (1-25): avg is sum(1..25)*10 / 25 = 130
+    expect(points[0].x).toBe(25);
+    expect(points[0].y).toBe(130);
+    expect(points[0].blockStartEp).toBe(1);
+    expect(points[0].blockEndEp).toBe(25);
+    // Block 2 (26-30, 5 eps): avg is (26+27+28+29+30)*10 / 5 = 280
+    expect(points[1].x).toBe(30);
+    expect(points[1].y).toBe(280);
+    expect(points[1].blockStartEp).toBe(26);
+    expect(points[1].blockEndEp).toBe(30);
+  });
+
+  it("renders block markers even when fewer than 25 episodes have run (single in-progress block point)", async () => {
+    const initialEpisodes: any[] = Array.from({ length: 10 }, (_, i) => ({
+      id: i + 1,
+      run_id: "run_active_123",
+      global_environment_episode: i + 1,
+      curriculum_stage: 8,
+      reward: 150,
+      result: "SUCCESS",
+      success: true,
+      global_timestep: (i + 1) * 100,
+      steps: 45,
+      sheep_penned: 6,
+    }));
+
+    const { container } = render(
+      <DiagnosticsPanel
+        checkpointIndex={mockCheckpointIndex}
+        bestCheckpointEpisode={6508}
+        trainingStatus={activeTrainingStatus}
+        effectiveCurriculumStage={8}
+        initialEpisodes={initialEpisodes}
+        initialStageScope={8}
+        lastLiveRefreshTime={Date.now()}
+      />
+    );
+
+    // Block markers use circle with fill="#38bdf8"
+    const blockMarkers = container.querySelectorAll('circle[fill="#38bdf8"]');
+    expect(blockMarkers.length).toBeGreaterThan(0);
+  });
+
+  it("preserves checkpoint history when recent rollouts are beyond the last checkpoint", async () => {
+    // Checkpoints at episode 10, 50, 100, 500, 1000
+    const sparseCheckpointIndex: any = {
+      ...mockCheckpointIndex,
+      checkpoints: [
+        {
+          checkpoint_episode: 10,
+          environment_episodes_total: 100,
+          success_rate: 0.2,
+          checkpoint: "c10",
+          evaluation: "e10",
+          replay: "r10",
+          environment_config: { curriculum_stage: 8 },
+        },
+        {
+          checkpoint_episode: 50,
+          environment_episodes_total: 500,
+          success_rate: 0.5,
+          checkpoint: "c50",
+          evaluation: "e50",
+          replay: "r50",
+          environment_config: { curriculum_stage: 8 },
+        },
+        {
+          checkpoint_episode: 100,
+          environment_episodes_total: 10000,
+          success_rate: 0.8,
+          checkpoint: "c100",
+          evaluation: "e100",
+          replay: "r100",
+          environment_config: { curriculum_stage: 8 },
+        },
+      ],
+    };
+
+    // Episodes spanning only 10,000 to 10,050 (last 50 episodes)
+    const recentEpisodes: any[] = Array.from({ length: 50 }, (_, i) => ({
+      id: i + 1,
+      run_id: "run_active_123",
+      global_environment_episode: 10000 + i + 1,
+      curriculum_stage: 8,
+      reward: 100,
+      result: "SUCCESS",
+      success: true,
+      global_timestep: (10000 + i + 1) * 100,
+      steps: 50,
+    }));
+
+    window.localStorage.setItem("sheepdog_insights_view_window", "50");
+
+    const { container } = render(
+      <DiagnosticsPanel
+        checkpointIndex={sparseCheckpointIndex}
+        bestCheckpointEpisode={null}
+        trainingStatus={activeTrainingStatus}
+        effectiveCurriculumStage={8}
+        initialEpisodes={recentEpisodes}
+        initialStageScope={8}
+        lastLiveRefreshTime={Date.now()}
+      />
+    );
+
+    // Last 50 means up to 50 checkpoints, not 50 high-frequency rollouts.
+    const formalLine = container.querySelector('polyline[stroke="#34d399"]');
+    expect(formalLine?.getAttribute("points")?.split(" ")).toHaveLength(3);
+  });
+
+  it("prompts a live poll when lastLiveRefreshTime updates", async () => {
+    const api = await import("../lib/api");
+    const loadEpisodesSpy = vi.spyOn(api, "loadTrainingEpisodes").mockImplementation(async () => {
+      return {
+        episodes: [],
+        latest_id: 0,
+        next_after_id: 0,
+        has_more: false,
+        max_id: 0,
+        oldest_available_timestamp: null,
+        total_matching: 0,
+      };
+    });
+
+    const { rerender } = render(
+      <DiagnosticsPanel
+        checkpointIndex={mockCheckpointIndex}
+        bestCheckpointEpisode={6508}
+        trainingStatus={activeTrainingStatus}
+        effectiveCurriculumStage={8}
+        initialStageScope={8}
+        lastLiveRefreshTime={1000}
+      />
+    );
+
+    const initialCallCount = loadEpisodesSpy.mock.calls.length;
+
+    // Simulate new rollout arrival triggering lastLiveRefreshTime update
+    await act(async () => {
+      rerender(
+        <DiagnosticsPanel
+          checkpointIndex={mockCheckpointIndex}
+          bestCheckpointEpisode={6508}
+          trainingStatus={activeTrainingStatus}
+          effectiveCurriculumStage={8}
+          initialStageScope={8}
+          lastLiveRefreshTime={2000}
+        />
+      );
+    });
+
+    expect(loadEpisodesSpy.mock.calls.length).toBeGreaterThan(initialCallCount);
+    loadEpisodesSpy.mockRestore();
+  });
+
+  it("getCheckpointXValue correctly scales checkpoints to environment_episodes_total for episode X-axis", async () => {
+    const { getCheckpointXValue } = await import("./DiagnosticsPanel");
+
+    const checkpoint: any = {
+      checkpoint_episode: 39986,
+      total_training_episodes: 380000,
+      environment_episodes_total: 386510,
+    };
+
+    // When environment_episodes_total is present, uses it directly to align with episode scale (~386k)
+    expect(getCheckpointXValue(checkpoint, "episode")).toBe(386510);
+
+    // Fallbacks
+    const cpNoEnv: any = {
+      checkpoint_episode: 39986,
+      total_training_episodes: 380000,
+    };
+    expect(getCheckpointXValue(cpNoEnv, "episode")).toBe(380000);
+
+    const cpRawOnly: any = {
+      checkpoint_episode: 39986,
+    };
+    expect(getCheckpointXValue(cpRawOnly, "episode")).toBe(39986);
+  });
+
+  it("renders 5 block trend points and valid polylines in a rollout-only Last 25 window", async () => {
+    // Checkpoint older than the active window
+    const nonOverlappingCheckpointIndex: CheckpointIndex = {
+      checkpoints: [
+        {
+          checkpoint_episode: 6000,
+          environment_episodes_total: 6000,
+          global_timestep: 600000,
+          curriculum_stage: 8,
+          success_rate: 0.75,
+          timeout_rate: 0.25,
+          average_completion_steps: 320,
+          average_completion_seconds: 32,
+          average_sheep_penned: 4,
+          average_reward: 200,
+          checkpoint: "checkpoint-006000.json",
+          evaluation: "eval_006000.json",
+          replay: "replay_006000.json",
+          recorded_at: "2026-08-01T10:00:00Z",
+          records: [],
+        },
+      ],
+      latest: null,
+    };
+
+    // Exactly 25 recent episodes (e.g. 6501 to 6525) that occur after checkpoint 6000
+    const recent25Episodes: any[] = Array.from({ length: 25 }, (_, i) => ({
+      id: i + 1,
+      run_id: "run_active_123",
+      global_environment_episode: 6500 + i + 1,
+      curriculum_stage: 8,
+      reward: 150 + i * 2,
+      result: i % 2 === 0 ? "SUCCESS" : "STOPPED",
+      success: i % 2 === 0,
+      global_timestep: (6500 + i + 1) * 100,
+      steps: 100 + i * 5,
+      sheep_penned: 3 + (i % 2),
+    }));
+
+    window.localStorage.setItem("sheepdog_insights_view_window", "25");
+
+    const { container } = render(
+      <DiagnosticsPanel
+        checkpointIndex={{ ...nonOverlappingCheckpointIndex, checkpoints: [] }}
+        bestCheckpointEpisode={null}
+        trainingStatus={activeTrainingStatus}
+        effectiveCurriculumStage={8}
+        initialEpisodes={recent25Episodes}
+        initialStageScope={8}
+        lastLiveRefreshTime={Date.now()}
+      />
+    );
+
+    // Chart canvas must not be empty or display the 'No data' fallback
+    expect(screen.queryByText(/No data available for current range/i)).toBeNull();
+
+    // Verify 5 block trend points are rendered (5 markers in active chart)
+    const blockMarkers = container.querySelectorAll('circle[fill="#38bdf8"]');
+    expect(blockMarkers.length).toBe(5);
+
+    // Verify block rollout polyline is rendered with 5 points
+    const polylines = Array.from(container.querySelectorAll("polyline"));
+    const blockPolyline = polylines.find((p) => p.getAttribute("stroke") === "#38bdf8");
+    expect(blockPolyline).toBeDefined();
+    expect(blockPolyline?.getAttribute("points")?.split(" ").length).toBe(5);
+
+    // Verify legend dynamically updates to 5-ep rollout trend
+    expect(screen.getByText("5-ep rollout trend")).toBeDefined();
+  });
+
+  it("switching between viewWindow options preserves valid, non-empty trend lines", async () => {
+    // 50 recent episodes
+    const recent50Episodes: any[] = Array.from({ length: 50 }, (_, i) => ({
+      id: i + 1,
+      run_id: "run_active_123",
+      global_environment_episode: 7000 + i + 1,
+      curriculum_stage: 8,
+      reward: 120 + i,
+      result: i % 3 !== 0 ? "SUCCESS" : "STOPPED",
+      success: i % 3 !== 0,
+      global_timestep: (7000 + i + 1) * 100,
+      steps: 150 - i,
+      sheep_penned: 4,
+    }));
+
+    const nonOverlappingCheckpointIndex: CheckpointIndex = {
+      checkpoints: [
+        {
+          checkpoint_episode: 5000,
+          environment_episodes_total: 5000,
+          global_timestep: 500000,
+          curriculum_stage: 8,
+          success_rate: 0.6,
+          timeout_rate: 0.4,
+          average_completion_steps: 400,
+          average_completion_seconds: 40,
+          average_sheep_penned: 2,
+          average_reward: 100,
+          checkpoint: "checkpoint-005000.json",
+          evaluation: "eval_005000.json",
+          replay: "replay_005000.json",
+          recorded_at: "2026-08-01T10:00:00Z",
+          records: [],
+        },
+      ],
+      latest: null,
+    };
+
+    window.localStorage.setItem("sheepdog_insights_view_window", "25");
+
+    const { container } = render(
+      <DiagnosticsPanel
+        checkpointIndex={{ ...nonOverlappingCheckpointIndex, checkpoints: [] }}
+        bestCheckpointEpisode={null}
+        trainingStatus={activeTrainingStatus}
+        effectiveCurriculumStage={8}
+        initialEpisodes={recent50Episodes}
+        initialStageScope={8}
+        lastLiveRefreshTime={Date.now()}
+      />
+    );
+
+    // Initial Last 25 viewWindow: effective block size 5 -> 5 block points
+    expect(screen.getByText("5-ep rollout trend")).toBeDefined();
+    let blockMarkers = container.querySelectorAll('circle[fill="#38bdf8"]');
+    expect(blockMarkers.length).toBe(5);
+
+    // Switch to "Last 50"
+    const btn50 = screen.getByRole("button", { name: "Last 50" });
+    fireEvent.click(btn50);
+
+    // On 50 episodes with viewWindow 50: effective block size 10 -> 5 block points
+    expect(screen.getByText("10-ep rollout trend")).toBeDefined();
+    blockMarkers = container.querySelectorAll('circle[fill="#38bdf8"]');
+    expect(blockMarkers.length).toBe(5);
+
+    let polylines = Array.from(container.querySelectorAll("polyline"));
+    let blockPolyline = polylines.find((p) => p.getAttribute("stroke") === "#38bdf8");
+    expect(blockPolyline).toBeDefined();
+    expect(blockPolyline?.getAttribute("points")?.split(" ").length).toBe(5);
+
+    // Switch to "All"
+    const btnAll = screen.getByRole("button", { name: "All" });
+    fireEvent.click(btnAll);
+
+    // On 50 episodes with viewWindow "all": effective block size 25 -> 2 block points
+    expect(screen.getByText("25-ep rollout trend")).toBeDefined();
+    blockMarkers = container.querySelectorAll('circle[fill="#38bdf8"]');
+    expect(blockMarkers.length).toBe(2);
+
+    polylines = Array.from(container.querySelectorAll("polyline"));
+    blockPolyline = polylines.find((p) => p.getAttribute("stroke") === "#38bdf8");
+    expect(blockPolyline).toBeDefined();
+    expect(blockPolyline?.getAttribute("points")?.split(" ").length).toBe(2);
+    expect(screen.queryByText(/No data available for current range/i)).toBeNull();
+  });
+
+  it.each([25, 50, 100])("keeps the last %i checkpoint evaluations through delayed telemetry and subsequent polls", async (windowSize) => {
+    const api = await import("../lib/api");
+    type Response = Awaited<ReturnType<typeof api.loadTrainingEpisodes>>;
+    let resolveBootstrap!: (response: Response) => void;
+    const bootstrap = new Promise<Response>((resolve) => { resolveBootstrap = resolve; });
+    const checkpointIndex: CheckpointIndex = {
+      latest: null,
+      checkpoints: Array.from({ length: 110 }, (_, i) => ({
+        ...mockCheckpointIndex.checkpoints[0],
+        checkpoint_episode: 6500 + i,
+        global_timestep: 335_000_000 + i * 25_000,
+        success_rate: i % 2 ? 0.7 : 0.9,
+        average_completion_steps: 300 + i,
+      })),
+    };
+    const rollout = (id: number) => ({
+      id, run_id: "run_active_123", curriculum_stage: 8,
+      event_key: `rollout-${id}`, session_id: null, episode_in_stage: id,
+      policy_version: 1, completed_at: "2026-11-09T18:00:00Z",
+      active_runtime_seconds_total: null, timeout: false, stopped: false,
+      total_sheep: 4, seed: id, checkpoint_id: null,
+      global_environment_episode: 2000 + id,
+      global_timestep: 338_190_000 + id * 100,
+      result: "SUCCESS", success: true, reward: 500,
+      steps: 50, sheep_penned: 4,
+    });
+    const response = (episodes: ReturnType<typeof rollout>[]): Response => ({
+      episodes, latest_id: episodes.at(-1)?.id ?? 0,
+      next_after_id: episodes.at(-1)?.id ?? 0, has_more: false,
+      oldest_available_timestamp: null, total_matching: episodes.length,
+    });
+    const spy = vi.spyOn(api, "loadTrainingEpisodes")
+      .mockReturnValueOnce(bootstrap)
+      .mockResolvedValue(response([rollout(51)]));
+    window.localStorage.clear();
+    window.localStorage.setItem("sheepdog_insights_view_window", String(windowSize));
+    const props = {
+      checkpointIndex, bestCheckpointEpisode: null,
+      trainingStatus: activeTrainingStatus, effectiveCurriculumStage: 8,
+      initialStageScope: 8 as const, lastLiveRefreshTime: 1,
+    };
+    const { container, rerender, unmount } = render(<DiagnosticsPanel {...props} />);
+    const formalPoints = () => container.querySelector('polyline[stroke="#34d399"]')!
+      .getAttribute("points")!.split(" ");
+    try {
+      const before = formalPoints();
+      expect(before).toHaveLength(windowSize);
+      await act(async () => {
+        resolveBootstrap(response([
+          { ...rollout(0), global_timestep: 1_000 },
+          ...Array.from({ length: 50 }, (_, i) => rollout(i + 1)),
+        ]));
+        await bootstrap;
+      });
+      const after = formalPoints();
+      expect(after).toHaveLength(windowSize);
+      // Benchmark values stay 70/90%, distinct from the 100% training rollouts.
+      expect(after.map((point) => point.split(",")[1]))
+        .toEqual(before.map((point) => point.split(",")[1]));
+      expect(container.querySelectorAll('circle[fill="rgba(56,189,248,0.5)"]')).toHaveLength(50);
+      expect(Number(after[0].split(",")[0])).toBe(54);
+      rerender(<DiagnosticsPanel {...props} lastLiveRefreshTime={2} />);
+      await act(async () => { await Promise.resolve(); });
+      expect(spy).toHaveBeenCalledTimes(2);
+      expect(formalPoints()).toHaveLength(windowSize);
+      expect(container.querySelectorAll('circle[fill="rgba(56,189,248,0.5)"]')).toHaveLength(51);
+    } finally {
+      unmount();
+      spy.mockRestore();
+    }
+  });
+
 });

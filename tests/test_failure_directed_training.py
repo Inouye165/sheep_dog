@@ -249,3 +249,66 @@ def test_deterministic_reproducibility() -> None:
         if item1.scenario is not None:
             assert item2.scenario is not None
             assert item1.scenario.name == item2.scenario.name
+
+
+def test_high_pen_standoff_and_wall_stray_builders() -> None:
+    """Verify high_pen_standoff and wall_stray_extraction builders for Stage 26 layout."""
+    from sheepdog.training.training_scenarios import (
+        create_high_pen_standoff_scenario,
+        create_wall_stray_extraction_scenario,
+    )
+
+    env_cfg = EnvironmentConfig(width=132, height=96, dogs=3, sheep=6, pen_placement="interior")
+
+    # High pen standoff: pen origin_y near top (<= 24), pen opening bottom, 6 sheep below pen
+    s_standoff = create_high_pen_standoff_scenario(seed=37, config=env_cfg)
+    assert s_standoff.name == "high_pen_standoff"
+    assert len(s_standoff.sheep) == 6
+    assert len(s_standoff.dogs) == 3
+    assert s_standoff.pen.origin_y <= 24
+    assert s_standoff.pen.opening == "bottom"
+    # Sheep should be positioned below the pen
+    for sh in s_standoff.sheep:
+        assert sh.y > s_standoff.pen.origin_y
+
+    # Wall stray extraction: 6 sheep (majority near pen, 1-2 at perimeter walls)
+    s_wall = create_wall_stray_extraction_scenario(seed=61, config=env_cfg)
+    assert s_wall.name == "wall_stray_extraction"
+    assert len(s_wall.sheep) == 6
+    assert len(s_wall.dogs) == 3
+
+
+def test_stage_26_evaluation_failure_archetypes() -> None:
+    """Verify that Stage 26 evaluation failures (Seed 37 and Seed 61) activate matching classes."""
+    train_cfg = TrainingConfig(
+        train_seed=1234,
+        failure_directed_training_enabled=True,
+        failure_directed_target_ratio=0.50,
+    )
+    env_cfg = EnvironmentConfig(width=132, height=96, dogs=3, sheep=6, pen_placement="interior")
+    sampler = ScenarioSampler(train_cfg, env_cfg)
+
+    # Evaluation results mimicking Stage 26: Seed 37 (0 penned, top pen) & Seed 61 (5 penned) fail
+    eval_records = [
+        {"seed": 37, "success": False, "sheep_penned": 0, "pen_zone": "top_right", "stop_reason": "timeout"},
+        {"seed": 61, "success": False, "sheep_penned": 5, "final_sheep_zone": "center", "stop_reason": "timeout"},
+        {"seed": 11, "success": True, "sheep_penned": 6},
+    ]
+
+    weights = sampler.update_from_evaluation(eval_records)
+    assert "high_pen_standoff" in weights
+    assert "wall_stray_extraction" in weights
+    assert weights["high_pen_standoff"] == 1.0
+    assert weights["wall_stray_extraction"] == 1.0
+
+    # Sample episodes: targeted scenarios should be created for both classes
+    sampled_types = set()
+    for ep in range(100):
+        sel = sampler.sample(ep)
+        sampled_types.add(sel.scenario_type)
+        if sel.scenario is not None:
+            assert sel.scenario.name in ("high_pen_standoff", "wall_stray_extraction")
+
+    assert "high_pen_standoff" in sampled_types
+    assert "wall_stray_extraction" in sampled_types
+

@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import type { CheckpointEntry, TrainingEpisode, AutoPromoteGateDiagnostics } from "../state/types";
 import {
   type CanonicalEpisodeRecord,
@@ -7,8 +7,6 @@ import {
   type FormalEvalMarker,
   computeRollingTrainingSeries,
   buildFormalEvalMarkers,
-  selectWindowSlice,
-  getCheckpointStage,
 } from "../lib/chartPipeline";
 
 export type { SmoothingWindow };
@@ -92,11 +90,11 @@ export function StackedLearningPanels({
   }, [checkpoints, curriculumStage, xAxisMode, bestCheckpointEpisode]);
 
   // 4. Determine canonical X value for any episode
-  const getEpX = (ep: RollingTrainingPoint | CanonicalEpisodeRecord): number => {
+  const getEpX = useCallback((ep: RollingTrainingPoint | CanonicalEpisodeRecord): number => {
     if (xAxisMode === "global_ep") return ep.global_environment_episode ?? ep.episode_in_stage;
     if (xAxisMode === "timesteps") return ep.global_timestep ?? ep.global_environment_episode ?? ep.episode_in_stage;
     return ep.episode_in_stage ?? ep.global_environment_episode;
-  };
+  }, [xAxisMode]);
 
   // 5. Shared canonical X-domain calculation across episodes and formal evals
   const { minX, maxX } = useMemo(() => {
@@ -111,7 +109,7 @@ export function StackedLearningPanels({
       return { minX: Math.max(0, min - 10), maxX: max + 10 };
     }
     return { minX: min, maxX: max };
-  }, [visibleRollingEpisodes, formalEvalMarkers, xAxisMode]);
+  }, [visibleRollingEpisodes, formalEvalMarkers, getEpX]);
 
   // 6. Shared SVG layout parameters
   const W = 900;
@@ -179,7 +177,7 @@ export function StackedLearningPanels({
       }
     }
     return closest;
-  }, [hoveredXVal, visibleRollingEpisodes, xAxisMode]);
+  }, [hoveredXVal, visibleRollingEpisodes, getEpX]);
 
   // Format X Axis tick labels
   const formatXLabel = (val: number): string => {

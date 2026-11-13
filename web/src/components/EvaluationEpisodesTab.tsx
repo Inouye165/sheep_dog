@@ -380,6 +380,27 @@ export function EvaluationEpisodesTab({
     Record<number, { bundle: ReplayBundle | null; loading: boolean; error: string | null }>
   >({});
   const replayCacheRef = useRef<Map<string, ReplayBundle>>(new Map());
+  const loadGenerationRef = useRef<number>(0);
+  const isMountedRef = useRef<boolean>(true);
+
+  const setCachedReplay = useCallback((cacheKey: string, bundle: ReplayBundle) => {
+    const cache = replayCacheRef.current;
+    if (!cache.has(cacheKey) && cache.size >= 40) {
+      const oldestKey = cache.keys().next().value;
+      if (oldestKey !== undefined) {
+        cache.delete(oldestKey);
+      }
+    }
+    cache.set(cacheKey, bundle);
+  }, []);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      loadGenerationRef.current += 1;
+    };
+  }, []);
 
   // Single-seed replay fallback state
   const [isLoadingSingleReplay, setIsLoadingSingleReplay] = useState<boolean>(false);
@@ -470,6 +491,7 @@ export function EvaluationEpisodesTab({
   // Load replays for all seeds of active evaluation in parallel batches
   const loadAllSeedReplays = useCallback(async (evalSummary: EvaluationSummaryPayload) => {
     if (!evalSummary || !evalSummary.records || evalSummary.records.length === 0) return;
+    const generation = ++loadGenerationRef.current;
 
     // Initialize multiReplays state with cached bundles or loading
     setMultiReplays((prev) => {
@@ -502,6 +524,7 @@ export function EvaluationEpisodesTab({
     // Load in concurrent batches of 3
     const batchSize = 3;
     for (let i = 0; i < recordsToFetch.length; i += batchSize) {
+      if (!isMountedRef.current || generation !== loadGenerationRef.current) return;
       const batch = recordsToFetch.slice(i, i + batchSize);
       await Promise.all(
         batch.map(async (record) => {
@@ -534,18 +557,21 @@ export function EvaluationEpisodesTab({
 
             if (bundle && bundle.frames && bundle.frames.length > 0) {
               const cacheKey = getEvaluationReplayCacheKey(evalSummary, record.seed, record.replay_path);
-              replayCacheRef.current.set(cacheKey, bundle);
+              setCachedReplay(cacheKey, bundle);
+              if (!isMountedRef.current || generation !== loadGenerationRef.current) return;
               setMultiReplays((prev) => ({
                 ...prev,
                 [record.seed]: { bundle, loading: false, error: null },
               }));
             } else {
+              if (!isMountedRef.current || generation !== loadGenerationRef.current) return;
               setMultiReplays((prev) => ({
                 ...prev,
                 [record.seed]: { bundle: null, loading: false, error: "Authentic evaluation recording not available or pruned" },
               }));
             }
           } catch (err: any) {
+            if (!isMountedRef.current || generation !== loadGenerationRef.current) return;
             setMultiReplays((prev) => ({
               ...prev,
               [record.seed]: {
@@ -558,15 +584,18 @@ export function EvaluationEpisodesTab({
         })
       );
     }
-  }, []);
+  }, [setCachedReplay]);
 
   // When active evaluation changes, trigger loading all seed replays
   useEffect(() => {
     if (activeEval) {
       setCurrentStep(0);
       setIsPlaying(false);
-      loadAllSeedReplays(activeEval);
+      void loadAllSeedReplays(activeEval);
     }
+    return () => {
+      loadGenerationRef.current += 1;
+    };
   }, [activeEval, loadAllSeedReplays]);
 
   // Authentic single-seed replay loader (sync with multiReplays cache)
@@ -615,7 +644,7 @@ export function EvaluationEpisodesTab({
       .then((bundle) => {
         if (!isMounted) return;
         if (bundle && bundle.frames && bundle.frames.length > 0) {
-          replayCacheRef.current.set(cacheKey, bundle);
+          setCachedReplay(cacheKey, bundle);
           setMultiReplays((prev) => ({
             ...prev,
             [activeRecord.seed]: { bundle, loading: false, error: null },
@@ -636,7 +665,7 @@ export function EvaluationEpisodesTab({
     return () => {
       isMounted = false;
     };
-  }, [activeRecord, activeEval]);
+  }, [activeRecord, activeEval, setCachedReplay]);
 
   // Compute master maximum steps across all seeds
   const maxSteps = useMemo(() => {

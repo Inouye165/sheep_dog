@@ -1,506 +1,331 @@
 # Sheepdog Herding Lab
 
-Sheepdog Herding Lab is a deterministic sheepdog-herding simulation where a team of dogs learns to herd multiple sheep into a pen.
+**Can a team of dogs learn to gather a flock, recover strays, and guide every sheep through a pen entrance?**
 
-The project is split into two parts:
+Sheepdog Herding Lab is an experimental reinforcement-learning environment for exploring that question. A Python simulation models dogs, reactive sheep, fences, and pen geometry. A React interface lets you train policies, inspect learning, compare checkpoints, and watch recorded evaluation episodes.
 
-- A Python simulation, training, and evaluation pipeline.
-- A React + TypeScript replay viewer that reads exported checkpoint data.
+The current saved experiment uses a **shared actor–critic neural policy trained with MaskablePPO**, with three hidden layers per branch: **256 → 256 → 128**. Dogs learn movement decisions from numerical observations and team rewards. Guided training supplies scripted tactical roles and targets; additional paths explore learning without those inputs and choosing the whole team's actions together.
 
-The current baseline is intentionally honest about what it does. It trains a role-aware shared linear policy with hill climbing, measures real checkpoint results, and exports replays that the UI can inspect.
+[Quick start](#quick-start) · [The dogs' brain](#the-dogs-brain) · [Training modes](#training-modes) · [Evaluation](#evaluation-and-evidence) · [Project map](#project-map)
 
-This repository now also includes an experimental comparison path: a small role-aware neural policy trained with MaskablePPO. The baseline is still present and still first-class. The point of this round is comparison and benchmarking, not replacing the hill-climbing path.
+## What the experiment explores
 
-## Why This Exists
+Herding is an indirect control problem: dogs move themselves, and sheep react. A useful policy must learn when to approach, flank, sprint, hold position, collect a stray, or clear the entrance.
 
-The goal is to make herd behavior visible, measurable, and comparable across checkpoints without hiding the actual results behind demo logic or hand-waved metrics.
+The lab brings together:
 
-## Quick Start
+- **A reproducible simulation:** seeded layouts and sheep behavior, explicit occupancy rules, walls, fences, and sheep personalities.
+- **Learning at several levels of guidance:** a linear baseline, guided and emergent neural policies, shepherd commands, and centralized team actions.
+- **A curriculum:** progressively harder layouts, flock sizes, pen approaches, and recovery situations.
+- **Behavioral evidence:** fixed-seed evaluation, per-component rewards, checkpoint comparisons, diagnostics, and recorded trajectories.
+- **Persistent experiments:** resumable training, model checkpoints, backups, adaptive learning controls, and failure-directed practice.
 
-1. Create a Python environment and install the backend package in editable mode with dev tools.
-2. Start the backend and web viewer from PowerShell.
-3. Open the UI and train or run the current dogs.
-4. Run the training pipeline when you want exported checkpoints and replay files.
+Success means **every sheep is penned**. Partial completion is useful diagnostic information, but counts as a failed episode.
 
-## Start From PowerShell
+## Quick start
 
-From the repository root in PowerShell, run:
+### Requirements
+
+- Python **3.11 or 3.12**; the package declares Python below 3.13.
+- Node.js and npm for the web interface.
+- PowerShell for the supplied service launchers.
+
+From the repository root:
 
 ```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[dev,rl]"
 .\start-app.ps1
 ```
 
-That launcher will:
+Open the [web interface](http://127.0.0.1:5173). The backend runs at [http://127.0.0.1:8000](http://127.0.0.1:8000).
 
-- install the backend in editable mode if needed
-- install the web dependencies if `web/node_modules` is missing
-- start the Python API server at `http://127.0.0.1:8000`
-- start the Vite viewer at `http://127.0.0.1:5173`
-- write process ids and startup log paths to `artifacts/startup/pids.json`
-
-To stop both services:
+The launcher uses the local virtual environment when available, installs missing web dependencies, starts the services, and writes logs under `artifacts/startup/`. Restoring a large saved experiment can take several minutes.
 
 ```powershell
 .\stop-app.ps1
-```
-
-If training is active, `stop-app.ps1` now asks the backend to persist the last complete checkpoint before it shuts the processes down. The next `start-app.ps1` run will prompt you to resume a paused or stopped training session if one is available. If the app was interrupted unexpectedly during a running batch, startup now auto-resumes from the last persisted safe point instead.
-
-To restart both services:
-
-```powershell
 .\restart-app.ps1
 ```
 
-If you want to start the services manually from PowerShell instead of using the launcher:
+Stopping through the supplied script requests persistence before shutdown. Startup supports restoring saved training; see [startup details](STARTUP.md).
+
+To run the services manually, use two terminals:
 
 ```powershell
-python -m pip install -e .[dev]
-python -m sheepdog.server
+# Terminal 1: backend
+.\.venv\Scripts\python.exe -m sheepdog.server
+```
+
+```powershell
+# Terminal 2: frontend
 cd web
 npm install
 npm run dev -- --host 127.0.0.1 --port 5173
 ```
 
-Example commands:
+## The dogs' brain
+
+### A precise description
+
+> The dogs share a feedforward actor–critic policy trained with Maskable Proximal Policy Optimization. In guided mode, each dog receives 54 numerical features. The actor and critic are separate multilayer perceptrons, each with three fully connected hidden layers of 256, 256, and 128 neurons using Tanh activations. The actor produces scores for nine discrete actions; the critic predicts expected discounted return.
+
+In everyday language: **the dogs share one learned brain that chooses movements, while a second branch helps it learn by estimating how promising a situation is.**
+
+### Structure
+
+```text
+                         54-feature observation
+                                  |
+                         Flatten (no weights)
+                                  |
+                 +----------------+----------------+
+                 |                                 |
+             ACTOR BRANCH                     CRITIC BRANCH
+          Linear: 54 → 256                  Linear: 54 → 256
+                Tanh                              Tanh
+          Linear: 256 → 256                 Linear: 256 → 256
+                Tanh                              Tanh
+          Linear: 256 → 128                 Linear: 256 → 128
+                Tanh                              Tanh
+          Linear: 128 → 9                   Linear: 128 → 1
+                 |                                 |
+          Legal-action mask                 Estimated return
+                 |
+       Categorical action distribution
+                 |
+             Dog's action
+```
+
+The actor's nine choices are:
+
+| Movement | Actions |
+|---|---|
+| Walk | Up, down, left, right |
+| Sprint | Up, down, left, right |
+| Hold | Wait |
+
+These are cardinal directions with two movement speeds. There are no diagonal actions.
+
+The mask removes illegal choices before action selection. The critic is used during training; choosing a movement depends on the actor.
+
+### How many layers?
+
+The clearest answer is **three hidden layers per branch**.
+
+| Counting convention | Count per branch |
+|---|---:|
+| Hidden layers only | 3 |
+| Learned linear layers, including the output layer | 4 |
+| Input, hidden layers, and output | 5 |
+
+The full actor–critic model has **eight learned linear layers across its two parallel branches**. That does not make it an eight-layer sequential network.
+
+For the 54-input, nine-action configuration, the actor has **113,929 parameters**, the critic has **112,897**, and the total is **226,826 trainable parameters**, including biases.
+
+### What is shared?
+
+All dogs use the **same actor weights** and contribute experience to the same training process. Different observations allow that shared policy to choose different actions for different dogs.
+
+The actor and critic have **separate hidden-layer weights**. Their common flattening step has no learned parameters. Sharing a policy among dogs and sharing layers between actor and critic are different design choices.
+
+### What does the model see?
+
+The guided observation builder supplies 54 features:
+
+| Feature group | Count |
+|---|---:|
+| Dog, pen, flock-center, and assigned-target coordinates | 8 |
+| Distances, flock spread, wall proximity, stall/loop indicators, and stray flag | 14 |
+| Tactical role one-hot encoding | 5 |
+| Focus-sheep relative position and distance | 3 |
+| Stray-sheep relative position | 2 |
+| Six sheep slots: relative coordinates and penned flag | 18 |
+| Two teammate slots: relative coordinates | 4 |
+| **Total** | **54** |
+
+Inputs are engineered numerical features. The policy is a feedforward MLP; it receives some history-derived indicators, but has no recurrent memory. Fixed entity slots keep the guided input shape stable across curriculum stages.
+
+Implementation: [observations](src/sheepdog/observations.py), [neural policy](src/sheepdog/policies/neural.py), and [configuration](src/sheepdog/config.py).
+
+## What is learned, and what is programmed?
+
+**Learned:** the neural weights that turn observations into movement probabilities, and the critic's estimate of future return.
+
+**Programmed:** sheep reactions, collision and fence rules, legal-action constraints, reward definitions, scenario generation, and curriculum logic. Guided mode also programs tactical role assignment and role targets. Hierarchical mode currently uses a scripted shepherd.
+
+This distinction defines the research question. Guided training asks whether a policy can learn effective movement with tactical assistance. Emergent observation mode asks how much behavior can be learned when role labels and targets are removed.
+
+The sheep are simulated agents with programmed behavior; they are not independently trained neural policies.
+
+## Training modes
+
+Observation mode and trainer type are separate settings.
+
+| Path | Guidance and decision structure | Model / trainer |
+|---|---|---|
+| Linear baseline | Scripted tactical roles; learned action scoring | Shared linear policy / hill climbing |
+| Guided neural | Role and target features supplied per dog | Shared MLP / MaskablePPO |
+| Emergent neural | Removes scripted role and target inputs; includes dog identity and spatial features | Shared MLP / MaskablePPO |
+| Hierarchical neural | Scripted shepherd supplies high-level commands to neural dogs | Command-conditioned MLP / hierarchical MaskablePPO trainer |
+| Joint-team neural | Centralized observation; chooses actions for the dog slots in one team decision | Team MLP / joint MaskablePPO trainer |
+
+Other policies provide random, instinct-only, and scripted expert comparisons.
+
+Changing observation mode changes the input architecture. Checkpoints require compatible observation shapes, action spaces, and network widths. A change to geometry or reward semantics may preserve tensor shapes while still changing what a trained policy means.
+
+### One training step versus one world step
+
+In the standard shared-dog PPO adapter, actions are selected one dog at a time and buffered. The world advances after the final dog chooses, and that transition emits the team reward. Earlier dog selections return zero reward without advancing the world.
+
+With three dogs, **three PPO transitions correspond to one simulation step**. This matters for interpreting timestep counts, discounting, and credit assignment. The joint-team path explicitly represents a simultaneous team decision.
+
+See the [evaluation roadmap](docs/rl-evaluation-roadmap.md) for the motivation and experiment history.
+
+## How learning works
+
+1. Reset into a seeded layout or sampled training scenario.
+2. Build each dog's observation and legal-action mask.
+3. Select actions, advance the world, and let sheep react.
+4. Compute the shared reward and episode outcome.
+5. Collect rollouts and update the actor and critic with PPO.
+6. Evaluate checkpoints, record evidence, and persist training state.
+
+The reward combines task completion with intermediate signals such as route progress toward the pen, flock cohesion, gate alignment, and stray recovery. Penalties discourage scattering, stalling, crowding, and wasted time. Optional instinct rewards add further pressure-position and safe-distance shaping.
+
+Pen progress accounts for fences and the open entrance using legal route distance. Penned sheep are retained. Episodes end on success, the step limit, or configured no-progress conditions.
+
+Curriculum stages vary the environment and difficulty. Failure-directed sampling increases exposure to diagnosed problem classes. Adaptive controls can change learning settings and restore a checkpoint after a detected collapse.
+
+## Run experiments
+
+The plain CLI defaults to the linear hill-climbing baseline. Select the neural trainer explicitly for PPO.
 
 ```powershell
-python -m pip install -e .[dev]
-.\start-app.ps1
-python -m sheepdog.cli train
-python -m sheepdog.cli export-demo
+# Linear baseline
+.\.venv\Scripts\python.exe -m sheepdog.cli train --trainer-type hill_climb --policy-type linear --output-dir artifacts/hill_climb
+
+# Fresh guided neural experiment
+.\.venv\Scripts\python.exe -m sheepdog.cli train --trainer-type maskable_ppo --policy-type neural --total-timesteps 20000 --output-dir artifacts/guided_trial
+
+# Hierarchical experiment
+.\.venv\Scripts\python.exe -m sheepdog.cli train-hierarchical --total-timesteps 20000 --output-dir artifacts/hierarchical_trial
 ```
 
-To run the experimental PPO path, install the RL extras once:
+Use a new output directory for a new experiment. Training in an existing output directory can restore its saved state.
+
+For a configured run:
 
 ```powershell
-python -m pip install -e .[dev,rl]
+.\.venv\Scripts\python.exe -m sheepdog.cli train --config path/to/config.json --output-dir artifacts/my_experiment
 ```
 
-## Repo Structure
+The JSON configuration groups settings under `environment`, `rewards`, `training`, and `policy`. Set `training.observation_mode` to `guided` or `emergent`. Select `joint_maskable_ppo` as the trainer type for the centralized team path.
 
-- `src/sheepdog/` Python simulation, policies, training, evaluation, checkpointing, and replay export.
-- `tests/` Python regression tests.
-- `web/` React + TypeScript UI for replay playback and checkpoint comparison.
-- `docs/architecture.md` High-level architecture notes.
-- [`docs/rl-evaluation-roadmap.md`](docs/rl-evaluation-roadmap.md) RL experiment results, decisions, and prioritized improvement queue.
-- `artifacts/` Generated training and evaluation output.
+### Saved experiment snapshot
 
-## Architecture Overview
+The local saved files inspected on **October 31, 2026** describe this run:
 
-The simulation is grid based and deterministic for a fixed seed. Dogs act first, sheep react to nearby pressure, and the environment tracks progress toward the pen. Rewards are decomposed into named pieces so the total can be audited.
+| Setting | Saved value |
+|---|---|
+| Trainer / observation mode | MaskablePPO / guided |
+| Hidden layers per branch | 256, 256, 128 |
+| Input / action dimensions | 54 / 9 |
+| Curriculum stage | 34 |
+| Field / team / flock | 144 × 104 / 3 dogs / 6 sheep |
+| Rollout length / minibatch size | 2,048 / 1,024 |
+| Base learning rate / discount factor | 0.0001 / 0.99 |
+| Optional instinct rewards | Disabled |
+| Adaptive learning / failure-directed training | Enabled |
+| Actual saved environment worker count | 1 |
 
-The trainer uses hill climbing to optimize a simple shared linear policy. Hill climbing is the training algorithm, not the model. The baseline is not PPO, not MaskablePPO, and not a neural network. Checkpoints are real evaluation snapshots, not fabricated milestones.
+The saved state reports approximately **314 million cumulative PPO timesteps** and a **best recorded evaluation success rate of 100%**. This is a historical checkpoint result on the configured evaluation suite, not a generalization guarantee or a fresh evaluation.
 
-The current baseline adds dynamic scripted team roles on top of that same hill-climbing trainer. Dogs still share one linear weight vector, but each step the team strategy assigns tactical jobs such as rear pressure, flanking, collecting strays, and blocking near the pen, then the role-aware linear policy scores actions against those temporary responsibilities.
+These values come from `artifacts/effective-training-config.json` and `artifacts/training-state.json`; local artifacts may change or be absent in another checkout. The configured eight workers are overridden to one by default on Windows.
 
-The experimental path keeps that scripted role assignment and swaps only the model and trainer pieces:
+## Evaluation and evidence
 
-- baseline model: role-aware linear policy
-- baseline trainer: hill climbing
-- experimental model: small neural policy
-- experimental trainer: MaskablePPO
+Checkpoint evaluations use fixed seeds so policies can be compared on the same starts. The default evaluation set contains ten seeds.
 
-The role system is still scripted in this phase. The neural policy does not learn role assignment from scratch yet.
+Assess behavior using several measures together:
 
-The web app is a viewer, not a second simulation engine. It loads exported checkpoint and replay files (`.json` or compressed `.json.gz`) and plays back the exact, authentic step-by-step trajectories recorded during evaluation benchmarks and rollouts. Benchmark episodes strictly require 100% of sheep penned to be marked as a pass (`✗ FAIL` if any sheep remain unpenned).
+- **Success rate:** fraction of episodes with every sheep penned.
+- **Completion time and steps:** efficiency when comparing successful episodes.
+- **Sheep penned and timeout rate:** the difference between partial progress and finishing.
+- **Reward breakdown:** which incentives the policy is exploiting or satisfying.
+- **Recorded trajectories:** whether behavior actually matches the intended skill.
 
-## Policy Modes
+Evaluation replays record the actions, snapshots, and rewards from the rollout. The web interface can replay those exact trajectories, including compressed `.json.gz` files. On-demand runs are separate simulations.
 
-- `random_untrained` picks legal moves uniformly and has no herding intelligence.
-- `instinct_only` can chase, circle, avoid diving into the flock, and recover nearby sheep, but it does not know where the pen is.
-- `heuristic_expert` is a scripted, pen-aware expert that uses pressure positioning behind the flock relative to the target.
-- `trained_policy` uses learned linear-policy weights from hill-climb training checkpoints.
-- `neural_policy` uses a learned small neural-network policy from MaskablePPO checkpoints.
+### Temporal interaction diagnostics
 
-By default the no-training playback path uses `instinct_only`, not the expert heuristic. Pen-directed behavior now requires training, `heuristic_expert`, or an explicit handler target command.
-us
+Open the **🔬 Temporal Diagnostics** workspace in either the Classic UI (`http://127.0.0.1:5173/?workspace=temporal&replay=checkpoint-039909-seed-000041`) or Studio v2 (`http://127.0.0.1:5173/v2?workspace=temporal&replay=checkpoint-039909-seed-000041`), or click **🔬 Temporal Evidence** while watching any recorded episode to inspect synchronized evidence across world steps:
 
-Action masking keeps illegal movement out of policy choices. For heuristic-style modes, `wait` is also gated by the same tactical scoring threshold used for movement decisions. For neural/RL modes such as `neural_policy`, `shepherd_neural_dogs`, and unspecified policy mode inside RL wrappers, `wait` remains legal even when a movement action scores better, so MaskablePPO can learn hold-position behavior instead of having it masked away.
+- **Above-the-fold player and adjacent interval selector:** the animated field, sticky playback transport (`Play/Pause`, `-10/-1/+1/+10` step buttons, speed selector, world-step scrubber, and lead-in/interval/aftermath quick-seek buttons), and synchronized interval selector appear immediately in the initial viewport without scrolling through introductory prose. Introductory guides, provenance keys, and full interval route/reward tables are organized in collapsible `<details>` sections while essential evidence warnings (`Not recorded (starts at step 1)`, frame gaps, `guidance_certainty`, telemetry truncation) remain visible in the top summary bar.
+- **Animated field with toggleable overlays:** view recorded dog/sheep trajectories alongside optional recent trails, estimated or recorded guidance targets, derived BFS legal-route waypoints, and descriptive dog–sheep–waypoint geometry.
+- **Synchronized interval timeline with stable episode-wide IDs:** select detected interaction intervals (*Repeated movement*, *Stationary hold*, *Productive repositioning*, *Counterproductive pressure candidate*, or *Unresolved pattern*) to seek directly to the interval's lead-in and scrub through the active interval and aftermath by exact `world_step` numbers (including recordings that start at step 1 or contain frame gaps). Filtering intervals by unpenned-sheep count (`All`, `6..1 Sheep`) preserves each interval's episode-wide ID (e.g., `#11` remains `#11` when filtered to `2 Sheep`).
+- **Synchronized progress, route distance, reward, and stall charts:** compare unpenned sheep count, aggregate and per-sheep BFS legal-route distances (`S0`–`S5`), reward components, and `no_progress_steps` (including spread-jitter resets).
+- **Entity inspector and epistemic provenance:** inspect pre-step decisions (selected vs. executed action, replacement reason, legal-action mask, recomputed or recorded action probabilities, value estimate, and labeled 54/52/69-feature observations) separately from post-step positions and displacements, with explicit badges distinguishing *Recorded*, *Derived*, *Estimated*, *Recomputed*, *Truncated*, and *Not recorded* fields.
+- **Read-only preview mode:** launch an isolated read-only diagnostic server without restoring or starting training using `python -m sheepdog.server --read-only --port 8015`.
 
-## Simulation Concepts
-
-- Dogs are AI-controlled and share one role-aware policy implementation.
-- Dogs can switch dynamic tactical roles each step while still using the same shared policy instance.
-- Sheep flee from nearby dogs, stay loosely flocked, and avoid walls.
-- The pen is a goal area inside the field.
-- Episodes succeed only when every sheep is penned.
-- The environment stops on success, timeout, or no-progress conditions.
-
-## Movement and Occupancy Rules
-
-- The logical field now runs on a significantly denser grid than the original release, so agents can reposition in smaller increments without visually shrinking to dots.
-- The default field now renders at one fixed world size instead of zooming to the current group positions.
-- Dogs move two logical cells per simulation step by default.
-- Sheep move one logical cell per simulation step.
-- Curriculum stages can still override dog speed for slower early training scenarios.
-- The viewer keeps icons roughly the same apparent size by scaling the rendered agent markers relative to grid density instead of tying icon size to one logical cell.
-- Dog-dog overlap is disallowed.
-- Dog-sheep overlap is disallowed.
-- Sheep-sheep overlap is also prevented in normal play.
-- If multiple agents want the same cell, resolution is deterministic: lower-index agents keep priority and blocked agents remain in place for that step.
-- Sheep add a small seed-driven tie-break jitter to local movement scoring so wall escapes and local minima do not always collapse to the same deterministic axis choice.
-- When a sheep stays pinned near a wall or pen edge and progress stalls, the dog scorer boosts flank/lateral repositioning and penalizes repeated bounce loops more strongly.
-- The pen now sits flush against the right wall so there is no dead strip behind it where sheep can get trapped.
-
-## Training
-
-The project now supports two clean trainer/model combinations:
-
-- hill-climbing trainer plus role-aware linear policy baseline
-- MaskablePPO trainer plus role-aware neural policy experiment
-- hierarchical MaskablePPO trainer plus shepherd-level neural dog coordination experiment
-
-Hill climbing and MaskablePPO are trainers, not models. Linear and neural are models, not trainers.
-
-Run training with:
+Compare checkpoint families with the benchmark command:
 
 ```powershell
-python -m sheepdog.cli train
+.\.venv\Scripts\python.exe -m sheepdog.cli benchmark --seeds 11 23 37 41 53 --linear-output-dir artifacts/hill_climb --neural-output-dir artifacts/guided_trial
 ```
 
-This writes checkpoint JSON files under `artifacts/checkpoints/`, evaluation JSON and CSV files under `artifacts/evaluations/`, and web assets under `web/public/generated/`.
+For meaningful comparisons, keep the environment, seeds, reward semantics, and evaluation protocol consistent. Confirm improvements across independent training seeds and held-out situations; a best result on a repeatedly used suite alone does not establish robustness.
 
-Baseline hill-climb training:
+## Project map
+
+| Location | Responsibility |
+|---|---|
+| `src/sheepdog/environment.py` | World state, physics, legal actions, and stepping |
+| `src/sheepdog/observations.py` | Guided, emergent, and hierarchical feature builders |
+| `src/sheepdog/team_strategy.py` | Scripted tactical role assignment |
+| `src/sheepdog/shepherd.py` | High-level shepherd commands |
+| `src/sheepdog/rewards.py` | Inspectable reward components |
+| `src/sheepdog/curriculum.py` | Stage definitions and environment overrides |
+| `src/sheepdog/policies/` | Linear, neural, hierarchical, joint-team, and comparison policies |
+| `src/sheepdog/training/` | PPO adapters, trainers, sampling, telemetry, and recovery |
+| `src/sheepdog/evaluation/` | Benchmarks, scenarios, and evaluation |
+| `src/sheepdog/server.py` | Backend API and training orchestration |
+| `web/src/` | React interface, field playback, charts, and diagnostics |
+| `tests/` | Python regression tests |
+| `artifacts/` | Local models, checkpoints, state, evaluations, and telemetry |
+
+### Saved outputs
+
+- `effective-training-config.json`: configuration associated with training.
+- `training-state.json`: saved progress and model references.
+- `checkpoints/` and `models/`: checkpoint metadata and model weights.
+- `evaluations/` and `replays/`: evaluation summaries and recorded trajectories.
+- `training-telemetry.sqlite`: persisted episode telemetry.
+- `backups/`: saved recovery artifacts.
+- `web/public/generated/`: exported assets for the viewer.
+
+## Development checks
 
 ```powershell
-python -m sheepdog.cli train --trainer-type hill_climb --policy-type linear --output-dir artifacts/hill_climb
-```
-
-Experimental MaskablePPO training:
-
-```powershell
-python -m sheepdog.cli train --trainer-type maskable_ppo --policy-type neural --total-timesteps 20000 --output-dir artifacts/maskable_ppo
-```
-
-Using separate output roots is the recommended comparison workflow so the latest linear and neural artifacts do not overwrite each other.
-
-## Checkpoints
-
-Default checkpoint episodes:
-
-`0, 5, 10, 25, 50, 100, 500, 1000`
-
-Each checkpoint includes:
-
-- checkpoint episode
-- total training episodes so far
-- policy name
-- trainer type and policy type
-- policy weights for linear checkpoints or model path plus policy config for neural checkpoints
-- environment configuration
-- reward configuration
-- success rate over evaluation seeds
-- average completion steps and seconds
-- timeout rate
-- average sheep penned
-- average reward
-- replay path for the exported run
-
-## Evaluation
-
-Evaluation uses fixed seeds so checkpoints are compared fairly.
-
-The evaluator writes:
-
-- JSON summary files
-- CSV per-seed records
-- replay JSON files for each evaluated seed
-
-Those files live under `artifacts/evaluations/` and are copied to the web public folder for playback.
-
-Evaluate fixed seeds for one policy mode:
-
-```powershell
-python -m sheepdog.cli evaluate --policy trained_policy --seeds 11 23 37
-python -m sheepdog.cli evaluate --policy neural_policy --config path\to\ppo-config.json --seeds 11 23 37
-```
-
-Compare random, instinct, heuristic, hill-climb linear, and MaskablePPO neural policies on the same seeds:
-
-```powershell
-python -m sheepdog.cli benchmark --seeds 11 23 37 41 53 --linear-output-dir artifacts/hill_climb --neural-output-dir artifacts/maskable_ppo
-```
-
-The benchmark command writes:
-
-- machine-readable JSON
-- machine-readable CSV
-- human-readable Markdown summary
-
-by default under `artifacts/benchmarks/`.
-
-## Herding Instincts and Curriculum
-
-Real sheepdogs start with herding instincts; the agents in this lab do not.
-To narrow that gap without scripting the answer, the project adds optional
-reward shaping that simulates instinct, plus a curriculum that starts simple
-and grows harder. The dog still selects its own actions through the existing
-policy; instincts only shape the reward signal and the training scenario.
-
-Training reward shaping may still use target progress toward the pen. That is separate from action selection: untrained action choice no longer gets a hidden pen-aware controller through the default playback policy.
-
-Configurable instinct reward terms (`InstinctRewardConfig` in
-`src/sheepdog/config.py`):
-
-- `pressure_zone_weight` – reward being on the opposite side of the flock from the pen.
-- `safe_pressure_weight` – reward staying in a useful distance band from the flock.
-- `grouping_weight` – reward decreasing flock spread.
-- `target_progress_weight` – reward the flock centroid moving toward the pen.
-- `chaos_penalty_weight` – penalize entering the flock or causing sudden scatter.
-- `overpressure_penalty_weight` – penalize crowding individual sheep.
-- `split_flock_penalty_weight` – penalize one sheep straying far from the rest.
-
-Toggles:
-
-- `enable_instinct_rewards` – off by default. Turn on to add the instinct terms to training.
-- `debug_reward_breakdown` – flag for downstream tooling to surface per-term values.
-- `curriculum_stage` – non-zero to apply a curriculum-stage environment override.
-
-Policy config (`PolicyConfig` in `src/sheepdog/config.py`):
-
-- `policy_mode` – select `random_untrained`, `instinct_only`, `heuristic_expert`, or `trained_policy`.
-- `allow_instinct_target_awareness` – off by default. Leave disabled unless you explicitly want instinct mode to read a target.
-- `handler_target_enabled` – off by default. Reserved for explicit handler-driven pen targeting.
-
-Training config (`TrainingConfig` in `src/sheepdog/config.py`):
-
-- `candidate_evaluation_seeds` – fixed seeds used to score hill-climber candidates before promotion.
-- `candidate_pool_size` – number of mutated candidate policies considered each training episode.
-- `mutation_scale` – per-weight mutation magnitude for the hill climber.
-
-Environment display config (`EnvironmentConfig` in `src/sheepdog/config.py`):
-
-- `sheep_personality_colors` – mapping of personality name → hex color used to color-code sheep in the replay viewer. Keys must match entries in `entities.SHEEP_PERSONALITIES` (`obedient`, `pen_fearful`, `pen_shy`, `escapist`, `bold`). When `sheep_personality_strength` is `0.0` every sheep is `obedient` and therefore shares the `obedient` color – raise the strength (e.g. `0.2`) to see distinct colors and behaviors.
-
-Curriculum stages (`CURRICULUM_STAGES` in `src/sheepdog/curriculum.py`):
-
-1. One dog, one sheep, dense open field, one-cell motion, nearby pen.
-2. One dog, small flock, dense-grid grouping in an open field.
-3. One dog, small flock, larger dense field for sustained drive/fetch.
-4. Two dogs, medium flock, dense-grid pressure control near guarded pens.
-5. Three dogs, larger flock, dense-grid cooperation without jump movement.
-
-Reward breakdown is always returned per step on `RewardBreakdown`, so the
-viewer or any debugging tool can inspect contributions term by term without
-log spam. To compare shaped vs. unshaped training, run with
-`enable_instinct_rewards=False` (the default) and again with it set to
-`True`.
-
-The UI training path sends `enable_instinct_rewards`, `curriculum_stage`,
-and `debug_reward_breakdown` to the backend API server. By default the Train panel starts
-new runs with instinct rewards enabled and curriculum stage 1 unless you
-override them.
-
-Compatibility warning: older checkpoints trained without instinct rewards can
-work against the new pressure-position curriculum. Do not expect a 1100-episode
-run from the old reward mix to improve just because the viewer changed. Clear
-existing training data before starting a fresh instincts curriculum run, but do
-that manually so you can keep old artifacts if you still want them for
-comparison.
-
-Recommended first run:
-
-- clear training data
-- enable instincts
-- use curriculum stage 1
-- keep the stage-1 one-cell dog speed defaults while the policy is learning pressure control
-
-Recommended progression:
-
-- stage 1 until the dog reliably holds pressure behind a single sheep
-- stage 2 until grouping three sheep looks stable
-- stage 3 for longer driving and fetch behavior in a larger field
-- stage 4 and stage 5 only after pressure positioning stays stable with one dog
-
-Realism note: the denser logical grid is doing the main visual work here. Instead of letting dogs jump 2-3 cells in one update, the simulation now advances with smaller logical steps and more total steps. That improves wall interactions, makes flanking space available, and gives the UI enough intermediate positions for smoother playback.
-
-## Scenario-Based Training
-
-Scenario-based training mixes difficult starting situations with normal random starts to make the trained policy more robust by regularly exposing it to edge-case recovery situations during training.
-
-### Why It Helps
-
-Normal random starts can leave the policy undertrained on difficult recovery scenarios like:
-- **Scattered sheep**: Sheep spread widely across the field, requiring dispersed flock recovery
-- **Split flock**: Sheep separated into two groups, requiring regrouping behavior
-- **Corner huddle**: Sheep clustered in a corner away from the pen, requiring extraction and movement
-
-By regularly training on these edge cases, the policy learns robust recovery strategies that generalize better to unseen situations.
-
-### How to Enable
-
-Add scenario training configuration to your training config:
-
-```json
-{
-  "training": {
-    "scenario_training_enabled": true,
-    "scenario_mix": {
-      "random": 0.50,
-      "scattered_sheep": 0.20,
-      "split_flock": 0.15,
-      "corner_huddle": 0.15
-    }
-  }
-}
-```
-
-The `scenario_mix` weights determine the probability of each scenario type at episode reset. Weights must sum to 1.0.
-
-### Important Warning
-
-**Always mix scenario training with random starts.** Do not set the random weight to 0.0. Training exclusively on difficult scenarios can cause overfitting to those specific patterns and degrade performance on normal situations. A mix of 50% random with 50% difficult scenarios is a good starting point.
-
-### Reproducibility
-
-Scenario selection uses the existing RNG/seed system. Two training runs with the same seed produce the same sequence of scenario choices, ensuring reproducible training.
-
-### Observability
-
-The scenario sampler tracks usage statistics. After training, you can query the scenario usage summary to see how many episodes started from each scenario type. This helps verify that the configured mix is being applied correctly.
-
-### Evaluation
-
-You can evaluate a trained policy against each scenario type separately to identify performance differences:
-
-```python
-from sheepdog.training.scenario_evaluator import evaluate_policy_on_scenario_types
-
-results = evaluate_policy_on_scenario_types(
-    policy,
-    config,
-    evaluation_seeds=(11, 23, 37, 41, 53),
-    scenario_types=("random", "scattered_sheep", "split_flock", "corner_huddle"),
-)
-```
-
-This returns per-scenario-type metrics (success rate, average reward, steps, etc.) so you can see if the policy performs differently on edge cases compared with normal random starts.
-
-### Available Scenario Types
-
-- **random**: Normal randomized starting positions (default behavior)
-- **scattered_sheep**: Sheep spread widely across the field
-- **split_flock**: Sheep separated into two groups
-- **corner_huddle**: Sheep clustered in a corner away from the pen
-
-All scenarios use relative placement where possible to work with different grid sizes.
-
-## UI
-
-Start the web viewer with:
-
-```powershell
-cd web
-npm install
-npm run dev
-```
-
-The UI shows:
-
-- the field, dogs, sheep, and pen
-- color-coded sheep markers with a sheep legend
-- compact dog role labels during replay
-- the selected checkpoint and seed
-- policy mode
-- run state
-- sheep penned count
-- elapsed simulated time and steps
-- reward breakdown
-- no-progress warning
-- start, pause, resume, stop, reset, evaluation refresh, and export controls
-
-Replay exports keep the dynamic role labels. Evaluation and benchmark replays now also preserve policy and trainer identity through the exported metadata so baseline and experimental runs can be distinguished during review.
-
-## Interactive Training
-
-Start the API server in one terminal:
-
-```powershell
-python -m sheepdog.server
-```
-
-Then open the UI, choose an episode count in the Train panel, toggle Fast mode if you want the replay to advance without visible delay, and press Train. The page will poll training status and refresh the latest checkpoint as each episode finishes.
-
-The Train panel also exposes instinct shaping, curriculum stage, and replay
-debug toggles. If you are switching from an older reward setup, clear the
-persisted training artifacts before you start the new curriculum run so the
-trainer does not continue mutating weights that learned to dive into the flock.
-
-## Tests
-
-Python:
-
-```powershell
-python -m pip install -e .[dev]
-python -m ruff format src tests
-python -m ruff check src tests
-python -m pylint src/sheepdog tests
-python -m pytest
-```
-
-Ruff is the source of truth for formatting, imports, unused code, and Python
-style. Pylint is intentionally limited to fatal and error diagnostics so the
-VS Code Problems panel stays focused on defects instead of duplicating Ruff or
-reporting legacy complexity metrics. VS Code formats Python with Ruff on save.
-The repository-wide Ruff lint and Pylint checks are clean; a full-tree
-`ruff format --check` remains deferred until legacy formatting is normalized.
-
-Web:
-
-```powershell
-cd web
-npm install
+# Backend tests
+.\.venv\Scripts\python.exe -m pytest
+
+# Frontend checks, from web/
+npm test
 npm run lint
-npm run test
+npm run build
 ```
 
-Full validation pass from PowerShell:
+Long-running Python tests are marked `slow`; use `-m "not slow"` for a shorter test run.
 
-```powershell
-python -m ruff check src tests
-python -m pylint src/sheepdog tests
-python -m pytest
-cd web
-npm run lint
-npm run test
-```
+## Further reading
 
-## Configuration Example
+- [Startup and restoration](STARTUP.md)
+- [Architecture notes](docs/architecture.md)
+- [Network guide](docs/sheep_dog_rl_network_guide.md)
+- [Observation modes](docs/training-modes.md)
+- [Evaluation roadmap and experiment decisions](docs/rl-evaluation-roadmap.md)
+- [Model training history](docs/model_training_history.md)
+- [Model changelog](MODEL_CHANGELOG.md)
+- [Previous README, preserved for comparison](README.before-2026-10-31.md)
 
-You can provide a JSON config file to the CLI. Example:
-
-```json
-{
-  "environment": {
-    "width": 48,
-    "height": 32,
-    "dogs": 3,
-    "sheep": 8,
-    "max_steps": 360
-  },
-  "rewards": {
-    "progress_scale": 2.0,
-    "sheep_penned_reward": 8.0,
-    "terminal_success_reward": 20.0
-  },
-  "training": {
-    "episodes": 1000,
-    "output_dir": "artifacts"
-  }
-}
-```
-
-## Known Limitations
-
-- The first release uses a simple hill-climbing policy rather than PPO.
-- Dynamic cooperation is role-aware, but it is still a shared linear baseline rather than a neural policy.
-- The UI is a replay viewer for exported runs, not a live training dashboard.
-- There is no backend API server yet; the browser reads generated files directly.
-
-## The Next Steps
-
-1. Compare this role-aware hill-climbing baseline against PPO or MaskablePPO rather than replacing it blindly.
-2. Add richer role analytics and per-dog trajectory overlays in the replay viewer.
-3. Expand replay analytics with per-step trajectory charts.
-4. Add a lightweight local API if live browser control becomes necessary.
+Some deeper documents describe earlier architectures and experiments. For the exact architecture of a run, inspect its checkpoint metadata, saved configuration, and the corresponding implementation.

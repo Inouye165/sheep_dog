@@ -17,6 +17,7 @@ interface ControlBarProps {
   disabled?: boolean;
   fastMode: boolean;
   onFastModeChange: (enabled: boolean) => void;
+  onOpenTemporalDiagnostics?: () => void;
 }
 
 export function ControlBar({
@@ -36,6 +37,7 @@ export function ControlBar({
   disabled,
   fastMode,
   onFastModeChange,
+  onOpenTemporalDiagnostics,
 }: ControlBarProps) {
   const runBestLabel = runningCurrent
     ? "Running best model…"
@@ -140,6 +142,15 @@ export function ControlBar({
         >
           End episode
         </button>
+        {onOpenTemporalDiagnostics ? (
+          <button
+            type="button"
+            className="button-row__secondary"
+            onClick={onOpenTemporalDiagnostics}
+          >
+            🔬 Temporal Diagnostics
+          </button>
+        ) : null}
       </div>
     </section>
   );

@@ -1993,6 +1993,40 @@ select {
   padding-top: 4px;
 }
 
+/* ── Session & Model Change Cues & Tooltips ── */
+.chart-tooltip--session {
+  min-width: 320px;
+  max-width: 420px;
+  background: rgba(15, 23, 42, 0.98);
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  box-shadow: 0 20px 45px rgba(0, 0, 0, 0.9), 0 8px 20px rgba(0, 0, 0, 0.7);
+}
+
+.session-marker-cue {
+  transition: opacity 0.15s ease-in-out;
+}
+
+.session-marker-cue:hover line {
+  stroke-width: 2.8px !important;
+  opacity: 1 !important;
+}
+
+.session-marker-cue:hover rect {
+  filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.6));
+}
+
+.session-marker-cue:focus {
+  outline: none;
+}
+
+.session-marker-cue:focus rect {
+  stroke-width: 2.2px !important;
+}
+
+.session-bands-layer rect {
+  transition: fill 0.2s ease;
+}
+
 .mini-chart--empty {
   padding: 0.65rem 0.8rem;
   display: flex;
@@ -6295,6 +6329,125 @@ select {
   color: #38bdf8;
   border: 1px solid rgba(56, 189, 248, 0.3);
 }
+
+/* ── Temporal Diagnostics Workspace Layout & Scroll Paths ── */
+.temporal-diagnostics-workspace {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  box-sizing: border-box;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0.1rem 0.25rem 1.5rem 0.1rem;
+  scroll-behavior: smooth;
+}
+
+.temporal-diagnostics-workspace *:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: 2px;
+  scroll-margin-top: 6rem;
+  scroll-margin-bottom: 2rem;
+}
+
+.temporal-primary-grid {
+  display: grid;
+  grid-template-columns: minmax(450px, 1.08fr) minmax(420px, 1fr);
+  gap: 0.65rem;
+  align-items: stretch;
+}
+
+.temporal-left-col,
+.temporal-right-col {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  min-width: 0;
+}
+
+.temporal-sticky-transport {
+  position: sticky;
+  top: 0;
+  z-index: 15;
+  backdrop-filter: blur(8px);
+}
+
+.temporal-diagnostics-workspace .field-card {
+  height: auto;
+  max-height: none;
+  flex: 0 0 auto;
+  padding: 0.42rem 0.65rem 0.45rem;
+  gap: 0.28rem;
+  overflow: visible;
+}
+
+.temporal-diagnostics-workspace .field-card__header {
+  gap: 0.4rem;
+}
+
+.temporal-diagnostics-workspace .field-card__header .eyebrow {
+  display: none;
+}
+
+.temporal-diagnostics-workspace .field-card__header h2 {
+  font-size: 0.92rem;
+  line-height: 1.15;
+}
+
+.temporal-diagnostics-workspace .field-stage {
+  flex: 0 0 auto;
+  height: clamp(190px, 28vh, 275px);
+  min-height: 190px;
+  max-height: 275px;
+  padding: 0.15rem;
+}
+
+.temporal-diagnostics-workspace .field-stage__svg {
+  flex: 1 1 auto;
+  height: 100%;
+  max-height: 100%;
+  min-height: 0;
+}
+
+.temporal-diagnostics-workspace .field-card__footer {
+  padding-top: 0.08rem;
+}
+
+@media (max-width: 1040px) {
+  .temporal-primary-grid {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .temporal-left-col,
+  .temporal-right-col {
+    display: contents;
+  }
+
+  .temporal-section-timeline {
+    order: 1;
+  }
+
+  .temporal-sticky-transport {
+    order: 2;
+  }
+
+  .temporal-section-player {
+    order: 3;
+  }
+
+  .temporal-section-charts {
+    order: 4;
+  }
+
+  .temporal-section-inspector {
+    order: 5;
+  }
+
+  .temporal-section-explain {
+    order: 6;
+  }
+}
+
 
 
 

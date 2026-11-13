@@ -10,6 +10,7 @@ import functools
 import json
 import logging
 import os
+import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
@@ -19,7 +20,6 @@ from typing import Any
 from stable_baselines3.common.callbacks import BaseCallback
 
 from sheepdog.atomic_io import atomic_write_json
-from sheepdog.evaluation.evaluator import EvaluationInterruptedError
 from sheepdog.checkpoints.store import (
     CheckpointMetadata,
     compute_env_config_hash,
@@ -28,6 +28,7 @@ from sheepdog.checkpoints.store import (
     get_observation_schema_hash,
 )
 from sheepdog.environment import ACTION_ORDER, ENV_CONFIG_VERSION
+from sheepdog.evaluation.evaluator import EvaluationInterruptedError
 from sheepdog.policies.neural import NeuralPolicy, tensorboard_available
 from sheepdog.rewards import REWARD_SCHEMA_VERSION
 from sheepdog.training.adaptive_learning import AdaptiveStepController
@@ -139,6 +140,14 @@ class _TrainingProgressCallback(BaseCallback):
                                 "capture_reason": ep_info.get("capture_reason"),
                                 "capture_status": ep_info.get("capture_status"),
                                 "reward_breakdown": ep_info.get("reward_breakdown"),
+                                "pen_zone": ep_info.get("pen_zone"),
+                                "spawn_mode": ep_info.get("spawn_mode"),
+                                "initial_sheep_zone": ep_info.get("initial_sheep_zone"),
+                                "final_sheep_zone": ep_info.get("final_sheep_zone"),
+                                "corner_time_pct": ep_info.get("corner_time_pct"),
+                                "wall_time_pct": ep_info.get("wall_time_pct"),
+                                "corner_stuck_at_end": ep_info.get("corner_stuck_at_end"),
+                                "spatial_metrics": ep_info.get("spatial_metrics"),
                             }
                         )
 
@@ -301,37 +310,58 @@ class MaskablePPOTrainer(Trainer):
 
         return sig
 
-    def _has_compatible_policy_state(self) -> bool:
-        policy_path_str = self._loaded_state.get("policy_state_path") or self._loaded_state.get("best_model_path")
-        if not policy_path_str:
-            return False
-        # Check if the policy state file actually exists
-        p = Path(policy_path_str)
+    def _resolve_checkpoint_path(self, path_str: str | None) -> Path | None:
+        if not path_str:
+            return None
+        p = Path(path_str)
+        if p.exists():
+            return p
         if not p.is_absolute():
-            for cand in (
+            active_stage = self.config.rewards.instincts.curriculum_stage
+            candidates = [
                 self.output_root / p,
                 self.output_root.parent / p,
                 self.output_root / "models" / p.name,
                 self.output_root / "checkpoints" / p.name,
-            ):
+            ]
+            if active_stage >= 9:
+                candidates.append(
+                    self.output_root / "checkpoints" / f"stage{active_stage}" / p.name
+                )
+            for cand in candidates:
                 if cand.exists():
-                    p = cand
-                    break
-        if not p.exists():
-            # Check models directory fallback
+                    return cand
+        return None
+
+    def _has_compatible_policy_state(self) -> bool:
+        active_stage = self.config.rewards.instincts.curriculum_stage
+        p = (
+            self._resolve_checkpoint_path(self._loaded_state.get("policy_state_path"))
+            or self._resolve_checkpoint_path(self._loaded_state.get("best_model_path"))
+        )
+        if p is None:
+            if not (self._loaded_state.get("policy_state_path") or self._loaded_state.get("best_model_path")):
+                return False
+            if active_stage >= 9:
+                return False
+            # Check models directory fallback for stages < 9
             best_fallback = self.output_root / "models" / "best-model.zip"
             if not best_fallback.exists():
                 return False
 
+        stored_config = self._loaded_state.get("policy_config")
+        if isinstance(stored_config, dict):
+            stored_act = stored_config.get("action_size")
+            if stored_act is not None and stored_act != len(ACTION_ORDER):
+                return False
+            raw_hidden = stored_config.get("hidden_sizes")
+            if isinstance(raw_hidden, list | tuple):
+                expected_hidden = tuple(self.config.training.neural_hidden_sizes)
+                if tuple(int(v) for v in raw_hidden) != expected_hidden:
+                    return False
+
         stored_signature = self._loaded_state.get("training_signature")
         if not isinstance(stored_signature, dict):
-            # If no signature was stored (e.g. from restored/forked checkpoint),
-            # check policy_config architecture if present
-            stored_config = self._loaded_state.get("policy_config")
-            if isinstance(stored_config, dict):
-                stored_act = stored_config.get("action_size")
-                if stored_act is not None and stored_act != len(ACTION_ORDER):
-                    return False
             return True
 
         # Check core architectural compatibility: action_size and observation_mode
@@ -339,38 +369,48 @@ class MaskablePPOTrainer(Trainer):
         if stored_act is not None and stored_act != len(ACTION_ORDER):
             return False
         stored_obs = stored_signature.get("observation_mode")
-        if stored_obs is not None and stored_obs != self.config.training.observation_mode:
-            return False
-
-        return True
+        return not (stored_obs is not None and stored_obs != self.config.training.observation_mode)
 
     def _load_state(self) -> dict[str, Any]:
+        default_state: dict[str, Any] = {
+            "total_episodes_trained": 0,
+            "total_environment_episodes": 0,
+            "total_timesteps": 0,
+            "policy_state_path": None,
+            "policy_config": None,
+            "incomplete_batch": None,
+            "run_id": None,
+            "experiment_id": None,
+            "change_id": None,
+            "parent_run_id": None,
+            "parent_checkpoint_id": None,
+        }
         if not self._state_path.exists():
-            return {
-                "total_episodes_trained": 0,
-                "total_environment_episodes": 0,
-                "total_timesteps": 0,
-                "policy_state_path": None,
-                "policy_config": None,
-                "incomplete_batch": None,
-                "run_id": None,
-                "parent_run_id": None,
-                "parent_checkpoint_id": None,
-            }
-        try:
-            payload = json.loads(self._state_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {
-                "total_episodes_trained": 0,
-                "total_environment_episodes": 0,
-                "total_timesteps": 0,
-                "policy_state_path": None,
-                "policy_config": None,
-                "incomplete_batch": None,
-                "run_id": None,
-                "parent_run_id": None,
-                "parent_checkpoint_id": None,
-            }
+            return default_state
+
+        last_exc: Exception | None = None
+        payload: Any = None
+        for attempt in range(5):
+            try:
+                payload = json.loads(self._state_path.read_text(encoding="utf-8"))
+                if not isinstance(payload, dict):
+                    raise ValueError(
+                        f"Expected JSON object in {self._state_path}, got {type(payload).__name__}"
+                    )
+                last_exc = None
+                break
+            except PermissionError as exc:
+                last_exc = exc
+                if attempt < 4:
+                    time.sleep(0.025)
+            except (OSError, json.JSONDecodeError, ValueError) as exc:
+                last_exc = exc
+                break
+
+        if last_exc is not None:
+            logger.error("Failed to load training state from %s: %s", self._state_path, last_exc)
+            default_state["_state_load_error"] = str(last_exc)
+            return default_state
         return {
             "total_episodes_trained": int(payload.get("total_episodes_trained", 0)),
             "total_environment_episodes": int(
@@ -388,6 +428,8 @@ class MaskablePPOTrainer(Trainer):
             "adaptive_step_state": payload.get("adaptive_step_state"),
             "incomplete_batch": payload.get("incomplete_batch"),
             "run_id": payload.get("run_id"),
+            "experiment_id": payload.get("experiment_id"),
+            "change_id": payload.get("change_id"),
             "parent_run_id": payload.get("parent_run_id"),
             "parent_checkpoint_id": payload.get("parent_checkpoint_id"),
             "policy_version": payload.get("policy_version"),
@@ -421,7 +463,7 @@ class MaskablePPOTrainer(Trainer):
         )
         try:
             from sheepdog.training.episode_store import get_episode_store
-            store = get_episode_store(self._output_dir / "training-telemetry.sqlite")
+            store = get_episode_store(self.output_root / "training-telemetry.sqlite")
             run_id = self._loaded_state.get("run_id")
             max_ep = store.get_max_episode(run_id)
             if max_ep > starting_environment_episodes:
@@ -555,6 +597,9 @@ class MaskablePPOTrainer(Trainer):
             base_mutation_scale=train_config.mutation_scale,
             base_entropy_coef=train_config.entropy_coef,
             initial_curriculum_stage=active_curriculum_stage,
+            entropy_damping_min_stage=getattr(
+                train_config, "adaptive_entropy_damping_min_stage", 2
+            ),
         )
         if resuming_policy:
             adaptive_controller.restore(
@@ -562,6 +607,25 @@ class MaskablePPOTrainer(Trainer):
                 active_curriculum_stage,
             )
         consecutive_collapse_count: int = 0
+
+        # Wire runtime execution tracking and verified startup activation
+        tracking_db_path = self.output_root / "training-telemetry.sqlite"
+        tracking_registry = None
+        try:
+            from sheepdog.tracking.registry import TrackingRegistry
+            tracking_registry = TrackingRegistry(tracking_db_path)
+            self.checkpoint_store.tracking_registry = tracking_registry
+            self.evaluator.tracking_registry = tracking_registry
+        except Exception:
+            pass
+
+        run_id = self._loaded_state.get("run_id") or f"run_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
+        experiment_id = getattr(train_config, "experiment_id", None) or self._loaded_state.get("experiment_id") or f"exp_{run_id}"
+        change_id = getattr(train_config, "change_id", None) or self._loaded_state.get("change_id")
+        self._loaded_state["run_id"] = run_id
+        self._loaded_state["experiment_id"] = experiment_id
+        if change_id:
+            self._loaded_state["change_id"] = change_id
 
         def emit(payload: dict[str, Any]) -> None:
             if progress_callback is None:
@@ -588,28 +652,38 @@ class MaskablePPOTrainer(Trainer):
             }
         )
 
-        # Prefer the best-scoring model when resuming so each new training batch
-        # continues from the highest-quality weights rather than the most recent
-        # (potentially degraded) checkpoint.  Fall back to policy_state_path when
-        # no best model has been recorded yet (e.g. first batch ever run).
+        # Prefer policy_state_path when resuming an incomplete batch or when
+        # best_model_curriculum_stage differs from active_stage; otherwise prefer
+        # best_model_path then policy_state_path. Never fall back to models/best-model.zip
+        # for active_stage >= 9.
         best_model_path_str = self._loaded_state.get("best_model_path")
-        resume_path = best_model_path_str or self._loaded_state.get("policy_state_path")
-        if resuming_policy and resume_path:
-            p = Path(resume_path)
-            if not p.is_absolute() and not p.exists():
-                for cand in (
-                    self.output_root / p,
-                    self.output_root.parent / p,
-                    self.output_root / "models" / p.name,
-                    self.output_root / "checkpoints" / p.name,
-                ):
-                    if cand.exists():
-                        p = cand
-                        break
-            if not p.exists():
-                best_fallback = self.output_root / "models" / "best-model.zip"
-                if best_fallback.exists():
-                    p = best_fallback
+        policy_state_path_str = self._loaded_state.get("policy_state_path")
+        raw_best_stage = self._loaded_state.get("best_model_curriculum_stage")
+        prefer_policy_state = bool(self._loaded_state.get("incomplete_batch")) or (
+            raw_best_stage is not None and int(raw_best_stage) != int(active_stage)
+        )
+        if resuming_policy and (best_model_path_str or policy_state_path_str):
+            if prefer_policy_state:
+                p = (
+                    self._resolve_checkpoint_path(policy_state_path_str)
+                    or self._resolve_checkpoint_path(best_model_path_str)
+                )
+            else:
+                p = (
+                    self._resolve_checkpoint_path(best_model_path_str)
+                    or self._resolve_checkpoint_path(policy_state_path_str)
+                )
+            if p is None:
+                fallback_str = (
+                    (policy_state_path_str or best_model_path_str)
+                    if prefer_policy_state
+                    else (best_model_path_str or policy_state_path_str)
+                )
+                if active_stage < 9:
+                    best_fallback = self.output_root / "models" / "best-model.zip"
+                    p = best_fallback if best_fallback.exists() else Path(str(fallback_str))
+                else:
+                    p = Path(str(fallback_str))
             policy = self.POLICY_CLASS.load(
                 p,
                 self.config,
@@ -617,6 +691,40 @@ class MaskablePPOTrainer(Trainer):
             )
         else:
             policy = self.POLICY_CLASS.initialize(self.config)
+
+        from sheepdog.tracking.execution import RuntimeExecutionTracker
+        from sheepdog.tracking.registry import classify_assistance_mode
+
+        effective_obs_mode = (
+            getattr(self.config.training, "observation_mode", None)
+            or getattr(policy, "observation_mode", None)
+        )
+        assistance_mode = classify_assistance_mode(effective_obs_mode)
+
+        exec_tracker = RuntimeExecutionTracker(registry=tracking_registry)
+        execution_context = exec_tracker.initialize_or_resume(
+            run_id=run_id,
+            experiment_id=experiment_id,
+            change_id=change_id,
+            starting_episode=starting_environment_episodes,
+            checkpoint_label_episode=starting_total,
+            starting_policy_transition=starting_total_timesteps,
+            starting_world_step=None,
+            policy_state_path=self._loaded_state.get("policy_state_path"),
+            config_hash=compute_env_config_hash(
+                self.config.to_dict().get("environment", {})
+                if hasattr(self.config, "to_dict")
+                else asdict(self.config.environment)
+            ),
+            is_resumed=resuming_policy,
+            target_stage=active_stage,
+            assistance_mode=assistance_mode,
+            hyperparameters={
+                "learning_rate": train_config.learning_rate,
+                "gamma": getattr(train_config, "gamma", 0.99),
+                "entropy_coef": getattr(train_config, "entropy_coef", 0.01),
+            },
+        )
 
         source_stage = self._loaded_state.get("best_model_curriculum_stage")
         existing_baseline = self._loaded_state.get("stage_transition_baseline")
@@ -680,6 +788,7 @@ class MaskablePPOTrainer(Trainer):
                     tuple(train_config.evaluation_seeds),
                     checkpoint_episode=starting_total,
                     capture_replays=True,
+                    capture_step_telemetry=True,
                     evaluation_mode="stage_transition_baseline",
                     run_id=run_id,
                     checkpoint_id=baseline_id,
@@ -687,6 +796,9 @@ class MaskablePPOTrainer(Trainer):
                     curriculum_stage=active_stage,
                     evaluation_index=0,
                     should_stop=should_stop,
+                    experiment_id=execution_context.experiment_id,
+                    activation_id=execution_context.activation_id,
+                    checkpoint_record_id=f"chk_rec_{baseline_id}",
                 )
             except EvaluationInterruptedError:
                 logger.info(
@@ -771,8 +883,13 @@ class MaskablePPOTrainer(Trainer):
             "batch_starting_checkpoint_episode": batch_starting_checkpoint_episode,
         }
         _pre_loop_state = dict(self._loaded_state)
+        _pre_loop_state["run_id"] = run_id
+        _pre_loop_state["experiment_id"] = experiment_id
+        if change_id:
+            _pre_loop_state["change_id"] = change_id
         _pre_loop_state["incomplete_batch"] = _batch_marker_pre
         atomic_write_json(self._state_path, _pre_loop_state)
+        self._loaded_state = _pre_loop_state
 
         for completed_checkpoints, _checkpoint_slot in enumerate(
             train_config.checkpoint_episodes,
@@ -846,14 +963,7 @@ class MaskablePPOTrainer(Trainer):
             if getattr(train_config, "enable_adaptive_learning", True):
                 adaptive_state = adaptive_controller.get_state()
                 effective_lr = adaptive_state.effective_learning_rate
-                policy.model.learning_rate = effective_lr
-                policy.model.lr_schedule = (
-                    lambda _, learning_rate=effective_lr: learning_rate
-                )
-                if hasattr(policy.model, "policy") and hasattr(policy.model.policy, "optimizer"):
-                    for param_group in policy.model.policy.optimizer.param_groups:
-                        param_group["lr"] = effective_lr
-                policy.model.ent_coef = adaptive_state.effective_entropy_coef
+                effective_ent = adaptive_state.effective_entropy_coef
             else:
                 # Fallback: Linear LR annealing across the batch
                 _batch_done = completed_checkpoints - skip_segments - 1
@@ -861,16 +971,40 @@ class MaskablePPOTrainer(Trainer):
                 _batch_progress = _batch_done / _batch_span
 
                 # Enforce 5e-5 floor on learning rate annealing
-                policy.model.learning_rate = max(
+                effective_lr = max(
                     5e-5,
                     train_config.learning_rate
-                    + (train_config.learning_rate_final - train_config.learning_rate) * _batch_progress
+                    + (train_config.learning_rate_final - train_config.learning_rate) * _batch_progress,
                 )
-                policy.model.ent_coef = train_config.entropy_coef
+                effective_ent = train_config.entropy_coef
                 adaptive_state = adaptive_controller.get_state()
 
-            # Apply training overrides for advantage estimation
-            policy.model.gae_lambda = train_config.gae_lambda
+            is_first_segment_of_batch = completed_checkpoints == skip_segments + 1
+            if hasattr(policy, "configure_for_training"):
+                self.last_configured_training_parameters = policy.configure_for_training(
+                    self.config,
+                    effective_learning_rate=effective_lr,
+                    effective_entropy_coef=effective_ent,
+                    reset_rollout_buffer=is_first_segment_of_batch,
+                    set_seed=is_first_segment_of_batch,
+                )
+            else:
+                policy.model.learning_rate = effective_lr
+                policy.model.lr_schedule = (
+                    lambda _, learning_rate=effective_lr: learning_rate
+                )
+                if hasattr(policy.model, "policy") and hasattr(policy.model.policy, "optimizer"):
+                    for param_group in policy.model.policy.optimizer.param_groups:
+                        param_group["lr"] = effective_lr
+                policy.model.ent_coef = effective_ent
+                policy.model.gae_lambda = train_config.gae_lambda
+                if hasattr(policy.model, "gamma"):
+                    policy.model.gamma = train_config.gamma
+                if hasattr(policy.model, "rollout_buffer") and policy.model.rollout_buffer is not None:
+                    if hasattr(policy.model.rollout_buffer, "gamma"):
+                        policy.model.rollout_buffer.gamma = train_config.gamma
+                    if hasattr(policy.model.rollout_buffer, "gae_lambda"):
+                        policy.model.rollout_buffer.gae_lambda = train_config.gae_lambda
 
             training_phase = (
                 self.runtime_tracker.phase("training")
@@ -987,22 +1121,29 @@ class MaskablePPOTrainer(Trainer):
 
             # Extract PPO diagnostics from model logger
             logger_obj = getattr(policy.model, "logger", None)
-            approx_kl = 0.0
-            clip_fraction = 0.0
-            explained_variance = 0.0
-            policy_gradient_loss = 0.0
-            value_loss = 0.0
-            entropy_loss = 0.0
-            loss = 0.0
+            approx_kl: float | None = None
+            clip_fraction: float | None = None
+            explained_variance: float | None = None
+            policy_gradient_loss: float | None = None
+            value_loss: float | None = None
+            entropy_loss: float | None = None
+            loss: float | None = None
             if logger_obj is not None:
                 name_to_value = getattr(logger_obj, "name_to_value", {})
-                approx_kl = float(name_to_value.get("train/approx_kl", 0.0))
-                clip_fraction = float(name_to_value.get("train/clip_fraction", 0.0))
-                explained_variance = float(name_to_value.get("train/explained_variance", 0.0))
-                policy_gradient_loss = float(name_to_value.get("train/policy_gradient_loss", 0.0))
-                value_loss = float(name_to_value.get("train/value_loss", 0.0))
-                entropy_loss = float(name_to_value.get("train/entropy_loss", 0.0))
-                loss = float(name_to_value.get("train/loss", 0.0))
+                if "train/approx_kl" in name_to_value:
+                    approx_kl = float(name_to_value["train/approx_kl"])
+                if "train/clip_fraction" in name_to_value:
+                    clip_fraction = float(name_to_value["train/clip_fraction"])
+                if "train/explained_variance" in name_to_value:
+                    explained_variance = float(name_to_value["train/explained_variance"])
+                if "train/policy_gradient_loss" in name_to_value:
+                    policy_gradient_loss = float(name_to_value["train/policy_gradient_loss"])
+                if "train/value_loss" in name_to_value:
+                    value_loss = float(name_to_value["train/value_loss"])
+                if "train/entropy_loss" in name_to_value:
+                    entropy_loss = float(name_to_value["train/entropy_loss"])
+                if "train/loss" in name_to_value:
+                    loss = float(name_to_value["train/loss"])
 
             if should_stop is not None and should_stop():
                 interrupted = True
@@ -1041,12 +1182,16 @@ class MaskablePPOTrainer(Trainer):
                         quick_seeds,
                         checkpoint_episode=total_eps_this_checkpoint,
                         capture_replays=True,
+                        capture_step_telemetry=True,
                         evaluation_mode="quick",
                         run_id=run_id,
                         checkpoint_id=chk_id,
                         policy_version=policy_version,
                         curriculum_stage=active_stage,
                         should_stop=should_stop,
+                        experiment_id=execution_context.experiment_id,
+                        activation_id=execution_context.activation_id,
+                        checkpoint_record_id=f"chk_rec_{chk_id}",
                     )
                     is_final_checkpoint = completed_checkpoints == n_checkpoints
                     confidence_candidate = (
@@ -1059,6 +1204,7 @@ class MaskablePPOTrainer(Trainer):
                             tuple(train_config.evaluation_seeds),
                             checkpoint_episode=total_eps_this_checkpoint,
                             capture_replays=True,
+                            capture_step_telemetry=True,
                             evaluation_mode="confidence",
                             run_id=run_id,
                             checkpoint_id=chk_id,
@@ -1066,6 +1212,9 @@ class MaskablePPOTrainer(Trainer):
                             curriculum_stage=active_stage,
                             evaluation_index=completed_checkpoints,
                             should_stop=should_stop,
+                            experiment_id=execution_context.experiment_id,
+                            activation_id=execution_context.activation_id,
+                            checkpoint_record_id=f"chk_rec_{chk_id}",
                         )
                     else:
                         summary = quick_summary
@@ -1085,6 +1234,8 @@ class MaskablePPOTrainer(Trainer):
                     saved_fw = self._loaded_state.get("failure_directed_weights")
                     if isinstance(saved_fw, dict):
                         self._failure_sampler.set_failure_weights(saved_fw)
+                else:
+                    self._failure_sampler.update_env_config(self.config.environment)
                 failure_weights = self._failure_sampler.update_from_evaluation(summary.records)
                 # Propagate to vectorized environment workers
                 if hasattr(policy.model, "get_env") and policy.model.get_env() is not None:
@@ -1092,8 +1243,8 @@ class MaskablePPOTrainer(Trainer):
                     try:
                         if hasattr(venv, "env_method"):
                             venv.env_method("update_failure_weights", failure_weights)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.warning("Failed to update failure weights on vec_env: %s", exc)
                 failure_telemetry = self._failure_sampler.get_usage_summary()
 
             if getattr(train_config, "enable_adaptive_learning", True):
@@ -1217,6 +1368,9 @@ class MaskablePPOTrainer(Trainer):
                 adaptive_lr_multiplier=adaptive_state.multiplier,
                 effective_learning_rate=adaptive_state.effective_learning_rate,
                 effective_mutation_scale=adaptive_state.effective_mutation_scale,
+                experiment_id=execution_context.experiment_id,
+                activation_id=execution_context.activation_id,
+                change_id=execution_context.change_id,
                 **runtime_snapshot,
             )
             if is_new_best:
@@ -1497,7 +1651,9 @@ class MaskablePPOTrainer(Trainer):
             "policy_config": policy.config.to_dict(),
             "training_signature": self._training_signature(),
             "incomplete_batch": None,
-            "run_id": self._loaded_state.get("run_id"),
+            "run_id": run_id,
+            "experiment_id": experiment_id,
+            "change_id": change_id,
             "parent_run_id": self._loaded_state.get("parent_run_id"),
             "parent_checkpoint_id": self._loaded_state.get("parent_checkpoint_id"),
             "policy_version": policy_version,

@@ -518,7 +518,7 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "no_progress_distance_delta": 0.1,
         "curriculum_stage": 25,
         "count_collection_progress": True,
-        "spawn_mix": _mix(scattered_sheep=0.35, partial_scattered=0.2, split_flock=0.2, farther_stray=0.15, nearby_stray=0.1),
+        "spawn_mix": _mix(scattered_sheep=0.35, split_flock=0.30, farther_stray=0.20, partial_scattered=0.15),
         "pen_placement": "away_from_corner",
     },
     26: {
@@ -531,13 +531,14 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "pen_opening": "bottom",
         "dog_speed": 2.0,
         "sheep_speed": 1,
-        "max_steps": 1820,
-        "no_progress_window": 560,
+        "max_steps": 2200,
+        "no_progress_window": 680,
         "no_progress_distance_delta": 0.1,
         "curriculum_stage": 26,
         "count_collection_progress": True,
         "spawn_mix": _mix(scattered_sheep=0.4, partial_scattered=0.2, split_flock=0.2, farther_stray=0.1, nearby_stray=0.1),
         "pen_placement": "interior",
+        "success_threshold": 0.85,
     },
     27: {
         "dogs": 3,
@@ -674,7 +675,7 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "stray_far_min": 32.0,
         "stray_far_max": 46.0,
         "pen_placement": "random",
-        "sheep_personality_strength": 0.35,
+        "sheep_personality_strength": 0.15,
     },
     34: {
         "dogs": 3,
@@ -695,7 +696,7 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "stray_far_min": 34.0,
         "stray_far_max": 48.0,
         "pen_placement": "random",
-        "sheep_personality_strength": 0.7,
+        "sheep_personality_strength": 0.3,
     },
     35: {
         "dogs": 3,
@@ -718,7 +719,7 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "stray_far_min": 35.0,
         "stray_far_max": 49.0,
         "pen_placement": "random",
-        "sheep_personality_strength": 0.7,
+        "sheep_personality_strength": 0.3,
     },
     36: {
         "dogs": 3,
@@ -741,7 +742,7 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "stray_far_min": 36.0,
         "stray_far_max": 50.0,
         "pen_placement": "random",
-        "sheep_personality_strength": 0.7,
+        "sheep_personality_strength": 0.3,
     },
     37: {
         "dogs": 3,
@@ -764,7 +765,7 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "stray_far_min": 38.0,
         "stray_far_max": 52.0,
         "pen_placement": "random",
-        "sheep_personality_strength": 1.0,
+        "sheep_personality_strength": 0.6,
     },
     38: {
         "dogs": 3,
@@ -787,7 +788,7 @@ CURRICULUM_STAGES: dict[int, dict[str, object]] = {
         "stray_far_min": 40.0,
         "stray_far_max": 54.0,
         "pen_placement": "random",
-        "sheep_personality_strength": 1.25,
+        "sheep_personality_strength": 0.9,
     },
 }
 
@@ -987,8 +988,10 @@ CURRICULUM_REWARD_OVERRIDES: dict[int, dict[str, object]] = {
         "no_progress_penalty": 0.048,
         "flock_cohesion_scale": 0.52,
         "scatter_penalty_scale": 0.48,
-        "farthest_sheep_progress_scale": 0.98,
-        "stray_ignore_penalty_scale": 0.00975,
+        "farthest_sheep_progress_scale": 1.45,
+        "stray_ignore_penalty_scale": 0.035,
+        "gate_corridor_progress_scale": 1.6,
+        "gate_alignment_scale": 1.8,
         "sheep_penned_reward": 10.0,
         "terminal_success_reward": 68.0,
     },
@@ -1134,6 +1137,16 @@ CURRICULUM_TRAINING_OVERRIDES: dict[int, dict[str, object]] = {
     15: {"entropy_coef": 0.010, "learning_rate": 1.0e-4, "learning_rate_final": 3e-5, "gae_lambda": 0.98},
     # transitional 6-sheep stage (boost entropy)
     16: {"entropy_coef": 0.020, "learning_rate": 1.2e-4, "learning_rate_final": 4e-5},
+    # Stage 26 interior-pen stray remediation & exploration (boost entropy to discover outrunner roles)
+    26: {
+        "entropy_coef": 0.020,
+        "failure_directed_training_enabled": True,
+    },
+    # Stage 33 mild personality variation with scattered escapists (boost exploration to learn non-cohesive containment)
+    33: {
+        "entropy_coef": 0.020,
+        "failure_directed_training_enabled": True,
+    },
 }
 
 def apply_curriculum_stage(config: LabConfig, stage: int) -> LabConfig:
@@ -1147,11 +1160,17 @@ def apply_curriculum_stage(config: LabConfig, stage: int) -> LabConfig:
         return config
     # Filter only keys that are actually fields of EnvironmentConfig
     env_keys = {f.name for f in fields(EnvironmentConfig)}
-    env_overrides = {k: v for k, v in overrides.items() if k in env_keys}
-    new_environment = replace(config.environment, **env_overrides)
+    stage_overrides = {k: v for k, v in overrides.items() if k in env_keys}
+    stage_overrides["curriculum_stage"] = stage
+    new_environment = replace(config.environment, **stage_overrides)
 
     reward_overrides = CURRICULUM_REWARD_OVERRIDES.get(stage)
     new_rewards = replace(config.rewards, **reward_overrides) if reward_overrides else config.rewards
+    if stage > 0:
+        new_rewards = replace(
+            new_rewards,
+            instincts=replace(new_rewards.instincts, curriculum_stage=stage),
+        )
 
     training_overrides = CURRICULUM_TRAINING_OVERRIDES.get(stage)
     new_training = replace(config.training, **training_overrides) if training_overrides else config.training

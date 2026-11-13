@@ -9,30 +9,33 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import os
 import re
+import threading
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from sheepdog.config import LabConfig
 from sheepdog.curriculum import (
     CURRICULUM_REWARD_OVERRIDES,
     CURRICULUM_STAGES,
     CURRICULUM_TRAINING_OVERRIDES,
-    stage_summary,
 )
 
 logger = logging.getLogger(__name__)
 
 # In-memory cache to guarantee <15ms response times on repeated calls
 _STAGE_HEALTH_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
-CACHE_TTL_SECONDS = 3.0
+_PARSED_EVAL_FILE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_CACHE_LOCK = threading.Lock()
+CACHE_TTL_SECONDS = 5.0
 
 
 @dataclass(frozen=True, slots=True)
 class SeedHealthItem:
+    """Per-seed reliability metrics across stage evaluation checkpoints."""
+
     seed: int
     win_rate: float
     wins: int
@@ -42,11 +45,14 @@ class SeedHealthItem:
     current_consecutive_fails: int
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize seed health metrics to a dictionary."""
         return asdict(self)
 
 
 @dataclass(frozen=True, slots=True)
 class FailureProgressStats:
+    """Distribution of partial sheep penning progress across failed evaluation runs."""
+
     total_failures: int
     avg_penned_on_fail: float
     three_penned_pct: float
@@ -56,11 +62,14 @@ class FailureProgressStats:
     closeness_score: float  # [0.0 - 1.0] Higher means failed runs were very close to victory
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize failure progress statistics to a dictionary."""
         return asdict(self)
 
 
 @dataclass(frozen=True, slots=True)
 class HyperparameterAuditItem:
+    """Comparison of an active stage hyperparameter against diagnostic guidance."""
+
     parameter: str
     current_value: Any
     recommended_value: Any
@@ -68,11 +77,14 @@ class HyperparameterAuditItem:
     note: str
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize hyperparameter audit item to a dictionary."""
         return asdict(self)
 
 
 @dataclass(frozen=True, slots=True)
 class PrescriptiveRecommendation:
+    """Actionable training recommendation synthesized from stage diagnostics."""
+
     type: str  # "continue", "reward_tweak", "entropy_tweak", "lr_tweak", "failure_directed", "cooldown"
     title: str
     description: str
@@ -80,11 +92,14 @@ class PrescriptiveRecommendation:
     priority: str  # "high", "medium", "info"
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize prescriptive recommendation to a dictionary."""
         return asdict(self)
 
 
 @dataclass(frozen=True, slots=True)
 class StageHealthSummary:
+    """Aggregated whole-stage learning health and prescriptive diagnostic payload."""
+
     stage: int
     stage_title: str
     total_stage_checkpoints: int
@@ -105,6 +120,7 @@ class StageHealthSummary:
     prescriptive_recommendations: tuple[PrescriptiveRecommendation, ...] = field(default_factory=tuple)
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize stage health summary to a JSON-compatible dictionary."""
         return {
             "stage": self.stage,
             "stage_title": self.stage_title,
@@ -147,18 +163,19 @@ def compute_stage_health_summary(
     evals_dir = out_root / "evaluations"
 
     cache_key = f"{out_root.as_posix()}_{target_stage}"
-    now_time = os.times().elapsed if hasattr(os, "times") else 0.0
+    now_time = time.monotonic()
 
-    if not force_refresh and cache_key in _STAGE_HEALTH_CACHE:
-        cached_ts, cached_data = _STAGE_HEALTH_CACHE[cache_key]
-        if now_time - cached_ts < CACHE_TTL_SECONDS:
-            return cached_data
+    with _CACHE_LOCK:
+        if not force_refresh and cache_key in _STAGE_HEALTH_CACHE:
+            cached_ts, cached_data = _STAGE_HEALTH_CACHE[cache_key]
+            if now_time - cached_ts < CACHE_TTL_SECONDS:
+                return cached_data
 
     if not evals_dir.exists():
         empty_summary = _build_empty_summary(target_stage or 1)
         return empty_summary.to_dict()
 
-    # Fast directory index of evaluation files
+    # Fast directory index of evaluation files (outside _CACHE_LOCK)
     eval_files: list[tuple[int, Path]] = []
     for entry in os.scandir(evals_dir):
         if entry.is_file() and entry.name.endswith(".json") and entry.name.startswith("eval_"):
@@ -175,20 +192,37 @@ def compute_stage_health_summary(
     # Load recent files from the end until stage is identified
     loaded_evals: list[tuple[int, dict[str, Any]]] = []
     seen_keys: set[tuple[int, str]] = set()
+    consecutive_other_stage = 0
 
     for pv, path in reversed(eval_files):
         try:
-            with path.open("r", encoding="utf-8") as fh:
-                data = json.load(fh)
+            p_str = str(path)
+            mtime = path.stat().st_mtime
+            with _CACHE_LOCK:
+                cached_file = _PARSED_EVAL_FILE_CACHE.get(p_str)
+            if cached_file is not None and cached_file[0] == mtime:
+                data = cached_file[1]
+            else:
+                with path.open("r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                if isinstance(data, dict):
+                    with _CACHE_LOCK:
+                        _PARSED_EVAL_FILE_CACHE[p_str] = (mtime, data)
+
             st = data.get("curriculum_stage")
             mode = data.get("evaluation_mode", "quick")
             if target_stage is None and st is not None:
                 target_stage = int(st)
             if st is not None and int(st) == target_stage:
+                consecutive_other_stage = 0
                 key = (pv, mode)
                 if key not in seen_keys:
                     seen_keys.add(key)
                     loaded_evals.append((pv, data))
+            elif target_stage is not None and st is not None and int(st) < target_stage:
+                consecutive_other_stage += 1
+                if consecutive_other_stage >= 10:
+                    break
         except Exception:
             continue
 
@@ -219,7 +253,7 @@ def compute_stage_health_summary(
     total_failed_runs = 0
 
     # Process chronologically
-    for pv, data in loaded_evals:
+    for _pv, data in loaded_evals:
         sr = data.get("success_rate")
         steps = data.get("average_completion_steps")
         rew = data.get("average_reward")
@@ -425,7 +459,7 @@ def compute_stage_health_summary(
         HyperparameterAuditItem(
             parameter="failure_directed_training_enabled",
             current_value=failure_directed,
-            recommended_value=True if drag_seeds else False,
+            recommended_value=bool(drag_seeds),
             status="warn" if (drag_seeds and not failure_directed) else "ok",
             note="Dynamic exposure to difficult seed spawn scenarios.",
         )
@@ -510,7 +544,8 @@ def compute_stage_health_summary(
     )
 
     result_dict = summary.to_dict()
-    _STAGE_HEALTH_CACHE[cache_key] = (now_time, result_dict)
+    with _CACHE_LOCK:
+        _STAGE_HEALTH_CACHE[cache_key] = (now_time, result_dict)
     return result_dict
 
 

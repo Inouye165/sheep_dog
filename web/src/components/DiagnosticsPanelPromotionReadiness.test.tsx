@@ -37,11 +37,11 @@ describe("DiagnosticsPanel & TrainingPanel Promotion Readiness Integrity", () =>
 
     const mockIndex: CheckpointIndex = {
       checkpoints: stage25Checkpoints,
+      latest: null,
     };
 
-    const mockStatus: TrainingStatus = {
+    const mockStatus = {
       running: true,
-      current_stage_curriculum_stage: 25,
       curriculum_stage: 25,
       total_episodes_trained: 500,
       total_timesteps: 106000000,
@@ -99,7 +99,7 @@ describe("DiagnosticsPanel & TrainingPanel Promotion Readiness Integrity", () =>
         step_efficiency_delta_pct: null,
         recent_avg_steps: 1200,
       },
-    };
+    } as unknown as TrainingStatus;
 
     render(
       <DiagnosticsPanel
@@ -160,11 +160,11 @@ describe("DiagnosticsPanel & TrainingPanel Promotion Readiness Integrity", () =>
 
     const mockIndex: CheckpointIndex = {
       checkpoints: stage25Checkpoints,
+      latest: null,
     };
 
-    const mockStatus: TrainingStatus = {
+    const mockStatus = {
       running: true,
-      current_stage_curriculum_stage: 25,
       curriculum_stage: 25,
       total_episodes_trained: 500,
       total_timesteps: 106000000,
@@ -222,7 +222,7 @@ describe("DiagnosticsPanel & TrainingPanel Promotion Readiness Integrity", () =>
         step_efficiency_delta_pct: null,
         recent_avg_steps: 1000,
       },
-    };
+    } as unknown as TrainingStatus;
 
     render(
       <DiagnosticsPanel

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -10,8 +11,13 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
-from sheepdog.config import LabConfig
+from sheepdog.config import EnvironmentConfig, LabConfig
 from sheepdog.environment import ACTION_ORDER, SheepdogEnvironment
+from sheepdog.observations import build_observation_builder
+from sheepdog.training.replay_writer import (
+    get_global_capture_policy,
+    validate_telemetry_config,
+)
 from sheepdog.training.scenario_sampler import ScenarioSampler
 
 
@@ -28,14 +34,38 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
         self,
         config: LabConfig,
         fixed_seed_sequence: Sequence[int] | None = None,
+        *,
+        telemetry_mode: str | None = None,
+        telemetry_head_steps: int | None = None,
+        telemetry_tail_steps: int | None = None,
+        max_telemetry_steps: int | None = None,
+        max_telemetry_steps_per_episode: int | None = None,
     ) -> None:
         super().__init__()
+        effective_max = (
+            max_telemetry_steps_per_episode
+            if max_telemetry_steps_per_episode is not None
+            else max_telemetry_steps
+        )
+        validate_telemetry_config(
+            telemetry_mode=telemetry_mode,
+            max_telemetry_steps=effective_max,
+            telemetry_head_steps=telemetry_head_steps,
+            telemetry_tail_steps=telemetry_tail_steps,
+        )
+        self._telemetry_mode: str | None = telemetry_mode
+        self._telemetry_head_steps: int | None = telemetry_head_steps
+        self._telemetry_tail_steps: int | None = telemetry_tail_steps
+        self._max_telemetry_steps: int | None = effective_max
         self.config = config
         self.fixed_seed_sequence = tuple(fixed_seed_sequence or ())
         self._fixed_seed_index = 0
         self._episode_counter = 0
         self.env_index: int = getattr(config, "env_index", 0)
         self._environment = SheepdogEnvironment(config)
+        self._environment._observation_builder = build_observation_builder(
+            config.training.observation_mode
+        )
         initial_snapshot = self._environment.reset(seed=config.training.train_seed)
         del initial_snapshot
         observation_size = len(self._environment.build_observation_for_dog(0).values)
@@ -47,6 +77,18 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
             dtype=np.float32,
         )
         self._pending_actions: list[str] = []
+        self._pending_decisions: list[dict[str, Any]] = []
+        self._captured_telemetry_steps = 0
+        self._telemetry_truncated = False
+        self._telemetry_omitted = False
+        tail_len = (
+            telemetry_tail_steps
+            if telemetry_tail_steps is not None and telemetry_tail_steps > 0
+            else (500 if telemetry_tail_steps is None else 1)
+        )
+        self._tail_telemetry_buffer: deque[tuple[int, dict[str, Any]]] = deque(
+            maxlen=tail_len
+        )
         self._current_dog_index = 0
         self._latest_seed = config.training.train_seed
         self._episode_reward = 0.0
@@ -70,6 +112,124 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
         self._evaluation_layouts = {}
         self._precompute_evaluation_layouts()
         self._current_episode_similarity_match = None
+
+    def _check_mid_episode_telemetry_mutation(self) -> None:
+        if hasattr(self, "_environment") and not self._environment._terminated and self._environment._step_count > 0:
+            raise RuntimeError("Cannot change telemetry configuration during an active episode")
+
+    @property
+    def telemetry_mode(self) -> str:
+        if self._telemetry_mode is not None:
+            return self._telemetry_mode
+        return getattr(get_global_capture_policy(), "telemetry_mode", "prefix")
+
+    @telemetry_mode.setter
+    def telemetry_mode(self, value: str) -> None:
+        self._check_mid_episode_telemetry_mutation()
+        validate_telemetry_config(telemetry_mode=value)
+        self._telemetry_mode = value
+
+    @property
+    def telemetry_head_steps(self) -> int:
+        if self._telemetry_head_steps is not None:
+            return self._telemetry_head_steps
+        return getattr(get_global_capture_policy(), "telemetry_head_steps", 200)
+
+    @telemetry_head_steps.setter
+    def telemetry_head_steps(self, value: int) -> None:
+        self._check_mid_episode_telemetry_mutation()
+        validate_telemetry_config(telemetry_head_steps=value)
+        self._telemetry_head_steps = value
+
+    @property
+    def telemetry_tail_steps(self) -> int:
+        if self._telemetry_tail_steps is not None:
+            return self._telemetry_tail_steps
+        return getattr(get_global_capture_policy(), "telemetry_tail_steps", 500)
+
+    @telemetry_tail_steps.setter
+    def telemetry_tail_steps(self, value: int) -> None:
+        self._check_mid_episode_telemetry_mutation()
+        validate_telemetry_config(telemetry_tail_steps=value)
+        self._telemetry_tail_steps = value
+        expected_tail_len = value if value > 0 else 1
+        self._tail_telemetry_buffer = deque(
+            self._tail_telemetry_buffer, maxlen=expected_tail_len
+        )
+
+    @property
+    def max_telemetry_steps(self) -> int:
+        if self._max_telemetry_steps is not None:
+            return self._max_telemetry_steps
+        return getattr(get_global_capture_policy(), "max_telemetry_steps_per_episode", 1000)
+
+    @max_telemetry_steps.setter
+    def max_telemetry_steps(self, value: int) -> None:
+        self._check_mid_episode_telemetry_mutation()
+        validate_telemetry_config(max_telemetry_steps=value)
+        self._max_telemetry_steps = value
+
+    @property
+    def max_telemetry_steps_per_episode(self) -> int:
+        return self.max_telemetry_steps
+
+    @max_telemetry_steps_per_episode.setter
+    def max_telemetry_steps_per_episode(self, value: int) -> None:
+        self.max_telemetry_steps = value
+
+    def export_active_trajectory(self, *, finalize_tail: bool = False) -> dict[str, Any]:
+        """Export the current active trajectory buffer.
+
+        If *finalize_tail* is True and an episode is interrupted mid-run before
+        normal termination, the current contents of the rolling tail buffer are
+        stitched into the trajectory copy and an omission marker is placed at step H+1
+        (if a gap exists relative to the current step count).
+        If *finalize_tail* is False, frames in the active trajectory buffer are
+        returned as-is (with intermediate steps > H having step_telemetry=None
+        and recent steps buffered in _tail_telemetry_buffer).
+        """
+        import copy
+        frames = copy.deepcopy(self._active_trajectory_buffer)
+        current_step = int(self._environment.step_count)
+        capture_policy = get_global_capture_policy()
+        telemetry_enabled = bool(capture_policy.capture_step_telemetry)
+        mode = self.telemetry_mode
+        head_steps = self.telemetry_head_steps
+        tail_steps = self.telemetry_tail_steps
+
+        if finalize_tail and len(frames) > 1 and telemetry_enabled and mode == "head_tail":
+            T = current_step
+            tail_start = max(1, T - tail_steps + 1) if tail_steps > 0 else T + 1
+            if tail_start > head_steps + 1:
+                omitted_start = head_steps + 1
+                omitted_end = tail_start - 1
+                omitted_count = tail_start - 1 - head_steps
+                omission_marker = {
+                    "telemetry_omitted": True,
+                    "omitted_reason": "intentionally_omitted_window",
+                    "telemetry_mode": "head_tail",
+                    "head_steps": head_steps,
+                    "tail_steps": tail_steps,
+                    "omitted_range": f"steps_{omitted_start}_to_{omitted_end}",
+                    "omitted_steps_start": omitted_start,
+                    "omitted_steps_end": omitted_end,
+                    "omitted_steps_count": omitted_count,
+                    "total_world_steps": T,
+                }
+                marker_idx = omitted_start
+                if 0 <= marker_idx < len(frames):
+                    frames[marker_idx]["step_telemetry"] = omission_marker
+
+            for step_num, payload in self._tail_telemetry_buffer:
+                if 0 <= step_num < len(frames):
+                    frames[step_num]["step_telemetry"] = payload
+
+        return {
+            "step_count": current_step,
+            "total_frames": len(frames),
+            "frames": frames,
+            "tail_buffer_count": len(self._tail_telemetry_buffer),
+        }
 
     def _precompute_evaluation_layouts(self) -> None:
         """Pre-generate initial positions for standard evaluation seeds to check training similarity."""
@@ -109,6 +269,11 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
         """Update failure scenario weights on the underlying scenario sampler."""
         self._scenario_sampler.set_failure_weights(weights)
 
+    def update_env_config(self, env_config: EnvironmentConfig) -> None:
+        """Update environment config on the environment and underlying scenario sampler."""
+        self._environment.env_config = env_config
+        self._scenario_sampler.update_env_config(env_config)
+
     def get_scenario_sampler_summary(self) -> dict[str, Any]:
         """Return the scenario sampler usage and telemetry summary."""
         return self._scenario_sampler.get_usage_summary()
@@ -132,14 +297,23 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
             seed = self._next_seed()
         self._latest_seed = int(seed)
         self._pending_actions = []
+        self._pending_decisions = []
+        self._captured_telemetry_steps = 0
+        self._telemetry_truncated = False
+        self._telemetry_omitted = False
+        self._tail_telemetry_buffer.clear()
         self._current_dog_index = 0
         self._episode_reward = 0.0
         self._active_trajectory_buffer = []
+        self._latest_scenario_id: str | None = None
 
         # Use scenario sampler if scenario training or failure-directed training is enabled
         if self.config.training.scenario_training_enabled or getattr(self.config.training, "failure_directed_training_enabled", False):
             selection = self._scenario_sampler.sample(self._episode_counter)
             if selection.scenario is not None:
+                self._latest_scenario_id = getattr(
+                    selection, "scenario_id", getattr(selection.scenario, "scenario_id", None)
+                )
                 self._environment.reset_from_scenario(selection.scenario)
             else:
                 self._environment.reset(seed=self._latest_seed)
@@ -242,15 +416,116 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
         return observation, self._info()
 
     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
-        action_name = ACTION_ORDER[int(action)]
+        from sheepdog.training.replay_writer import get_global_capture_policy
+
+        dog_idx = self._current_dog_index
+        raw_action_name = ACTION_ORDER[int(action)]
         mask = self._current_dog_action_mask()
-        if not bool(mask[int(action)]):
-            action_name = "wait"
-        self._pending_actions.append(action_name)
+        is_legal = bool(mask[int(action)])
+        executed_action = raw_action_name if is_legal else "wait"
+        replacement_reason = None if is_legal else "action_masked_illegal"
+        self._pending_actions.append(executed_action)
+
+        capture_policy = get_global_capture_policy()
+        telemetry_enabled = bool(capture_policy.capture_step_telemetry)
+        mode = self.telemetry_mode
+        budget = self.max_telemetry_steps
+        head_steps = self.telemetry_head_steps
+        tail_steps = self.telemetry_tail_steps
+        expected_tail_len = tail_steps if tail_steps > 0 else 1
+        if self._tail_telemetry_buffer.maxlen != expected_tail_len:
+            self._tail_telemetry_buffer = deque(
+                self._tail_telemetry_buffer, maxlen=expected_tail_len
+            )
+
+        current_world_step = int(self._environment.step_count) + 1
+        if not telemetry_enabled:
+            capture_active = False
+        elif mode == "prefix":
+            capture_active = self._captured_telemetry_steps < budget
+        elif mode == "head_tail":
+            capture_active = (tail_steps > 0) or (current_world_step <= head_steps)
+        else:
+            capture_active = False
+
+        if capture_active:
+            dog_obs = self._current_observation().tolist()
+            decision_mask_dict = {
+                act: bool(mask[idx]) for idx, act in enumerate(ACTION_ORDER)
+            }
+            physical_mask = self._environment.action_mask_for_dog(
+                dog_idx,
+                policy_mode="neural_policy",
+                reserved_positions={
+                    self._environment.dogs[i].position
+                    for i in range(dog_idx)
+                },
+            )
+            physical_mask_dict = {
+                act: bool(physical_mask.get(act, False)) for act in ACTION_ORDER
+            }
+            self._pending_decisions.append({
+                "dog_index": dog_idx,
+                "world_step": int(self._environment.step_count),
+                "observation": dog_obs,
+                "decision_action_mask": decision_mask_dict,
+                "recomputed_physical_mask": physical_mask_dict,
+                "selected_action": raw_action_name,
+                "executed_action": executed_action,
+                "replacement_reason": replacement_reason,
+                "action_probabilities": None,
+                "logits": None,
+                "value_estimate": None,
+                "decision_mode": "sampled",
+                "policy_version": getattr(self, "policy_version", None),
+                "checkpoint_id": getattr(self, "checkpoint_id", None),
+                "mask_type": "actual_decision_time",
+            })
+
         terminated = False
         truncated = False
         reward = 0.0
         if len(self._pending_actions) >= self._environment.dog_count:
+            step_telemetry: dict[str, Any] | None = None
+            if telemetry_enabled:
+                if mode == "prefix":
+                    if self._captured_telemetry_steps < budget:
+                        self._captured_telemetry_steps += 1
+                        from sheepdog.training.diagnostics.temporal_interaction import (
+                            build_step_instrumentation_payload,
+                        )
+
+                        step_telemetry = build_step_instrumentation_payload(
+                            self._environment,
+                            decisions=self._pending_decisions,
+                            raw_actions=self._pending_actions,
+                        )
+                    elif not self._telemetry_truncated:
+                        self._telemetry_truncated = True
+                        step_telemetry = {
+                            "telemetry_truncated": True,
+                            "truncation_reason": "per_episode_telemetry_budget_exhausted",
+                            "telemetry_limit_steps": budget,
+                            "affected_range": f"steps_{self._environment.step_count}_to_end",
+                        }
+                elif mode == "head_tail" and capture_active:
+                    from sheepdog.training.diagnostics.temporal_interaction import (
+                        build_step_instrumentation_payload,
+                    )
+
+                    payload = build_step_instrumentation_payload(
+                        self._environment,
+                        decisions=self._pending_decisions,
+                        raw_actions=self._pending_actions,
+                    )
+                    if current_world_step <= head_steps:
+                        step_telemetry = payload
+                        self._captured_telemetry_steps += 1
+                    else:
+                        if tail_steps > 0:
+                            self._tail_telemetry_buffer.append((current_world_step, payload))
+                        step_telemetry = None
+
             snapshot, breakdown = self._environment.step(self._pending_actions)
             reward = float(breakdown.total)
             self._episode_reward += reward
@@ -261,18 +536,50 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
             info["final_snapshot"] = snapshot.to_dict()
 
             # Append frame to active trajectory buffer
-            self._active_trajectory_buffer.append({
+            frame_entry: dict[str, Any] = {
                 "step": int(snapshot.step),
                 "actions": list(self._pending_actions),
                 "snapshot": snapshot.to_dict(),
                 "reward": breakdown.to_dict(),
-            })
+            }
+            if step_telemetry is not None:
+                frame_entry["step_telemetry"] = step_telemetry
+            self._active_trajectory_buffer.append(frame_entry)
 
             self._pending_actions = []
+            self._pending_decisions = []
             self._current_dog_index = 0
 
             # Handle episode completion & selective trajectory capture
             if terminated or truncated:
+                if telemetry_enabled and mode == "head_tail":
+                    T = int(snapshot.step)
+                    tail_start = max(1, T - tail_steps + 1) if tail_steps > 0 else T + 1
+                    if tail_start > head_steps + 1:
+                        self._telemetry_omitted = True
+                        omitted_start = head_steps + 1
+                        omitted_end = tail_start - 1
+                        omitted_count = tail_start - 1 - head_steps
+                        omission_marker = {
+                            "telemetry_omitted": True,
+                            "omitted_reason": "intentionally_omitted_window",
+                            "telemetry_mode": "head_tail",
+                            "head_steps": head_steps,
+                            "tail_steps": tail_steps,
+                            "omitted_range": f"steps_{omitted_start}_to_{omitted_end}",
+                            "omitted_steps_start": omitted_start,
+                            "omitted_steps_end": omitted_end,
+                            "omitted_steps_count": omitted_count,
+                            "total_world_steps": T,
+                        }
+                        marker_idx = omitted_start
+                        if 0 <= marker_idx < len(self._active_trajectory_buffer):
+                            self._active_trajectory_buffer[marker_idx]["step_telemetry"] = omission_marker
+
+                    for step_num, payload in self._tail_telemetry_buffer:
+                        if 0 <= step_num < len(self._active_trajectory_buffer):
+                            self._active_trajectory_buffer[step_num]["step_telemetry"] = payload
+
                 penned = getattr(snapshot, "penned_count", sum(1 for s in snapshot.sheep if getattr(s, "penned", False)))
                 total_sheep = len(snapshot.sheep)
                 status_str = "SUCCESS" if snapshot.success else ("TIMEOUT" if snapshot.timeout else "STOPPED")
@@ -304,7 +611,7 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
                     replay_id = f"diag_stage{stage}_ep{ep_num}_seed{seed_val}_t{ts_suffix}"
                     event_key = f"ep_{ep_num}_stage_{stage}_seed_{seed_val}_env_{self.env_index}_t{ts_suffix}"
 
-                    output_dir = Path("artifacts/replays")
+                    output_dir = Path(self.config.training.output_dir) / "replays"
                     output_path = output_dir / f"{replay_id}.json.gz"
                     replay_path_str = str(output_path)
 
@@ -315,18 +622,62 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
                         else {}
                     )
 
+                    T = int(snapshot.step)
+                    if mode == "head_tail":
+                        tail_start = max(1, T - tail_steps + 1) if tail_steps > 0 else T + 1
+                        has_gap = tail_start > head_steps + 1
+                        omitted_steps = (tail_start - 1 - head_steps) if has_gap else 0
+                        detailed_steps = (T - omitted_steps) if telemetry_enabled else 0
+                        telemetry_coverage = {
+                            "mode": mode,
+                            "total_steps": T,
+                            "captured_detailed_steps": detailed_steps,
+                            "omitted_steps_count": omitted_steps,
+                            "retained_head_range": [1, min(head_steps, T)] if (head_steps > 0 and telemetry_enabled) else None,
+                            "retained_tail_range": [tail_start, T] if (tail_steps > 0 and tail_start <= T and telemetry_enabled) else None,
+                            "omitted_range": [head_steps + 1, tail_start - 1] if has_gap else None,
+                            "telemetry_truncated": False,
+                            "complete_decision_coverage": (tail_start <= head_steps + 1) and telemetry_enabled,
+                        }
+                    else:
+                        is_truncated = self._telemetry_truncated
+                        detailed_steps = min(T, budget) if telemetry_enabled else 0
+                        omitted_steps = (T - detailed_steps) if telemetry_enabled else 0
+                        telemetry_coverage = {
+                            "mode": mode,
+                            "total_steps": T,
+                            "captured_detailed_steps": detailed_steps,
+                            "omitted_steps_count": omitted_steps,
+                            "retained_head_range": [1, min(budget, T)] if (budget > 0 and telemetry_enabled) else None,
+                            "retained_tail_range": None,
+                            "omitted_range": [budget + 1, T] if is_truncated else None,
+                            "telemetry_truncated": is_truncated,
+                            "complete_decision_coverage": (budget >= T) and telemetry_enabled,
+                        }
+
                     payload = {
                         "seed": seed_val,
+                        "scenario_id": getattr(self, "_latest_scenario_id", None),
                         "policy_name": f"ppo_stage_{stage}",
                         "trainer_type": "maskable_ppo",
                         "policy_type": "team_shared",
                         "replay_mode": "training_diagnostic",
                         "replay_source": "training-diagnostic",
+                        "strategy_version": "1.0.0",
+                        "discount_timebase": "sequential_shared_dog",
+                        "discount_factor": float(self.config.training.gamma),
+                        "dog_count": int(self._environment.dog_count),
                         "capture_reason": capture_reason,
                         "capture_status": "queued",
                         "environment": self.config.to_dict()["environment"],
                         "final_snapshot": snapshot.to_dict(),
                         "stats": stats_dict,
+                        "telemetry_mode": mode,
+                        "telemetry_head_steps": head_steps if mode == "head_tail" else None,
+                        "telemetry_tail_steps": tail_steps if mode == "head_tail" else None,
+                        "telemetry_truncated": self._telemetry_truncated,
+                        "telemetry_limit_steps": budget if (mode == "prefix" and telemetry_enabled) else None,
+                        "telemetry_coverage": telemetry_coverage,
                         "frames": list(self._active_trajectory_buffer),
                     }
 
@@ -340,7 +691,12 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
                         use_gzip=True,
                     )
 
-                    writer = get_replay_writer(output_dir=output_dir, episode_store=get_episode_store())
+                    writer = get_replay_writer(
+                        output_dir=output_dir,
+                        episode_store=get_episode_store(
+                            Path(self.config.training.output_dir) / "training-telemetry.sqlite"
+                        ),
+                    )
                     writer.enqueue(job)
 
                 dog_cnt = self._environment.dog_count

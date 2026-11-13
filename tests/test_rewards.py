@@ -226,6 +226,7 @@ def test_stray_approach_reward_for_isolated_stray() -> None:
         flock_centroid=(10.0, 10.0),
         target_position=(0.0, 10.0),
         sheep_positions=((30.0, 10.0), (10.0, 10.0)),
+        previous_sheep_positions=((30.0, 10.0), (10.0, 10.0)),
         # Dog moved from (25.0, 10.0) to (27.0, 10.0) -> closer by 2.0 units
         previous_dog_positions=((25.0, 10.0),),
         dog_positions=((27.0, 10.0),),
@@ -249,6 +250,7 @@ def test_stray_approach_reward_for_isolated_stray() -> None:
         flock_centroid=(10.0, 10.0),
         target_position=(0.0, 10.0),
         sheep_positions=((30.0, 10.0), (10.0, 10.0)),
+        previous_sheep_positions=((30.0, 10.0), (10.0, 10.0)),
         # Dog moved from (27.0, 10.0) to (25.0, 10.0) -> further by 2.0 units
         previous_dog_positions=((27.0, 10.0),),
         dog_positions=((25.0, 10.0),),
@@ -257,7 +259,7 @@ def test_stray_approach_reward_for_isolated_stray() -> None:
     breakdown_closer = computer.compute(closer_inputs)
     breakdown_further = computer.compute(further_inputs)
 
-    assert breakdown_closer.stray_ignore_penalty > breakdown_further.stray_ignore_penalty
+    assert breakdown_closer.stray_approach_progress > breakdown_further.stray_approach_progress
 
 
 def test_stray_approach_reward_for_single_remaining_unpenned_sheep() -> None:
@@ -286,6 +288,7 @@ def test_stray_approach_reward_for_single_remaining_unpenned_sheep() -> None:
         flock_centroid=lone_sheep,
         target_position=target,
         sheep_positions=(lone_sheep,),
+        previous_sheep_positions=(lone_sheep,),
         previous_dog_positions=((10.0, 10.0),),
         dog_positions=((15.0, 10.0),),
     )
@@ -308,6 +311,7 @@ def test_stray_approach_reward_for_single_remaining_unpenned_sheep() -> None:
         flock_centroid=lone_sheep,
         target_position=target,
         sheep_positions=(lone_sheep,),
+        previous_sheep_positions=(lone_sheep,),
         previous_dog_positions=((15.0, 10.0),),
         dog_positions=((10.0, 10.0),),
     )
@@ -315,7 +319,7 @@ def test_stray_approach_reward_for_single_remaining_unpenned_sheep() -> None:
     breakdown_closer = computer.compute(closer_inputs)
     breakdown_further = computer.compute(further_inputs)
 
-    assert breakdown_closer.stray_ignore_penalty > breakdown_further.stray_ignore_penalty
+    assert breakdown_closer.stray_approach_progress > breakdown_further.stray_approach_progress
 
 
 def test_stray_approach_reward_for_multi_sheep_unpenned_cluster() -> None:
@@ -347,6 +351,7 @@ def test_stray_approach_reward_for_multi_sheep_unpenned_cluster() -> None:
         flock_centroid=flock_centroid,
         target_position=target,
         sheep_positions=(sheep1, sheep2),
+        previous_sheep_positions=(sheep1, sheep2),
         previous_dog_positions=((5.0, 5.0),),
         dog_positions=((10.0, 10.0),),
     )
@@ -369,6 +374,7 @@ def test_stray_approach_reward_for_multi_sheep_unpenned_cluster() -> None:
         flock_centroid=flock_centroid,
         target_position=target,
         sheep_positions=(sheep1, sheep2),
+        previous_sheep_positions=(sheep1, sheep2),
         previous_dog_positions=((10.0, 10.0),),
         dog_positions=((5.0, 5.0),),
     )
@@ -376,7 +382,7 @@ def test_stray_approach_reward_for_multi_sheep_unpenned_cluster() -> None:
     breakdown_closer = computer.compute(closer_inputs)
     breakdown_further = computer.compute(further_inputs)
 
-    assert breakdown_closer.stray_ignore_penalty > breakdown_further.stray_ignore_penalty
+    assert breakdown_closer.stray_approach_progress > breakdown_further.stray_approach_progress
 
 
 def test_gate_camping_penalty_when_unpenned_sheep_are_far() -> None:

@@ -355,6 +355,15 @@ beforeEach(() => {
     if (path.includes("/api/training/status")) {
       return jsonResponse(idleTrainingStatus);
     }
+    if (path.includes("/api/early-warnings")) {
+      return jsonResponse({
+        enabled: true,
+        summary: { total_active: 0, critical_count: 0, warning_count: 0, info_count: 0, total_acknowledged: 0 },
+        active_warnings: [],
+        acknowledged_warnings: [],
+        current_evaluation: null,
+      });
+    }
     if (path.includes("checkpoint-index.json")) {
       return jsonResponse(checkpointIndex);
     }
@@ -793,7 +802,6 @@ describe("App", () => {
   });
 
   it("starts training with instincts disabled and curriculum stage one by default", async () => {
-    const user = userEvent.setup();
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
       const path = String(input);
@@ -1094,5 +1102,142 @@ describe("App", () => {
 
     // Verify stale 'learning' phase is no longer shown
     expect(screen.queryByText("Learning neural policy: segment 1/5")).not.toBeInTheDocument();
+  });
+
+  it("replays selected checkpoint without clobbering running state or sending stage -1", async () => {
+    const fetchMock = vi.mocked(fetch);
+    const stagelessCheckpointIndex = {
+      checkpoints: [
+        {
+          ...checkpointIndex.checkpoints[0],
+          environment_config: { dogs: 2, sheep: 2, width: 80, height: 60 },
+          reward_config: undefined,
+          records: [
+            {
+              ...checkpointIndex.checkpoints[0].records[0],
+              replay_path: undefined,
+            },
+          ],
+        },
+      ],
+      latest: checkpointIndex.latest,
+    };
+    const twoFrameReplay = {
+      ...replay,
+      frames: [
+        replay.frames[0],
+        {
+          ...replay.frames[0],
+          step: 2,
+          snapshot: {
+            ...replay.frames[0].snapshot,
+            step: 2,
+            simulated_seconds: 2,
+          },
+        },
+      ],
+    };
+
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.includes("/api/training/status")) {
+        return jsonResponse({ ...idleTrainingStatus, curriculum_stage: 3 });
+      }
+      if (path.includes("checkpoint-index.json")) {
+        return jsonResponse(stagelessCheckpointIndex);
+      }
+      if (path.includes("/api/replay/run")) {
+        return jsonResponse(twoFrameReplay);
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("tab", { name: "Playback" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Replay selected" })).toBeInTheDocument());
+    await waitFor(() => expect(within(screen.getByLabelText("Run status")).getByText("idle")).toBeInTheDocument());
+
+    const callsBeforeClick = fetchMock.mock.calls.filter(([req]) => String(req).includes("/api/replay/run")).length;
+    fireEvent.click(screen.getByRole("button", { name: "Replay selected" }));
+
+    await waitFor(() => {
+      const callsAfterClick = fetchMock.mock.calls.filter(([req]) => String(req).includes("/api/replay/run"));
+      expect(callsAfterClick.length).toBe(callsBeforeClick + 1);
+      const lastCallBody = JSON.parse(String(callsAfterClick[callsAfterClick.length - 1][1]?.body ?? "{}"));
+      expect(lastCallBody.effective_config?.curriculum_stage).toBe(3);
+    });
+
+    // Run status transitions to running (or advances to frame 2), never immediately clobbered by a duplicate load
+    await waitFor(() => {
+      const statusText = screen.getByLabelText("Run status").textContent ?? "";
+      expect(statusText.includes("running") || statusText.includes("2")).toBe(true);
+    });
+  });
+
+  it("discards stale in-flight status polls across user lifecycle mutations", async () => {
+    const fetchMock = vi.mocked(fetch);
+    const slowPollHolder: { resolve: ((res: Response) => void) | null } = { resolve: null };
+    let statusCallCount = 0;
+
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.includes("/api/training/status")) {
+        statusCallCount += 1;
+        if (statusCallCount === 1) {
+          return Promise.resolve(jsonResponse(idleTrainingStatus));
+        }
+        if (statusCallCount === 2) {
+          return new Promise<Response>((resolve) => {
+            slowPollHolder.resolve = resolve;
+          });
+        }
+        return Promise.resolve(
+          jsonResponse({
+            ...idleTrainingStatus,
+            running: true,
+            phase: "learning",
+            message: "Training batch active",
+          }),
+        );
+      }
+      if (path.includes("/api/training/start")) {
+        return Promise.resolve(
+          jsonResponse({
+            ...idleTrainingStatus,
+            running: true,
+            phase: "learning",
+            requested_episodes: 50,
+            batch_total_episodes: 50,
+            message: "Training batch active",
+          }),
+        );
+      }
+      if (path.includes("checkpoint-index.json")) {
+        return Promise.resolve(jsonResponse(checkpointIndex));
+      }
+      if (path.includes("checkpoint-000000-seed-000011.json")) {
+        return Promise.resolve(jsonResponse(replay));
+      }
+      return Promise.resolve(new Response("not found", { status: 404 }));
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Train 50 more" })).toBeInTheDocument());
+    await waitFor(() => expect(slowPollHolder.resolve).not.toBeNull());
+
+    fireEvent.click(screen.getByRole("button", { name: "Train 50 more" }));
+    await waitFor(() => expect(screen.getByText("Training batch active")).toBeInTheDocument());
+
+    // Now resolve the stale in-flight status poll that started BEFORE clicking Train
+    slowPollHolder.resolve?.(
+      jsonResponse({ ...idleTrainingStatus, running: false, phase: "idle", message: "Stale idle poll" }),
+    );
+
+    // Ensure the stale poll was ignored and did not overwrite "Training batch active"
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.queryByText("Stale idle poll")).not.toBeInTheDocument();
+    expect(screen.getByText("Training batch active")).toBeInTheDocument();
   });
 });

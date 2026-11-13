@@ -15,11 +15,13 @@ import { ResultsPanel } from "./components/ResultsPanel";
 import { WandbTab } from "./components/WandbTab";
 import { EvaluationEpisodesTab } from "./components/EvaluationEpisodesTab";
 import { EvaluationBanner } from "./components/EvaluationBanner";
+import { TemporalDiagnosticsPanel } from "./components/TemporalDiagnosticsPanel";
 import {
   clearTraining,
   evaluateScenario,
   loadEffectiveConfig,
   loadCheckpointIndex,
+  CHECKPOINT_INDEX_SAFETY_REFRESH_MS,
   loadHyperparams,
   loadNetworkTopology,
   loadReplay,
@@ -36,6 +38,7 @@ import {
   startTraining,
   stopTraining,
   shutdownApp,
+  isBackendStartingError,
 } from "./lib/api";
 import type { CheckpointMode } from "./lib/api";
 import { recommendedEpisodesForStage } from "./lib/trainingConfig";
@@ -50,12 +53,13 @@ import type {
 } from "./state/types";
 
 type RunState = "idle" | "running" | "paused" | "success" | "timeout" | "stopped";
-type ActiveTab = "train" | "test" | "network" | "layers" | "stages" | "insights" | "results" | "config" | "history" | "wandb";
+type ActiveTab = "train" | "test" | "temporal" | "network" | "layers" | "stages" | "insights" | "results" | "config" | "history" | "wandb";
 type RightRailTab = "training" | "controls" | "status" | "scenario" | "library";
 
 const APP_TABS: { id: ActiveTab; label: string }[] = [
   { id: "train", label: "Train" },
   { id: "test", label: "Scenarios" },
+  { id: "temporal", label: "Temporal Diagnostics" },
   { id: "network", label: "Network" },
   { id: "layers", label: "Layers" },
   { id: "stages", label: "Stages" },
@@ -151,7 +155,23 @@ export function App() {
   const [lifecycleAction, setLifecycleAction] = useState<"pause" | "stop" | null>(null);
   const [runningCurrentReplay, setRunningCurrentReplay] = useState(false);
   const [loadingSelectedReplay, setLoadingSelectedReplay] = useState(false);
-  const [activeTab, setActiveTab] = useState<ActiveTab>("train");
+  const [activeTab, setActiveTab] = useState<ActiveTab>(() => {
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      const tabParam = (params.get("tab") ?? params.get("mode") ?? "").toLowerCase();
+      if (tabParam === "temporal" || tabParam === "temporal-diagnostics" || params.get("replay")) {
+        return "temporal";
+      }
+    }
+    return "train";
+  });
+  const [temporalReplayId, setTemporalReplayId] = useState<string | null>(() => {
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      return params.get("replay")?.trim() || null;
+    }
+    return null;
+  });
   const [rightRailTab, setRightRailTab] = useState<RightRailTab>("training");
   const [scenarioReplay, setScenarioReplay] = useState<ReplayBundle | null>(null);
   const [scenarioFrameIndex, setScenarioFrameIndex] = useState(0);
@@ -175,6 +195,12 @@ export function App() {
   // When true, the user explicitly picked a stage in the UI and idle polling
   // should not auto-bounce it back to a higher server-reported stage.
   const manualStageOverrideRef = useRef(false);
+  // Monotonic sequence incremented at the start and completion of lifecycle/stage
+  // mutations so in-flight status polls never clobber newer user mutations.
+  const statusMutationSeqRef = useRef(0);
+  // Tracks the last (checkpointEpisode:seed) loaded so explicit play ("Replay selected")
+  // and live checkpoint auto-play do not have runState="running" overwritten to "idle".
+  const lastLoadedSelectionKeyRef = useRef<string | null>(null);
 
   const syncTrainingStageFromStatus = useCallback((status: TrainingStatus | null): void => {
     const reportedStage = status?.curriculum_stage;
@@ -196,37 +222,45 @@ export function App() {
     const clamped = Math.max(0, Math.min(maxCurriculumStage, normalized));
 
     if (clamped < effectiveCurriculumStage && !trainingRunning) {
-      const shouldRewind = window.confirm(
-        `Restart from Stage ${clamped} and remove saved progress from higher stages? ` +
-          "This hides those stages from the UI and prevents training from resuming from them.",
-      );
+      const serverActiveStage = trainingStatus?.curriculum_stage ?? 1;
+      if (clamped < serverActiveStage) {
+        const shouldRewind = window.confirm(
+          `Restart from Stage ${clamped} and remove saved progress from higher stages? ` +
+            "This hides those stages from the UI and prevents training from resuming from them.",
+        );
 
-      if (shouldRewind) {
-        setTrainingError(null);
-        setError(null);
-        try {
-          const status = await rewindTraining(clamped);
-          setTrainingStatus(status);
-          setPromoteFromEpisode(null);
-          manualStageOverrideRef.current = true;
-          setTrainingCurriculumStage(clamped);
-          localStorage.setItem("sheepdog_curriculum_stage", String(clamped));
-          setTrainingEpisodes(recommendedEpisodesForStage(clamped));
-          const index = await loadCheckpointIndex();
-          applyCheckpointIndex(index);
-          await refreshScenarioIndex();
-          return;
-        } catch (rewindError) {
-          setTrainingError(
-            rewindError instanceof Error
-              ? rewindError.message
-              : "Unable to rewind training state.",
-          );
-          return;
+        if (shouldRewind) {
+          statusMutationSeqRef.current += 1;
+          setTrainingError(null);
+          setError(null);
+          try {
+            const status = await rewindTraining(clamped);
+            statusMutationSeqRef.current += 1;
+            setTrainingStatus(status);
+            setPromoteFromEpisode(null);
+            manualStageOverrideRef.current = true;
+            setTrainingCurriculumStage(clamped);
+            localStorage.setItem("sheepdog_curriculum_stage", String(clamped));
+            setTrainingEpisodes(recommendedEpisodesForStage(clamped));
+            lastLoadedSelectionKeyRef.current = null;
+            const index = await loadCheckpointIndex();
+            applyCheckpointIndex(index);
+            await refreshScenarioIndex();
+            return;
+          } catch (rewindError) {
+            statusMutationSeqRef.current += 1;
+            setTrainingError(
+              rewindError instanceof Error
+                ? rewindError.message
+                : "Unable to rewind training state.",
+            );
+            return;
+          }
         }
       }
     }
 
+    statusMutationSeqRef.current += 1;
     manualStageOverrideRef.current = true;
     setTrainingCurriculumStage(clamped);
     localStorage.setItem("sheepdog_curriculum_stage", String(clamped));
@@ -437,7 +471,10 @@ export function App() {
     }
   }, [activeTab]);
 
-  async function refreshScenarioIndex() {
+  const latestCheckpointEpisodeRef = useRef<number | null>(null);
+  latestCheckpointEpisodeRef.current = latestCheckpointEpisode;
+
+  const refreshScenarioIndex = useCallback(async () => {
     try {
       const index = await loadScenarioIndex();
       setScenarioIndex(index);
@@ -446,11 +483,11 @@ export function App() {
         scenarios: [],
         runs: [],
         best_by_scenario: {},
-        latest_checkpoint_episode: latestCheckpointEpisode,
+        latest_checkpoint_episode: latestCheckpointEpisodeRef.current,
         latest_runs: [],
       });
     }
-  }
+  }, []);
 
   function buildScenarioCheckpointRequest() {
     return {
@@ -489,6 +526,7 @@ export function App() {
       return index;
     });
     if (!index) {
+      lastLoadedSelectionKeyRef.current = null;
       setReplay(null);
       setSelectedCheckpointEpisode(null);
       setSelectedSeed(11);
@@ -503,19 +541,29 @@ export function App() {
     setSelectedSeed(seed);
   }, []);
 
-  useEffect(() => {
-    if (trainingStatus !== null && loading) {
-      setLoading(false);
-    }
-  }, [trainingStatus, loading]);
+  const hasTrainingStatus = trainingStatus !== null;
+  const statusRunning = trainingStatus?.running ?? false;
+  const statusPhase = trainingStatus?.phase ?? null;
+  const statusError = trainingStatus?.error ?? null;
+  const statusLatestCpEp = trainingStatus?.latest_checkpoint_episode ?? null;
+  const statusActiveCpId =
+    trainingStatus?.active_checkpoint_id ?? trainingStatus?.active_policy_identity ?? null;
+  const statusReadOnlyPreview = Boolean(
+    trainingStatus?.read_only_preview ||
+      trainingStatus?.mode === "read_only_preview" ||
+      trainingStatus?.phase === "read_only_preview",
+  );
 
   useEffect(() => {
-    if (!trainingStatus || trainingStatus.phase === "offline" || trainingStatus.error) {
+    if (hasTrainingStatus && loading) {
+      setLoading(false);
+    }
+  }, [hasTrainingStatus, loading]);
+
+  useEffect(() => {
+    if (!hasTrainingStatus || statusPhase === "offline" || statusPhase === "restoring" || statusError) {
       return;
     }
-    const isRunning = trainingStatus.running;
-    const latestCpEp = trainingStatus.latest_checkpoint_episode;
-    const activeCpId = trainingStatus.active_checkpoint_id ?? trainingStatus.active_policy_identity;
     const lastIndexCp = checkpointIndex?.checkpoints?.length
       ? checkpointIndex.checkpoints[checkpointIndex.checkpoints.length - 1]
       : null;
@@ -524,10 +572,10 @@ export function App() {
 
     const shouldFetch =
       checkpointIndex === null ||
-      (latestCpEp !== null && latestCpEp > currentMaxEp) ||
-      (activeCpId != null && lastIndexCpId != null && String(activeCpId) !== String(lastIndexCpId));
+      (statusLatestCpEp !== null && statusLatestCpEp > currentMaxEp) ||
+      (statusActiveCpId != null && lastIndexCpId != null && String(statusActiveCpId) !== String(lastIndexCpId));
 
-    if (!shouldFetch && !isRunning) {
+    if (!shouldFetch && !statusRunning) {
       return;
     }
 
@@ -549,10 +597,14 @@ export function App() {
       void fetchIndex();
     }
 
-    if (isRunning) {
+    if (statusRunning) {
+      // New checkpoints are detected via the status poll (latest_checkpoint_episode /
+      // active_checkpoint_id change -> this effect re-runs with shouldFetch=true). The
+      // interval below is only a slow safety net: the index is tens of MB and is served
+      // by the training process, so re-downloading it every few seconds slows training.
       const intervalId = setInterval(() => {
         void fetchIndex();
-      }, 3000);
+      }, CHECKPOINT_INDEX_SAFETY_REFRESH_MS);
       return () => {
         active = false;
         clearInterval(intervalId);
@@ -562,7 +614,17 @@ export function App() {
     return () => {
       active = false;
     };
-  }, [trainingStatus?.running, trainingStatus?.phase, trainingStatus?.error, trainingStatus?.latest_checkpoint_episode, trainingStatus?.active_checkpoint_id, checkpointIndex, applyCheckpointIndex]);
+  }, [
+    hasTrainingStatus,
+    statusRunning,
+    statusPhase,
+    statusError,
+    statusLatestCpEp,
+    statusActiveCpId,
+    checkpointIndex,
+    applyCheckpointIndex,
+    refreshScenarioIndex,
+  ]);
 
   useEffect(() => {
     if (activeTab !== "network") {
@@ -587,7 +649,7 @@ export function App() {
   }, [activeTab]);
 
   useEffect(() => {
-    if (!trainingStatus || trainingStatus.phase === "offline") {
+    if (!hasTrainingStatus || statusPhase === "offline" || statusPhase === "restoring") {
       return;
     }
     let active = true;
@@ -616,7 +678,7 @@ export function App() {
     return () => {
       active = false;
     };
-  }, [trainingStatus?.phase]);
+  }, [hasTrainingStatus, statusPhase]);
 
   // Recursive-setTimeout polling: avoids stale-closure trap of setInterval.
   // pollDelayRef is a plain ref so every setTimeout callback reads the live delay
@@ -641,9 +703,10 @@ export function App() {
       pollInFlight = true;
       const firstFetch = isInitialFetch;
       isInitialFetch = false;
+      const seq = statusMutationSeqRef.current;
       try {
         const status = await loadTrainingStatus();
-        if (!active) return;
+        if (!active || seq !== statusMutationSeqRef.current) return;
         setLastLiveRefreshTime(Date.now());
         if (pollDelayRef.current !== 500) {
           console.log("[Polling] Server back online — resetting poll delay to 500ms.");
@@ -654,6 +717,8 @@ export function App() {
           syncTrainingStageFromStatus(status);
         } else if (firstFetch) {
           // On initial load, adopt the server's active curriculum stage so the UI
+          // reflects the server's state, unless localStorage is legitimately one stage
+          // ahead due to a pending local promotion.
           const localStage = parseInt(localStorage.getItem("sheepdog_curriculum_stage") ?? "0", 10);
           const serverStage = status.curriculum_stage;
           const maxPromoteStage = (status.max_curriculum_stage ?? serverStage ?? 1) + 1;
@@ -661,12 +726,23 @@ export function App() {
             syncTrainingStageFromStatus(status);
           }
         }
-      } catch {
-        if (!active) return;
-        if (pollDelayRef.current !== 5000) {
-          console.error("[Polling] Connection failed, switching to backoff delay of 5000ms.");
-          pollDelayRef.current = 5000;
+      } catch (err) {
+        if (!active || seq !== statusMutationSeqRef.current) return;
+        // The backend binds its port immediately and answers 503 BACKEND_STARTING while it
+        // restores training state; show that as "restoring" rather than "disconnected".
+        const backendStarting = isBackendStartingError(err);
+        const retryDelay = backendStarting ? 2000 : 5000;
+        if (pollDelayRef.current !== retryDelay) {
+          if (backendStarting) {
+            console.info("[Polling] Backend is restoring training state; retrying every 2000ms.");
+          } else {
+            console.error("[Polling] Connection failed, switching to backoff delay of 5000ms.");
+          }
+          pollDelayRef.current = retryDelay;
         }
+        const restoringMessage = backendStarting
+          ? ((err as Error).message || "Restoring training state")
+          : null;
         setTrainingStatus((prev) => {
           const base = prev ?? {
             running: false,
@@ -703,6 +779,16 @@ export function App() {
             error_type: "Connection Error",
             starting_episode: null,
           };
+          if (restoringMessage !== null) {
+            return {
+              ...base,
+              running: false,
+              phase: "restoring",
+              message: restoringMessage,
+              error: null,
+              error_type: null,
+            };
+          }
           return {
             ...base,
             running: false,
@@ -743,7 +829,7 @@ export function App() {
   }, [syncTrainingStageFromStatus]);
 
   useEffect(() => {
-    if (!trainingStatus?.running || trainingStatus.phase === "offline" || trainingStatus.latest_checkpoint_episode === null) {
+    if (!statusRunning || statusPhase === "offline" || statusLatestCpEp === null) {
       return;
     }
 
@@ -757,21 +843,27 @@ export function App() {
         setCheckpointIndex(index);
         void refreshScenarioIndex();
         const checkpoint =
-          index.checkpoints.find((entry) => entry.checkpoint_episode === trainingStatus.latest_checkpoint_episode) ??
+          index.checkpoints.find((entry) => entry.checkpoint_episode === statusLatestCpEp) ??
           index.checkpoints[index.checkpoints.length - 1] ??
           null;
         if (checkpoint) {
-          setSelectedCheckpointEpisode(checkpoint.checkpoint_episode);
           const seed = checkpoint.records?.[0]?.seed ?? null;
-          setSelectedSeed(seed);
           const record = checkpoint.records?.find((entry) => entry.seed === seed) ?? checkpoint.records?.[0];
           if (record && record.replay_path) {
             const bundle = await loadReplay(record.replay_path);
             if (cancelled) {
               return;
             }
+            const resolvedSeed = seed ?? DEFAULT_EVAL_SEEDS[0];
+            lastLoadedSelectionKeyRef.current = `${checkpoint.checkpoint_episode}:${resolvedSeed}`;
+            setSelectedCheckpointEpisode(checkpoint.checkpoint_episode);
+            setSelectedSeed(seed);
             setReplay(bundle);
             setFrameIndex(0);
+            setRunState("running");
+          } else {
+            setSelectedCheckpointEpisode(checkpoint.checkpoint_episode);
+            setSelectedSeed(seed);
           }
         }
       } catch (loadError) {
@@ -784,7 +876,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [trainingStatus?.latest_checkpoint_episode, trainingStatus?.running]);
+  }, [statusLatestCpEp, statusRunning, statusPhase, refreshScenarioIndex]);
 
   useEffect(() => {
     if (!trainingStatus?.latest_replay_path) {
@@ -817,6 +909,10 @@ export function App() {
     if (seed === null) {
       return;
     }
+    const selectionKey = `${selectedCheckpoint.checkpoint_episode}:${seed}`;
+    if (lastLoadedSelectionKeyRef.current === selectionKey) {
+      return;
+    }
     const record = selectedCheckpoint.records?.find((entry) => entry.seed === seed) ?? selectedCheckpoint.records?.[0];
 
     let cancelled = false;
@@ -825,6 +921,8 @@ export function App() {
         let bundle: ReplayBundle;
         if (record?.replay_path) {
           bundle = await loadReplay(record.replay_path);
+        } else if (statusReadOnlyPreview) {
+          return;
         } else {
           const checkpointStage = getCheckpointStage(selectedCheckpoint);
           bundle = await runReplay({
@@ -835,7 +933,7 @@ export function App() {
             policy_mode: selectedCheckpoint.policy_mode || selectedCheckpoint.policy_name,
             effective_config: {
               enable_instinct_rewards: effectiveEnableInstincts,
-              curriculum_stage: checkpointStage ?? effectiveCurriculumStage,
+              curriculum_stage: checkpointStage >= 0 ? checkpointStage : effectiveCurriculumStage,
               debug_reward_breakdown: effectiveDebugRewardBreakdown,
             },
           });
@@ -843,6 +941,7 @@ export function App() {
         if (cancelled) {
           return;
         }
+        lastLoadedSelectionKeyRef.current = selectionKey;
         setReplay(bundle);
         setFrameIndex(0);
         setRunState("idle");
@@ -861,6 +960,7 @@ export function App() {
     effectiveEnableInstincts,
     effectiveCurriculumStage,
     effectiveDebugRewardBreakdown,
+    statusReadOnlyPreview,
   ]);
 
   useEffect(() => {
@@ -898,6 +998,7 @@ export function App() {
   }, [scenarioPlaybackDelay, scenarioReplay, scenarioRunState]);
 
   function handleCheckpointChange(episode: number) {
+    lastLoadedSelectionKeyRef.current = null;
     setSelectedCheckpointEpisode(episode);
     const checkpoint = checkpointIndex?.checkpoints.find((entry) => entry.checkpoint_episode === episode);
     const seed = checkpoint?.records?.[0]?.seed ?? DEFAULT_EVAL_SEEDS[0];
@@ -905,6 +1006,7 @@ export function App() {
   }
 
   function handleSeedChange(seed: number) {
+    lastLoadedSelectionKeyRef.current = null;
     setSelectedSeed(seed);
   }
 
@@ -913,6 +1015,7 @@ export function App() {
     // stage counter.  The episode ID is sent with the next training request so
     // the backend seeds Stage N+1 from the peak policy, not the hill-climbing
     // tail which may have lower formal success rate.
+    statusMutationSeqRef.current += 1;
     setPromoteFromEpisode(bestStageFormalEntry?.checkpoint_episode ?? null);
     manualStageOverrideRef.current = true;
     setTrainingCurriculumStage((prev) => {
@@ -927,6 +1030,7 @@ export function App() {
   }
 
   async function handleStartTraining() {
+    statusMutationSeqRef.current += 1;
     setTrainingError(null);
     setError(null);
     setIsStartingTraining(true);
@@ -949,10 +1053,12 @@ export function App() {
           promote_from_checkpoint_episode: promoteFromEpisode ?? undefined,
         });
       }
+      statusMutationSeqRef.current += 1;
       setPromoteFromEpisode(null);
       setTrainingStatus(status);
       syncTrainingStageFromStatus(status);
     } catch (startError) {
+      statusMutationSeqRef.current += 1;
       setTrainingError(startError instanceof Error ? startError.message : "Unable to start training.");
     } finally {
       setIsStartingTraining(false);
@@ -961,13 +1067,16 @@ export function App() {
 
   async function handlePauseTraining() {
     if (lifecycleAction !== null) return;
+    statusMutationSeqRef.current += 1;
     setTrainingError(null);
     setError(null);
     setLifecycleAction("pause");
     try {
       const status = await pauseTraining();
+      statusMutationSeqRef.current += 1;
       setTrainingStatus(status);
     } catch (pauseError) {
+      statusMutationSeqRef.current += 1;
       setTrainingError(pauseError instanceof Error ? pauseError.message : "Unable to pause training.");
     } finally {
       setLifecycleAction(null);
@@ -976,13 +1085,16 @@ export function App() {
 
   async function handleStopTraining() {
     if (lifecycleAction !== null) return;
+    statusMutationSeqRef.current += 1;
     setTrainingError(null);
     setError(null);
     setLifecycleAction("stop");
     try {
       const status = await stopTraining();
+      statusMutationSeqRef.current += 1;
       setTrainingStatus(status);
     } catch (stopError) {
+      statusMutationSeqRef.current += 1;
       setTrainingError(stopError instanceof Error ? stopError.message : "Unable to stop training.");
     } finally {
       setLifecycleAction(null);
@@ -998,7 +1110,7 @@ export function App() {
     try {
       await shutdownApp();
       setIsAppClosed(true);
-    } catch (closeError) {
+    } catch {
       // API call may fail or abort due to server process shutdown, which is expected.
       setIsAppClosed(true);
     }
@@ -1012,6 +1124,7 @@ export function App() {
       return;
     }
 
+    statusMutationSeqRef.current += 1;
     setTrainingError(null);
     setError(null);
     setIsStartingTraining(true);
@@ -1020,9 +1133,11 @@ export function App() {
         ...request,
         episodes: remainingEpisodes,
       });
+      statusMutationSeqRef.current += 1;
       setPromoteFromEpisode(null);
       setTrainingStatus(status);
     } catch (resumeError) {
+      statusMutationSeqRef.current += 1;
       setTrainingError(resumeError instanceof Error ? resumeError.message : "Unable to resume training.");
     } finally {
       setIsStartingTraining(false);
@@ -1030,14 +1145,17 @@ export function App() {
   }
 
   async function handleStartRemediation() {
+    statusMutationSeqRef.current += 1;
     setTrainingError(null);
     setError(null);
     setIsStartingTraining(true);
     try {
       const status = await startRemediationFork(9, 20);
+      statusMutationSeqRef.current += 1;
       setTrainingStatus(status);
       syncTrainingStageFromStatus(status);
     } catch (remediationError) {
+      statusMutationSeqRef.current += 1;
       setTrainingError(
         remediationError instanceof Error
           ? remediationError.message
@@ -1067,11 +1185,14 @@ export function App() {
       return;
     }
 
+    statusMutationSeqRef.current += 1;
     setClearingTraining(true);
     setTrainingError(null);
     setError(null);
     try {
       const status = await clearTraining();
+      statusMutationSeqRef.current += 1;
+      lastLoadedSelectionKeyRef.current = null;
       const index = await loadCheckpointIndex();
       setTrainingStatus(status);
       setTrainingCurriculumStage(1);
@@ -1086,6 +1207,7 @@ export function App() {
         const record = latestCheckpoint.records?.find((entry) => entry.seed === seed) ?? latestCheckpoint.records?.[0];
         if (record && record.replay_path) {
           const bundle = await loadReplay(record.replay_path);
+          lastLoadedSelectionKeyRef.current = `${latestCheckpoint.checkpoint_episode}:${seed}`;
           setReplay(bundle);
         }
       } else {
@@ -1094,6 +1216,7 @@ export function App() {
       setFrameIndex(0);
       setRunState("idle");
     } catch (clearError) {
+      statusMutationSeqRef.current += 1;
       setTrainingError(clearError instanceof Error ? clearError.message : "Unable to clear training.");
     } finally {
       setClearingTraining(false);
@@ -1105,11 +1228,14 @@ export function App() {
       return;
     }
 
+    statusMutationSeqRef.current += 1;
     setClearingTraining(true);
     setTrainingError(null);
     setError(null);
     try {
       const status = await resetJourneyTraining();
+      statusMutationSeqRef.current += 1;
+      lastLoadedSelectionKeyRef.current = null;
       const index = await loadCheckpointIndex();
       setTrainingStatus(status);
       setTrainingCurriculumStage(1);
@@ -1121,6 +1247,7 @@ export function App() {
       setFrameIndex(0);
       setRunState("idle");
     } catch (resetError) {
+      statusMutationSeqRef.current += 1;
       setTrainingError(resetError instanceof Error ? resetError.message : "Unable to reset training journey.");
     } finally {
       setClearingTraining(false);
@@ -1128,6 +1255,7 @@ export function App() {
   }
 
   const handleWatchReplay = useCallback((episode: number) => {
+    lastLoadedSelectionKeyRef.current = null;
     setSelectedCheckpointEpisode(episode);
     const checkpoint = checkpointIndex?.checkpoints.find((entry) => entry.checkpoint_episode === episode);
     setSelectedSeed(checkpoint?.records?.[0]?.seed ?? null);
@@ -1291,6 +1419,7 @@ export function App() {
           debug_reward_breakdown: effectiveDebugRewardBreakdown,
         },
       });
+      lastLoadedSelectionKeyRef.current = null;
       setReplay(bundle);
       setSelectedCheckpointEpisode(null);
       setSelectedSeed(bundle.seed);
@@ -1328,7 +1457,7 @@ export function App() {
           policy_mode: checkpoint.policy_mode || checkpoint.policy_name,
           effective_config: {
             enable_instinct_rewards: effectiveEnableInstincts,
-            curriculum_stage: checkpointStage ?? effectiveCurriculumStage,
+            curriculum_stage: checkpointStage >= 0 ? checkpointStage : effectiveCurriculumStage,
             debug_reward_breakdown: effectiveDebugRewardBreakdown,
           },
         });
@@ -1336,6 +1465,9 @@ export function App() {
         setFrameIndex(0);
         setRunState("running");
         return;
+      }
+      if (checkpoint && targetSeed !== null) {
+        lastLoadedSelectionKeyRef.current = `${checkpoint.checkpoint_episode}:${targetSeed}`;
       }
       setReplay(bundle);
       setSelectedSeed(targetSeed);
@@ -1436,11 +1568,10 @@ export function App() {
   }
 
   // Check if opened as standalone 10-seed replay popup window / second screen view
-  const isStandaloneEval10 = useMemo(() => {
-    if (typeof window === "undefined") return false;
-    const params = new URLSearchParams(window.location.search);
-    return params.get("view") === "eval10" || window.location.hash === "#eval10";
-  }, []);
+  const isStandaloneEval10 =
+    typeof window !== "undefined" &&
+    (new URLSearchParams(window.location.search).get("view") === "eval10" ||
+      window.location.hash === "#eval10");
 
   if (isStandaloneEval10) {
     return (
@@ -1465,11 +1596,53 @@ export function App() {
       {/* Unified tab bar - always in same position */}
       <div className="app-tab-bar" role="tablist">
         {tabButtons}
+        <a
+          href="/v2"
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{
+            marginLeft: "auto",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "0.35rem",
+            padding: "0.35rem 0.75rem",
+            borderRadius: "0.5rem",
+            background: "linear-gradient(135deg, rgba(99, 102, 241, 0.22), rgba(79, 70, 229, 0.14))",
+            border: "1px solid rgba(129, 140, 248, 0.45)",
+            color: "#e0e7ff",
+            fontSize: "0.78rem",
+            fontWeight: 700,
+            textDecoration: "none",
+            whiteSpace: "nowrap",
+          }}
+          title="Open the new Sheepdog RL Studio v2 in a new browser tab (runs simultaneously with Classic UI)"
+        >
+          ✨ Studio v2 ↗
+        </a>
       </div>
 
-      {activeTab === "insights" || activeTab === "results" || activeTab === "config" || activeTab === "network" || activeTab === "layers" || activeTab === "stages" || activeTab === "history" || activeTab === "wandb" ? (
+      {activeTab === "temporal" || activeTab === "insights" || activeTab === "results" || activeTab === "config" || activeTab === "network" || activeTab === "layers" || activeTab === "stages" || activeTab === "history" || activeTab === "wandb" ? (
         <div className="insights-fullscreen">
-          {activeTab === "stages" ? (
+          {activeTab === "temporal" ? (
+            <TemporalDiagnosticsPanel
+              initialReplayId={temporalReplayId}
+              activeReplay={replay}
+              activeReplayId={temporalReplayId}
+              backendOffline={trainingStatus?.phase === "offline"}
+              isReadOnlyPreview={Boolean(
+                trainingStatus?.read_only_preview ||
+                  trainingStatus?.mode === "read_only_preview" ||
+                  trainingStatus?.phase === "read_only_preview",
+              )}
+              onSyncReplayToMainViewer={(syncedReplay, worldStep) => {
+                setReplay(syncedReplay);
+                const idx = syncedReplay.frames.findIndex(
+                  (fr) => (fr.step ?? fr.snapshot?.step) === worldStep,
+                );
+                setFrameIndex(idx >= 0 ? idx : 0);
+              }}
+            />
+          ) : activeTab === "stages" ? (
             <StagesTab />
           ) : activeTab === "layers" ? (
             <LayersTab
@@ -1621,6 +1794,22 @@ export function App() {
                     disabled={loading}
                     fastMode={playbackFastMode}
                     onFastModeChange={setPlaybackFastMode}
+                    onOpenTemporalDiagnostics={() => {
+                      const record = selectedCheckpoint?.records?.find(
+                        (r) => r.seed === selectedSeed,
+                      );
+                      if (record?.replay_path) {
+                        const base = record.replay_path.split(/[\\/]/).pop();
+                        if (base) {
+                          setTemporalReplayId(base.replace(/\.json$/i, ""));
+                        }
+                      } else if (selectedCheckpointEpisode != null && selectedSeed != null) {
+                        setTemporalReplayId(
+                          `checkpoint-${String(selectedCheckpointEpisode).padStart(6, "0")}-seed-${String(selectedSeed).padStart(6, "0")}`,
+                        );
+                      }
+                      setActiveTab("temporal");
+                    }}
                   />
                   <StatusPanel
                     snapshot={snapshot}

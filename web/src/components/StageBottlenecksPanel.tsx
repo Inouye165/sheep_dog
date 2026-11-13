@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useRef } from "react";
+import React, { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import type { StageBottleneckReport, ZoneMetricSummary } from "../state/types";
 import { loadStageDiagnostics } from "../lib/api";
 
@@ -27,6 +27,16 @@ export const StageBottlenecksPanel: React.FC<StageBottlenecksPanelProps> = ({
   const [report, setReport] = useState<StageBottleneckReport | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const requestSeqRef = useRef<number>(0);
+  const isMountedRef = useRef<boolean>(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      requestSeqRef.current += 1;
+    };
+  }, []);
 
   const prevStageRef = useRef<number>(currentStage);
   // Sync selected stage only if currentStage actually changes to a new stage
@@ -37,25 +47,43 @@ export const StageBottlenecksPanel: React.FC<StageBottlenecksPanelProps> = ({
     }
   }, [currentStage]);
 
+  const stageOptions = useMemo(() => {
+    const stages = new Set<number>();
+    for (let s = 1; s <= 38; s += 1) {
+      stages.add(s);
+    }
+    if (currentStage > 0) stages.add(currentStage);
+    if (selectedStage > 0) stages.add(selectedStage);
+    return Array.from(stages).sort((a, b) => a - b);
+  }, [currentStage, selectedStage]);
+
   const fetchDiagnostics = useCallback(async () => {
+    const reqSeq = ++requestSeqRef.current;
     setLoading(true);
     setError(null);
     try {
       const data = await loadStageDiagnostics(selectedStage, runId || undefined);
+      if (!isMountedRef.current || reqSeq !== requestSeqRef.current) return;
       if (data) {
         setReport(data);
       } else {
         setError("Failed to load stage diagnostics data.");
       }
     } catch (err) {
+      if (!isMountedRef.current || reqSeq !== requestSeqRef.current) return;
       setError(String(err));
     } finally {
-      setLoading(false);
+      if (isMountedRef.current && reqSeq === requestSeqRef.current) {
+        setLoading(false);
+      }
     }
   }, [selectedStage, runId]);
 
   useEffect(() => {
     void fetchDiagnostics();
+    return () => {
+      requestSeqRef.current += 1;
+    };
   }, [fetchDiagnostics]);
 
   const getWinRateColor = (rate: number, total: number): { bg: string; border: string; text: string } => {
@@ -103,7 +131,7 @@ export const StageBottlenecksPanel: React.FC<StageBottlenecksPanelProps> = ({
             onChange={(e) => setSelectedStage(Number(e.target.value))}
             className="bg-slate-900 border border-slate-700 text-slate-200 text-sm rounded-lg px-3 py-1.5 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
           >
-            {[1, 2, 3, 4, 5, 6, 7, 8].map((s) => (
+            {stageOptions.map((s) => (
               <option key={s} value={s}>
                 Stage {s} {s === currentStage ? "(Active)" : ""}
               </option>
@@ -293,14 +321,14 @@ export const StageBottlenecksPanel: React.FC<StageBottlenecksPanelProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800/60">
-                  {Object.values(report.pen_stats).length === 0 ? (
+                  {Object.values(report.pen_stats ?? {}).length === 0 ? (
                     <tr>
                       <td colSpan={4} className="py-4 text-center text-slate-500">
                         No pen placement records recorded.
                       </td>
                     </tr>
                   ) : (
-                    Object.values(report.pen_stats).map((p, idx) => (
+                    Object.values(report.pen_stats ?? {}).map((p, idx) => (
                       <tr key={idx} className="hover:bg-slate-900/60 transition">
                         <td className="py-2.5 px-3 font-medium text-slate-200 capitalize">
                           {p.placement.replace("_", " ")}
@@ -334,14 +362,14 @@ export const StageBottlenecksPanel: React.FC<StageBottlenecksPanelProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800/60">
-                  {Object.values(report.setup_stats).length === 0 ? (
+                  {Object.values(report.setup_stats ?? {}).length === 0 ? (
                     <tr>
                       <td colSpan={4} className="py-4 text-center text-slate-500">
                         No setup configuration records recorded.
                       </td>
                     </tr>
                   ) : (
-                    Object.values(report.setup_stats).map((s, idx) => (
+                    Object.values(report.setup_stats ?? {}).map((s, idx) => (
                       <tr key={idx} className="hover:bg-slate-900/60 transition">
                         <td className="py-2.5 px-3 font-medium text-slate-200 capitalize">
                           {s.setup.replace("_", " ")}

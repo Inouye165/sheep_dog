@@ -5,7 +5,7 @@ import {
   calculateRawSuccessY,
   calculateRollingSuccess,
 } from "./DiagnosticsPanel";
-import type { CheckpointIndex, TrainingEpisode, TrainingStatus } from "../state/types";
+import type { CheckpointIndex, TrainingEpisode } from "../state/types";
 
 const mockIndexWithCheckpoint: CheckpointIndex = {
   checkpoints: [

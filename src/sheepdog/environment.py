@@ -4,9 +4,10 @@
 from __future__ import annotations
 
 import json
+from collections import deque
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass, field
-from math import inf
+from dataclasses import asdict, dataclass, field, replace
+from math import atan2, cos, hypot, inf, pi, sin
 from pathlib import Path
 from random import Random
 from statistics import fmean
@@ -28,16 +29,16 @@ from sheepdog.entities import (
     SheepState,
 )
 from sheepdog.evaluation.scenarios import SavedScenario
-
-# from sheepdog.observations import DogObservation, RoleAwareObservationBuilder
 from sheepdog.observations import (
     DogObservation,
     EmergentObservationBuilder,
     RoleAwareObservationBuilder,
 )
+from sheepdog.pen_navigation import pen_navigation
 from sheepdog.policies.base import Action, Policy, PolicyMode
 from sheepdog.rewards import RewardBreakdown, RewardComputer, RewardInputs
 from sheepdog.team_strategy import RoleAssignment, StrategySnapshot, TeamStrategy
+from sheepdog.training.replay_writer import validate_telemetry_config
 from sheepdog.training.spatial_analytics import SpatialEpisodeTracker
 
 ENV_CONFIG_VERSION = "1.0"
@@ -86,6 +87,7 @@ class AgentSnapshot:
     last_action: str = "wait"
     personality: str | None = None
     color: str | None = None
+    packed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,10 +128,14 @@ class StepRecord:
     actions: tuple[str, ...]
     snapshot: EnvironmentSnapshot
     reward: RewardBreakdown
+    step_telemetry: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict."""
-        return asdict(self)
+        data = asdict(self)
+        if self.step_telemetry is None:
+            data.pop("step_telemetry", None)
+        return data
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +148,7 @@ class EpisodeResult:
     stats: EpisodeStats
     replay: tuple[StepRecord, ...] = field(default_factory=tuple)
     observations: tuple[Any, ...] = field(default_factory=tuple)
+    initial_snapshot: EnvironmentSnapshot | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict."""
@@ -151,11 +158,40 @@ class EpisodeResult:
 class SheepdogEnvironment:
     """Grid-based herding environment with deterministic transitions."""
 
-    def __init__(self, config: LabConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: LabConfig | None = None,
+        *,
+        capture_step_telemetry: bool = False,
+        telemetry_mode: str = "prefix",
+        max_telemetry_steps: int = 1000,
+        telemetry_head_steps: int = 200,
+        telemetry_tail_steps: int = 500,
+        max_telemetry_steps_per_episode: int | None = None,
+    ) -> None:
+        effective_max = (
+            max_telemetry_steps_per_episode
+            if max_telemetry_steps_per_episode is not None
+            else max_telemetry_steps
+        )
+        validate_telemetry_config(
+            telemetry_mode=telemetry_mode,
+            max_telemetry_steps=effective_max,
+            telemetry_head_steps=telemetry_head_steps,
+            telemetry_tail_steps=telemetry_tail_steps,
+        )
         self.config = config or LabConfig()
         self.env_config: EnvironmentConfig = self.config.environment
         self.reward_computer = RewardComputer(self.config.rewards)
         self._rng = Random()
+        self.capture_step_telemetry: bool = capture_step_telemetry
+        self._telemetry_mode: str = telemetry_mode
+        self._max_telemetry_steps: int = effective_max
+        self._telemetry_head_steps: int = telemetry_head_steps
+        self._telemetry_tail_steps: int = telemetry_tail_steps
+        self._tail_telemetry_buffer: deque[tuple[int, dict[str, Any]]] = deque(
+            maxlen=self._telemetry_tail_steps if self._telemetry_tail_steps > 0 else 1
+        )
         self._seed = 0
         self._step_count = 0
         self._simulated_seconds = 0.0
@@ -167,6 +203,8 @@ class SheepdogEnvironment:
         self._previous_flock_spread = 0.0
         self._previous_farthest_distance = 0.0
         self._no_progress_steps = 0
+        self._entry_stall_steps = 0
+        self._best_entry_distance: float | None = None
         self._reward_total = 0.0
         self._terminated = False
         self._timeout = False
@@ -228,6 +266,12 @@ class SheepdogEnvironment:
         self._observations_history: list[Any] = []
         self._previous_dog_positions: tuple[tuple[float, float], ...] = ()
         self._previous_sheep_positions: tuple[tuple[float, float], ...] = ()
+        self._pen_breached: bool = False
+
+    @property
+    def pen_breached(self) -> bool:
+        """Return whether any sheep has breached the pen threshold during this episode."""
+        return self._pen_breached
 
     @property
     def dog_count(self) -> int:
@@ -259,6 +303,63 @@ class SheepdogEnvironment:
         """Return the completed step records in order."""
         return tuple(self._history)
 
+    def _check_mid_episode_telemetry_mutation(self) -> None:
+        if not self._terminated and self._step_count > 0:
+            raise RuntimeError("Cannot change telemetry configuration during an active episode")
+
+    @property
+    def telemetry_mode(self) -> str:
+        return self._telemetry_mode
+
+    @telemetry_mode.setter
+    def telemetry_mode(self, value: str) -> None:
+        self._check_mid_episode_telemetry_mutation()
+        validate_telemetry_config(telemetry_mode=value)
+        self._telemetry_mode = value
+
+    @property
+    def max_telemetry_steps(self) -> int:
+        return self._max_telemetry_steps
+
+    @max_telemetry_steps.setter
+    def max_telemetry_steps(self, value: int) -> None:
+        self._check_mid_episode_telemetry_mutation()
+        validate_telemetry_config(max_telemetry_steps=value)
+        self._max_telemetry_steps = value
+
+    @property
+    def max_telemetry_steps_per_episode(self) -> int:
+        return self._max_telemetry_steps
+
+    @max_telemetry_steps_per_episode.setter
+    def max_telemetry_steps_per_episode(self, value: int) -> None:
+        self._check_mid_episode_telemetry_mutation()
+        validate_telemetry_config(max_telemetry_steps=value)
+        self._max_telemetry_steps = value
+
+    @property
+    def telemetry_head_steps(self) -> int:
+        return self._telemetry_head_steps
+
+    @telemetry_head_steps.setter
+    def telemetry_head_steps(self, value: int) -> None:
+        self._check_mid_episode_telemetry_mutation()
+        validate_telemetry_config(telemetry_head_steps=value)
+        self._telemetry_head_steps = value
+
+    @property
+    def telemetry_tail_steps(self) -> int:
+        return self._telemetry_tail_steps
+
+    @telemetry_tail_steps.setter
+    def telemetry_tail_steps(self, value: int) -> None:
+        self._check_mid_episode_telemetry_mutation()
+        validate_telemetry_config(telemetry_tail_steps=value)
+        self._telemetry_tail_steps = value
+        self._tail_telemetry_buffer = deque(
+            maxlen=value if value > 0 else 1
+        )
+
     def invalidate_role_assignments(self) -> None:
         """Force role reassignment on the next call to prepare_policy_step."""
         self._roles_prepared_step = None
@@ -270,6 +371,8 @@ class SheepdogEnvironment:
         self._step_count = 0
         self._simulated_seconds = 0.0
         self._no_progress_steps = 0
+        self._entry_stall_steps = 0
+        self._best_entry_distance = None
         self._reward_total = 0.0
         self._terminated = False
         self._timeout = False
@@ -277,6 +380,7 @@ class SheepdogEnvironment:
         self._success = False
         self._stop_reason = ""
         self._history = []
+        self._tail_telemetry_buffer.clear()
         self._stats = EpisodeStats()
         self._role_assignments = {}
         self._strategy_snapshot = StrategySnapshot(None, 0.0, 0.0, None, False, False)
@@ -296,6 +400,14 @@ class SheepdogEnvironment:
         self._right_flank_occupancy_steps = 0
         self._gate_corridor_occupancy_peak = 0.0
         self._gate_corridor_failure_steps = 0
+        self._wall_stall_steps = 0
+        self._max_wall_stall_steps = 0
+        self._sheep_wall_stalls = {}
+        self._wall_lateral_movements = 0
+        self._wall_inward_recoveries = 0
+        self._corner_occupancy_steps = 0
+        self._pen_breached = False
+        self._team_strategy.reset()
         pen_origin, pen_opening = self._sample_pen_origin_and_opening()
         self._pen = Pen(
             pen_origin,
@@ -349,6 +461,8 @@ class SheepdogEnvironment:
         self._step_count = 0
         self._simulated_seconds = 0.0
         self._no_progress_steps = 0
+        self._entry_stall_steps = 0
+        self._best_entry_distance = None
         self._reward_total = 0.0
         self._episode_reward_breakdown = {}
         self._terminated = False
@@ -357,6 +471,7 @@ class SheepdogEnvironment:
         self._success = False
         self._stop_reason = ""
         self._history = []
+        self._tail_telemetry_buffer.clear()
         self._stats = EpisodeStats()
         self._role_assignments = {}
         self._strategy_snapshot = StrategySnapshot(None, 0.0, 0.0, None, False, False)
@@ -377,6 +492,14 @@ class SheepdogEnvironment:
         self._right_flank_occupancy_steps = 0
         self._gate_corridor_occupancy_peak = 0.0
         self._gate_corridor_failure_steps = 0
+        self._wall_stall_steps = 0
+        self._max_wall_stall_steps = 0
+        self._sheep_wall_stalls = {}
+        self._wall_lateral_movements = 0
+        self._wall_inward_recoveries = 0
+        self._corner_occupancy_steps = 0
+        self._pen_breached = False
+        self._team_strategy.reset()
         self._spawn_mode = "scenario"
         self._pen = Pen(
             Point(scenario.pen.origin_x, scenario.pen.origin_y),
@@ -402,6 +525,24 @@ class SheepdogEnvironment:
                     position=Point(layout.x, layout.y).clamp(scenario.width, scenario.height),
                     personality=personality,
                 )
+            )
+        if (
+            scenario.width != self.env_config.width
+            or scenario.height != self.env_config.height
+            or len(self._dogs) != self.env_config.dogs
+            or len(self._sheep) != self.env_config.sheep
+        ):
+            self.env_config = replace(
+                self.env_config,
+                width=scenario.width,
+                height=scenario.height,
+                dogs=len(self._dogs),
+                sheep=len(self._sheep),
+            )
+            self._team_strategy = TeamStrategy(
+                scenario.width,
+                scenario.height,
+                self.env_config,
             )
         for dog in self._dogs:
             self._record_position_history(dog.recent_positions, dog.position)
@@ -585,6 +726,7 @@ class SheepdogEnvironment:
                     penned=sheep.penned,
                     personality=sheep.personality,
                     color=self._sheep_display_color(sheep.personality),
+                    packed=sheep.is_packed,
                 )
                 for sheep in self._sheep
             ),
@@ -761,35 +903,246 @@ class SheepdogEnvironment:
         )
 
     def run_policy(
-        self, policy: Policy, seed: int, capture_replay: bool = False, deterministic: bool = True
+        self,
+        policy: Policy,
+        seed: int,
+        capture_replay: bool = False,
+        deterministic: bool = True,
+        capture_step_telemetry: bool = False,
+        max_telemetry_steps: int | None = None,
+        telemetry_mode: str | None = None,
+        telemetry_head_steps: int | None = None,
+        telemetry_tail_steps: int | None = None,
+        max_telemetry_steps_per_episode: int | None = None,
     ) -> EpisodeResult:
         """Run *policy* from *seed* until termination and return the episode result."""
+        effective_max = (
+            max_telemetry_steps_per_episode
+            if max_telemetry_steps_per_episode is not None
+            else max_telemetry_steps
+        )
+        validate_telemetry_config(
+            telemetry_mode=telemetry_mode,
+            max_telemetry_steps=effective_max,
+            telemetry_head_steps=telemetry_head_steps,
+            telemetry_tail_steps=telemetry_tail_steps,
+        )
+        self.capture_step_telemetry = capture_step_telemetry
+        if telemetry_mode is not None:
+            self._telemetry_mode = telemetry_mode
+        if effective_max is not None:
+            self._max_telemetry_steps = effective_max
+        if telemetry_head_steps is not None:
+            self._telemetry_head_steps = telemetry_head_steps
+        if telemetry_tail_steps is not None:
+            self._telemetry_tail_steps = telemetry_tail_steps
+            self._tail_telemetry_buffer = deque(
+                maxlen=self._telemetry_tail_steps if self._telemetry_tail_steps > 0 else 1
+            )
         self.reset(seed)
         return self._run_policy_loop(
-            policy, seed=seed, capture_replay=capture_replay, deterministic=deterministic
+            policy,
+            seed=seed,
+            capture_replay=capture_replay,
+            deterministic=deterministic,
+            capture_step_telemetry=capture_step_telemetry,
         )
 
     def run_policy_on_scenario(
-        self, policy: Policy, scenario: object, capture_replay: bool = False, deterministic: bool = True
+        self,
+        policy: Policy,
+        scenario: object,
+        capture_replay: bool = False,
+        deterministic: bool = True,
+        capture_step_telemetry: bool = False,
+        max_telemetry_steps: int | None = None,
+        telemetry_mode: str | None = None,
+        telemetry_head_steps: int | None = None,
+        telemetry_tail_steps: int | None = None,
+        max_telemetry_steps_per_episode: int | None = None,
     ) -> EpisodeResult:
         """Run *policy* on a fixed :class:`SavedScenario` layout."""
+        effective_max = (
+            max_telemetry_steps_per_episode
+            if max_telemetry_steps_per_episode is not None
+            else max_telemetry_steps
+        )
+        validate_telemetry_config(
+            telemetry_mode=telemetry_mode,
+            max_telemetry_steps=effective_max,
+            telemetry_head_steps=telemetry_head_steps,
+            telemetry_tail_steps=telemetry_tail_steps,
+        )
+        self.capture_step_telemetry = capture_step_telemetry
+        if telemetry_mode is not None:
+            self._telemetry_mode = telemetry_mode
+        if effective_max is not None:
+            self._max_telemetry_steps = effective_max
+        if telemetry_head_steps is not None:
+            self._telemetry_head_steps = telemetry_head_steps
+        if telemetry_tail_steps is not None:
+            self._telemetry_tail_steps = telemetry_tail_steps
+            self._tail_telemetry_buffer = deque(
+                maxlen=self._telemetry_tail_steps if self._telemetry_tail_steps > 0 else 1
+            )
         self.reset_from_scenario(scenario)
         assert isinstance(scenario, SavedScenario)
         return self._run_policy_loop(
-            policy, seed=scenario.seed, capture_replay=capture_replay, deterministic=deterministic
+            policy,
+            seed=scenario.seed,
+            capture_replay=capture_replay,
+            deterministic=deterministic,
+            capture_step_telemetry=capture_step_telemetry,
         )
 
     def _run_policy_loop(
-        self, policy: Policy, *, seed: int, capture_replay: bool, deterministic: bool = True
+        self,
+        policy: Policy,
+        *,
+        seed: int,
+        capture_replay: bool,
+        deterministic: bool = True,
+        capture_step_telemetry: bool = False,
     ) -> EpisodeResult:
-        while not self._terminated:
-            step_obs = []
-            for dog_index in range(self.dog_count):
-                step_obs.append(self.build_observation_for_dog(dog_index))
-            self._observations_history.append(tuple(step_obs))
+        initial_snapshot = self.get_state_snapshot()
+        captured_telemetry_steps = 0
+        telemetry_truncation_notified = False
+        original_capture_flag = self.capture_step_telemetry
+        mode = self.telemetry_mode
+        H = max(0, int(self.telemetry_head_steps))
+        L = max(0, int(self.telemetry_tail_steps))
+        tail_buffer: deque[tuple[int, dict[str, Any]]] = deque(
+            maxlen=L if L > 0 else 1
+        )
+        self._tail_telemetry_buffer = tail_buffer
 
-            actions = policy.select_actions(self, deterministic=deterministic)
-            self.step(actions, capture_replay=capture_replay)
+        try:
+            while not self._terminated:
+                step_obs = []
+                for dog_index in range(self.dog_count):
+                    step_obs.append(self.build_observation_for_dog(dog_index))
+                self._observations_history.append(tuple(step_obs))
+
+                current_step_index = self._step_count + 1
+
+                # Make the effective capture flag reflect the remaining budget / window BEFORE action selection
+                if not capture_step_telemetry:
+                    can_capture = False
+                elif mode == "prefix":
+                    can_capture = captured_telemetry_steps < self.max_telemetry_steps
+                elif mode == "head_tail":
+                    can_capture = (L > 0) or (current_step_index <= H)
+                else:
+                    can_capture = False
+
+                self.capture_step_telemetry = can_capture
+
+                actions = policy.select_actions(self, deterministic=deterministic)
+                policy_decisions = getattr(policy, "latest_decision_telemetry", None)
+                step_telemetry = None
+                if capture_step_telemetry:
+                    if mode == "prefix":
+                        if captured_telemetry_steps < self.max_telemetry_steps:
+                            from sheepdog.training.diagnostics.temporal_interaction import (
+                                build_step_instrumentation_payload,
+                            )
+
+                            step_telemetry = build_step_instrumentation_payload(
+                                self,
+                                decisions=policy_decisions,
+                                raw_actions=actions,
+                            )
+                            captured_telemetry_steps += 1
+                        else:
+                            # Enforce per-episode capture budget: record truncation once, then omit telemetry safely
+                            if not telemetry_truncation_notified:
+                                telemetry_truncation_notified = True
+                                step_telemetry = {
+                                    "telemetry_truncated": True,
+                                    "truncation_reason": "per_episode_telemetry_budget_exhausted",
+                                    "limit_steps": self.max_telemetry_steps,
+                                    "truncated_step_start": self._step_count,
+                                    "affected_range": f"steps_{self._step_count}_to_end",
+                                    "missing_evidence": (
+                                        "policy_decisions, actual_decision_masks, and recomputed_distributions "
+                                        "omitted beyond limit to bound memory growth"
+                                    ),
+                                }
+                            else:
+                                step_telemetry = None
+                    elif mode == "head_tail":
+                        if can_capture:
+                            from sheepdog.training.diagnostics.temporal_interaction import (
+                                build_step_instrumentation_payload,
+                            )
+
+                            payload = build_step_instrumentation_payload(
+                                self,
+                                decisions=policy_decisions,
+                                raw_actions=actions,
+                            )
+                            if current_step_index <= H:
+                                step_telemetry = payload
+                                captured_telemetry_steps += 1
+                            else:
+                                if L > 0:
+                                    tail_buffer.append((current_step_index, payload))
+                                step_telemetry = None
+                        else:
+                            step_telemetry = None
+
+                self.step(actions, capture_replay=capture_replay, step_telemetry=step_telemetry)
+
+            # Replay post-processing for head_tail mode
+            if capture_replay and capture_step_telemetry and mode == "head_tail":
+                T = self._step_count
+                tail_start = max(1, T - L + 1) if L > 0 else T + 1
+
+                # If there is a gap between head and tail:
+                # When T > H + L (equivalent to tail_start > H + 1):
+                if tail_start > H + 1:
+                    omitted_start = H + 1
+                    omitted_end = tail_start - 1
+                    omitted_count = tail_start - 1 - H
+
+                    omission_marker = {
+                        "telemetry_omitted": True,
+                        "omitted_reason": "intentionally_omitted_window",
+                        "telemetry_mode": "head_tail",
+                        "head_steps": H,
+                        "tail_steps": L,
+                        "omitted_range": f"steps_{omitted_start}_to_{omitted_end}",
+                        "omitted_steps_start": omitted_start,
+                        "omitted_steps_end": omitted_end,
+                        "omitted_steps_count": omitted_count,
+                        "total_world_steps": T,
+                    }
+                    marker_idx = omitted_start - 1
+                    if 0 <= marker_idx < len(self._history):
+                        rec = self._history[marker_idx]
+                        self._history[marker_idx] = StepRecord(
+                            step=rec.step,
+                            actions=rec.actions,
+                            snapshot=rec.snapshot,
+                            reward=rec.reward,
+                            step_telemetry=omission_marker,
+                        )
+
+                # Attach tail telemetry from ring buffer
+                for step_num, payload in tail_buffer:
+                    idx = step_num - 1
+                    if 0 <= idx < len(self._history):
+                        rec = self._history[idx]
+                        self._history[idx] = StepRecord(
+                            step=rec.step,
+                            actions=rec.actions,
+                            snapshot=rec.snapshot,
+                            reward=rec.reward,
+                            step_telemetry=payload,
+                        )
+        finally:
+            self.capture_step_telemetry = original_capture_flag
+            tail_buffer.clear()
         final_snapshot = self.get_state_snapshot()
         return EpisodeResult(
             seed=seed,
@@ -798,6 +1151,7 @@ class SheepdogEnvironment:
             stats=self._stats,
             replay=tuple(self._history),
             observations=tuple(self._observations_history),
+            initial_snapshot=initial_snapshot,
         )
 
 
@@ -812,7 +1166,10 @@ class SheepdogEnvironment:
         return total_dist / len(self._dogs)
 
     def step(
-        self, actions: Sequence[str], capture_replay: bool = False
+        self,
+        actions: Sequence[str],
+        capture_replay: bool = False,
+        step_telemetry: dict[str, Any] | None = None,
     ) -> tuple[EnvironmentSnapshot, RewardBreakdown]:
         """Advance the simulation one team step and return the new snapshot and reward."""
         if self._terminated:
@@ -826,11 +1183,25 @@ class SheepdogEnvironment:
             and self.project_dog_action(dog_index, action) == self._dogs[dog_index].position
             for dog_index, action in enumerate(validated_actions)
         )
+        if step_telemetry is not None and "decisions" in step_telemetry:
+            for idx, dec in enumerate(step_telemetry["decisions"]):
+                exec_act = str(validated_actions[idx]) if idx < len(validated_actions) else dec.get("selected_action")
+                sel_act = dec.get("selected_action", exec_act)
+                dec["executed_action"] = exec_act
+                if sel_act != exec_act:
+                    dec["replacement_reason"] = "action_replaced"
+                elif idx < len(invalid_action_attempts) and invalid_action_attempts[idx]:
+                    dec["replacement_reason"] = "projected_blocked_by_obstacle"
 
         previous_snapshot = self.get_state_snapshot()
+        navigation = pen_navigation(self._pen, self.env_config.width, self.env_config.height)
+        previous_entry_distance = sum(
+            navigation.distance(sheep.position) for sheep in self._sheep if not sheep.penned
+        ) / max(1, len(self._sheep))
+        if self._best_entry_distance is None:
+            self._best_entry_distance = previous_entry_distance
         previous_farthest_to_flock_center = self._farthest_distance_to_flock_center()
         previous_flock_centroid = self._flock_center()
-        previous_gate_distance = self._flock_gate_distance(previous_flock_centroid)
         previous_gate_corridor_distance = self._average_gate_corridor_distance()
         previous_gate_corridor_occupancy = self._gate_corridor_occupancy()
         self._apply_dog_actions(validated_actions)
@@ -841,9 +1212,18 @@ class SheepdogEnvironment:
 
         current_snapshot = self.get_state_snapshot()
         newly_penned = current_snapshot.penned_count - previous_snapshot.penned_count
-        progress_delta = (
-            previous_snapshot.average_distance_to_pen - current_snapshot.average_distance_to_pen
+        current_entry_distance = sum(
+            navigation.distance(sheep.position) for sheep in self._sheep if not sheep.penned
+        ) / max(1, len(self._sheep))
+        progress_delta = previous_entry_distance - current_entry_distance
+        best_entry_progress = (
+            newly_penned > 0 or current_entry_distance < self._best_entry_distance - 1e-6
         )
+        if best_entry_progress:
+            self._best_entry_distance = current_entry_distance
+            self._entry_stall_steps = 0
+        else:
+            self._entry_stall_steps += 1
         spread_delta = previous_snapshot.flock_spread - current_snapshot.flock_spread
         current_farthest_to_flock_center = self._farthest_distance_to_flock_center()
         farthest_to_flock_center_delta = (
@@ -853,10 +1233,10 @@ class SheepdogEnvironment:
         farthest_to_pen_delta = self._previous_farthest_distance - current_farthest_to_pen
         progress_made = self._progress_made_for_no_progress(
             newly_penned=newly_penned,
-            average_distance_delta=progress_delta,
+            average_distance_delta=progress_delta if best_entry_progress else 0.0,
             flock_spread_delta=spread_delta,
             farthest_to_flock_center_delta=farthest_to_flock_center_delta,
-            farthest_to_pen_delta=farthest_to_pen_delta,
+            farthest_to_pen_delta=farthest_to_pen_delta if best_entry_progress else 0.0,
         )
         if progress_made:
             self._no_progress_steps = max(0, self._no_progress_steps - 1)
@@ -885,7 +1265,7 @@ class SheepdogEnvironment:
         current_gate_distance = self._flock_gate_distance(current_flock_centroid)
         current_gate_corridor_distance = self._average_gate_corridor_distance()
         current_gate_corridor_occupancy = self._gate_corridor_occupancy()
-        gate_progress_delta = previous_gate_distance - current_gate_distance
+        gate_progress_delta = progress_delta
         gate_corridor_delta = previous_gate_corridor_distance - current_gate_corridor_distance
         progressing_to_gate = (
             newly_penned > 0
@@ -896,12 +1276,16 @@ class SheepdogEnvironment:
         tactically_valid_hold = bool(
             current_gate_distance <= self.env_config.gate_hold_safe_distance
             and current_gate_corridor_occupancy > 0.0
+            and self._entry_stall_steps <= self.env_config.stalled_control_activation_steps
         )
         wrong_hold_active = False
         if (
             self._is_controlled_state(current_flock_centroid)
             and newly_penned == 0
-            and not progressing_to_gate
+            and (
+                not progressing_to_gate
+                or self._entry_stall_steps > self.env_config.stalled_control_activation_steps
+            )
             and not tactically_valid_hold
         ):
             self._controlled_stall_steps += 1
@@ -929,10 +1313,15 @@ class SheepdogEnvironment:
             for sheep in self._sheep
             if not sheep.penned
         )
+        approach_target = (
+            navigation.target(self._navigation_anchor())
+            if current_flock_centroid is not None
+            else None
+        )
         breakdown = self.reward_computer.compute(
             RewardInputs(
-                previous_average_distance=previous_snapshot.average_distance_to_pen,
-                current_average_distance=current_snapshot.average_distance_to_pen,
+                previous_average_distance=previous_entry_distance,
+                current_average_distance=current_entry_distance,
                 previous_flock_spread=previous_snapshot.flock_spread,
                 current_flock_spread=current_snapshot.flock_spread,
                 newly_penned=newly_penned,
@@ -942,8 +1331,8 @@ class SheepdogEnvironment:
                 sprint_count=sum(
                     1 for action in validated_actions if self._is_sprint_action(action)
                 ),
-                previous_gate_distance=previous_gate_distance,
-                current_gate_distance=current_gate_distance,
+                previous_gate_distance=previous_entry_distance,
+                current_gate_distance=current_entry_distance,
                 previous_gate_corridor_distance=previous_gate_corridor_distance,
                 current_gate_corridor_distance=current_gate_corridor_distance,
                 previous_gate_corridor_occupancy=previous_gate_corridor_occupancy,
@@ -968,7 +1357,19 @@ class SheepdogEnvironment:
                     if previous_flock_centroid is not None
                     else None
                 ),
-                target_position=(float(self._pen.center.x), float(self._pen.center.y)),
+                target_position=(
+                    (
+                        float(approach_target.x),
+                        float(approach_target.y),
+                    )
+                    if approach_target is not None
+                    else None
+                ),
+                route_progress_delta=progress_delta,
+                entry_stall_steps=max(
+                    0,
+                    self._entry_stall_steps - self.env_config.stalled_control_activation_steps,
+                ),
                 previous_farthest_distance=self._previous_farthest_distance,
                 current_farthest_distance=current_farthest_to_pen,
                 previous_dog_positions=self._previous_dog_positions,
@@ -1081,6 +1482,7 @@ class SheepdogEnvironment:
                     actions=tuple(validated_actions),
                     snapshot=final_snapshot,
                     reward=breakdown,
+                    step_telemetry=step_telemetry,
                 )
             )
 
@@ -1711,9 +2113,23 @@ class SheepdogEnvironment:
         claimed_positions: set[Point] = set()
         next_positions: list[Point] = []
         next_budgets: list[float] = []
+
+        # Check leader-follower surge condition (Specification 3)
+        penned_sheep = [s for s in self._sheep if s.penned or self._pen.contains(s.position)]
+        if penned_sheep:
+            self._pen_breached = True
+            penned_centroid: Point | None = Point(
+                round(fmean(s.position.x for s in penned_sheep)),
+                round(fmean(s.position.y for s in penned_sheep)),
+            )
+        else:
+            penned_centroid = None
+
         for sheep in self._sheep:
             if sheep.penned or self._pen.contains(sheep.position):
                 sheep.penned = True
+                self._pen_breached = True
+                sheep.is_packed = False
                 sheep.panic_steps = 0
                 next_positions.append(sheep.position)
                 next_budgets.append(0.0)
@@ -1723,8 +2139,17 @@ class SheepdogEnvironment:
             blocked_positions = claimed_positions | {
                 position for position in occupied_sheep_positions if position != sheep.position
             }
+            is_surging = False
+            if self._pen_breached and penned_centroid is not None and move.distance_to(penned_centroid) <= self.env_config.sheep_surge_cohesion_radius:
+                is_surging = True
+
+            effective_speed = (
+                self.env_config.sheep_speed * self.env_config.sheep_surge_multiplier
+                if is_surging
+                else self.env_config.sheep_speed
+            )
             steps, remaining_budget = self._movement_steps(
-                self.env_config.sheep_speed,
+                effective_speed,
                 sheep.movement_budget,
             )
             for _ in range(steps):
@@ -1735,12 +2160,15 @@ class SheepdogEnvironment:
                     sheep.panic_steps,
                     blocked_positions=blocked_positions,
                     sheep=sheep,
+                    penned_centroid=penned_centroid if is_surging else None,
                 )
                 if sheep.panic_steps > 0:
                     sheep.panic_steps = max(0, sheep.panic_steps - 1)
                 if next_move == move:
                     break
                 move = next_move
+                if self._pen.contains(move):
+                    break
             if self._nearest_dog_distance(move, dog_positions) <= self.env_config.sheep_vision:
                 sheep.panic_steps = max(sheep.panic_steps, 2)
             next_positions.append(move)
@@ -1763,6 +2191,9 @@ class SheepdogEnvironment:
             moved = position != sheep.position
             sheep.position = position
             sheep.penned = self._pen.contains(position)
+            if sheep.penned:
+                self._pen_breached = True
+                sheep.is_packed = False
             sheep.movement_budget = 0.0 if sheep.penned else remaining_budget
             sheep.blocked_steps = 0 if moved or sheep.penned else sheep.blocked_steps + 1
             self._record_position_history(sheep.recent_positions, position)
@@ -1798,6 +2229,7 @@ class SheepdogEnvironment:
         panic_steps: int,
         blocked_positions: set[Point] | None = None,
         sheep: SheepState | None = None,
+        penned_centroid: Point | None = None,
     ) -> Point:
         personality = sheep.personality if sheep is not None else "obedient"
         strength = max(0.0, float(self.env_config.sheep_personality_strength))
@@ -1805,72 +2237,103 @@ class SheepdogEnvironment:
         # Check if sheep should idle (no dog pressure, not panicked, near flock, away from wall)
         nearest_dog_distance = self._nearest_dog_distance(position, dog_positions)
         should_idle = (
-            panic_steps <= 0
+            penned_centroid is None
+            and panic_steps <= 0
             and nearest_dog_distance > self.env_config.sheep_vision
             and flock_center is not None
             and position.distance_to(flock_center) <= self.env_config.flock_radius
             and self._wall_margin(position) > 1.0
         )
         if should_idle and self._rng.random() < 0.7:
-            # 70% chance to idle when conditions are met
+            if sheep is not None:
+                sheep.is_packed = False
             return position
 
         vector_x = 0.0
         vector_y = 0.0
+        predator_pressure = 0.0
         for dog_position in dog_positions:
             distance = max(1.0, position.distance_to(dog_position))
             nearest_dog_distance = min(nearest_dog_distance, distance)
             if distance <= self.env_config.sheep_vision:
                 weight = (self.env_config.sheep_vision - distance + 1.0) / distance
+                predator_pressure += weight
                 # Bold sheep ignore distant dogs more readily, so the dog must
-                # close the gap (or bark) to apply meaningful pressure.
+                # close the gap to apply meaningful pressure.
                 if personality == "bold" and strength > 0.0 and distance > 3.0:
                     weight *= max(0.0, 1.0 - 0.4 * strength)
                 vector_x += (position.x - dog_position.x) * weight
                 vector_y += (position.y - dog_position.y) * weight
-        if panic_steps <= 0 and flock_center is not None:
-            # Flock cohesion: only apply when dogs are nearby OR sheep is far from flock
-            # This prevents constant self-driving when no dogs are present
-            dogs_nearby = nearest_dog_distance <= self.env_config.sheep_vision
-            far_from_flock = position.distance_to(flock_center) > self.env_config.flock_radius
-            allow_far_from_flock = (
-                far_from_flock and self.env_config.sheep_cohere_without_dog_pressure
-            )
-            if dogs_nearby or allow_far_from_flock:
-                vector_x += (
-                    flock_center.x - position.x
-                ) * self.env_config.sheep_flock_cohesion_weight
-                vector_y += (
-                    flock_center.y - position.y
-                ) * self.env_config.sheep_flock_cohesion_weight
-        elif personality == "escapist" and strength > 0.0 and flock_center is not None:
-            # When scared, an escapist sheep bolts away from the flock instead
-            # of cohering with it.
-            vector_x += (position.x - flock_center.x) * 0.35 * strength
-            vector_y += (position.y - flock_center.y) * 0.35 * strength
-        if nearest_dog_distance <= self.env_config.sheep_vision:
-            vector_x *= 1.5
-            vector_y *= 1.5
-        vector_x += self._wall_avoidance(position, axis="x")
-        vector_y += self._wall_avoidance(position, axis="y")
-        if strength > 0.0 and personality == "pen_shy":
-            pen_center = self._pen.center
-            dx = pen_center.x - position.x
-            dy = pen_center.y - position.y
-            norm = max(1.0, (dx * dx + dy * dy) ** 0.5)
-            vector_x -= (dx / norm) * strength
-            vector_y -= (dy / norm) * strength
-        if strength > 0.0 and personality == "pen_fearful":
-            pen_center = self._pen.center
-            dx = pen_center.x - position.x
-            dy = pen_center.y - position.y
-            dist = max(1.0, (dx * dx + dy * dy) ** 0.5)
-            # Scale repulsion up to 4× at the pen entrance (dist ≈ 1) and fade
-            # smoothly to 1× at pen_width distance away.
-            proximity_scale = max(1.0, self.env_config.pen_width / dist * 4.0)
-            magnitude = strength * proximity_scale
-            vector_x -= (dx / dist) * magnitude
-            vector_y -= (dy / dist) * magnitude
+
+        # Leader-Follower Surge Pull (Specification 3):
+        if penned_centroid is not None:
+            dist_to_penned = max(0.5, position.distance_to(penned_centroid))
+            surge_pull = 1.8
+            vector_x += ((penned_centroid.x - position.x) / dist_to_penned) * surge_pull
+            vector_y += ((penned_centroid.y - position.y) / dist_to_penned) * surge_pull
+
+        # Pressure-Relief Vector (Flank Squirting vs Driving, Specification 2):
+        gate_entrance = self._gate_entrance_center()
+        gate_dx = gate_entrance.x - position.x
+        gate_dy = gate_entrance.y - position.y
+        gate_dist = max(1.0, hypot(gate_dx, gate_dy))
+
+        containment_held = False
+        has_open_flank = False
+        if predator_pressure > 0.5:
+            psi_gate = atan2(gate_dy, gate_dx)
+            psi_rear = psi_gate + pi
+            active_offsets: list[float] = []
+            for dog_position in dog_positions:
+                if position.distance_to(dog_position) <= self.env_config.sheep_vision:
+                    phi_dog = atan2(dog_position.y - position.y, dog_position.x - position.x)
+                    rel_angle = atan2(sin(phi_dog - psi_rear), cos(phi_dog - psi_rear))
+                    if abs(rel_angle) <= (2.0 * pi / 3.0):
+                        active_offsets.append(rel_angle)
+
+            if active_offsets:
+                min_phi = min(active_offsets)
+                max_phi = max(active_offsets)
+                span = max_phi - min_phi
+                containment_held = (
+                    span >= self.env_config.sheep_theta_containment
+                    and min_phi <= -0.25
+                    and max_phi >= 0.25
+                )
+                if containment_held:
+                    # Dogs cover the rear and both flanks; drive forward toward gate
+                    vector_x += (gate_dx / gate_dist) * 1.5
+                    vector_y += (gate_dy / gate_dist) * 1.5
+                else:
+                    # Flank escape opening: squirt laterally through the gap
+                    has_open_flank = True
+                    open_angle = psi_rear - pi / 2.0 if min_phi > -0.25 else psi_rear + pi / 2.0
+                    vector_x += cos(open_angle) * 1.8
+                    vector_y += sin(open_angle) * 1.8
+
+        # Directional threshold drag & hesitation parameters (Specification 1)
+        r_gate_x, r_gate_y = self._gate_vector_into_pen()
+        d_gate = gate_dist
+        proximity = max(0.0, min(1.0, 1.0 - d_gate / self.env_config.sheep_d_gate))
+        forward_comp = vector_x * r_gate_x + vector_y * r_gate_y
+
+        if penned_centroid is not None:
+            alpha = 0.0
+        else:
+            alpha = self.env_config.sheep_alpha_hesitation
+            if strength > 0.0:
+                if personality == "pen_fearful":
+                    alpha = min(0.95, alpha * (1.0 + 0.6 * strength))
+                elif personality == "pen_shy":
+                    alpha = min(0.85, alpha * (0.8 + 0.3 * strength))
+                elif personality == "bold":
+                    alpha = max(0.15, alpha * (1.0 - 0.4 * strength))
+                elif personality == "obedient":
+                    alpha = alpha * 0.7
+            else:
+                alpha = alpha * 0.5
+
+        # Check preliminary blocked state
         blocked = blocked_positions or set()
         candidate_actions = ("up", "down", "left", "right")
         primary_action: Action | None = None
@@ -1891,6 +2354,94 @@ class SheepdogEnvironment:
                 dog_positions,
                 blocked,
             )
+
+        # Tonic Immobility / Packing Threshold (Specification 4):
+        # Applies when predator pressure exceeds P_crit while forward path is blocked/dragging,
+        # unless predator pressure shifts to a viable open flank.
+        open_candidates = [
+            a for a in candidate_actions
+            if not self._sheep_move_blocked(
+                position,
+                Point(
+                    position.x + ACTION_DELTAS[a][0],
+                    position.y + ACTION_DELTAS[a][1],
+                ).clamp(self.env_config.width, self.env_config.height),
+                dog_positions,
+                blocked,
+            )
+        ]
+        has_viable_flank = bool(has_open_flank and open_candidates)
+        is_dragging = bool(d_gate <= self.env_config.sheep_d_gate and forward_comp > 0.0 and alpha > 0.0)
+        pack_condition = (
+            predator_pressure >= self.env_config.sheep_p_crit
+            and (is_dragging or primary_blocked or not open_candidates)
+            and not has_viable_flank
+        )
+        if pack_condition:
+            if sheep is not None:
+                sheep.is_packed = True
+        elif sheep is not None:
+            sheep.is_packed = False
+
+        is_packed = bool(sheep is not None and sheep.is_packed)
+
+        # Flocking Cohesion & Escapist Dynamics
+        if is_packed:
+            # Under packing, sheep do NOT scatter radially; cohesion attraction is doubled
+            if flock_center is not None:
+                vector_x += (
+                    flock_center.x - position.x
+                ) * self.env_config.sheep_flock_cohesion_weight * 2.0
+                vector_y += (
+                    flock_center.y - position.y
+                ) * self.env_config.sheep_flock_cohesion_weight * 2.0
+        elif panic_steps <= 0 and flock_center is not None:
+            dogs_nearby = nearest_dog_distance <= self.env_config.sheep_vision
+            far_from_flock = position.distance_to(flock_center) > self.env_config.flock_radius
+            allow_far_from_flock = (
+                far_from_flock and self.env_config.sheep_cohere_without_dog_pressure
+            )
+            if dogs_nearby or allow_far_from_flock:
+                vector_x += (
+                    flock_center.x - position.x
+                ) * self.env_config.sheep_flock_cohesion_weight
+                vector_y += (
+                    flock_center.y - position.y
+                ) * self.env_config.sheep_flock_cohesion_weight
+        elif personality == "escapist" and strength > 0.0 and flock_center is not None:
+            # Escapist bolts away from flock only when not packed
+            vector_x += (position.x - flock_center.x) * 0.35 * strength
+            vector_y += (position.y - flock_center.y) * 0.35 * strength
+
+        if nearest_dog_distance <= self.env_config.sheep_vision:
+            vector_x *= 1.5
+            vector_y *= 1.5
+        vector_x += self._wall_avoidance(position, axis="x")
+        vector_y += self._wall_avoidance(position, axis="y")
+
+        # Apply Directional Threshold Drag (Specification 1)
+        if d_gate <= self.env_config.sheep_d_gate:
+            fwd = vector_x * r_gate_x + vector_y * r_gate_y
+            if fwd > 0.0:
+                drag_factor = max(0.2, 1.0 - alpha * proximity)
+                fwd_x = fwd * r_gate_x * drag_factor
+                fwd_y = fwd * r_gate_y * drag_factor
+                lat_x = vector_x - fwd * r_gate_x
+                lat_y = vector_y - fwd * r_gate_y
+                vector_x = fwd_x + lat_x
+                vector_y = fwd_y + lat_y
+
+            # Increased turning sensitivity / angular jitter proportional to gate proximity
+            if proximity > 0.0 and alpha > 0.0:
+                perp_x, perp_y = -r_gate_y, r_gate_x
+                jitter_mag = proximity * alpha * 0.75
+                jitter_dir = 1.0 if self._rng.random() < 0.5 else -1.0
+                vector_x += perp_x * jitter_mag * jitter_dir
+                vector_y += perp_y * jitter_mag * jitter_dir
+
+        # Tonic immobility freezing: high probability of holding position
+        if is_packed and self._rng.random() < 0.75:
+            return position
         edge_escape_actions = self._edge_escape_actions(position)
 
         best_score = -inf
@@ -1936,7 +2487,7 @@ class SheepdogEnvironment:
     ) -> bool:
         if candidate == position:
             return True
-        if candidate in self._fence_cells and not self._pen.contains(position):
+        if candidate in self._fence_cells:
             return True
         return candidate in dog_positions or candidate in blocked_positions
 
@@ -1999,7 +2550,13 @@ class SheepdogEnvironment:
         candidate_debug = self._action_context_debug(active_policy_mode, dog_index, candidate)
         current_debug = self._action_context_debug(active_policy_mode, dog_index, dog.position)
         flock_center = self._flock_center() or dog.position
-        pen_center = self._pen.center
+        pen_center = (
+            pen_navigation(self._pen, self.env_config.width, self.env_config.height).target(
+                self._navigation_anchor()
+            )
+            if self._flock_center() is not None
+            else self._pen.center
+        )
         assignment = self._role_assignments.get(
             dog_index,
             RoleAssignment(dog.index, DogRole.REAR_PRESSURE, dog.position),
@@ -2177,6 +2734,28 @@ class SheepdogEnvironment:
             return Point(self._pen.center.x, self._pen.origin.y - 1)
         return Point(self._pen.center.x, self._pen.origin.y + self._pen.height)
 
+    def _gate_vector_into_pen(self) -> tuple[float, float]:
+        """Unit vector pointing from the gate threshold inward into the pen."""
+        if self._pen.opening == "bottom":
+            return (0.0, -1.0)
+        if self._pen.opening == "top":
+            return (0.0, 1.0)
+        if self._pen.opening == "left":
+            return (1.0, 0.0)
+        return (-1.0, 0.0)
+
+    def _gate_entrance_center(self) -> Point:
+        """Center coordinate of the pen opening / gate threshold."""
+        ox, oy = self._pen.origin.x, self._pen.origin.y
+        w, h = self._pen.width, self._pen.height
+        if self._pen.opening == "bottom":
+            return Point(ox + w // 2, oy + h)
+        if self._pen.opening == "top":
+            return Point(ox + w // 2, oy)
+        if self._pen.opening == "left":
+            return Point(ox, oy + h // 2)
+        return Point(ox + w, oy + h // 2)
+
     def _formation_target(
         self,
         dog_index: int,
@@ -2316,16 +2895,28 @@ class SheepdogEnvironment:
         unpenned = [sheep.position for sheep in self._sheep if not sheep.penned]
         if not unpenned:
             return 0.0
-        pen_center = self._pen.center
-        return fmean(position.distance_to(pen_center) for position in unpenned)
+        navigation = pen_navigation(self._pen, self.env_config.width, self.env_config.height)
+        return fmean(navigation.distance(position) for position in unpenned)
 
     def _farthest_distance_to_pen(self) -> float:
-        """Return the max distance any unpenned sheep is from the pen centre."""
+        """Return the longest legal entry route among unpenned sheep."""
         unpenned = [sheep.position for sheep in self._sheep if not sheep.penned]
         if not unpenned:
             return 0.0
-        pen_center = self._pen.center
-        return max(position.distance_to(pen_center) for position in unpenned)
+        navigation = pen_navigation(self._pen, self.env_config.width, self.env_config.height)
+        return max(navigation.distance(position) for position in unpenned)
+
+    def _navigation_anchor(self) -> Point:
+        """Use a real sheep if the flock centroid lies on a closed fence."""
+        center = self._flock_center()
+        if center is None:
+            raise ValueError("Cannot choose an approach target without unpenned sheep.")
+        if center not in self._fence_cells:
+            return center
+        return min(
+            (sheep.position for sheep in self._sheep if not sheep.penned),
+            key=lambda position: position.distance_to(center),
+        )
 
     def _farthest_distance_to_flock_center(self) -> float:
         """Return distance from flock center to the farthest unpenned sheep."""
@@ -2540,7 +3131,6 @@ class SheepdogEnvironment:
 
     def _pressure_position_debug(self, dog_index: int, position: Point) -> dict[str, Any]:
         flock_center = self._flock_center()
-        pen_center = self._pen.center
         if flock_center is None:
             return {
                 "desired_pressure_target": {"x": position.x, "y": position.y},
@@ -2556,6 +3146,9 @@ class SheepdogEnvironment:
                 "role_slot": self._pressure_role_offset(dog_index),
             }
 
+        pen_center = pen_navigation(
+            self._pen, self.env_config.width, self.env_config.height
+        ).target(self._navigation_anchor())
         role_assignment = self._role_assignments.get(dog_index)
         target = (
             role_assignment.target
@@ -2735,6 +3328,9 @@ class SheepdogEnvironment:
             "spawn_mode": self._spawn_mode,
             "cumulative_gate_progress": self._cumulative_gate_progress,
             "controlled_stall_steps": self._controlled_stall_steps,
+            "entry_progress_mode": "fence_route_v1",
+            "entry_stall_steps": self._entry_stall_steps,
+            "best_entry_distance": self._best_entry_distance,
             "wall_stall_steps": self._wall_stall_steps,
             "max_wall_stall_steps": self._max_wall_stall_steps,
             "wall_lateral_movements": self._wall_lateral_movements,
@@ -2810,8 +3406,10 @@ class SheepdogEnvironment:
         if self._flock_spread() > self.env_config.controlled_flock_spread_threshold:
             return False
         return any(
-            dog.position.distance_to(flock_center) <= self._flock_buffer_radius() + 3.0
+            dog.position.distance_to(sheep.position) <= self.env_config.sheep_vision
             for dog in self._dogs
+            for sheep in self._sheep
+            if not sheep.penned
         )
 
     def _flock_gate_distance(self, flock_center: Point | None) -> float:
@@ -2834,8 +3432,14 @@ class SheepdogEnvironment:
 
     def _is_in_gate_corridor(self, position: Point) -> bool:
         along_distance, lateral_distance = self._gate_axis_distances(position)
+        gate = self._gate_position()
+        inward_x, inward_y = self._gate_vector_into_pen()
+        on_approach_side = (
+            (position.x - gate.x) * inward_x + (position.y - gate.y) * inward_y <= 0
+        )
         return (
-            lateral_distance <= self.env_config.gate_corridor_half_width
+            on_approach_side
+            and lateral_distance <= self.env_config.gate_corridor_half_width
             and along_distance <= self.env_config.gate_approach_distance
         )
 

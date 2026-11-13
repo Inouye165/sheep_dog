@@ -1,0 +1,16 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Start Sheepdog backend",
+			"type": "shell",
+			"command": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+			"args": [
+				"-m",
+				"sheepdog.server"
+			],
+			"isBackground": true,
+			"problemMatcher": []
+		}
+	]
+}

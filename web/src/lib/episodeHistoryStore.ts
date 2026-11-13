@@ -1,4 +1,4 @@
-import type { EpisodeRecord, EpisodeOutcome, ReplayFrame, ReplaySnapshot, AgentSnapshot, TrainingEpisode } from "../state/types";
+import type { EpisodeRecord, EpisodeOutcome, TrainingEpisode } from "../state/types";
 
 export const MAX_EPISODE_HISTORY_BUFFER_SIZE = 50;
 

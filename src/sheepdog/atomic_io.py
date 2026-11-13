@@ -18,22 +18,16 @@ from typing import Any
 
 def atomic_replace(tmp: Path, dest: Path) -> None:
     """Rename *tmp* to *dest*, retrying briefly on Windows file-lock errors."""
-    for attempt in range(25):
+    for attempt in range(30):
         try:
             os.replace(tmp, dest)
             return
         except PermissionError:
-            if attempt == 24:
-                # Windows fallback: if destination is locked against replacement/deletion
-                # but permits write access, write contents directly to destination in-place.
-                try:
-                    dest.write_bytes(tmp.read_bytes())
-                    with contextlib.suppress(Exception):
-                        os.remove(tmp)
-                    return
-                except Exception:
-                    raise
-            time.sleep(min(0.25, 0.05 * (attempt + 1)))
+            if attempt == 29:
+                with contextlib.suppress(OSError):
+                    os.remove(tmp)
+                raise
+            time.sleep(min(0.2, 0.03 * (attempt + 1)))
 
 
 def atomic_write_json(path: Path, data: Any) -> None:

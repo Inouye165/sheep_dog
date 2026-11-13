@@ -402,6 +402,135 @@ describe("TrainingPanel", () => {
     fireEvent.mouseLeave(trigger);
     expect(screen.queryByTestId("auto-promote-popover")).not.toBeInTheDocument();
   });
+
+  it("renders progress bar with percentage and without spinner when training is active", () => {
+    render(
+      <TrainingPanel
+        episodes={500}
+        fastMode={false}
+        enableInstincts={true}
+        curriculumStage={25}
+        maxCurriculumStage={32}
+        debugRewardBreakdown={false}
+        autoPromote={false}
+        running={true}
+        clearing={false}
+        batchCompletedEpisodes={326}
+        batchTotalEpisodes={500}
+        currentEpisode={1326}
+        totalEpisodesTrained={1326}
+        stageHistory={{}}
+        grandTotalEpisodes={1326}
+        phase="running"
+        message="Training active"
+        error={null}
+        successRate={null}
+        onEpisodesChange={vi.fn()}
+        onFastModeChange={vi.fn()}
+        onEnableInstinctsChange={vi.fn()}
+        onCurriculumStageChange={vi.fn()}
+        onDebugRewardBreakdownChange={vi.fn()}
+        onAutoPromoteChange={vi.fn()}
+        onStartTraining={vi.fn()}
+        onPauseTraining={vi.fn()}
+        onStopTraining={vi.fn()}
+        onResumeTraining={vi.fn()}
+        onClearTraining={vi.fn()}
+        onResetJourney={vi.fn()}
+        onPromote={vi.fn()}
+      />,
+    );
+
+    const progressBar = screen.getByRole("progressbar", { name: "Training batch progress" });
+    expect(progressBar).toBeInTheDocument();
+    expect(progressBar).toHaveAttribute("aria-valuenow", "65");
+    expect(screen.getByText("Training batch in progress...")).toBeInTheDocument();
+    expect(screen.getByText("326 / 500 Episodes (65%)")).toBeInTheDocument();
+
+    // Verify there is no spinner inside the progress bar
+    expect(progressBar.querySelector(".spinner")).toBeNull();
+  });
+
+  it("computes and displays throughput rate and ETA from training start time", () => {
+    // 326 episodes over 65 seconds = ~5.0 ep/s, remaining 174 episodes => ~35s ETA
+    const startTime = new Date(Date.now() - 65_000).toISOString();
+    render(
+      <TrainingPanel
+        episodes={500}
+        fastMode={false}
+        enableInstincts={true}
+        curriculumStage={25}
+        maxCurriculumStage={32}
+        debugRewardBreakdown={false}
+        autoPromote={false}
+        running={true}
+        clearing={false}
+        batchCompletedEpisodes={326}
+        batchTotalEpisodes={500}
+        currentEpisode={1326}
+        totalEpisodesTrained={1326}
+        stageHistory={{}}
+        grandTotalEpisodes={1326}
+        phase="running"
+        message="Training active"
+        error={null}
+        successRate={null}
+        trainingStatus={{
+          running: true,
+          fast_mode: false,
+          enable_instinct_rewards: true,
+          debug_reward_breakdown: false,
+          curriculum_stage: 25,
+          requested_episodes: 500,
+          completed_episodes: 326,
+          batch_total_episodes: 500,
+          batch_completed_episodes: 326,
+          total_episodes_trained: 1326,
+          stage_history: {},
+          grand_total_episodes: 1326,
+          current_episode: 1326,
+          checkpoint_episode: 1300,
+          latest_checkpoint_episode: 1300,
+          latest_seed: 1,
+          latest_replay_path: null,
+          best_score: null,
+          latest_success_rate: null,
+          latest_avg_sheep_penned: null,
+          latest_avg_reward: null,
+          latest_timeout_rate: null,
+          latest_stopped_rate: null,
+          latest_avg_no_progress_steps: null,
+          latest_avg_distance_to_pen: null,
+          latest_avg_flock_spread: null,
+          latest_avg_farthest_distance_to_pen: null,
+          latest_avg_farthest_distance_to_flock_center: null,
+          phase: "running",
+          message: "Training active",
+          error: null,
+          starting_episode: 1000,
+          training_start_time: startTime,
+        }}
+        onEpisodesChange={vi.fn()}
+        onFastModeChange={vi.fn()}
+        onEnableInstinctsChange={vi.fn()}
+        onCurriculumStageChange={vi.fn()}
+        onDebugRewardBreakdownChange={vi.fn()}
+        onAutoPromoteChange={vi.fn()}
+        onStartTraining={vi.fn()}
+        onPauseTraining={vi.fn()}
+        onStopTraining={vi.fn()}
+        onResumeTraining={vi.fn()}
+        onClearTraining={vi.fn()}
+        onResetJourney={vi.fn()}
+        onPromote={vi.fn()}
+      />,
+    );
+
+    const progressBar = screen.getByRole("progressbar", { name: "Training batch progress" });
+    expect(progressBar).toBeInTheDocument();
+    expect(screen.getByText(/ep\/s/)).toBeInTheDocument();
+    expect(screen.getByText(/ETA/)).toBeInTheDocument();
+  });
 });
 
 

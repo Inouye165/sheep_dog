@@ -119,6 +119,24 @@ export interface EpisodeBucket {
   episodes: CanonicalEpisodeRecord[];
 }
 
+/**
+ * Calculates adaptive bucket and block size based on the active view window and episode count.
+ * Prevents single-bucket/single-point collapses on smaller view windows (e.g. viewWindow = 25).
+ */
+export function calculateAdaptiveBlockSize(viewWindow: ViewWindow, count: number): number {
+  if (viewWindow === 25) {
+    return count < 25 ? Math.max(1, Math.min(5, Math.floor(count / 4))) || 1 : 5;
+  }
+  if (viewWindow === 50) {
+    return count < 50 ? Math.max(1, Math.min(10, Math.floor(count / 5))) || 1 : 10;
+  }
+  if (viewWindow === 100) {
+    return count < 100 ? Math.max(1, Math.min(20, Math.floor(count / 5))) || 1 : 20;
+  }
+  // viewWindow === "all"
+  return count < 25 ? Math.max(1, Math.floor(count / 5)) || 1 : 25;
+}
+
 export function buildEpisodeBuckets(
   episodes: CanonicalEpisodeRecord[],
   bucketSize: number = 25
