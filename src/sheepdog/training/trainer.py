@@ -802,10 +802,21 @@ class Trainer:
                 return dict(record)
             source_path = Path(replay_value)
             target_path = replay_output_dir / source_path.name
-            if source_path.exists():
+            try:
+                src_stat = source_path.stat()
+            except OSError:
+                src_stat = None
+            if src_stat is not None:
                 try:
-                    target_path.parent.mkdir(parents=True, exist_ok=True)
-                    target_path.write_bytes(source_path.read_bytes())
+                    needs_copy = True
+                    try:
+                        if target_path.stat().st_size == src_stat.st_size:
+                            needs_copy = False
+                    except OSError:
+                        needs_copy = True
+                    if needs_copy:
+                        target_path.parent.mkdir(parents=True, exist_ok=True)
+                        target_path.write_bytes(source_path.read_bytes())
                 except (FileNotFoundError, OSError):
                     pass
             exported_record = dict(record)

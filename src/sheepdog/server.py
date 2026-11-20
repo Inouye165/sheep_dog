@@ -39,6 +39,7 @@ from sheepdog.config import (
     LabConfig,
     RewardConfig,
     resolve_workspace_path,
+    validate_observation_history_strides,
 )
 from sheepdog.curriculum import apply_training_profile, available_stages, validate_curriculum_stage
 from sheepdog.environment import ACTION_ORDER, SheepdogEnvironment
@@ -49,6 +50,8 @@ from sheepdog.evaluation.scenario_evaluator import (
     resolve_checkpoint_episode,
 )
 from sheepdog.evaluation.scenarios import ScenarioStore, scenario_from_snapshot
+from sheepdog.evaluation.summary_cache import default_eval_cache_path, load_evaluation_summaries
+from sheepdog.observations import build_observation_builder
 from sheepdog.policies.base import Policy, PolicyMode
 from sheepdog.policies.factory import load_playable_policy
 from sheepdog.policies.heuristic import InstinctOnlyPolicy
@@ -228,15 +231,23 @@ def _json_file_corrupt_or_locked(path: Path) -> bool:
 def _expected_observation_size(config: LabConfig) -> int:
     """Derive expected observation vector dimension from *config* with 54 fallback."""
     try:
-        from sheepdog.observations import build_observation_builder
-
-        builder = build_observation_builder(config.training.observation_mode)
+        include_loop_flags = bool(
+            getattr(config.training, "include_loop_flags_in_observation", True)
+        )
+        builder = build_observation_builder(
+            config.training.observation_mode,
+            include_loop_flags=include_loop_flags,
+        )
+        strides = validate_observation_history_strides(
+            getattr(config.training, "observation_history_strides", (0,))
+        )
         feature_names = getattr(builder, "feature_names", None)
         if feature_names is not None:
-            return len(feature_names)
+            base_size = len(feature_names)
+            return base_size * len(strides)
         env = SheepdogEnvironment(config)
         env.reset(seed=42)
-        return len(builder.build(env, 0).feature_names)
+        return len(env.build_observation_for_dog(0).feature_names)
     except Exception:
         return 54
 
@@ -481,7 +492,35 @@ def _config_from_checkpoint_payload(base_config: LabConfig, payload: dict[str, A
         if isinstance(reward_payload, dict)
         else base_config.rewards
     )
-    return replace(base_config, environment=environment, rewards=rewards)
+    training = base_config.training
+    policy_config = payload.get("policy_config")
+    if isinstance(policy_config, dict):
+        training_updates: dict[str, Any] = {}
+        obs_mode = policy_config.get("observation_mode")
+        if isinstance(obs_mode, str) and obs_mode:
+            training_updates["observation_mode"] = obs_mode
+        if (
+            "observation_history_strides" in policy_config
+            and policy_config["observation_history_strides"] is not None
+        ):
+            training_updates["observation_history_strides"] = (
+                validate_observation_history_strides(
+                    tuple(int(s) for s in policy_config["observation_history_strides"])
+                )
+            )
+        if (
+            "include_loop_flags_in_observation" in policy_config
+            and policy_config["include_loop_flags_in_observation"] is not None
+        ):
+            training_updates["include_loop_flags_in_observation"] = bool(
+                policy_config["include_loop_flags_in_observation"]
+            )
+        hidden_sizes = policy_config.get("hidden_sizes")
+        if isinstance(hidden_sizes, (list, tuple)) and hidden_sizes:
+            training_updates["neural_hidden_sizes"] = tuple(int(x) for x in hidden_sizes)
+        if training_updates:
+            training = replace(base_config.training, **training_updates)
+    return replace(base_config, environment=environment, rewards=rewards, training=training)
 
 
 def _resolve_replay_selection(
@@ -845,8 +884,6 @@ def _seed_success_gate(success_count: int, seed_count: int) -> bool:
 
 
 _EVAL_CACHE_LOCK = threading.Lock()
-_EVAL_CACHE_MAX_ENTRIES = 2048
-_EVAL_CACHE: OrderedDict[str, tuple[float, dict[str, Any]]] = OrderedDict()
 _DIR_EVAL_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
 
@@ -872,44 +909,8 @@ def _load_all_persisted_evaluations(output_root: Path, journey: str | None = Non
         if cached_dir is not None and cached_dir[0] == dir_mtime and dir_mtime > 0.0:
             return list(cached_dir[1])
 
-    evaluations = []
-    seen_ids = set()
-    try:
-        for p in eval_dir.iterdir():
-            name = p.name
-            if not name.endswith(".json"):
-                continue
-            if not (name.startswith("eval_") or name.startswith("evaluation-checkpoint-")):
-                continue
-            try:
-                mtime = p.stat().st_mtime
-                cache_key = str(p.resolve())
-                with _EVAL_CACHE_LOCK:
-                    cached = _EVAL_CACHE.get(cache_key)
-                    if cached is not None and cached[0] == mtime:
-                        _EVAL_CACHE.move_to_end(cache_key)
-                        data = cached[1]
-                    else:
-                        data = None
-                if data is None:
-                    with p.open("r", encoding="utf-8") as f:
-                        loaded = json.load(f)
-                    if isinstance(loaded, dict):
-                        data = loaded
-                        with _EVAL_CACHE_LOCK:
-                            _EVAL_CACHE[cache_key] = (mtime, data)
-                            _EVAL_CACHE.move_to_end(cache_key)
-                            while len(_EVAL_CACHE) > _EVAL_CACHE_MAX_ENTRIES:
-                                _EVAL_CACHE.popitem(last=False)
-                if isinstance(data, dict):
-                    eval_id = data.get("evaluation_id") or data.get("checkpoint_id") or name
-                    if eval_id not in seen_ids:
-                        seen_ids.add(eval_id)
-                        evaluations.append(data)
-            except Exception:
-                pass
-    except Exception:
-        pass
+    cache_path = default_eval_cache_path(output_root, journey)
+    evaluations = load_evaluation_summaries(eval_dir, cache_path)
 
     if dir_mtime > 0.0:
         with _EVAL_CACHE_LOCK:
@@ -1638,7 +1639,7 @@ def _training_checkpoint_timestep_schedule(
 ) -> tuple[int, ...]:
     """Return aligned cumulative timestep targets including the final target."""
 
-    cadence = max(rollout_quantum, (32_768 // rollout_quantum) * rollout_quantum)
+    cadence = max(rollout_quantum, (65_536 // rollout_quantum) * rollout_quantum)
     return tuple(
         sorted({*range(cadence, total_timesteps, cadence), total_timesteps})
     )
@@ -1800,6 +1801,11 @@ class TrainingManager:
         establish_process_startup_boundary()
         self._lock = threading.RLock()
         self._start_lock = threading.Lock()
+        self._cache_lock = threading.Lock()
+        self._json_file_cache: dict[str, tuple[int, int, dict[str, Any]]] = {}
+        self._confidence_info_cache: dict[
+            tuple[str, int], tuple[int, int, tuple[int | None, int | None]]
+        ] = {}
         self._maintenance_busy = False
         self._thread: threading.Thread | None = None
         self._control_request: str | None = None
@@ -1915,7 +1921,9 @@ class TrainingManager:
                 )
             return checkpoint_summaries
 
-        config = LabConfig()
+        base_config = LabConfig()
+        user_params = _read_explicit_user_hyperparams(output_root, base_config)
+        config = _apply_user_hyperparams(base_config, user_params)
         try:
             obs_hash = get_observation_schema_hash(config)
         except Exception:
@@ -2738,28 +2746,87 @@ class TrainingManager:
 
         return status
 
+    def _load_cached_json_dict(self, path: Path) -> dict[str, Any] | None:
+        """Load a JSON object from *path*, caching parsed dicts by ``(st_mtime_ns, st_size)``."""
+        cache_lock = getattr(self, "_cache_lock", None)
+        key = str(path)
+        try:
+            stat_res = path.stat()
+        except OSError:
+            if cache_lock is not None:
+                with cache_lock:
+                    self._json_file_cache.pop(key, None)
+            return None
+
+        mtime_ns = stat_res.st_mtime_ns
+        size = stat_res.st_size
+        if cache_lock is not None:
+            with cache_lock:
+                cached = self._json_file_cache.get(key)
+                if cached is not None and cached[0] == mtime_ns and cached[1] == size:
+                    return cached[2]
+
+        data = _load_json(path)
+        if isinstance(data, dict):
+            if cache_lock is not None:
+                with cache_lock:
+                    self._json_file_cache[key] = (mtime_ns, size, data)
+            return data
+
+        if cache_lock is not None:
+            with cache_lock:
+                self._json_file_cache.pop(key, None)
+        return None
+
     def _get_latest_confidence_info(self, stage: int) -> tuple[int | None, int | None]:
         web_dir = Path(LabConfig().training.web_export_dir)
         index_path = web_dir / "checkpoint-index.json"
+        cache_lock = getattr(self, "_cache_lock", None)
+        index_key = str(index_path)
+        try:
+            stat_res = index_path.stat()
+        except OSError:
+            if cache_lock is not None:
+                with cache_lock:
+                    self._json_file_cache.pop(index_key, None)
+                    for key in [k for k in self._confidence_info_cache if k[0] == index_key]:
+                        self._confidence_info_cache.pop(key, None)
+            return None, None
+
+        mtime_ns = stat_res.st_mtime_ns
+        size = stat_res.st_size
+        stage_key = (index_key, int(stage))
+        if cache_lock is not None:
+            with cache_lock:
+                cached = self._confidence_info_cache.get(stage_key)
+                if cached is not None and cached[0] == mtime_ns and cached[1] == size:
+                    return cached[2]
+
+        payload = self._load_cached_json_dict(index_path)
+        if not isinstance(payload, dict):
+            return None, None
+
         latest_eval_env_ep = None
         latest_eval_ts = None
-        if index_path.exists():
-            try:
-                with index_path.open("r", encoding="utf-8") as f:
-                    payload = json.load(f)
-                checkpoints = payload.get("checkpoints", [])
-                stage_cps = [c for c in checkpoints if c.get("curriculum_stage") == stage]
-                if stage_cps:
-                    latest_cp = stage_cps[-1]
-                    latest_eval_env_ep = (
-                        latest_cp.get("total_training_episodes")
-                        or latest_cp.get("completed_environment_episodes")
-                        or latest_cp.get("checkpoint_episode")
-                    )
-                    latest_eval_ts = latest_cp.get("global_timestep")
-            except Exception:
-                pass
-        return latest_eval_env_ep, latest_eval_ts
+        try:
+            checkpoints = payload.get("checkpoints", [])
+            stage_cps = [c for c in checkpoints if c.get("curriculum_stage") == stage]
+            if stage_cps:
+                latest_cp = stage_cps[-1]
+                latest_eval_env_ep = (
+                    latest_cp.get("total_training_episodes")
+                    or latest_cp.get("completed_environment_episodes")
+                    or latest_cp.get("checkpoint_episode")
+                )
+                latest_eval_ts = latest_cp.get("global_timestep")
+        except Exception:
+            return None, None
+
+        result = (latest_eval_env_ep, latest_eval_ts)
+        if cache_lock is not None:
+            with cache_lock:
+                self._confidence_info_cache[stage_key] = (mtime_ns, size, result)
+        return result
 
     def _enrich_status_with_telemetry(self, status: dict[str, Any]) -> dict[str, Any]:
         stg = status.get("curriculum_stage") or 8
@@ -2799,7 +2866,7 @@ class TrainingManager:
             }
 
         state_path = output_root / Trainer.STATE_FILENAME
-        state_data = _load_json(state_path) or {}
+        state_data = self._load_cached_json_dict(state_path) or {}
         state_ts = state_data.get("total_timesteps") if isinstance(state_data, dict) else None
 
         current_gt = (
@@ -2895,7 +2962,9 @@ class TrainingManager:
         active = float(runtime.get("active_seconds_total", 0.0))
         training = float(runtime.get("training_seconds", 0.0))
         total_episodes = int(status.get("grand_total_episodes", 0))
-        state = _load_json(Path(LabConfig().training.output_dir) / Trainer.STATE_FILENAME)
+        state = self._load_cached_json_dict(
+            Path(LabConfig().training.output_dir) / Trainer.STATE_FILENAME
+        )
         total_timesteps = int(state.get("total_timesteps", 0)) if isinstance(state, dict) else 0
         runtime["episodes_per_active_hour"] = (
             total_episodes * 3600.0 / active if active > 0 else None
@@ -5874,20 +5943,54 @@ class TrainingManager:
                         latest_seed = summary["records"][0].get("seed")
                         if replay_path is None:
                             replay_path = summary["records"][0].get("replay_path")
-                    batch_completed_raw = payload.get("batch_completed_episodes", 0)
-                    batch_completed_segments = payload.get("batch_completed_segments", batch_completed_raw)
+                    default_total_segs = (
+                        status_snap.get("batch_total_segments")
+                        or (
+                            len(job_config.training.checkpoint_episodes)
+                            if getattr(job_config.training, "checkpoint_episodes", None)
+                            else total_episodes
+                        )
+                        or 1
+                    )
+                    raw_total_segs = payload.get("batch_total_segments")
+                    batch_total_segments = (
+                        raw_total_segs if raw_total_segs is not None else default_total_segs
+                    )
+
+                    if (
+                        "batch_completed_segments" in payload
+                        and payload["batch_completed_segments"] is not None
+                    ):
+                        batch_completed_segments = float(payload["batch_completed_segments"])
+                    elif (
+                        "batch_completed_episodes" in payload
+                        and payload["batch_completed_episodes"] is not None
+                    ):
+                        batch_completed_segments = float(payload["batch_completed_episodes"])
+                    else:
+                        batch_completed_segments = float(
+                            status_snap.get("batch_completed_segments")
+                            or stage_batch_completed_episodes
+                            or 0.0
+                        )
                     batch_completed = batch_completed_segments
-                    batch_total_segments = payload.get("batch_total_segments", payload.get("batch_total_episodes", 1))
 
                     actual_completed = payload.get("actual_completed_episodes")
                     if actual_completed is None:
-                        actual_completed = int(batch_completed_segments)
+                        prev_completed = status_snap.get("completed_episodes")
+                        prev_segments = status_snap.get("batch_completed_segments")
+                        seg_int = int(batch_completed_segments)
+                        if prev_completed is None:
+                            actual_completed = seg_int
+                        elif prev_segments is None or batch_completed_segments > float(prev_segments):
+                            actual_completed = max(int(prev_completed), seg_int)
+                        else:
+                            actual_completed = int(prev_completed)
 
-                    if isinstance(batch_completed_segments, (int, float)):
-                        stage_batch_completed_episodes = max(
-                            stage_batch_completed_episodes,
-                            batch_completed_segments,
-                        )
+                    stage_batch_completed_episodes = max(
+                        stage_batch_completed_episodes,
+                        batch_completed_segments,
+                    )
                     total_trained = payload.get("total_episodes_trained")
                     phase = payload.get("phase")
 
@@ -5984,13 +6087,18 @@ class TrainingManager:
                             else job_config.training.total_timesteps
                         ),
                         "effective_timesteps": job_config.training.total_timesteps,
-                        "batch_total_timesteps": payload.get(
-                            "batch_total_timesteps",
-                            job_config.training.total_timesteps,
+                        "batch_total_timesteps": (
+                            payload["batch_total_timesteps"]
+                            if payload.get("batch_total_timesteps") is not None
+                            else (
+                                status_snap.get("batch_total_timesteps")
+                                or job_config.training.total_timesteps
+                            )
                         ),
-                        "batch_completed_timesteps": payload.get(
-                            "batch_completed_timesteps",
-                            status_snap.get("batch_completed_timesteps", 0),
+                        "batch_completed_timesteps": (
+                            payload["batch_completed_timesteps"]
+                            if payload.get("batch_completed_timesteps") is not None
+                            else status_snap.get("batch_completed_timesteps", 0)
                         ),
                         "completed_environment_episodes": actual_completed,
                         "estimated_equivalent_episodes": computed_batch_completed_episodes,
@@ -6002,6 +6110,13 @@ class TrainingManager:
                         "error_type": None,
                         "traceback": None,
                     }
+                    current_global_ts = payload.get("current_global_timestep")
+                    if current_global_ts is None:
+                        current_global_ts = payload.get("global_timestep")
+                    if current_global_ts is None:
+                        current_global_ts = status_snap.get("current_global_timestep")
+                    if current_global_ts is not None:
+                        update["current_global_timestep"] = current_global_ts
                     if phase == "episode_complete":
                         update["latest_episode_completed_at"] = datetime.datetime.now(datetime.UTC).isoformat()
                         if "reward" in payload:
@@ -6111,6 +6226,7 @@ class TrainingManager:
                         update["effective_mutation_scale"] = payload["effective_mutation_scale"]
                     if total_trained is not None:
                         update["total_episodes_trained"] = total_trained
+                    trigger_cp: dict[str, Any] | None = None
                     if checkpoint_episode is not None:
                         update["latest_checkpoint_episode"] = checkpoint_episode
                         update["latest_seed"] = latest_seed
@@ -6206,7 +6322,8 @@ class TrainingManager:
                         cp_seeds = None
                         if checkpoint_episode is not None:
                             try:
-                                trigger_cp = self.get_checkpoint_details(checkpoint_episode)
+                                if trigger_cp is None:
+                                    trigger_cp = self.get_checkpoint_details(checkpoint_episode)
                                 cp_stage = trigger_cp.get("curriculum_stage")
                                 cp_policy_version = trigger_cp.get("policy_version")
                                 cp_id_val = trigger_cp.get("checkpoint_id")
@@ -6608,6 +6725,7 @@ class TrainingManager:
                         "completed_episodes": initial_completed,
                         "batch_total_episodes": batch_episodes,
                         "batch_completed_episodes": initial_completed,
+                        "batch_completed_segments": initial_completed,
                         "estimated_equivalent_episodes": float(initial_completed),
                         "current_episode": None,
                         "checkpoint_episode": None,
@@ -6899,6 +7017,7 @@ class TrainingManager:
                         "requested_episodes": total_episodes,
                         "batch_total_episodes": batch_episodes,
                         "batch_completed_episodes": 0,
+                        "batch_completed_segments": 0,
 
                         "auto_promote_gate": {
                             **_auto_promote_gate_defaults(current_stage),

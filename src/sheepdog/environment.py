@@ -3,11 +3,12 @@
 # pylint: disable=too-many-lines
 from __future__ import annotations
 
+import copy
 import json
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field, replace
-from math import atan2, cos, hypot, inf, pi, sin
+from math import atan2, cos, fsum, hypot, inf, pi, sin
 from pathlib import Path
 from random import Random
 from statistics import fmean
@@ -18,6 +19,7 @@ from sheepdog.config import (
     SPAWN_MODES,
     EnvironmentConfig,
     LabConfig,
+    validate_observation_history_strides,
 )
 from sheepdog.entities import (
     SHEEP_PERSONALITIES,
@@ -33,6 +35,8 @@ from sheepdog.observations import (
     DogObservation,
     EmergentObservationBuilder,
     RoleAwareObservationBuilder,
+    build_observation_builder,
+    stack_strided_observations,
 )
 from sheepdog.pen_navigation import pen_navigation
 from sheepdog.policies.base import Action, Policy, PolicyMode
@@ -41,7 +45,7 @@ from sheepdog.team_strategy import RoleAssignment, StrategySnapshot, TeamStrateg
 from sheepdog.training.replay_writer import validate_telemetry_config
 from sheepdog.training.spatial_analytics import SpatialEpisodeTracker
 
-ENV_CONFIG_VERSION = "1.0"
+ENV_CONFIG_VERSION = "1.1"
 
 ACTION_DELTAS: dict[Action, tuple[int, int]] = {
     "up": (0, -1),
@@ -117,7 +121,63 @@ class EnvironmentSnapshot:
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict."""
-        return asdict(self)
+        return {
+            "step": self.step,
+            "simulated_seconds": self.simulated_seconds,
+            "grid_width": self.grid_width,
+            "grid_height": self.grid_height,
+            "field_width": self.field_width,
+            "field_height": self.field_height,
+            "dogs": tuple(
+                {
+                    "index": d.index,
+                    "x": d.x,
+                    "y": d.y,
+                    "role": d.role,
+                    "penned": d.penned,
+                    "last_action": d.last_action,
+                    "personality": d.personality,
+                    "color": d.color,
+                    "packed": d.packed,
+                }
+                for d in self.dogs
+            ),
+            "sheep": tuple(
+                {
+                    "index": s.index,
+                    "x": s.x,
+                    "y": s.y,
+                    "role": s.role,
+                    "penned": s.penned,
+                    "last_action": s.last_action,
+                    "personality": s.personality,
+                    "color": s.color,
+                    "packed": s.packed,
+                }
+                for s in self.sheep
+            ),
+            "pen": {
+                "origin": {"x": self.pen.origin.x, "y": self.pen.origin.y},
+                "width": self.pen.width,
+                "height": self.pen.height,
+                "opening": self.pen.opening,
+            },
+            "fence_cells": (
+                self.fence_cells
+                if isinstance(self.fence_cells, tuple)
+                else tuple((c[0], c[1]) for c in self.fence_cells)
+            ),
+            "penned_count": self.penned_count,
+            "average_distance_to_pen": self.average_distance_to_pen,
+            "flock_spread": self.flock_spread,
+            "no_progress_steps": self.no_progress_steps,
+            "terminated": self.terminated,
+            "timeout": self.timeout,
+            "stopped": self.stopped,
+            "success": self.success,
+            "status": self.status,
+            "debug": copy.deepcopy(self.debug) if self.debug else {},
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,9 +192,18 @@ class StepRecord:
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict."""
-        data = asdict(self)
-        if self.step_telemetry is None:
-            data.pop("step_telemetry", None)
+        data: dict[str, Any] = {
+            "step": self.step,
+            "actions": (
+                tuple(self.actions)
+                if isinstance(self.actions, tuple)
+                else list(self.actions)
+            ),
+            "snapshot": self.snapshot.to_dict(),
+            "reward": self.reward.to_dict(),
+        }
+        if self.step_telemetry is not None:
+            data["step_telemetry"] = copy.deepcopy(self.step_telemetry)
         return data
 
 
@@ -199,12 +268,16 @@ class SheepdogEnvironment:
         self._sheep: list[SheepState] = []
         self._pen = Pen(Point(0, 0), 0, 0)
         self._fence_cells: frozenset[Point] = frozenset()
+        self._sorted_fence_cells: tuple[tuple[int, int], ...] = ()
+        self._sorted_fence_cells_source: frozenset[Point] = self._fence_cells
         self._previous_average_distance = 0.0
         self._previous_flock_spread = 0.0
         self._previous_farthest_distance = 0.0
         self._no_progress_steps = 0
         self._entry_stall_steps = 0
         self._best_entry_distance: float | None = None
+        self._best_flock_spread: float | None = None
+        self._best_farthest_to_flock_center: float | None = None
         self._reward_total = 0.0
         self._terminated = False
         self._timeout = False
@@ -224,15 +297,26 @@ class SheepdogEnvironment:
         )
         if config is None:
             obs_mode = "guided"
+            include_loop_flags = True
+            obs_strides: tuple[int, ...] = (0,)
         else:
             training_config = getattr(config, "training", None)
             obs_mode = getattr(training_config, "observation_mode", "guided")
+            include_loop_flags = bool(
+                getattr(training_config, "include_loop_flags_in_observation", True)
+            )
+            obs_strides = validate_observation_history_strides(
+                getattr(training_config, "observation_history_strides", (0,))
+            )
+        self._observation_history_strides: tuple[int, ...] = obs_strides
+        self._include_loop_flags_in_observation: bool = include_loop_flags
+        self._obs_history_by_dog: dict[int, dict[int, DogObservation]] = {}
         self._observation_builder: RoleAwareObservationBuilder | EmergentObservationBuilder
 
-        if obs_mode == "emergent":
-            self._observation_builder = EmergentObservationBuilder()
-        else:
-            self._observation_builder = RoleAwareObservationBuilder()
+        self._observation_builder = build_observation_builder(
+            obs_mode,
+            include_loop_flags=include_loop_flags,
+        )
         self._role_assignments: dict[int, RoleAssignment] = {}
         self._strategy_snapshot = StrategySnapshot(None, 0.0, 0.0, None, False, False)
         self._roles_prepared_step: int | None = None
@@ -373,6 +457,8 @@ class SheepdogEnvironment:
         self._no_progress_steps = 0
         self._entry_stall_steps = 0
         self._best_entry_distance = None
+        self._best_flock_spread = None
+        self._best_farthest_to_flock_center = None
         self._reward_total = 0.0
         self._terminated = False
         self._timeout = False
@@ -380,6 +466,7 @@ class SheepdogEnvironment:
         self._success = False
         self._stop_reason = ""
         self._history = []
+        self._obs_history_by_dog.clear()
         self._tail_telemetry_buffer.clear()
         self._stats = EpisodeStats()
         self._role_assignments = {}
@@ -416,6 +503,10 @@ class SheepdogEnvironment:
             opening=pen_opening,
         )
         self._fence_cells = self._pen.fence_cells()
+        self._sorted_fence_cells = tuple(
+            (cell.x, cell.y) for cell in sorted(self._fence_cells, key=lambda p: (p.y, p.x))
+        )
+        self._sorted_fence_cells_source = self._fence_cells
         self._dogs = self._initial_dogs()
         self._sheep = self._initial_sheep()
         for dog in self._dogs:
@@ -463,6 +554,8 @@ class SheepdogEnvironment:
         self._no_progress_steps = 0
         self._entry_stall_steps = 0
         self._best_entry_distance = None
+        self._best_flock_spread = None
+        self._best_farthest_to_flock_center = None
         self._reward_total = 0.0
         self._episode_reward_breakdown = {}
         self._terminated = False
@@ -471,6 +564,7 @@ class SheepdogEnvironment:
         self._success = False
         self._stop_reason = ""
         self._history = []
+        self._obs_history_by_dog.clear()
         self._tail_telemetry_buffer.clear()
         self._stats = EpisodeStats()
         self._role_assignments = {}
@@ -508,6 +602,10 @@ class SheepdogEnvironment:
             opening=scenario.pen.opening,
         )
         self._fence_cells = self._pen.fence_cells()
+        self._sorted_fence_cells = tuple(
+            (cell.x, cell.y) for cell in sorted(self._fence_cells, key=lambda p: (p.y, p.x))
+        )
+        self._sorted_fence_cells_source = self._fence_cells
         self._dogs = [
             DogState(index=layout.index, position=Point(layout.x, layout.y).clamp(
                 scenario.width, scenario.height
@@ -655,7 +753,7 @@ class SheepdogEnvironment:
         blocked_positions: set[Point] | None = None,
     ) -> Point:
         current = position
-        blocked = blocked_positions or set()
+        blocked = blocked_positions if blocked_positions is not None else set()
         for _ in range(max(0, steps)):
             candidate = self._target_position(current, action)
             if candidate == current or candidate in blocked:
@@ -700,6 +798,11 @@ class SheepdogEnvironment:
 
     def get_state_snapshot(self) -> EnvironmentSnapshot:
         """Return a frozen snapshot of the current environment state."""
+        if self._sorted_fence_cells_source is not self._fence_cells:
+            self._sorted_fence_cells = tuple(
+                (cell.x, cell.y) for cell in sorted(self._fence_cells, key=lambda p: (p.y, p.x))
+            )
+            self._sorted_fence_cells_source = self._fence_cells
         debug_payload = self._snapshot_debug_payload()
         return EnvironmentSnapshot(
             step=self._step_count,
@@ -731,9 +834,7 @@ class SheepdogEnvironment:
                 for sheep in self._sheep
             ),
             pen=self._pen,
-            fence_cells=tuple(
-                (cell.x, cell.y) for cell in sorted(self._fence_cells, key=lambda p: (p.y, p.x))
-            ),
+            fence_cells=self._sorted_fence_cells,
             penned_count=sum(1 for sheep in self._sheep if sheep.penned),
             average_distance_to_pen=self._average_distance_to_pen(),
             flock_spread=self._flock_spread(),
@@ -746,6 +847,11 @@ class SheepdogEnvironment:
             debug=debug_payload,
         )
 
+    def _blocked_positions_for_dog(self, dog_index: int) -> set[Point]:
+        blocked_positions = {sheep.position for sheep in self._sheep if not sheep.penned}
+        blocked_positions.update(other.position for other in self._dogs if other.index != dog_index)
+        return blocked_positions
+
     def action_mask_for_dog(
         self,
         dog_index: int,
@@ -756,8 +862,12 @@ class SheepdogEnvironment:
         """Return a legal-action mask for the specified dog."""
         self.prepare_policy_step(weights=weights)
         dog = self._dogs[dog_index]
+        blocked_positions = self._blocked_positions_for_dog(dog_index)
         movement_mask: dict[Action, bool] = {
-            action: self.project_dog_action(dog_index, action) != dog.position
+            action: self.project_dog_action(
+                dog_index, action, blocked_positions=blocked_positions
+            )
+            != dog.position
             for action in ACTION_ORDER
             if action != "wait"
         }
@@ -770,6 +880,7 @@ class SheepdogEnvironment:
             "wait",
             policy_mode=policy_mode,
             weights=weights,
+            blocked_positions=blocked_positions,
         )
         move_scores = {
             action: self._action_score(
@@ -778,6 +889,7 @@ class SheepdogEnvironment:
                 policy_mode=policy_mode,
                 weights=weights,
                 reserved_positions=reserved_positions,
+                blocked_positions=blocked_positions,
             )
             for action in ACTION_ORDER
             if action != "wait"
@@ -819,16 +931,23 @@ class SheepdogEnvironment:
             reverse=True,
         )
 
-    def project_dog_action(self, dog_index: int, action: Action) -> Point:
+    def project_dog_action(
+        self,
+        dog_index: int,
+        action: Action,
+        blocked_positions: set[Point] | None = None,
+    ) -> Point:
         """Return the destination point a dog would reach by taking the given action."""
         dog = self._dogs[dog_index]
-        blocked_positions = {sheep.position for sheep in self._sheep if not sheep.penned}
-        blocked_positions.update(other.position for other in self._dogs if other.index != dog_index)
         steps, _ = self._movement_steps(
             self._dog_action_speed(action),
             dog.movement_budget,
             allow_accumulation=action != "wait",
         )
+        if steps <= 0:
+            return dog.position
+        if blocked_positions is None:
+            blocked_positions = self._blocked_positions_for_dog(dog_index)
         return self._advance_position(
             dog.position,
             action,
@@ -883,9 +1002,22 @@ class SheepdogEnvironment:
         }
 
     def build_observation_for_dog(self, dog_index: int) -> DogObservation:
-        """Build the shared role-aware observation for one dog."""
-
-        return self._observation_builder.build(self, dog_index)
+        """Build the shared observation for one dog, optionally stacking strided history."""
+        step = self._step_count
+        dog_history = self._obs_history_by_dog.setdefault(dog_index, {})
+        if step not in dog_history:
+            dog_history[step] = self._observation_builder.build(self, dog_index)
+        strides = self._observation_history_strides
+        if strides == (0,):
+            stale_steps = [k for k in dog_history if k < step]
+            for k in stale_steps:
+                del dog_history[k]
+            return dog_history[step]
+        min_keep_step = step - max(strides)
+        stale_steps = [k for k in dog_history if k < min_keep_step]
+        for k in stale_steps:
+            del dog_history[k]
+        return stack_strided_observations(dog_history, step, strides)
 
     def score_action_for_dog(
         self,
@@ -1193,14 +1325,19 @@ class SheepdogEnvironment:
                 elif idx < len(invalid_action_attempts) and invalid_action_attempts[idx]:
                     dec["replacement_reason"] = "projected_blocked_by_obstacle"
 
-        previous_snapshot = self.get_state_snapshot()
+        previous_penned_count = sum(1 for sheep in self._sheep if sheep.penned)
+        previous_flock_spread = self._flock_spread()
         navigation = pen_navigation(self._pen, self.env_config.width, self.env_config.height)
         previous_entry_distance = sum(
             navigation.distance(sheep.position) for sheep in self._sheep if not sheep.penned
         ) / max(1, len(self._sheep))
         if self._best_entry_distance is None:
             self._best_entry_distance = previous_entry_distance
+        if self._best_flock_spread is None:
+            self._best_flock_spread = previous_flock_spread
         previous_farthest_to_flock_center = self._farthest_distance_to_flock_center()
+        if self._best_farthest_to_flock_center is None:
+            self._best_farthest_to_flock_center = previous_farthest_to_flock_center
         previous_flock_centroid = self._flock_center()
         previous_gate_corridor_distance = self._average_gate_corridor_distance()
         previous_gate_corridor_occupancy = self._gate_corridor_occupancy()
@@ -1210,8 +1347,10 @@ class SheepdogEnvironment:
         self._simulated_seconds += self.env_config.seconds_per_step
         self._roles_prepared_step = None
 
-        current_snapshot = self.get_state_snapshot()
-        newly_penned = current_snapshot.penned_count - previous_snapshot.penned_count
+        current_penned_count = sum(1 for sheep in self._sheep if sheep.penned)
+        current_flock_spread = self._flock_spread()
+        current_average_distance_to_pen = self._average_distance_to_pen()
+        newly_penned = current_penned_count - previous_penned_count
         current_entry_distance = sum(
             navigation.distance(sheep.position) for sheep in self._sheep if not sheep.penned
         ) / max(1, len(self._sheep))
@@ -1224,11 +1363,30 @@ class SheepdogEnvironment:
             self._entry_stall_steps = 0
         else:
             self._entry_stall_steps += 1
-        spread_delta = previous_snapshot.flock_spread - current_snapshot.flock_spread
-        current_farthest_to_flock_center = self._farthest_distance_to_flock_center()
-        farthest_to_flock_center_delta = (
-            previous_farthest_to_flock_center - current_farthest_to_flock_center
+        best_spread_progress = (
+            newly_penned > 0
+            or current_flock_spread < self._best_flock_spread - 1e-6
         )
+        spread_delta = (
+            self._best_flock_spread - current_flock_spread
+            if best_spread_progress
+            else 0.0
+        )
+        if best_spread_progress:
+            self._best_flock_spread = current_flock_spread
+        current_farthest_to_flock_center = self._farthest_distance_to_flock_center()
+        best_farthest_to_flock_center_progress = (
+            newly_penned > 0
+            or current_farthest_to_flock_center
+            < self._best_farthest_to_flock_center - 1e-6
+        )
+        farthest_to_flock_center_delta = (
+            self._best_farthest_to_flock_center - current_farthest_to_flock_center
+            if best_farthest_to_flock_center_progress
+            else 0.0
+        )
+        if best_farthest_to_flock_center_progress:
+            self._best_farthest_to_flock_center = current_farthest_to_flock_center
         current_farthest_to_pen = self._farthest_distance_to_pen()
         farthest_to_pen_delta = self._previous_farthest_distance - current_farthest_to_pen
         progress_made = self._progress_made_for_no_progress(
@@ -1243,7 +1401,7 @@ class SheepdogEnvironment:
         else:
             self._no_progress_steps += 1
 
-        self._success = current_snapshot.penned_count == len(self._sheep)
+        self._success = current_penned_count == len(self._sheep)
         self._timeout = self._step_count >= self.env_config.max_steps and not self._success
         self._stopped = (
             not self._success
@@ -1322,8 +1480,8 @@ class SheepdogEnvironment:
             RewardInputs(
                 previous_average_distance=previous_entry_distance,
                 current_average_distance=current_entry_distance,
-                previous_flock_spread=previous_snapshot.flock_spread,
-                current_flock_spread=current_snapshot.flock_spread,
+                previous_flock_spread=previous_flock_spread,
+                current_flock_spread=current_flock_spread,
                 newly_penned=newly_penned,
                 no_progress_step=not progress_made,
                 touched_wall=self._touched_wall_this_step(validated_actions),
@@ -1379,8 +1537,8 @@ class SheepdogEnvironment:
         self._reward_total += breakdown.total
         for k, v in breakdown.to_dict().items():
             self._episode_reward_breakdown[k] = self._episode_reward_breakdown.get(k, 0.0) + v
-        self._previous_average_distance = current_snapshot.average_distance_to_pen
-        self._previous_flock_spread = current_snapshot.flock_spread
+        self._previous_average_distance = current_average_distance_to_pen
+        self._previous_flock_spread = current_flock_spread
         self._previous_farthest_distance = current_farthest_to_pen
         self._previous_dog_positions = tuple(
             (float(dog.position.x), float(dog.position.y)) for dog in self._dogs
@@ -2047,13 +2205,28 @@ class SheepdogEnvironment:
         )
 
     def _target_position(self, position: Point, action: Action) -> Point:
-        dx, dy = ACTION_DELTAS[action]
-        candidate = Point(position.x + dx, position.y + dy).clamp(
-            self.env_config.width, self.env_config.height
-        )
-        if self._pen.contains(candidate) and not self._pen.contains(position):
+        if action == "wait":
             return position
-        if candidate in self._fence_cells and not self._pen.contains(position):
+        dx, dy = ACTION_DELTAS[action]
+        px = position.x
+        py = position.y
+        max_x = self.env_config.width - 1
+        max_y = self.env_config.height - 1
+        cx = px + dx
+        if cx > max_x:
+            cx = max_x
+        if cx < 0:
+            cx = 0
+        cy = py + dy
+        if cy > max_y:
+            cy = max_y
+        if cy < 0:
+            cy = 0
+        if cx == px and cy == py:
+            return position
+        candidate = Point(cx, cy)
+        pen = self._pen
+        if (pen.contains(candidate) or candidate in self._fence_cells) and not pen.contains(position):
             return position
         return candidate
 
@@ -2542,13 +2715,15 @@ class SheepdogEnvironment:
         policy_mode: PolicyMode | None = None,
         weights: Any | None = None,
         reserved_positions: set[Point] | None = None,
+        blocked_positions: set[Point] | None = None,
     ) -> float:
         self.prepare_policy_step(weights=weights)
         dog = self._dogs[dog_index]
         active_policy_mode = self._resolve_policy_mode(policy_mode, weights)
-        candidate = self.project_dog_action(dog_index, action)
+        candidate = self.project_dog_action(
+            dog_index, action, blocked_positions=blocked_positions
+        )
         candidate_debug = self._action_context_debug(active_policy_mode, dog_index, candidate)
-        current_debug = self._action_context_debug(active_policy_mode, dog_index, dog.position)
         flock_center = self._flock_center() or dog.position
         pen_center = (
             pen_navigation(self._pen, self.env_config.width, self.env_config.height).target(
@@ -2631,11 +2806,10 @@ class SheepdogEnvironment:
         )
         score += self._loop_penalty(dog, candidate)
         score -= self._sprint_action_penalty(dog, action, candidate, assignment, candidate_debug)
-        if self._is_reverse_action(dog.last_action, action) and not self._reverse_is_clearly_better(
-            current_debug,
-            candidate_debug,
-        ):
-            score -= 1.2
+        if self._is_reverse_action(dog.last_action, action):
+            current_debug = self._action_context_debug(active_policy_mode, dog_index, dog.position)
+            if not self._reverse_is_clearly_better(current_debug, candidate_debug):
+                score -= 1.2
         return score
 
     def _role_score(
@@ -2842,12 +3016,14 @@ class SheepdogEnvironment:
     ) -> bool:
         if not self._sheep:
             return False
+        blocked_positions = self._blocked_positions_for_dog(dog.index)
         current_score = self._action_score(
             dog.index,
             "wait",
             policy_mode=policy_mode,
             weights=weights,
             reserved_positions=reserved_positions,
+            blocked_positions=blocked_positions,
         )
         best_move_score = max(
             self._action_score(
@@ -2856,6 +3032,7 @@ class SheepdogEnvironment:
                 policy_mode=policy_mode,
                 weights=weights,
                 reserved_positions=reserved_positions,
+                blocked_positions=blocked_positions,
             )
             for action in ACTION_ORDER
             if action != "wait"
@@ -2870,33 +3047,45 @@ class SheepdogEnvironment:
 
     def _touched_wall_this_step(self, actions: list[Action]) -> bool:
         for dog, action in zip(self._dogs, actions, strict=True):
+            if action == "wait":
+                continue
             candidate = self.project_dog_action(dog.index, action)
-            if candidate == dog.position and action != "wait":
+            if candidate == dog.position:
                 return True
         return False
 
     def _flock_center(self) -> Point | None:
-        unpenned = [sheep.position for sheep in self._sheep if not sheep.penned]
-        if not unpenned:
+        sum_x = 0
+        sum_y = 0
+        n = 0
+        for sheep in self._sheep:
+            if not sheep.penned:
+                pos = sheep.position
+                sum_x += pos.x
+                sum_y += pos.y
+                n += 1
+        if n == 0:
             return None
-        x = round(fmean(position.x for position in unpenned))
-        y = round(fmean(position.y for position in unpenned))
-        return Point(x, y)
+        return Point(round(sum_x / n), round(sum_y / n))
 
     def _flock_spread(self) -> float:
         unpenned = [sheep.position for sheep in self._sheep if not sheep.penned]
-        if len(unpenned) <= 1:
+        n = len(unpenned)
+        if n <= 1:
             return 0.0
         centroid = self._flock_center()
         assert centroid is not None
-        return fmean(position.distance_to(centroid) for position in unpenned)
+        cx = centroid.x
+        cy = centroid.y
+        return fsum(hypot(position.x - cx, position.y - cy) for position in unpenned) / n
 
     def _average_distance_to_pen(self) -> float:
         unpenned = [sheep.position for sheep in self._sheep if not sheep.penned]
-        if not unpenned:
+        n = len(unpenned)
+        if n == 0:
             return 0.0
         navigation = pen_navigation(self._pen, self.env_config.width, self.env_config.height)
-        return fmean(navigation.distance(position) for position in unpenned)
+        return fsum(navigation.distance(position) for position in unpenned) / n
 
     def _farthest_distance_to_pen(self) -> float:
         """Return the longest legal entry route among unpenned sheep."""
@@ -3002,82 +3191,8 @@ class SheepdogEnvironment:
 
     def _default_action_weights(self, policy_mode: PolicyMode) -> Any:
         if self._instinct_target_awareness_enabled(policy_mode):
-            return type(
-                "Weights",
-                (),
-                {
-                    "nearest_sheep": 0.45,
-                    "flock_center": 1.8,
-                    "pen_pressure": 2.2,
-                    "behind_flock": 3.2,
-                    "team_formation": 2.8,
-                    "dog_spacing": 0.6,
-                    "wall_margin": 0.2,
-                    "wait_bias": 0.1,
-                    "rear_drive": 1.05,
-                    "flank_control": 0.95,
-                    "collector_focus": 1.15,
-                    "blocker_cover": 1.0,
-                    "rear_behind_flock": 1.0,
-                    "rear_drive_to_pen": 1.0,
-                    "rear_avoid_overpressure": 0.9,
-                    "rear_spacing": 0.55,
-                    "flank_side_control": 1.1,
-                    "flank_handedness": 0.75,
-                    "flank_escape_blocking": 0.85,
-                    "flank_spacing": 0.65,
-                    "flank_wall_margin": 0.35,
-                    "collector_stray_focus": 1.15,
-                    "collector_return_to_flock": 0.9,
-                    "collector_avoid_scatter": 0.85,
-                    "collector_rejoin_angle": 0.75,
-                    "blocker_escape_route_cover": 1.0,
-                    "blocker_gate_control": 1.1,
-                    "blocker_funnel_lane": 0.9,
-                    "blocker_hold_position": 0.8,
-                    "blocker_spacing": 0.55,
-                    "anti_stack_penalty": 2.0,
-                    "oscillation_penalty": 0.8,
-                },
-            )()
-        return type(
-            "Weights",
-            (),
-            {
-                "nearest_sheep": 0.75,
-                "flock_center": 2.1,
-                "pen_pressure": 0.0,
-                "behind_flock": 1.1,
-                "team_formation": 2.2,
-                "dog_spacing": 0.7,
-                "wall_margin": 0.25,
-                "wait_bias": -1.2,
-                "rear_drive": 0.0,
-                "flank_control": 0.0,
-                "collector_focus": 0.0,
-                "blocker_cover": 0.0,
-                "rear_behind_flock": 0.0,
-                "rear_drive_to_pen": 0.0,
-                "rear_avoid_overpressure": 0.0,
-                "rear_spacing": 0.0,
-                "flank_side_control": 0.0,
-                "flank_handedness": 0.0,
-                "flank_escape_blocking": 0.0,
-                "flank_spacing": 0.0,
-                "flank_wall_margin": 0.0,
-                "collector_stray_focus": 0.0,
-                "collector_return_to_flock": 0.0,
-                "collector_avoid_scatter": 0.0,
-                "collector_rejoin_angle": 0.0,
-                "blocker_escape_route_cover": 0.0,
-                "blocker_gate_control": 0.0,
-                "blocker_funnel_lane": 0.0,
-                "blocker_hold_position": 0.0,
-                "blocker_spacing": 0.0,
-                "anti_stack_penalty": 2.0,
-                "oscillation_penalty": 0.8,
-            },
-        )()
+            return _TARGET_AWARE_DEFAULT_WEIGHTS
+        return _INSTINCT_ONLY_DEFAULT_WEIGHTS
 
     def _action_context_debug(
         self,
@@ -3419,9 +3534,10 @@ class SheepdogEnvironment:
 
     def _average_gate_corridor_distance(self) -> float:
         unpenned = [sheep.position for sheep in self._sheep if not sheep.penned]
-        if not unpenned:
+        n = len(unpenned)
+        if n == 0:
             return 0.0
-        return fmean(self._gate_axis_distances(position)[1] for position in unpenned)
+        return fsum(self._gate_axis_distances(position)[1] for position in unpenned) / n
 
     def _gate_corridor_occupancy(self) -> float:
         unpenned = [sheep.position for sheep in self._sheep if not sheep.penned]
@@ -3508,3 +3624,110 @@ class SheepdogEnvironment:
         if self._terminated:
             return "terminated"
         return "running"
+
+
+@dataclass(frozen=True, slots=True)
+class _DefaultActionWeights:
+    nearest_sheep: float
+    flock_center: float
+    pen_pressure: float
+    behind_flock: float
+    team_formation: float
+    dog_spacing: float
+    wall_margin: float
+    wait_bias: float
+    rear_drive: float
+    flank_control: float
+    collector_focus: float
+    blocker_cover: float
+    rear_behind_flock: float
+    rear_drive_to_pen: float
+    rear_avoid_overpressure: float
+    rear_spacing: float
+    flank_side_control: float
+    flank_handedness: float
+    flank_escape_blocking: float
+    flank_spacing: float
+    flank_wall_margin: float
+    collector_stray_focus: float
+    collector_return_to_flock: float
+    collector_avoid_scatter: float
+    collector_rejoin_angle: float
+    blocker_escape_route_cover: float
+    blocker_gate_control: float
+    blocker_funnel_lane: float
+    blocker_hold_position: float
+    blocker_spacing: float
+    anti_stack_penalty: float
+    oscillation_penalty: float
+
+
+_TARGET_AWARE_DEFAULT_WEIGHTS = _DefaultActionWeights(
+    nearest_sheep=0.45,
+    flock_center=1.8,
+    pen_pressure=2.2,
+    behind_flock=3.2,
+    team_formation=2.8,
+    dog_spacing=0.6,
+    wall_margin=0.2,
+    wait_bias=0.1,
+    rear_drive=1.05,
+    flank_control=0.95,
+    collector_focus=1.15,
+    blocker_cover=1.0,
+    rear_behind_flock=1.0,
+    rear_drive_to_pen=1.0,
+    rear_avoid_overpressure=0.9,
+    rear_spacing=0.55,
+    flank_side_control=1.1,
+    flank_handedness=0.75,
+    flank_escape_blocking=0.85,
+    flank_spacing=0.65,
+    flank_wall_margin=0.35,
+    collector_stray_focus=1.15,
+    collector_return_to_flock=0.9,
+    collector_avoid_scatter=0.85,
+    collector_rejoin_angle=0.75,
+    blocker_escape_route_cover=1.0,
+    blocker_gate_control=1.1,
+    blocker_funnel_lane=0.9,
+    blocker_hold_position=0.8,
+    blocker_spacing=0.55,
+    anti_stack_penalty=2.0,
+    oscillation_penalty=0.8,
+)
+
+_INSTINCT_ONLY_DEFAULT_WEIGHTS = _DefaultActionWeights(
+    nearest_sheep=0.75,
+    flock_center=2.1,
+    pen_pressure=0.0,
+    behind_flock=1.1,
+    team_formation=2.2,
+    dog_spacing=0.7,
+    wall_margin=0.25,
+    wait_bias=-1.2,
+    rear_drive=0.0,
+    flank_control=0.0,
+    collector_focus=0.0,
+    blocker_cover=0.0,
+    rear_behind_flock=0.0,
+    rear_drive_to_pen=0.0,
+    rear_avoid_overpressure=0.0,
+    rear_spacing=0.0,
+    flank_side_control=0.0,
+    flank_handedness=0.0,
+    flank_escape_blocking=0.0,
+    flank_spacing=0.0,
+    flank_wall_margin=0.0,
+    collector_stray_focus=0.0,
+    collector_return_to_flock=0.0,
+    collector_avoid_scatter=0.0,
+    collector_rejoin_angle=0.0,
+    blocker_escape_route_cover=0.0,
+    blocker_gate_control=0.0,
+    blocker_funnel_lane=0.0,
+    blocker_hold_position=0.0,
+    blocker_spacing=0.0,
+    anti_stack_penalty=2.0,
+    oscillation_penalty=0.8,
+)
