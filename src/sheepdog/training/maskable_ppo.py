@@ -37,6 +37,61 @@ from sheepdog.training.trainer import Trainer
 logger = logging.getLogger(__name__)
 
 
+def collect_worker_scenario_usage(venv: Any) -> dict[str, Any]:
+    """Read cumulative episode-start counts from the workers that actually sample.
+
+    Counts span this vector environment's lifetime, not a checkpoint interval or
+    restored historical run. A failed query is unavailable, never zero exposure.
+    """
+    try:
+        if venv is None or not hasattr(venv, "env_method"):
+            raise RuntimeError("Training vector environment does not expose env_method")
+        summaries = venv.env_method("get_scenario_sampler_summary")
+        if not summaries or len(summaries) != venv.num_envs:
+            raise RuntimeError("Incomplete worker scenario summaries")
+        counts: dict[str, int] = {}
+        for summary in summaries:
+            worker_counts = summary["scenario_counts"]
+            if sum(worker_counts.values()) != summary["total_episodes"]:
+                raise ValueError("Worker scenario counts do not match episode total")
+            for name, count in worker_counts.items():
+                counts[name] = counts.get(name, 0) + int(count)
+        total = sum(counts.values())
+        normal = counts.get("normal", 0) + counts.get("random", 0)
+        return {
+            "status": "available",
+            "source": "training_vector_workers",
+            "count_scope": "vector_environment_lifetime_episode_starts",
+            "worker_count": len(summaries),
+            "failure_directed_enabled": all(w["failure_directed_enabled"] for w in summaries),
+            "active_failure_weights": summaries[0]["active_failure_weights"] if all(
+                w["active_failure_weights"] == summaries[0]["active_failure_weights"] for w in summaries
+            ) else None,
+            "total_episodes": total,
+            "normal_episodes": normal,
+            "targeted_episodes": total - normal,
+            "normal_percentage": normal / total * 100 if total else None,
+            "targeted_percentage": (total - normal) / total * 100 if total else None,
+            "scenario_counts": counts,
+            "scenario_percentages": {k: v / total * 100 for k, v in counts.items()} if total else {},
+            "workers": summaries,
+        }
+    except Exception as exc:
+        logger.warning("Scenario exposure telemetry unavailable: %s", exc)
+        return {
+            "status": "unavailable",
+            "source": "training_vector_workers",
+            "count_scope": "vector_environment_lifetime_episode_starts",
+            "error": str(exc),
+            "total_episodes": None,
+            "normal_episodes": None,
+            "targeted_episodes": None,
+            "normal_percentage": None,
+            "targeted_percentage": None,
+            "scenario_counts": None,
+        }
+
+
 @dataclass(frozen=True, slots=True)
 class NeuralTrainingRunSummary:
     """Metadata for a neural PPO training run."""
@@ -72,6 +127,8 @@ class _TrainingProgressCallback(BaseCallback):
         segment_index: int,
         policy_version: int,
         starting_total: int,
+        batch_total_segments: int = 1,
+        batch_completed_timesteps_offset: int = 0,
     ) -> None:
         super().__init__()
         self._emit = emit
@@ -85,12 +142,21 @@ class _TrainingProgressCallback(BaseCallback):
         self._completed_timesteps = completed_timesteps
         self._completed_segments = completed_segments
         self._segment_index = segment_index
+        self._batch_total_segments = max(1, int(batch_total_segments))
+        self._batch_completed_timesteps_offset = max(0, int(batch_completed_timesteps_offset))
         self.policy_version = policy_version
         self._last_reported_steps = 0
 
     def _on_step(self) -> bool:
         if self._should_stop is not None and self._should_stop():
             return False
+
+        num_timesteps = int(self.num_timesteps)
+        current_seg_ts = min(num_timesteps, self._total_timesteps)
+        completion = min(1.0, current_seg_ts / self._total_timesteps)
+        fractional_completed = self._completed_segments + completion
+        current_global_ts = self._completed_timesteps + num_timesteps
+        batch_completed_ts = self._batch_completed_timesteps_offset + current_seg_ts
 
         # Emit individual episode completion logs as they finish
         dones = self.locals.get("dones")
@@ -108,13 +174,10 @@ class _TrainingProgressCallback(BaseCallback):
                         except Exception:
                             actual_eps = 0
                         ep_num = self._starting_total + actual_eps
-                        current_global_ts = self._completed_timesteps + int(self.num_timesteps)
-                        current_seg_ts = min(int(self.num_timesteps), self._total_timesteps)
-                        completion_pct = current_seg_ts / max(1, self._total_timesteps)
                         msg = (
                             f"Learning neural policy: "
                             f"{current_seg_ts}/{self._total_timesteps} "
-                            f"timesteps ({completion_pct:.0%})"
+                            f"timesteps ({completion:.0%})"
                         )
                         self._emit(
                             {
@@ -125,6 +188,13 @@ class _TrainingProgressCallback(BaseCallback):
                                 "total_episodes_trained": ep_num,
                                 "actual_completed_episodes": actual_eps,
                                 "global_timestep": current_global_ts,
+                                "current_global_timestep": current_global_ts,
+                                "batch_completed_segments": fractional_completed,
+                                "batch_total_segments": self._batch_total_segments,
+                                "batch_completed_episodes": fractional_completed,
+                                "batch_total_episodes": self._batch_total_episodes,
+                                "batch_completed_timesteps": batch_completed_ts,
+                                "batch_total_timesteps": self._batch_total_timesteps,
                                 "reward": float(ep_info.get("r", 0.0)),
                                 "length": int(ep_info.get("l", 0)),
                                 "success": bool(ep_info.get("success", False)),
@@ -151,15 +221,12 @@ class _TrainingProgressCallback(BaseCallback):
                             }
                         )
 
-        num_timesteps = int(self.num_timesteps)
         if (
             num_timesteps < self._total_timesteps
             and num_timesteps - self._last_reported_steps < self._report_interval
         ):
             return True
         self._last_reported_steps = num_timesteps
-        completion = min(1.0, num_timesteps / self._total_timesteps)
-        fractional_completed = self._completed_segments + completion
         ppo_update_count = getattr(self.model, "_n_updates", 0)
         current_policy_version = self.policy_version + ppo_update_count
         last_policy_update_time = datetime.now(UTC).isoformat() if ppo_update_count > 0 else None
@@ -175,6 +242,8 @@ class _TrainingProgressCallback(BaseCallback):
         self._emit(
             {
                 "phase": "learning",
+                "batch_completed_segments": fractional_completed,
+                "batch_total_segments": self._batch_total_segments,
                 "batch_completed_episodes": fractional_completed,
                 "actual_completed_episodes": actual_completed_episodes,
                 "current_episode": self._starting_total + actual_completed_episodes,
@@ -183,13 +252,13 @@ class _TrainingProgressCallback(BaseCallback):
                 "best_score": None,
                 "message": (
                     f"Learning neural policy: "
-                    f"{min(num_timesteps, self._total_timesteps)}/{self._total_timesteps} "
+                    f"{current_seg_ts}/{self._total_timesteps} "
                     f"timesteps ({completion:.0%})"
                 ),
                 "batch_total_episodes": self._batch_total_episodes,
                 "batch_total_timesteps": self._batch_total_timesteps,
-                "batch_completed_timesteps": self._completed_timesteps
-                + min(num_timesteps, self._total_timesteps),
+                "batch_completed_timesteps": batch_completed_ts,
+                "current_global_timestep": current_global_ts,
                 "policy_version": current_policy_version,
                 "ppo_update_count": ppo_update_count,
                 "last_policy_update_time": last_policy_update_time,
@@ -631,15 +700,22 @@ class MaskablePPOTrainer(Trainer):
             if progress_callback is None:
                 return
             payload.setdefault("batch_total_episodes", batch_total)
+            payload.setdefault("batch_total_segments", n_checkpoints)
             payload.setdefault("starting_total_episodes", starting_total)
             progress_callback(payload)
 
         self.evaluator.progress_callback = emit
 
+        resumed_batch_target = timestep_targets[skip_segments - 1] if skip_segments else 0
         emit(
             {
                 "phase": "starting",
+                "batch_completed_segments": skip_segments,
+                "batch_total_segments": n_checkpoints,
                 "batch_completed_episodes": skip_segments,
+                "batch_total_timesteps": timestep_targets[-1],
+                "batch_completed_timesteps": resumed_batch_target,
+                "current_global_timestep": starting_total_timesteps,
                 "current_episode": None,
                 "total_episodes_trained": starting_total,
                 "checkpoint_episode": None,
@@ -788,7 +864,7 @@ class MaskablePPOTrainer(Trainer):
                     tuple(train_config.evaluation_seeds),
                     checkpoint_episode=starting_total,
                     capture_replays=True,
-                    capture_step_telemetry=True,
+                    capture_step_telemetry=False,
                     evaluation_mode="stage_transition_baseline",
                     run_id=run_id,
                     checkpoint_id=baseline_id,
@@ -798,7 +874,7 @@ class MaskablePPOTrainer(Trainer):
                     should_stop=should_stop,
                     experiment_id=execution_context.experiment_id,
                     activation_id=execution_context.activation_id,
-                    checkpoint_record_id=f"chk_rec_{baseline_id}",
+                    checkpoint_record_id=None,
                 )
             except EvaluationInterruptedError:
                 logger.info(
@@ -864,8 +940,8 @@ class MaskablePPOTrainer(Trainer):
                 try:
                     if hasattr(venv, "env_method"):
                         venv.env_method("update_failure_weights", saved_fw)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("Failed to restore failure weights on vec_env: %s", exc)
 
         checkpoint_payloads: list[dict[str, Any]] = (
             list(self._load_summary_checkpoints()) if resuming_policy else []
@@ -891,6 +967,7 @@ class MaskablePPOTrainer(Trainer):
         atomic_write_json(self._state_path, _pre_loop_state)
         self._loaded_state = _pre_loop_state
 
+        cumulative_ts = starting_total_timesteps
         for completed_checkpoints, _checkpoint_slot in enumerate(
             train_config.checkpoint_episodes,
             start=1,
@@ -900,18 +977,23 @@ class MaskablePPOTrainer(Trainer):
                 break
             if completed_checkpoints <= skip_segments:
                 continue
+            segment_start_perf = time.perf_counter()
             new_segments = completed_checkpoints - skip_segments
             segment_steps = segment_timesteps[completed_checkpoints - 1]
-            resumed_target = timestep_targets[skip_segments - 1] if skip_segments else 0
-            cumulative_ts = (
-                starting_total_timesteps
-                + timestep_targets[completed_checkpoints - 1]
-                - resumed_target
+            previous_target = (
+                timestep_targets[completed_checkpoints - 2]
+                if completed_checkpoints > 1
+                else 0
             )
             emit(
                 {
                     "phase": "learning",
+                    "batch_completed_segments": completed_checkpoints - 1,
+                    "batch_total_segments": n_checkpoints,
                     "batch_completed_episodes": completed_checkpoints - 1,
+                    "batch_total_timesteps": timestep_targets[-1],
+                    "batch_completed_timesteps": previous_target,
+                    "current_global_timestep": cumulative_ts,
                     "current_episode": None,
                     "total_episodes_trained": starting_total + new_segments - 1,
                     "checkpoint_episode": None,
@@ -932,18 +1014,13 @@ class MaskablePPOTrainer(Trainer):
                 starting_total_episodes=starting_total + new_segments - 1,
                 batch_total_episodes=batch_total,
                 batch_total_timesteps=timestep_targets[-1],
-                completed_timesteps=(
-                    starting_total_timesteps
-                    + (
-                        timestep_targets[completed_checkpoints - 2]
-                        if completed_checkpoints > 1
-                        else 0
-                    )
-                ),
+                completed_timesteps=cumulative_ts,
                 completed_segments=completed_checkpoints - 1,
                 segment_index=completed_checkpoints - 1,
                 policy_version=policy_version,
                 starting_total=starting_environment_episodes,
+                batch_total_segments=n_checkpoints,
+                batch_completed_timesteps_offset=previous_target,
             )
             from stable_baselines3.common.callbacks import CallbackList
             callbacks_to_use = [progress_reporter]
@@ -1017,6 +1094,7 @@ class MaskablePPOTrainer(Trainer):
                 except Exception:
                     policy.model.tensorboard_log = None
 
+            learn_start_perf = time.perf_counter()
             with training_phase:
                 try:
                     policy.model.learn(
@@ -1036,6 +1114,18 @@ class MaskablePPOTrainer(Trainer):
                         progress_bar=False,
                         callback=callback_list,
                     )
+            learn_seconds = max(0.0, time.perf_counter() - learn_start_perf)
+            raw_learned_timesteps = getattr(policy.model, "num_timesteps", None)
+            actual_segment_steps = (
+                int(raw_learned_timesteps)
+                if isinstance(raw_learned_timesteps, (int, float))
+                and int(raw_learned_timesteps) > 0
+                else int(segment_steps)
+            )
+            cumulative_ts += actual_segment_steps
+            transitions_per_sec = (
+                float(actual_segment_steps) / learn_seconds if learn_seconds > 0 else None
+            )
 
             # Increment policy update version
             policy_version += 1
@@ -1153,6 +1243,7 @@ class MaskablePPOTrainer(Trainer):
                 if self.runtime_tracker is not None
                 else contextlib.nullcontext()
             )
+            model_save_start_perf = time.perf_counter()
             with model_save_phase:
                 active_stage = self.config.rewards.instincts.curriculum_stage
                 model_name = (
@@ -1161,6 +1252,7 @@ class MaskablePPOTrainer(Trainer):
                     else f"{self.MODEL_PREFIX}-{cumulative_ts:08d}"
                 )
                 saved_model_path = policy.save(stage_model_root / model_name)
+            model_save_seconds = max(0.0, time.perf_counter() - model_save_start_perf)
             total_eps_this_checkpoint = batch_starting_checkpoint_episode + _checkpoint_slot
             run_id = self._loaded_state.get("run_id")
             chk_id = f"chk_{run_id}_pv_{policy_version}_ts_{cumulative_ts}"
@@ -1168,43 +1260,64 @@ class MaskablePPOTrainer(Trainer):
             active_stage = self.config.rewards.instincts.curriculum_stage
 
             self.evaluator.runtime_tracker = self.runtime_tracker
+            all_eval_seeds = tuple(train_config.evaluation_seeds)
             quick_seed_count = max(1, int(train_config.quick_evaluation_seed_count))
             quick_seeds = tuple(train_config.evaluation_seeds[:quick_seed_count])
+            ran_quick_eval = quick_seeds != all_eval_seeds
+            is_final_checkpoint = completed_checkpoints == n_checkpoints
             evaluation_phase = (
                 self.runtime_tracker.phase("evaluation")
                 if self.runtime_tracker is not None
                 else contextlib.nullcontext()
             )
+            ran_confidence_eval = False
+            quick_eval_seconds = 0.0
+            confidence_eval_seconds = 0.0
+            quick_summary: Any = None
+            quick_evaluation_json: Path | None = None
             try:
                 with evaluation_phase:
-                    quick_summary, evaluation_json, _csv_path = self.evaluator.evaluate(
-                        policy,
-                        quick_seeds,
-                        checkpoint_episode=total_eps_this_checkpoint,
-                        capture_replays=True,
-                        capture_step_telemetry=True,
-                        evaluation_mode="quick",
-                        run_id=run_id,
-                        checkpoint_id=chk_id,
-                        policy_version=policy_version,
-                        curriculum_stage=active_stage,
-                        should_stop=should_stop,
-                        experiment_id=execution_context.experiment_id,
-                        activation_id=execution_context.activation_id,
-                        checkpoint_record_id=f"chk_rec_{chk_id}",
-                    )
-                    is_final_checkpoint = completed_checkpoints == n_checkpoints
-                    confidence_candidate = (
-                        quick_summary.success_rate
-                        >= float(train_config.confidence_candidate_success_rate)
-                    )
-                    if is_final_checkpoint or confidence_candidate or len(quick_summary.records) < len(train_config.evaluation_seeds):
-                        summary, evaluation_json, _csv_path = self.evaluator.evaluate(
+                    if ran_quick_eval:
+                        quick_eval_start_perf = time.perf_counter()
+                        quick_summary, quick_evaluation_json, _csv_path = self.evaluator.evaluate(
                             policy,
-                            tuple(train_config.evaluation_seeds),
+                            quick_seeds,
                             checkpoint_episode=total_eps_this_checkpoint,
                             capture_replays=True,
-                            capture_step_telemetry=True,
+                            capture_step_telemetry=False,
+                            evaluation_mode="quick",
+                            run_id=run_id,
+                            checkpoint_id=chk_id,
+                            policy_version=policy_version,
+                            curriculum_stage=active_stage,
+                            should_stop=should_stop,
+                            experiment_id=execution_context.experiment_id,
+                            activation_id=execution_context.activation_id,
+                            checkpoint_record_id=f"chk_rec_{chk_id}",
+                            record_in_registry=False,
+                        )
+                        quick_eval_seconds = max(0.0, time.perf_counter() - quick_eval_start_perf)
+                        confidence_candidate = (
+                            quick_summary.success_rate
+                            >= float(train_config.confidence_candidate_success_rate)
+                        )
+                        should_run_confidence = (
+                            is_final_checkpoint
+                            or confidence_candidate
+                            or len(quick_summary.records) < len(all_eval_seeds)
+                        )
+                    else:
+                        should_run_confidence = True
+
+                    if should_run_confidence:
+                        ran_confidence_eval = True
+                        confidence_eval_start_perf = time.perf_counter()
+                        summary, evaluation_json, _csv_path = self.evaluator.evaluate(
+                            policy,
+                            all_eval_seeds,
+                            checkpoint_episode=total_eps_this_checkpoint,
+                            capture_replays=True,
+                            capture_step_telemetry=False,
                             evaluation_mode="confidence",
                             run_id=run_id,
                             checkpoint_id=chk_id,
@@ -1215,9 +1328,14 @@ class MaskablePPOTrainer(Trainer):
                             experiment_id=execution_context.experiment_id,
                             activation_id=execution_context.activation_id,
                             checkpoint_record_id=f"chk_rec_{chk_id}",
+                            record_in_registry=False,
+                        )
+                        confidence_eval_seconds = max(
+                            0.0, time.perf_counter() - confidence_eval_start_perf
                         )
                     else:
                         summary = quick_summary
+                        evaluation_json = quick_evaluation_json
             except EvaluationInterruptedError:
                 logger.info("Evaluation at checkpoint %d interrupted by stop/pause request.", total_eps_this_checkpoint)
                 interrupted = True
@@ -1238,14 +1356,23 @@ class MaskablePPOTrainer(Trainer):
                     self._failure_sampler.update_env_config(self.config.environment)
                 failure_weights = self._failure_sampler.update_from_evaluation(summary.records)
                 # Propagate to vectorized environment workers
+                weight_update_status = "unavailable"
+                weight_update_error = None
                 if hasattr(policy.model, "get_env") and policy.model.get_env() is not None:
                     venv = policy.model.get_env()
                     try:
                         if hasattr(venv, "env_method"):
                             venv.env_method("update_failure_weights", failure_weights)
+                            weight_update_status = "applied"
                     except Exception as exc:
+                        weight_update_status = "failed"
+                        weight_update_error = str(exc)
                         logger.warning("Failed to update failure weights on vec_env: %s", exc)
-                failure_telemetry = self._failure_sampler.get_usage_summary()
+                venv = policy.model.get_env() if hasattr(policy.model, "get_env") else None
+                failure_telemetry = collect_worker_scenario_usage(venv)
+                failure_telemetry["requested_failure_weights"] = failure_weights
+                failure_telemetry["weight_update_status"] = weight_update_status
+                failure_telemetry["weight_update_error"] = weight_update_error
 
             if getattr(train_config, "enable_adaptive_learning", True):
                 adaptive_state = adaptive_controller.update(
@@ -1373,6 +1500,7 @@ class MaskablePPOTrainer(Trainer):
                 change_id=execution_context.change_id,
                 **runtime_snapshot,
             )
+            post_eval_save_start_perf = time.perf_counter()
             if is_new_best:
                 best_success_rate = summary.success_rate
                 best_average_reward = summary.average_reward
@@ -1409,6 +1537,47 @@ class MaskablePPOTrainer(Trainer):
             )
             with checkpoint_write_phase:
                 checkpoint_path = self.checkpoint_store.write(metadata)
+            if ran_quick_eval and quick_summary is not None and quick_evaluation_json is not None:
+                self.evaluator.record_evaluation_in_registry(
+                    summary=quick_summary,
+                    json_path=quick_evaluation_json,
+                    policy=policy,
+                    experiment_id=execution_context.experiment_id,
+                    activation_id=execution_context.activation_id,
+                    checkpoint_record_id=f"chk_rec_{chk_id}",
+                )
+            if ran_confidence_eval:
+                self.evaluator.record_evaluation_in_registry(
+                    summary=summary,
+                    json_path=evaluation_json,
+                    policy=policy,
+                    experiment_id=execution_context.experiment_id,
+                    activation_id=execution_context.activation_id,
+                    checkpoint_record_id=f"chk_rec_{chk_id}",
+                )
+            ppo_env_workers = int(getattr(train_config, "ppo_env_workers", 1) or 1)
+            save_and_export_seconds = model_save_seconds + max(
+                0.0, time.perf_counter() - post_eval_save_start_perf
+            )
+            segment_total_seconds = max(0.0, time.perf_counter() - segment_start_perf)
+            eval_overhead_pct = (
+                100.0 * (quick_eval_seconds + confidence_eval_seconds) / segment_total_seconds
+                if segment_total_seconds > 0
+                else 0.0
+            )
+            segment_timing: dict[str, Any] = {
+                "segment_steps": int(actual_segment_steps),
+                "requested_segment_steps": int(segment_steps),
+                "actual_segment_steps": int(actual_segment_steps),
+                "learn_seconds": learn_seconds,
+                "transitions_per_sec": transitions_per_sec,
+                "quick_eval_seconds": quick_eval_seconds,
+                "confidence_eval_seconds": confidence_eval_seconds,
+                "save_and_export_seconds": save_and_export_seconds,
+                "segment_total_seconds": segment_total_seconds,
+                "eval_overhead_pct": eval_overhead_pct,
+                "ppo_env_workers": ppo_env_workers,
+            }
             checkpoint_payload = {
                 "checkpoint_episode": total_eps_this_checkpoint,
                 "recorded_at": recorded_time,
@@ -1478,6 +1647,7 @@ class MaskablePPOTrainer(Trainer):
                 "promotion_eligible": summary.promotion_eligible,
                 "failure_directed_weights": failure_weights if getattr(train_config, "failure_directed_training_enabled", False) else None,
                 "failure_directed_telemetry": failure_telemetry if getattr(train_config, "failure_directed_training_enabled", False) else None,
+                "segment_timing": segment_timing,
                 **runtime_snapshot,
             }
             checkpoint_payloads = self._merge_checkpoint(checkpoint_payloads, checkpoint_payload)
@@ -1514,6 +1684,7 @@ class MaskablePPOTrainer(Trainer):
                 "failure_directed_weights": failure_weights if getattr(train_config, "failure_directed_training_enabled", False) else None,
                 "failure_directed_telemetry": failure_telemetry if getattr(train_config, "failure_directed_training_enabled", False) else None,
                 "stage_transition_baseline": self._loaded_state.get("stage_transition_baseline"),
+                "last_segment_timing": segment_timing,
             }
             state_export_phase = (
                 self.runtime_tracker.phase("checkpoint_save")
@@ -1542,6 +1713,32 @@ class MaskablePPOTrainer(Trainer):
                     logging.getLogger(__name__).warning(
                         "Optional summary/web asset export failed: %s", exc, exc_info=True
                     )
+            save_and_export_seconds = model_save_seconds + max(
+                0.0, time.perf_counter() - post_eval_save_start_perf
+            )
+            segment_total_seconds = max(0.0, time.perf_counter() - segment_start_perf)
+            eval_overhead_pct = (
+                100.0 * (quick_eval_seconds + confidence_eval_seconds) / segment_total_seconds
+                if segment_total_seconds > 0
+                else 0.0
+            )
+            segment_timing["save_and_export_seconds"] = save_and_export_seconds
+            segment_timing["segment_total_seconds"] = segment_total_seconds
+            segment_timing["eval_overhead_pct"] = eval_overhead_pct
+            tps_str = (
+                f"{transitions_per_sec:.0f} steps/s"
+                if transitions_per_sec is not None
+                else "n/a"
+            )
+            print(
+                f"[Sheepdog] Timing | total={segment_total_seconds:.2f}s | "
+                f"learn={learn_seconds:.2f}s ({tps_str}) | "
+                f"quick_eval={quick_eval_seconds:.2f}s | "
+                f"conf_eval={confidence_eval_seconds:.2f}s | "
+                f"save_export={save_and_export_seconds:.2f}s | "
+                f"eval_overhead={eval_overhead_pct:.1f}%",
+                flush=True,
+            )
             if getattr(self.config.training, "backup_enabled", True):
                 try:
                     from sheepdog.training.backup import TrainingBackupManager
@@ -1569,6 +1766,8 @@ class MaskablePPOTrainer(Trainer):
             emit(
                 {
                     "phase": "checkpoint",
+                    "batch_completed_segments": completed_checkpoints,
+                    "batch_total_segments": n_checkpoints,
                     "batch_completed_episodes": completed_checkpoints,
                     "current_episode": total_eps_this_checkpoint,
                     "total_episodes_trained": total_eps_this_checkpoint,
@@ -1586,6 +1785,7 @@ class MaskablePPOTrainer(Trainer):
                     "clip_fraction": clip_fraction,
                     "explained_variance": explained_variance,
                     "total_timesteps": cumulative_ts,
+                    "current_global_timestep": cumulative_ts,
                     "batch_total_timesteps": timestep_targets[-1],
                     "batch_completed_timesteps": timestep_targets[
                         completed_checkpoints - 1
@@ -1598,6 +1798,7 @@ class MaskablePPOTrainer(Trainer):
                     "last_policy_update_time": datetime.now(UTC).isoformat(),
                     "last_evaluation_time": datetime.now(UTC).isoformat(),
                     "run_id": self._loaded_state.get("run_id"),
+                    "segment_timing": segment_timing,
                 }
             )
 
@@ -1638,9 +1839,7 @@ class MaskablePPOTrainer(Trainer):
         state_payload = {
             "total_episodes_trained": total_episodes_trained,
             "total_environment_episodes": total_environment_episodes,
-            "total_timesteps": starting_total_timesteps
-            + timestep_targets[-1]
-            - (timestep_targets[skip_segments - 1] if skip_segments else 0),
+            "total_timesteps": cumulative_ts,
             "policy_state_path": final_model_path_str,
             "best_model_path": str(tracked_best_model_path) if tracked_best_model_path else None,
             "best_model_curriculum_stage": best_model_curriculum_stage,
@@ -1658,6 +1857,7 @@ class MaskablePPOTrainer(Trainer):
             "parent_checkpoint_id": self._loaded_state.get("parent_checkpoint_id"),
             "policy_version": policy_version,
             "stage_transition_baseline": self._loaded_state.get("stage_transition_baseline"),
+            "last_segment_timing": self._loaded_state.get("last_segment_timing"),
         }
         atomic_write_json(self._state_path, state_payload)
         self._loaded_state = state_payload
@@ -1675,9 +1875,14 @@ class MaskablePPOTrainer(Trainer):
         emit(
             {
                 "phase": "complete",
+                "batch_completed_segments": n_checkpoints,
+                "batch_total_segments": n_checkpoints,
                 "batch_completed_episodes": train_config.checkpoint_episodes[-1]
                 if train_config.checkpoint_episodes
                 else batch_total,
+                "batch_total_timesteps": timestep_targets[-1],
+                "batch_completed_timesteps": timestep_targets[-1],
+                "current_global_timestep": state_payload["total_timesteps"],
                 "current_episode": checkpoint_payloads[-1]["checkpoint_episode"]
                 if checkpoint_payloads
                 else None,

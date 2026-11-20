@@ -985,19 +985,55 @@ def compute_promotion_gate_snapshot(
         except Exception:
             eval_summary = {}
 
-    eval_records = eval_summary.get("records", []) if eval_summary else checkpoint_payload.get("records", [])
+    target_run_id = checkpoint_payload.get("run_id") or eval_summary.get("run_id")
+    target_obs_hash = (
+        checkpoint_payload.get("observation_schema_hash")
+        or eval_summary.get("observation_schema_hash")
+    )
+    target_env_hash = (
+        checkpoint_payload.get("environment_config_hash")
+        or eval_summary.get("environment_config_hash")
+    )
+    identity_filters = (
+        ("run_id", target_run_id),
+        ("observation_schema_hash", target_obs_hash),
+        ("environment_config_hash", target_env_hash),
+    )
+
+    def _matches_identity(record: dict[str, Any]) -> bool:
+        return not any(
+            (record.get(field) != target_val)
+            if target_val is not None
+            else (record.get(field) is not None)
+            for field, target_val in identity_filters
+        )
+
+    eval_summary_compatible = (
+        bool(eval_summary)
+        and eval_summary.get("evaluation_mode") != "stage_transition_baseline"
+        and _matches_identity(eval_summary)
+    )
+    eval_records = (
+        eval_summary.get("records", [])
+        if eval_summary_compatible
+        else checkpoint_payload.get("records", [])
+    )
 
     all_evals = _load_all_persisted_evaluations(output_root, journey)
 
-    # Filter formal evaluations compatible with the current stage and journey.
-    # Deduplicate by checkpoint_episode so each checkpoint is counted at most once
-    # (preferring formal 'confidence' benchmark runs over 'quick' runs).
+    # Filter formal evaluations compatible with the current stage, run, and schema/config.
+    # Exclude stage_transition_baseline evaluations and deduplicate by checkpoint_episode so
+    # each checkpoint is counted at most once (preferring formal 'confidence' runs over 'quick').
     evals_by_ep: dict[int, dict[str, Any]] = {}
     for ev in all_evals:
+        if ev.get("evaluation_mode") == "stage_transition_baseline":
+            continue
         ev_ep = ev.get("checkpoint_episode")
         if ev_ep is None or ev_ep > target_ep:
             continue
         if ev.get("curriculum_stage") != target_stage:
+            continue
+        if not _matches_identity(ev):
             continue
         ev_recs = ev.get("records", [])
         if len(ev_recs) < 5:  # Require formal multi-seed evaluation
@@ -1018,7 +1054,13 @@ def compute_promotion_gate_snapshot(
             if (ev_is_conf and not existing_is_conf) or (not existing_is_conf and ev.get("evaluation_mode") != "quick"):
                 evals_by_ep[ev_ep] = ev
 
-    if target_ep not in evals_by_ep and checkpoint_payload and checkpoint_payload.get("curriculum_stage") == target_stage and len(eval_records) >= 5:
+    if (
+        target_ep not in evals_by_ep
+        and checkpoint_payload
+        and checkpoint_payload.get("curriculum_stage") == target_stage
+        and checkpoint_payload.get("evaluation_mode") != "stage_transition_baseline"
+        and len(eval_records) >= 5
+    ):
         evals_by_ep[target_ep] = {
             **checkpoint_payload,
             "checkpoint_episode": target_ep,

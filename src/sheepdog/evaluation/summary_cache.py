@@ -25,7 +25,7 @@ from sheepdog.atomic_io import atomic_write_json
 
 logger = logging.getLogger(__name__)
 
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 
 SUMMARY_FIELDS: tuple[str, ...] = (
     "average_completion_steps",
@@ -33,9 +33,13 @@ SUMMARY_FIELDS: tuple[str, ...] = (
     "checkpoint_episode",
     "checkpoint_id",
     "curriculum_stage",
+    "environment_config_hash",
     "evaluation_id",
     "evaluation_mode",
+    "evaluation_seed_set_id",
+    "observation_schema_hash",
     "promotion_eligible",
+    "run_id",
     "success_rate",
 )
 
