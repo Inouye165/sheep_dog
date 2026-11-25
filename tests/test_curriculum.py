@@ -310,3 +310,58 @@ def test_stage_seven_curriculum_and_training_overrides() -> None:
     assert stage_seven.training.failure_directed_training_enabled is True
 
 
+def test_stage_zero_returns_config_unchanged() -> None:
+    base = LabConfig()
+    result = apply_curriculum_stage(base, 0)
+    assert result == base
+
+
+def test_stage_aware_ppo_overrides_across_stages() -> None:
+    base = LabConfig()
+
+    stage_1 = apply_curriculum_stage(base, 1)
+    assert stage_1.environment.dogs == 1
+    assert stage_1.training.gamma == 0.99
+    assert stage_1.training.learning_rate == 3.0e-4
+    assert stage_1.training.learning_rate_final == 1.0e-4
+    assert stage_1.training.target_kl == 0.03
+
+    stage_5 = apply_curriculum_stage(base, 5)
+    assert stage_5.environment.dogs == 2
+    assert stage_5.training.gamma == 0.995
+    assert stage_5.training.learning_rate == 3.0e-4
+    assert stage_5.training.learning_rate_final == 1.0e-4
+    assert stage_5.training.target_kl == 0.03
+
+    stage_7 = apply_curriculum_stage(base, 7)
+    assert stage_7.environment.dogs == 2
+    assert stage_7.training.gamma == 0.995
+    assert stage_7.training.learning_rate == 8.0e-5
+    assert stage_7.training.learning_rate_final == 2.5e-5
+    assert stage_7.training.target_kl == 0.02
+    assert stage_7.training.entropy_coef == 0.014
+
+    stage_8 = apply_curriculum_stage(base, 8)
+    assert stage_8.environment.dogs == 3
+    assert stage_8.training.gamma == 0.997
+    assert stage_8.training.learning_rate == 1.2e-4
+    assert stage_8.training.learning_rate_final == 4.0e-5
+    assert stage_8.training.target_kl == 0.02
+
+    stage_33 = apply_curriculum_stage(base, 33)
+    assert stage_33.environment.dogs == 3
+    assert stage_33.training.gamma == 0.997
+    assert stage_33.training.learning_rate == 1.0e-4
+    assert stage_33.training.learning_rate_final == 3.0e-5
+    assert stage_33.training.target_kl == 0.015
+    assert stage_33.training.entropy_coef == 0.020
+
+    for stage in (37, 38):
+        cfg = apply_curriculum_stage(base, stage)
+        assert cfg.environment.dogs == 3
+        assert cfg.training.gamma == 0.997
+        assert cfg.training.learning_rate == 1.0e-4
+        assert cfg.training.learning_rate_final == 3.0e-5
+        assert cfg.training.target_kl == 0.015
+
+

@@ -310,19 +310,19 @@ function HyperparamsEditor({ hyperparams, onSaved }: HyperparamsEditorProps) {
 
       <div className="hyperparam-editor__sections">
         <div className="hyperparam-section">
-          <h4 className="hyperparam-section__title">🐑 Sheep Behavior</h4>
+          <h4 className="hyperparam-section__title">Sheep Behavior</h4>
           <table className="hyperparam-table"><tbody>
             {ENV_FIELDS.map(f => renderField("environment", f))}
           </tbody></table>
         </div>
         <div className="hyperparam-section">
-          <h4 className="hyperparam-section__title">🏆 Rewards</h4>
+          <h4 className="hyperparam-section__title">Rewards</h4>
           <table className="hyperparam-table"><tbody>
             {REWARD_FIELDS.map(f => renderField("rewards", f))}
           </tbody></table>
         </div>
         <div className="hyperparam-section">
-          <h4 className="hyperparam-section__title">🧠 Training (PPO)</h4>
+          <h4 className="hyperparam-section__title">Training (PPO)</h4>
           <table className="hyperparam-table"><tbody>
             {TRAINING_FIELDS.map(f => renderField("training", f))}
           </tbody></table>

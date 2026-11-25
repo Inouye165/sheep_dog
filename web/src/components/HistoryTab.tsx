@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
+import { isDocumentVisible } from "../hooks/useVisibility";
 import { loadTrainingHistory } from "../lib/api";
 import type { TelemetryRecord } from "../state/types";
 import { RecentEpisodesViewer } from "./RecentEpisodesViewer";
@@ -15,14 +16,22 @@ function isFiniteNumber(val: unknown): val is number {
   return typeof val === "number" && Number.isFinite(val);
 }
 
+const MAX_CHART_POINTS = 200;
+
 export function HistoryTab() {
   const [history, setHistory] = useState<TelemetryRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [visibleCount, setVisibleCount] = useState(50);
   const activeRef = useRef(true);
   const hasLoadedOnceRef = useRef(false);
+  const inFlightRef = useRef(false);
 
   const fetchHistory = useCallback(async (isBackgroundPoll = false) => {
+    if (inFlightRef.current) {
+      return;
+    }
+    inFlightRef.current = true;
     try {
       if (!isBackgroundPoll && !hasLoadedOnceRef.current) {
         setLoading(true);
@@ -50,6 +59,7 @@ export function HistoryTab() {
         setError("Failed to load training history telemetry records.");
       }
     } finally {
+      inFlightRef.current = false;
       if (activeRef.current) {
         setLoading(false);
       }
@@ -58,14 +68,25 @@ export function HistoryTab() {
 
   useEffect(() => {
     activeRef.current = true;
-    void fetchHistory(false);
-    // Set up auto-refresh every 8 seconds without resetting loading=true
+    if (isDocumentVisible()) {
+      void fetchHistory(false);
+    }
+    // Set up auto-refresh every 8 seconds while tab is visible without resetting loading=true
     const interval = setInterval(() => {
-      void fetchHistory(true);
+      if (isDocumentVisible()) {
+        void fetchHistory(true);
+      }
     }, 8000);
+    const handleVisibilityChange = () => {
+      if (activeRef.current && isDocumentVisible()) {
+        void fetchHistory(hasLoadedOnceRef.current);
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
       activeRef.current = false;
       clearInterval(interval);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [fetchHistory]);
 
@@ -88,14 +109,29 @@ export function HistoryTab() {
   const chartPoints = React.useMemo(() => {
     if (totalRecords < 2) return [];
 
-    return history.map((record, i) => {
-      const x = paddingLeft + (i / (totalRecords - 1)) * (chartWidth - paddingLeft - paddingRight);
+    let sampled: TelemetryRecord[] = history;
+    if (totalRecords > MAX_CHART_POINTS) {
+      sampled = [];
+      const lastIndex = totalRecords - 1;
+      for (let i = 0; i < MAX_CHART_POINTS; i += 1) {
+        const idx = Math.round((i / (MAX_CHART_POINTS - 1)) * lastIndex);
+        sampled.push(history[idx]);
+      }
+    }
+
+    const len = sampled.length;
+    return sampled.map((record, i) => {
+      const x = paddingLeft + (i / (len - 1)) * (chartWidth - paddingLeft - paddingRight);
       const sr = isFiniteNumber(record.success_rate) ? record.success_rate : 0;
       // y goes from top (0) to bottom (chartHeight). Success rate is 0.0 to 1.0.
       const y = chartHeight - paddingBottom - sr * (chartHeight - paddingTop - paddingBottom);
       return { x, y, record };
     });
   }, [history, totalRecords]);
+
+  const visibleHistoryRows = React.useMemo(() => {
+    return [...history].reverse().slice(0, visibleCount);
+  }, [history, visibleCount]);
 
   const svgPath = React.useMemo(() => {
     if (chartPoints.length < 2) return "";
@@ -144,7 +180,6 @@ export function HistoryTab() {
           <div style={{ marginBottom: "2rem" }}>
             <RecentEpisodesViewer />
           </div>
-
           {/* KPI Cards */}
           <div className="network-tab__kpis" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "1rem", marginBottom: "2rem" }}>
             <div className="network-tab__card" style={{ padding: "1rem", borderRadius: "8px", border: "1px solid var(--border-color)" }}>
@@ -306,7 +341,7 @@ export function HistoryTab() {
                     </tr>
                   </thead>
                   <tbody>
-                    {[...history].reverse().map((record, index) => {
+                    {visibleHistoryRows.map((record, index) => {
                       const baseKey = record.checkpoint_id 
                         ? record.checkpoint_id 
                         : record.evaluation_id 
@@ -350,6 +385,20 @@ export function HistoryTab() {
                   })}
                 </tbody>
                 </table>
+                {totalRecords > visibleHistoryRows.length && (
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0.75rem 0.5rem", fontSize: "0.8rem", color: "var(--text-muted)" }}>
+                    <span>
+                      Showing {visibleHistoryRows.length} of {totalRecords} records
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setVisibleCount((c) => c + 50)}
+                      style={{ padding: "0.35rem 0.75rem", backgroundColor: "var(--theme-bg-accent, #334155)", color: "white", borderRadius: "4px", border: "none", cursor: "pointer", fontWeight: 600 }}
+                    >
+                      Show 50 more
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </div>

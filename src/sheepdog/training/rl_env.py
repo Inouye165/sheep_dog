@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections import deque
 from collections.abc import Sequence
 from pathlib import Path
@@ -11,7 +12,7 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
-from sheepdog.config import EnvironmentConfig, LabConfig
+from sheepdog.config import EnvironmentConfig, LabConfig, validate_observation_history_strides
 from sheepdog.environment import ACTION_ORDER, SheepdogEnvironment
 from sheepdog.observations import build_observation_builder
 from sheepdog.training.replay_writer import (
@@ -63,8 +64,17 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
         self._episode_counter = 0
         self.env_index: int = getattr(config, "env_index", 0)
         self._environment = SheepdogEnvironment(config)
+        include_loop_flags = bool(
+            getattr(config.training, "include_loop_flags_in_observation", True)
+        )
+        obs_strides = validate_observation_history_strides(
+            getattr(config.training, "observation_history_strides", (0,))
+        )
+        self._environment._include_loop_flags_in_observation = include_loop_flags
+        self._environment._observation_history_strides = obs_strides
         self._environment._observation_builder = build_observation_builder(
-            config.training.observation_mode
+            config.training.observation_mode,
+            include_loop_flags=include_loop_flags,
         )
         initial_snapshot = self._environment.reset(seed=config.training.train_seed)
         del initial_snapshot
@@ -90,6 +100,8 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
             maxlen=tail_len
         )
         self._current_dog_index = 0
+        self._cached_action_mask_key: tuple[int, int] | None = None
+        self._cached_action_mask: np.ndarray | None = None
         self._latest_seed = config.training.train_seed
         self._episode_reward = 0.0
         self._active_trajectory_buffer: list[dict[str, Any]] = []
@@ -273,6 +285,7 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
         """Update environment config on the environment and underlying scenario sampler."""
         self._environment.env_config = env_config
         self._scenario_sampler.update_env_config(env_config)
+        self._invalidate_action_mask_cache()
 
     def get_scenario_sampler_summary(self) -> dict[str, Any]:
         """Return the scenario sampler usage and telemetry summary."""
@@ -303,16 +316,20 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
         self._telemetry_omitted = False
         self._tail_telemetry_buffer.clear()
         self._current_dog_index = 0
+        self._invalidate_action_mask_cache()
         self._episode_reward = 0.0
         self._active_trajectory_buffer = []
         self._latest_scenario_id: str | None = None
 
         # Use scenario sampler if scenario training or failure-directed training is enabled
         if self.config.training.scenario_training_enabled or getattr(self.config.training, "failure_directed_training_enabled", False):
-            selection = self._scenario_sampler.sample(self._episode_counter)
+            selection = self._scenario_sampler.sample(
+                self._episode_counter, seed=self._latest_seed
+            )
+            self._latest_seed = selection.seed
             if selection.scenario is not None:
                 self._latest_scenario_id = getattr(
-                    selection, "scenario_id", getattr(selection.scenario, "scenario_id", None)
+                    selection, "scenario_id", getattr(selection.scenario, "id", None)
                 )
                 self._environment.reset_from_scenario(selection.scenario)
             else:
@@ -527,19 +544,20 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
                         step_telemetry = None
 
             snapshot, breakdown = self._environment.step(self._pending_actions)
+            self._invalidate_action_mask_cache()
             reward = float(breakdown.total)
             self._episode_reward += reward
             terminated = bool(snapshot.success or snapshot.stopped)
             truncated = bool(snapshot.timeout)
             info = self._info()
             info["team_step_completed"] = True
-            info["final_snapshot"] = snapshot.to_dict()
+            snap_dict = snapshot.to_dict()
 
             # Append frame to active trajectory buffer
             frame_entry: dict[str, Any] = {
                 "step": int(snapshot.step),
                 "actions": list(self._pending_actions),
-                "snapshot": snapshot.to_dict(),
+                "snapshot": snap_dict,
                 "reward": breakdown.to_dict(),
             }
             if step_telemetry is not None:
@@ -552,6 +570,7 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
 
             # Handle episode completion & selective trajectory capture
             if terminated or truncated:
+                info["final_snapshot"] = snap_dict
                 if telemetry_enabled and mode == "head_tail":
                     T = int(snapshot.step)
                     tail_start = max(1, T - tail_steps + 1) if tail_steps > 0 else T + 1
@@ -608,8 +627,15 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
                     ep_num = int(self._episode_counter)
                     seed_val = int(self._latest_seed)
                     ts_suffix = int(time.time())
-                    replay_id = f"diag_stage{stage}_ep{ep_num}_seed{seed_val}_t{ts_suffix}"
-                    event_key = f"ep_{ep_num}_stage_{stage}_seed_{seed_val}_env_{self.env_index}_t{ts_suffix}"
+                    pid = os.getpid()
+                    replay_id = (
+                        f"diag_stage{stage}_ep{ep_num}_seed{seed_val}"
+                        f"_w{self.env_index}_p{pid}_t{ts_suffix}"
+                    )
+                    event_key = (
+                        f"ep_{ep_num}_stage_{stage}_seed_{seed_val}"
+                        f"_env_{self.env_index}_p{pid}_t{ts_suffix}"
+                    )
 
                     output_dir = Path(self.config.training.output_dir) / "replays"
                     output_path = output_dir / f"{replay_id}.json.gz"
@@ -670,7 +696,7 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
                         "capture_reason": capture_reason,
                         "capture_status": "queued",
                         "environment": self.config.to_dict()["environment"],
-                        "final_snapshot": snapshot.to_dict(),
+                        "final_snapshot": snap_dict,
                         "stats": stats_dict,
                         "telemetry_mode": mode,
                         "telemetry_head_steps": head_steps if mode == "head_tail" else None,
@@ -749,13 +775,16 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
 
                 self._active_trajectory_buffer = []
         else:
-            info = self._info(action_mask=mask)
+            info = self._info()
             self._current_dog_index += 1
+            self._invalidate_action_mask_cache()
             info["team_step_completed"] = False
 
+        # Return the real s_T observation on timeout (truncated and not terminated)
+        # so SB3 stores it in info["terminal_observation"] for V(s_T) bootstrapping.
         observation = (
             self._current_observation()
-            if not (terminated or truncated)
+            if not terminated
             else np.zeros(self.observation_space.shape, dtype=np.float32)
         )
         return observation, reward, terminated, truncated, info
@@ -767,8 +796,19 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
         """Return a boolean mask for the current dog's legal actions."""
         return self._current_dog_action_mask()
 
+    def _invalidate_action_mask_cache(self) -> None:
+        """Clear the cached per-dog action mask."""
+        self._cached_action_mask_key = None
+        self._cached_action_mask = None
+
     def _current_dog_action_mask(self) -> np.ndarray:
         """Return the legal-action mask for the active dog."""
+        key = (int(self._environment.step_count), int(self._current_dog_index))
+        if (
+            self._cached_action_mask_key == key
+            and self._cached_action_mask is not None
+        ):
+            return self._cached_action_mask
         mask_map = self._environment.action_mask_for_dog(
             self._current_dog_index,
             reserved_positions={
@@ -776,20 +816,19 @@ class SheepdogRLAdapter(gym.Env[np.ndarray, int]):
                 for i in range(self._current_dog_index)
             },
         )
-        return np.array(
+        arr = np.array(
             [mask_map.get(action, False) for action in ACTION_ORDER],
             dtype=bool,
         )
+        arr.flags.writeable = False
+        self._cached_action_mask_key = key
+        self._cached_action_mask = arr
+        return arr
 
-    def _info(
-        self, action_mask: np.ndarray | None = None
-    ) -> dict[str, Any]:
+    def _info(self) -> dict[str, Any]:
         """Build metadata dict emitted alongside step observations."""
-        if action_mask is None:
-            action_mask = self.action_masks()
         return {
             "current_dog_index": self._current_dog_index,
-            "action_mask": action_mask,
             "simulated_seconds": self._environment.simulated_seconds,
             "step_count": self._environment.step_count,
             "latest_seed": self._latest_seed,

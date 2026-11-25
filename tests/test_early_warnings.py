@@ -457,3 +457,38 @@ def test_monitoring_neutrality_preserves_rng_and_training():
     res1 = run_simulation_step(with_early_warning_check=False)
     res2 = run_simulation_step(with_early_warning_check=True)
     assert res1 == res2
+
+
+def test_ignores_inprogress_evaluation_files(tmp_path: Path, caplog):
+    """Verifies that *.inprogress.json files with newer mtimes are ignored by EarlyWarningMonitor."""
+    import logging
+    import os
+
+    eval_dir = tmp_path / "evaluations"
+    completed_file = _make_mock_evaluation(
+        eval_dir=eval_dir,
+        eval_id="eval_completed_001",
+        stage=34,
+        checkpoint_ep=100,
+        policy_version=10,
+        success_rate=0.80,
+        with_v2_diagnostics=True,
+    )
+
+    inprogress_file = eval_dir / "eval_newer_002.inprogress.json"
+    inprogress_file.write_text(
+        json.dumps({"evaluation_id": "eval_newer_002", "is_complete": False, "records": []}),
+        encoding="utf-8",
+    )
+
+    # Ensure inprogress file has strictly newer mtime than completed file
+    comp_mtime = completed_file.stat().st_mtime
+    os.utime(inprogress_file, (comp_mtime + 10.0, comp_mtime + 10.0))
+
+    monitor = EarlyWarningMonitor(tmp_path)
+    with caplog.at_level(logging.WARNING):
+        summary = monitor.get_warnings_summary(current_stage=34, force_refresh=True)
+
+    assert "Rejected incomplete evaluation" not in caplog.text
+    assert summary["current_evaluation"] is not None
+    assert summary["current_evaluation"]["evaluation_id"] == "eval_completed_001"

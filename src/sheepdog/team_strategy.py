@@ -39,9 +39,36 @@ _LATERAL_DEAD_ZONE: int = 3
 class TeamStrategy:
     """Assign dynamic cooperative roles from current flock state."""
 
-    VERSION: str = "1.0.0"
+    VERSION: str = "1.1.0"
+    # Optional split-flock/corner guidance (ASSISTED/guided scripted behavior).
+    # All default OFF so default targets are identical to 1.0.0.  Evaluation
+    # scripts may override these class defaults; constructor args win.
+    DEFAULT_MAIN_GROUP_TARGETS: bool = False
+    DEFAULT_COLLECTOR_YIELD: bool = False
+    DEFAULT_CORNER_CLEARANCE: bool = False
+    YIELD_MAX_PENALTY: float = 40.0
+    YIELD_FLOOR: float = -30.0
+    CORNER_CLEARANCE_CELLS: int = 4
 
-    def __init__(self, width: int, height: int, config: EnvironmentConfig | None = None) -> None:
+    def __init__(
+        self,
+        width: int,
+        height: int,
+        config: EnvironmentConfig | None = None,
+        *,
+        main_group_targets: bool | None = None,
+        collector_yield: bool | None = None,
+        corner_clearance: bool | None = None,
+    ) -> None:
+        self._main_group_targets = (
+            self.DEFAULT_MAIN_GROUP_TARGETS if main_group_targets is None else main_group_targets
+        )
+        self._collector_yield = (
+            self.DEFAULT_COLLECTOR_YIELD if collector_yield is None else collector_yield
+        )
+        self._corner_clearance = (
+            self.DEFAULT_CORNER_CLEARANCE if corner_clearance is None else corner_clearance
+        )
         self._width = width
         self._height = height
         self._config = config or EnvironmentConfig(width=width, height=height)
@@ -93,9 +120,17 @@ class TeamStrategy:
             wall_pressure=wall_pressure,
         )
 
+        # Option: aim rear/flank/collector geometry at the main group, not a
+        # centroid dragged toward the stray.  Snapshot keeps the all-sheep centre.
+        target_sheep = unpenned
+        if self._main_group_targets and stray is not None and len(unpenned) > 1:
+            target_sheep = [a for a in unpenned if a.index != stray.index]
+            flock_center = self._flock_center(target_sheep)
+            flock_spread = self._flock_spread(target_sheep, flock_center)
+
         navigation = pen_navigation(pen, self._width, self._height)
         anchor = (
-            min(unpenned, key=lambda animal: animal.position.distance_to(flock_center)).position
+            min(target_sheep, key=lambda animal: animal.position.distance_to(flock_center)).position
             if flock_center in navigation.fences
             else flock_center
         )
@@ -149,6 +184,10 @@ class TeamStrategy:
         rear_target = self._safe_open_field_target(raw_rear, flock_center, unpenned)
         left_target = self._safe_open_field_target(raw_left, flock_center, unpenned)
         right_target = self._safe_open_field_target(raw_right, flock_center, unpenned)
+        if self._corner_clearance and stray is not None:
+            rear_target = self._clear_of_stray(rear_target, stray.position)
+            left_target = self._clear_of_stray(left_target, stray.position)
+            right_target = self._clear_of_stray(right_target, stray.position)
         blocker_target = self._blocker_target(flock_center, pen, lateral_x, lateral_y)
 
         assignments: dict[int, RoleAssignment] = {}
@@ -304,7 +343,18 @@ class TeamStrategy:
         tx = stray_position.x + dx * 2
         ty = stray_position.y + dy * 2
 
-        if self._wall_margin(stray_position) <= 3:
+        if self._corner_clearance and self._wall_margin(stray_position) <= 3:
+            # Approach from the open-field side with extra clearance.
+            c = self.CORNER_CLEARANCE_CELLS
+            if stray_position.x <= 3:
+                tx = stray_position.x + c
+            elif (self._width - 1 - stray_position.x) <= 3:
+                tx = stray_position.x - c
+            if stray_position.y <= 3:
+                ty = stray_position.y + c
+            elif (self._height - 1 - stray_position.y) <= 3:
+                ty = stray_position.y - c
+        elif self._wall_margin(stray_position) <= 3:
             # Back off 3-4 cells into the open field away from the nearest boundary
             # so the collector dog does not press the sheep into the wall and gives
             # it room to turn and escape inward.
@@ -321,6 +371,22 @@ class TeamStrategy:
         return Point(tx, ty).clamp(
             self._width,
             self._height,
+        )
+
+    def _clear_of_stray(self, target: Point, stray_position: Point) -> Point:
+        """Push a non-collector target out of a wall/corner stray's boxing range."""
+        if self._wall_margin(stray_position) > 3:
+            return target
+        c = self.CORNER_CLEARANCE_CELLS
+        if max(abs(target.x - stray_position.x), abs(target.y - stray_position.y)) >= c:
+            return target
+        dx = self._axis_sign(target.x - stray_position.x)
+        dy = self._axis_sign(target.y - stray_position.y)
+        if dx == 0 and dy == 0:
+            dx = 1 if stray_position.x < self._width // 2 else -1
+            dy = 1 if stray_position.y < self._height // 2 else -1
+        return Point(stray_position.x + dx * c, stray_position.y + dy * c).clamp(
+            self._width, self._height
         )
 
     def _blocker_target(
@@ -380,7 +446,10 @@ class TeamStrategy:
         ramp = min(hold_steps, self._config.role_minimum_hold_steps) * 0.5
         cap = self._config.role_stickiness_distance
 
-        if hold_steps > 150:
+        if self._collector_yield and hold_steps > 150:
+            stagnation_penalty = min(self.YIELD_MAX_PENALTY, (hold_steps - 150) * 0.5)
+            effective_bonus = max(self.YIELD_FLOOR, bonus + ramp - stagnation_penalty)
+        elif hold_steps > 150:
             stagnation_penalty = min(15.0, (hold_steps - 150) * 0.25)
             effective_bonus = max(-5.0, bonus + ramp - stagnation_penalty)
         else:

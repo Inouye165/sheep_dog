@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import type { EpisodeRecord, EpisodeOutcome, CapturePolicyConfig } from "../state/types";
+import { isDocumentVisible } from "../hooks/useVisibility";
 import { episodeHistoryStore, formatFailedEpisodeLabel } from "../lib/episodeHistoryStore";
 import {
   loadFailedEpisodes,
@@ -24,6 +25,8 @@ export function RecentEpisodesViewer() {
   const episodesRef = useRef<EpisodeRecord[]>(episodes);
   const selectedEpisodeIdRef = useRef<string | number>(selectedEpisodeId);
   const isMountedRef = useRef<boolean>(true);
+  const episodesInFlightRef = useRef<boolean>(false);
+  const policyInFlightRef = useRef<boolean>(false);
 
   episodesRef.current = episodes;
   selectedEpisodeIdRef.current = selectedEpisodeId;
@@ -42,6 +45,10 @@ export function RecentEpisodesViewer() {
   const [isReproducing, setIsReproducing] = useState<boolean>(false);
 
   const refreshEpisodes = useCallback(async () => {
+    if (episodesInFlightRef.current) {
+      return;
+    }
+    episodesInFlightRef.current = true;
     if (episodesRef.current.length === 0) {
       setIsLoading(true);
     }
@@ -58,9 +65,7 @@ export function RecentEpisodesViewer() {
           episodeHistoryStore.syncWithApiEpisodes(rawList);
         }
 
-        const prevEpisodes = episodesRef.current;
         const storeEpisodes = episodeHistoryStore.getEpisodes();
-        const existingMap = new Map(prevEpisodes.map((ep) => [String(ep.episode_id), ep]));
         const validRecords: EpisodeRecord[] = [];
 
         for (const ep of storeEpisodes) {
@@ -68,17 +73,7 @@ export function RecentEpisodesViewer() {
             rejections.push({ epId: ep.episode_id, reason: "Episode was successful (win)" });
             continue;
           }
-          const existing = existingMap.get(String(ep.episode_id));
-          if (existing && existing.move_history && existing.move_history.length > 0) {
-            validRecords.push({
-              ...ep,
-              initial_state: existing.initial_state || ep.initial_state,
-              move_history: existing.move_history,
-              total_moves: existing.total_moves,
-            });
-          } else {
-            validRecords.push(ep);
-          }
+          validRecords.push(ep);
         }
 
         episodesRef.current = validRecords;
@@ -113,6 +108,7 @@ export function RecentEpisodesViewer() {
     } catch {
       // Ignore unhandled background poll errors
     } finally {
+      episodesInFlightRef.current = false;
       if (isMountedRef.current) {
         setIsLoading(false);
       }
@@ -120,9 +116,17 @@ export function RecentEpisodesViewer() {
   }, []);
 
   const refreshPolicy = useCallback(async () => {
-    const pol = await fetchCapturePolicy();
-    if (isMountedRef.current && pol) {
-      setCapturePolicy(pol);
+    if (policyInFlightRef.current) {
+      return;
+    }
+    policyInFlightRef.current = true;
+    try {
+      const pol = await fetchCapturePolicy();
+      if (isMountedRef.current && pol) {
+        setCapturePolicy(pol);
+      }
+    } finally {
+      policyInFlightRef.current = false;
     }
   }, []);
 
@@ -135,16 +139,28 @@ export function RecentEpisodesViewer() {
       selectedEpisodeIdRef.current = initialList[0].episode_id;
       setSelectedEpisodeId(initialList[0].episode_id);
     }
-    void refreshEpisodes();
-    void refreshPolicy();
-
-    const timer = setInterval(() => {
+    if (isDocumentVisible()) {
       void refreshEpisodes();
       void refreshPolicy();
+    }
+
+    const timer = setInterval(() => {
+      if (isDocumentVisible()) {
+        void refreshEpisodes();
+        void refreshPolicy();
+      }
     }, 4000);
+    const handleVisibilityChange = () => {
+      if (isMountedRef.current && isDocumentVisible()) {
+        void refreshEpisodes();
+        void refreshPolicy();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
       isMountedRef.current = false;
       clearInterval(timer);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [refreshEpisodes, refreshPolicy]);
 
@@ -208,11 +224,9 @@ export function RecentEpisodesViewer() {
               total_moves: bundle.frames.length > 0 ? bundle.frames.length - 1 : currentEpisode.total_moves,
             };
             episodeHistoryStore.updateEpisode(updatedEp);
-            setEpisodes((prev) => {
-              const next = prev.map((ep) => (String(ep.episode_id) === String(updatedEp.episode_id) ? updatedEp : ep));
-              episodesRef.current = next;
-              return next;
-            });
+            const next = episodeHistoryStore.getEpisodes().filter((ep) => ep.outcome !== "win");
+            episodesRef.current = next;
+            setEpisodes(next);
           }
         })
         .catch(() => {
@@ -240,6 +254,9 @@ export function RecentEpisodesViewer() {
     const delayMs = playbackSpeed === 2 ? 150 : playbackSpeed === 0.5 ? 600 : 300;
 
     const timer = setInterval(() => {
+      if (!isDocumentVisible()) {
+        return;
+      }
       setCurrentStep((prevStep) => {
         const maxMoves = currentEpisode.total_moves;
         if (prevStep >= maxMoves) {

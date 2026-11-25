@@ -17,9 +17,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import torch
 from stable_baselines3.common.callbacks import BaseCallback
 
-from sheepdog.atomic_io import atomic_write_json
+from sheepdog.atomic_io import (
+    DEFAULT_WARN_FREE_DISK_BYTES,
+    DiskSpaceError,
+    atomic_write_json,
+    ensure_free_disk_space,
+)
 from sheepdog.checkpoints.store import (
     CheckpointMetadata,
     compute_env_config_hash,
@@ -129,6 +135,7 @@ class _TrainingProgressCallback(BaseCallback):
         starting_total: int,
         batch_total_segments: int = 1,
         batch_completed_timesteps_offset: int = 0,
+        segment_start_timesteps: int = 0,
     ) -> None:
         super().__init__()
         self._emit = emit
@@ -144,6 +151,7 @@ class _TrainingProgressCallback(BaseCallback):
         self._segment_index = segment_index
         self._batch_total_segments = max(1, int(batch_total_segments))
         self._batch_completed_timesteps_offset = max(0, int(batch_completed_timesteps_offset))
+        self._segment_start_timesteps = max(0, int(segment_start_timesteps))
         self.policy_version = policy_version
         self._last_reported_steps = 0
 
@@ -151,11 +159,11 @@ class _TrainingProgressCallback(BaseCallback):
         if self._should_stop is not None and self._should_stop():
             return False
 
-        num_timesteps = int(self.num_timesteps)
-        current_seg_ts = min(num_timesteps, self._total_timesteps)
+        seg_elapsed = max(0, int(self.num_timesteps) - self._segment_start_timesteps)
+        current_seg_ts = min(seg_elapsed, self._total_timesteps)
         completion = min(1.0, current_seg_ts / self._total_timesteps)
         fractional_completed = self._completed_segments + completion
-        current_global_ts = self._completed_timesteps + num_timesteps
+        current_global_ts = self._completed_timesteps + seg_elapsed
         batch_completed_ts = self._batch_completed_timesteps_offset + current_seg_ts
 
         # Emit individual episode completion logs as they finish
@@ -222,11 +230,11 @@ class _TrainingProgressCallback(BaseCallback):
                         )
 
         if (
-            num_timesteps < self._total_timesteps
-            and num_timesteps - self._last_reported_steps < self._report_interval
+            seg_elapsed < self._total_timesteps
+            and seg_elapsed - self._last_reported_steps < self._report_interval
         ):
             return True
-        self._last_reported_steps = num_timesteps
+        self._last_reported_steps = seg_elapsed
         ppo_update_count = getattr(self.model, "_n_updates", 0)
         current_policy_version = self.policy_version + ppo_update_count
         last_policy_update_time = datetime.now(UTC).isoformat() if ppo_update_count > 0 else None
@@ -305,6 +313,7 @@ class MaskablePPOTrainer(Trainer):
     def __init__(self, config: Any, output_root: str | Path) -> None:
         super().__init__(config, output_root)
         self._failure_sampler: Any | None = None
+        self.prefer_latest_checkpoint = False
 
     def _stage_model_root(self, active_stage: int) -> Path:
         """Return the model directory for the active curriculum stage."""
@@ -513,6 +522,7 @@ class MaskablePPOTrainer(Trainer):
         should_stop: Callable[[], bool] | None = None,
     ) -> NeuralTrainingRunSummary:  # type: ignore[override]
         train_config = self.config.training
+        torch.set_num_threads(max(1, int(train_config.torch_num_threads)))
         web_export_dir = Path(train_config.web_export_dir)
         web_export_dir.mkdir(parents=True, exist_ok=True)
         model_root = self.output_root / self.MODEL_DIRNAME
@@ -524,6 +534,12 @@ class MaskablePPOTrainer(Trainer):
             bool(self._loaded_state.get("policy_state_path"))
             and self.has_compatible_policy_state()
         )
+        if self.prefer_latest_checkpoint and not resuming_policy and (
+            self._loaded_state.get("policy_state_path")
+            or self._loaded_state.get("best_model_path")
+            or self.total_episodes_trained > 0
+        ):
+            raise RuntimeError("Continuous training requires a compatible latest checkpoint")
         starting_total = self.total_episodes_trained if resuming_policy else 0
         starting_environment_episodes = (
             int(self._loaded_state.get("total_environment_episodes", 0))
@@ -634,30 +650,33 @@ class MaskablePPOTrainer(Trainer):
                 batch_starting_checkpoint_episode = starting_total - completed_slot
         else:
             batch_starting_checkpoint_episode = starting_total + (1 if resuming_policy else 0)
+        loaded_best_stage = self._loaded_state.get("best_model_curriculum_stage")
+        same_best_stage = loaded_best_stage is None or int(loaded_best_stage) == int(active_stage)
+        restore_best = resuming_policy and same_best_stage
         best_success_rate: float = (
             float(self._loaded_state["best_success_rate"])
-            if resuming_policy and self._loaded_state.get("best_success_rate") is not None
+            if restore_best and self._loaded_state.get("best_success_rate") is not None
             else -1.0
         )
         best_average_reward: float = (
             float(self._loaded_state["best_average_reward"])
-            if resuming_policy and self._loaded_state.get("best_average_reward") is not None
+            if restore_best and self._loaded_state.get("best_average_reward") is not None
             else float("-inf")
         )
         best_completion_steps: float = (
             float(self._loaded_state["best_completion_steps"])
-            if resuming_policy and self._loaded_state.get("best_completion_steps") is not None
+            if restore_best and self._loaded_state.get("best_completion_steps") is not None
             else float("inf")
         )
         tracked_best_model_path: Path | None = (
             Path(self._loaded_state["best_model_path"])
-            if resuming_policy and self._loaded_state.get("best_model_path")
+            if restore_best and self._loaded_state.get("best_model_path")
             else None
         )
         best_model_curriculum_stage: int = (
-            int(self._loaded_state["best_model_curriculum_stage"])
-            if resuming_policy and self._loaded_state.get("best_model_curriculum_stage") is not None
-            else self.config.rewards.instincts.curriculum_stage
+            int(loaded_best_stage)
+            if restore_best and loaded_best_stage is not None
+            else int(active_stage)
         )
 
         active_curriculum_stage = int(self.config.rewards.instincts.curriculum_stage)
@@ -739,7 +758,13 @@ class MaskablePPOTrainer(Trainer):
             raw_best_stage is not None and int(raw_best_stage) != int(active_stage)
         )
         if resuming_policy and (best_model_path_str or policy_state_path_str):
-            if prefer_policy_state:
+            if self.prefer_latest_checkpoint:
+                p = self._resolve_checkpoint_path(policy_state_path_str)
+                if p is None:
+                    raise FileNotFoundError(
+                        f"Cannot continue training without the latest checkpoint: {policy_state_path_str}"
+                    )
+            elif prefer_policy_state:
                 p = (
                     self._resolve_checkpoint_path(policy_state_path_str)
                     or self._resolve_checkpoint_path(best_model_path_str)
@@ -768,154 +793,67 @@ class MaskablePPOTrainer(Trainer):
         else:
             policy = self.POLICY_CLASS.initialize(self.config)
 
-        from sheepdog.tracking.execution import RuntimeExecutionTracker
-        from sheepdog.tracking.registry import classify_assistance_mode
+        try:
+            from sheepdog.tracking.execution import RuntimeExecutionTracker
+            from sheepdog.tracking.registry import classify_assistance_mode
 
-        effective_obs_mode = (
-            getattr(self.config.training, "observation_mode", None)
-            or getattr(policy, "observation_mode", None)
-        )
-        assistance_mode = classify_assistance_mode(effective_obs_mode)
+            effective_obs_mode = (
+                getattr(self.config.training, "observation_mode", None)
+                or getattr(policy, "observation_mode", None)
+            )
+            assistance_mode = classify_assistance_mode(effective_obs_mode)
 
-        exec_tracker = RuntimeExecutionTracker(registry=tracking_registry)
-        execution_context = exec_tracker.initialize_or_resume(
-            run_id=run_id,
-            experiment_id=experiment_id,
-            change_id=change_id,
-            starting_episode=starting_environment_episodes,
-            checkpoint_label_episode=starting_total,
-            starting_policy_transition=starting_total_timesteps,
-            starting_world_step=None,
-            policy_state_path=self._loaded_state.get("policy_state_path"),
-            config_hash=compute_env_config_hash(
-                self.config.to_dict().get("environment", {})
-                if hasattr(self.config, "to_dict")
-                else asdict(self.config.environment)
-            ),
-            is_resumed=resuming_policy,
-            target_stage=active_stage,
-            assistance_mode=assistance_mode,
-            hyperparameters={
-                "learning_rate": train_config.learning_rate,
-                "gamma": getattr(train_config, "gamma", 0.99),
-                "entropy_coef": getattr(train_config, "entropy_coef", 0.01),
-            },
-        )
+            exec_tracker = RuntimeExecutionTracker(registry=tracking_registry)
+            execution_context = exec_tracker.initialize_or_resume(
+                run_id=run_id,
+                experiment_id=experiment_id,
+                change_id=change_id,
+                starting_episode=starting_environment_episodes,
+                checkpoint_label_episode=starting_total,
+                starting_policy_transition=starting_total_timesteps,
+                starting_world_step=None,
+                policy_state_path=self._loaded_state.get("policy_state_path"),
+                config_hash=compute_env_config_hash(
+                    self.config.to_dict().get("environment", {})
+                    if hasattr(self.config, "to_dict")
+                    else asdict(self.config.environment)
+                ),
+                is_resumed=resuming_policy,
+                target_stage=active_stage,
+                assistance_mode=assistance_mode,
+                hyperparameters={
+                    "learning_rate": train_config.learning_rate,
+                    "gamma": getattr(train_config, "gamma", 0.99),
+                    "entropy_coef": getattr(train_config, "entropy_coef", 0.01),
+                },
+            )
 
-        source_stage = self._loaded_state.get("best_model_curriculum_stage")
-        existing_baseline = self._loaded_state.get("stage_transition_baseline")
-        environment_config_hash = compute_env_config_hash(
-            self.config.to_dict()["environment"]
-        )
-        baseline_matches_environment = (
-            isinstance(existing_baseline, dict)
-            and int(existing_baseline.get("target_stage", -1)) == int(active_stage)
-            and existing_baseline.get("environment_config_hash") == environment_config_hash
-        )
-        is_new_stage_transition = (
-            resuming_policy
-            and source_stage is not None
-            and int(source_stage) < int(active_stage)
-            and not baseline_matches_environment
-        )
-        if (
-            resuming_policy
-            and baseline_matches_environment
-            and float(existing_baseline.get("success_rate", 0.0))
-            < self.STAGE_TRANSITION_MIN_SUCCESS_RATE
-        ):
-            logger.warning(
-                "Stage transition note: inherited policy scored %.0f%% on Stage %s "
-                "(minimum recommended %.0f%%). Training is proceeding to learn new stage dynamics.",
-                float(existing_baseline.get("success_rate", 0.0)) * 100,
-                active_stage,
-                self.STAGE_TRANSITION_MIN_SUCCESS_RATE * 100,
+            source_stage = self._loaded_state.get("best_model_curriculum_stage")
+            existing_baseline = self._loaded_state.get("stage_transition_baseline")
+            environment_config_hash = compute_env_config_hash(
+                self.config.to_dict()["environment"]
             )
-            emit(
-                {
-                    "phase": "transition_warning",
-                    "batch_completed_episodes": 0,
-                    "total_episodes_trained": starting_total,
-                    "checkpoint_episode": starting_total,
-                    "message": (
-                        f"Inherited Stage {source_stage} policy scored "
-                        f"{float(existing_baseline.get('success_rate', 0.0)):.0%} on Stage {active_stage}. "
-                        "Training may be slow initially as new concepts are acquired."
-                    ),
-                }
+            baseline_matches_environment = (
+                isinstance(existing_baseline, dict)
+                and int(existing_baseline.get("target_stage", -1)) == int(active_stage)
+                and existing_baseline.get("environment_config_hash") == environment_config_hash
             )
-        if is_new_stage_transition:
-            run_id = self._loaded_state.get("run_id")
-            baseline_id = f"stage{active_stage}-inherited-pv{policy_version}"
-            emit(
-                {
-                    "phase": "evaluating_transition",
-                    "batch_completed_episodes": 0,
-                    "total_episodes_trained": starting_total,
-                    "checkpoint_episode": starting_total,
-                    "message": (
-                        f"Evaluating inherited Stage {source_stage} policy on Stage {active_stage}"
-                    ),
-                }
+            is_new_stage_transition = (
+                resuming_policy
+                and source_stage is not None
+                and int(source_stage) < int(active_stage)
+                and not baseline_matches_environment
             )
-            try:
-                baseline_summary, evaluation_json, _csv_path = self.evaluator.evaluate(
-                    policy,
-                    tuple(train_config.evaluation_seeds),
-                    checkpoint_episode=starting_total,
-                    capture_replays=True,
-                    capture_step_telemetry=False,
-                    evaluation_mode="stage_transition_baseline",
-                    run_id=run_id,
-                    checkpoint_id=baseline_id,
-                    policy_version=policy_version,
-                    curriculum_stage=active_stage,
-                    evaluation_index=0,
-                    should_stop=should_stop,
-                    experiment_id=execution_context.experiment_id,
-                    activation_id=execution_context.activation_id,
-                    checkpoint_record_id=None,
-                )
-            except EvaluationInterruptedError:
-                logger.info(
-                    "Stage transition baseline evaluation interrupted by stop/pause request."
-                )
-                emit(
-                    {
-                        "phase": "paused" if (should_stop and self._loaded_state.get("paused")) else "stopped",
-                        "batch_completed_episodes": 0,
-                        "total_episodes_trained": starting_total,
-                        "checkpoint_episode": starting_total,
-                        "message": (
-                            f"Stage {active_stage} baseline evaluation paused/stopped. "
-                            "Progress has been saved and will resume automatically on next start."
-                        ),
-                    }
-                )
-                return NeuralTrainingRunSummary(
-                    checkpoints=[],
-                    final_model_path=str(self._loaded_state.get("policy_state_path", "")),
-                    policy_config=policy.config.to_dict(),
-                )
-            baseline = {
-                "source_stage": int(source_stage),
-                "target_stage": int(active_stage),
-                "environment_config_hash": environment_config_hash,
-                "policy_version": policy_version,
-                "evaluation": str(evaluation_json),
-                "success_rate": baseline_summary.success_rate,
-                "timeout_rate": baseline_summary.timeout_rate,
-                "average_reward": baseline_summary.average_reward,
-                "average_completion_steps": baseline_summary.average_completion_steps,
-            }
-            self._loaded_state["stage_transition_baseline"] = baseline
-            atomic_write_json(self._state_path, self._loaded_state)
-            if baseline_summary.success_rate < self.STAGE_TRANSITION_MIN_SUCCESS_RATE:
+            if (
+                resuming_policy
+                and baseline_matches_environment
+                and float(existing_baseline.get("success_rate", 0.0))
+                < self.STAGE_TRANSITION_MIN_SUCCESS_RATE
+            ):
                 logger.warning(
-                    "Stage transition baseline: inherited Stage %s policy scored %.0f%% on Stage %s "
-                    "(minimum recommended %.0f%%). Proceeding with training to adapt policy.",
-                    source_stage,
-                    baseline_summary.success_rate * 100,
+                    "Stage transition note: inherited policy scored %.0f%% on Stage %s "
+                    "(minimum recommended %.0f%%). Training is proceeding to learn new stage dynamics.",
+                    float(existing_baseline.get("success_rate", 0.0)) * 100,
                     active_stage,
                     self.STAGE_TRANSITION_MIN_SUCCESS_RATE * 100,
                 )
@@ -926,742 +864,1060 @@ class MaskablePPOTrainer(Trainer):
                         "total_episodes_trained": starting_total,
                         "checkpoint_episode": starting_total,
                         "message": (
-                            f"Inherited Stage {source_stage} policy baseline scored "
-                            f"{baseline_summary.success_rate:.0%} on Stage {active_stage}. "
-                            "Proceeding with training to acquire new concepts."
+                            f"Inherited Stage {source_stage} policy scored "
+                            f"{float(existing_baseline.get('success_rate', 0.0)):.0%} on Stage {active_stage}. "
+                            "Training may be slow initially as new concepts are acquired."
                         ),
                     }
                 )
-
-        if getattr(train_config, "failure_directed_training_enabled", False):
-            saved_fw = self._loaded_state.get("failure_directed_weights")
-            if isinstance(saved_fw, dict) and hasattr(policy.model, "get_env") and policy.model.get_env() is not None:
-                venv = policy.model.get_env()
+            if is_new_stage_transition:
+                run_id = self._loaded_state.get("run_id")
+                baseline_id = f"stage{active_stage}-inherited-pv{policy_version}"
+                emit(
+                    {
+                        "phase": "evaluating_transition",
+                        "batch_completed_episodes": 0,
+                        "total_episodes_trained": starting_total,
+                        "checkpoint_episode": starting_total,
+                        "message": (
+                            f"Evaluating inherited Stage {source_stage} policy on Stage {active_stage}"
+                        ),
+                    }
+                )
                 try:
-                    if hasattr(venv, "env_method"):
-                        venv.env_method("update_failure_weights", saved_fw)
-                except Exception as exc:
-                    logger.warning("Failed to restore failure weights on vec_env: %s", exc)
-
-        checkpoint_payloads: list[dict[str, Any]] = (
-            list(self._load_summary_checkpoints()) if resuming_policy else []
-        )
-        saved_model_path: Path | None = None
-        interrupted = False
-
-        # Stamp an in-progress batch marker before the loop so a crash mid-batch
-        # is resumable on the next call with the same episode count.
-        _batch_marker_pre: dict[str, Any] = {
-            "batch_completed_segments": skip_segments,
-            "batch_total_segments": n_checkpoints,
-            "batch_steps_per_segment": uniform_segment_timesteps,
-            "batch_timestep_targets": list(timestep_targets),
-            "batch_starting_checkpoint_episode": batch_starting_checkpoint_episode,
-        }
-        _pre_loop_state = dict(self._loaded_state)
-        _pre_loop_state["run_id"] = run_id
-        _pre_loop_state["experiment_id"] = experiment_id
-        if change_id:
-            _pre_loop_state["change_id"] = change_id
-        _pre_loop_state["incomplete_batch"] = _batch_marker_pre
-        atomic_write_json(self._state_path, _pre_loop_state)
-        self._loaded_state = _pre_loop_state
-
-        cumulative_ts = starting_total_timesteps
-        for completed_checkpoints, _checkpoint_slot in enumerate(
-            train_config.checkpoint_episodes,
-            start=1,
-        ):
-            if should_stop is not None and should_stop():
-                interrupted = True
-                break
-            if completed_checkpoints <= skip_segments:
-                continue
-            segment_start_perf = time.perf_counter()
-            new_segments = completed_checkpoints - skip_segments
-            segment_steps = segment_timesteps[completed_checkpoints - 1]
-            previous_target = (
-                timestep_targets[completed_checkpoints - 2]
-                if completed_checkpoints > 1
-                else 0
-            )
-            emit(
-                {
-                    "phase": "learning",
-                    "batch_completed_segments": completed_checkpoints - 1,
-                    "batch_total_segments": n_checkpoints,
-                    "batch_completed_episodes": completed_checkpoints - 1,
-                    "batch_total_timesteps": timestep_targets[-1],
-                    "batch_completed_timesteps": previous_target,
-                    "current_global_timestep": cumulative_ts,
-                    "current_episode": None,
-                    "total_episodes_trained": starting_total + new_segments - 1,
-                    "checkpoint_episode": None,
-                    "best_score": None,
-                    "message": (
-                        f"Learning neural policy: segment {completed_checkpoints}/{n_checkpoints}"
-                        f" (0/{segment_steps} timesteps)"
-                    ),
+                    baseline_summary, evaluation_json, _csv_path = self.evaluator.evaluate(
+                        policy,
+                        tuple(train_config.evaluation_seeds),
+                        checkpoint_episode=starting_total,
+                        capture_replays=True,
+                        capture_step_telemetry=False,
+                        evaluation_mode="stage_transition_baseline",
+                        run_id=run_id,
+                        checkpoint_id=baseline_id,
+                        policy_version=policy_version,
+                        curriculum_stage=active_stage,
+                        evaluation_index=0,
+                        should_stop=should_stop,
+                        experiment_id=execution_context.experiment_id,
+                        activation_id=execution_context.activation_id,
+                        checkpoint_record_id=None,
+                    )
+                except EvaluationInterruptedError:
+                    logger.info(
+                        "Stage transition baseline evaluation interrupted by stop/pause request."
+                    )
+                    emit(
+                        {
+                            "phase": "paused" if (should_stop and self._loaded_state.get("paused")) else "stopped",
+                            "batch_completed_episodes": 0,
+                            "total_episodes_trained": starting_total,
+                            "checkpoint_episode": starting_total,
+                            "message": (
+                                f"Stage {active_stage} baseline evaluation paused/stopped. "
+                                "Progress has been saved and will resume automatically on next start."
+                            ),
+                        }
+                    )
+                    return NeuralTrainingRunSummary(
+                        checkpoints=[],
+                        final_model_path=str(self._loaded_state.get("policy_state_path", "")),
+                        policy_config=policy.config.to_dict(),
+                    )
+                baseline = {
+                    "source_stage": int(source_stage),
+                    "target_stage": int(active_stage),
+                    "environment_config_hash": environment_config_hash,
+                    "policy_version": policy_version,
+                    "evaluation": str(evaluation_json),
+                    "success_rate": baseline_summary.success_rate,
+                    "timeout_rate": baseline_summary.timeout_rate,
+                    "average_reward": baseline_summary.average_reward,
+                    "average_completion_steps": baseline_summary.average_completion_steps,
                 }
-            )
-            progress_reporter = _TrainingProgressCallback(
-                emit,
-                should_stop=should_stop,
-                # Emit progress frequently enough that long PPO segments do not
-                # look stalled in the UI. Cap the update rate to avoid chatty logs.
-                report_interval=max(250, min(5_000, segment_steps // 100)),
-                total_timesteps=segment_steps,
-                starting_total_episodes=starting_total + new_segments - 1,
-                batch_total_episodes=batch_total,
-                batch_total_timesteps=timestep_targets[-1],
-                completed_timesteps=cumulative_ts,
-                completed_segments=completed_checkpoints - 1,
-                segment_index=completed_checkpoints - 1,
-                policy_version=policy_version,
-                starting_total=starting_environment_episodes,
-                batch_total_segments=n_checkpoints,
-                batch_completed_timesteps_offset=previous_target,
-            )
-            from stable_baselines3.common.callbacks import CallbackList
-            callbacks_to_use = [progress_reporter]
-            if wandb_enabled:
-                try:
-                    from wandb.integration.sb3 import WandbCallback
-                    callbacks_to_use.append(WandbCallback(verbose=0))
-                # The optional integration may fail with version-specific SDK errors.
-                except Exception as exc:  # pylint: disable=broad-exception-caught
-                    logging.getLogger(__name__).warning(
-                        "Failed to create W&B callback: %s", exc
+                self._loaded_state["stage_transition_baseline"] = baseline
+                atomic_write_json(self._state_path, self._loaded_state)
+                if baseline_summary.success_rate < self.STAGE_TRANSITION_MIN_SUCCESS_RATE:
+                    logger.warning(
+                        "Stage transition baseline: inherited Stage %s policy scored %.0f%% on Stage %s "
+                        "(minimum recommended %.0f%%). Proceeding with training to adapt policy.",
+                        source_stage,
+                        baseline_summary.success_rate * 100,
+                        active_stage,
+                        self.STAGE_TRANSITION_MIN_SUCCESS_RATE * 100,
+                    )
+                    emit(
+                        {
+                            "phase": "transition_warning",
+                            "batch_completed_episodes": 0,
+                            "total_episodes_trained": starting_total,
+                            "checkpoint_episode": starting_total,
+                            "message": (
+                                f"Inherited Stage {source_stage} policy baseline scored "
+                                f"{baseline_summary.success_rate:.0%} on Stage {active_stage}. "
+                                "Proceeding with training to acquire new concepts."
+                            ),
+                        }
                     )
 
-            callback_list = CallbackList(callbacks_to_use)
-
-            # Adaptive learning rate & entropy controller with conservative staging and automatic curriculum reset
-            if getattr(train_config, "enable_adaptive_learning", True):
-                adaptive_state = adaptive_controller.get_state()
-                effective_lr = adaptive_state.effective_learning_rate
-                effective_ent = adaptive_state.effective_entropy_coef
-            else:
-                # Fallback: Linear LR annealing across the batch
-                _batch_done = completed_checkpoints - skip_segments - 1
-                _batch_span = max(1, n_checkpoints - skip_segments - 1)
-                _batch_progress = _batch_done / _batch_span
-
-                # Enforce 5e-5 floor on learning rate annealing
-                effective_lr = max(
-                    5e-5,
-                    train_config.learning_rate
-                    + (train_config.learning_rate_final - train_config.learning_rate) * _batch_progress,
-                )
-                effective_ent = train_config.entropy_coef
-                adaptive_state = adaptive_controller.get_state()
-
-            is_first_segment_of_batch = completed_checkpoints == skip_segments + 1
-            if hasattr(policy, "configure_for_training"):
-                self.last_configured_training_parameters = policy.configure_for_training(
-                    self.config,
-                    effective_learning_rate=effective_lr,
-                    effective_entropy_coef=effective_ent,
-                    reset_rollout_buffer=is_first_segment_of_batch,
-                    set_seed=is_first_segment_of_batch,
-                )
-            else:
-                policy.model.learning_rate = effective_lr
-                policy.model.lr_schedule = (
-                    lambda _, learning_rate=effective_lr: learning_rate
-                )
-                if hasattr(policy.model, "policy") and hasattr(policy.model.policy, "optimizer"):
-                    for param_group in policy.model.policy.optimizer.param_groups:
-                        param_group["lr"] = effective_lr
-                policy.model.ent_coef = effective_ent
-                policy.model.gae_lambda = train_config.gae_lambda
-                if hasattr(policy.model, "gamma"):
-                    policy.model.gamma = train_config.gamma
-                if hasattr(policy.model, "rollout_buffer") and policy.model.rollout_buffer is not None:
-                    if hasattr(policy.model.rollout_buffer, "gamma"):
-                        policy.model.rollout_buffer.gamma = train_config.gamma
-                    if hasattr(policy.model.rollout_buffer, "gae_lambda"):
-                        policy.model.rollout_buffer.gae_lambda = train_config.gae_lambda
-
-            training_phase = (
-                self.runtime_tracker.phase("training")
-                if self.runtime_tracker is not None
-                else contextlib.nullcontext()
-            )
-            if hasattr(policy.model, "tensorboard_log") and policy.model.tensorboard_log:
-                try:
-                    Path(policy.model.tensorboard_log).mkdir(parents=True, exist_ok=True)
-                except Exception:
-                    policy.model.tensorboard_log = None
-
-            learn_start_perf = time.perf_counter()
-            with training_phase:
-                try:
-                    policy.model.learn(
-                        total_timesteps=segment_steps,
-                        reset_num_timesteps=True,
-                        progress_bar=False,
-                        callback=callback_list,
-                    )
-                except (FileNotFoundError, OSError) as tb_err:
-                    logger.warning("Tensorboard logging failed (%s). Continuing rollout without Tensorboard logging.", tb_err)
-                    policy.model.tensorboard_log = None
-                    if hasattr(policy.model, "_logger"):
-                        policy.model._logger = None
-                    policy.model.learn(
-                        total_timesteps=segment_steps,
-                        reset_num_timesteps=False,
-                        progress_bar=False,
-                        callback=callback_list,
-                    )
-            learn_seconds = max(0.0, time.perf_counter() - learn_start_perf)
-            raw_learned_timesteps = getattr(policy.model, "num_timesteps", None)
-            actual_segment_steps = (
-                int(raw_learned_timesteps)
-                if isinstance(raw_learned_timesteps, (int, float))
-                and int(raw_learned_timesteps) > 0
-                else int(segment_steps)
-            )
-            cumulative_ts += actual_segment_steps
-            transitions_per_sec = (
-                float(actual_segment_steps) / learn_seconds if learn_seconds > 0 else None
-            )
-
-            # Increment policy update version
-            policy_version += 1
-            policy.policy_version = policy_version
-
-            environment_episodes_since_run_start = 0
-            try:
-                if hasattr(policy.model, "get_env") and policy.model.get_env() is not None:
-                    environment_episodes_since_run_start = int(
-                        sum(policy.model.get_env().get_attr("_episode_counter"))
-                    )
-            except (AttributeError, RuntimeError, TypeError, ValueError):
-                environment_episodes_since_run_start = 0
-            environment_episodes_total = (
-                starting_environment_episodes + environment_episodes_since_run_start
-            )
-
-            # Retrieve training scenario coverage stats from env
-            eval_seeds = getattr(getattr(self.config, "training", None), "evaluation_seeds", (11, 23, 37, 41, 53, 59, 61, 67, 71, 73))
-            curr_coverage = self._loaded_state.get("training_scenario_coverage")
-            if not isinstance(curr_coverage, dict):
-                curr_coverage = {
-                    "seeds_seen": [],
-                    "configs_seen": [],
-                    "min_sheep_to_pen": float("inf"),
-                    "max_sheep_to_pen": float("-inf"),
-                    "sum_sheep_to_pen": 0.0,
-                    "count_sheep_to_pen": 0,
-                    "min_dog_to_sheep": float("inf"),
-                    "max_dog_to_sheep": float("-inf"),
-                    "sum_dog_to_sheep": 0.0,
-                    "count_dog_to_sheep": 0,
-                    "similarity_episodes": {str(k): 0 for k in eval_seeds},
-                    "similarity_successes": {str(k): 0 for k in eval_seeds},
-                }
-            curr_coverage["similarity_episodes"] = {str(k): v for k, v in curr_coverage.get("similarity_episodes", {}).items()}
-            curr_coverage["similarity_successes"] = {str(k): v for k, v in curr_coverage.get("similarity_successes", {}).items()}
-
-            if hasattr(policy.model, "get_env") and policy.model.get_env() is not None:
-                venv = policy.model.get_env()
-                try:
-                    if hasattr(venv, "env_method"):
-                        workers_stats = venv.env_method("get_coverage_stats")
-                        for ws in workers_stats:
-                            if not isinstance(ws, dict):
-                                continue
-                            seeds_list = set(curr_coverage.get("seeds_seen", []))
-                            seeds_list.update(ws.get("seeds_seen_list", []))
-                            curr_coverage["seeds_seen"] = list(seeds_list)
-
-                            configs_list = set(curr_coverage.get("configs_seen", []))
-                            configs_list.update(ws.get("configs_seen_list", []))
-                            curr_coverage["configs_seen"] = list(configs_list)
-
-                            if ws.get("count_sheep_to_pen", 0) > 0:
-                                curr_coverage["min_sheep_to_pen"] = min(curr_coverage["min_sheep_to_pen"], ws["min_sheep_to_pen"])
-                                curr_coverage["max_sheep_to_pen"] = max(curr_coverage["max_sheep_to_pen"], ws["max_sheep_to_pen"])
-                                curr_coverage["sum_sheep_to_pen"] += ws["sum_sheep_to_pen"]
-                                curr_coverage["count_sheep_to_pen"] += ws["count_sheep_to_pen"]
-
-                            if ws.get("count_dog_to_sheep", 0) > 0:
-                                curr_coverage["min_dog_to_sheep"] = min(curr_coverage["min_dog_to_sheep"], ws["min_dog_to_sheep"])
-                                curr_coverage["max_dog_to_sheep"] = max(curr_coverage["max_dog_to_sheep"], ws["max_dog_to_sheep"])
-                                curr_coverage["sum_dog_to_sheep"] += ws["sum_dog_to_sheep"]
-                                curr_coverage["count_dog_to_sheep"] += ws["count_dog_to_sheep"]
-
-                            ws_sim_episodes = ws.get("similarity_episodes", {})
-                            ws_sim_successes = ws.get("similarity_successes", {})
-                            all_keys = set(eval_seeds) | {int(k) for k in ws_sim_episodes if str(k).isdigit()}
-                            for k in all_keys:
-                                k_str = str(k)
-                                ep_val = ws_sim_episodes.get(k, ws_sim_episodes.get(k_str, 0))
-                                suc_val = ws_sim_successes.get(k, ws_sim_successes.get(k_str, 0))
-                                curr_coverage["similarity_episodes"][k_str] = curr_coverage["similarity_episodes"].get(k_str, 0) + ep_val
-                                curr_coverage["similarity_successes"][k_str] = curr_coverage["similarity_successes"].get(k_str, 0) + suc_val
-                except (AttributeError, RuntimeError, TypeError, ValueError):
-                    logging.getLogger(__name__).debug(
-                        "PPO environment coverage statistics are unavailable",
-                        exc_info=True,
-                    )
-
-            self._loaded_state["training_scenario_coverage"] = curr_coverage
-
-            # Extract PPO diagnostics from model logger
-            logger_obj = getattr(policy.model, "logger", None)
-            approx_kl: float | None = None
-            clip_fraction: float | None = None
-            explained_variance: float | None = None
-            policy_gradient_loss: float | None = None
-            value_loss: float | None = None
-            entropy_loss: float | None = None
-            loss: float | None = None
-            if logger_obj is not None:
-                name_to_value = getattr(logger_obj, "name_to_value", {})
-                if "train/approx_kl" in name_to_value:
-                    approx_kl = float(name_to_value["train/approx_kl"])
-                if "train/clip_fraction" in name_to_value:
-                    clip_fraction = float(name_to_value["train/clip_fraction"])
-                if "train/explained_variance" in name_to_value:
-                    explained_variance = float(name_to_value["train/explained_variance"])
-                if "train/policy_gradient_loss" in name_to_value:
-                    policy_gradient_loss = float(name_to_value["train/policy_gradient_loss"])
-                if "train/value_loss" in name_to_value:
-                    value_loss = float(name_to_value["train/value_loss"])
-                if "train/entropy_loss" in name_to_value:
-                    entropy_loss = float(name_to_value["train/entropy_loss"])
-                if "train/loss" in name_to_value:
-                    loss = float(name_to_value["train/loss"])
-
-            if should_stop is not None and should_stop():
-                interrupted = True
-                break
-            model_save_phase = (
-                self.runtime_tracker.phase("checkpoint_save")
-                if self.runtime_tracker is not None
-                else contextlib.nullcontext()
-            )
-            model_save_start_perf = time.perf_counter()
-            with model_save_phase:
-                active_stage = self.config.rewards.instincts.curriculum_stage
-                model_name = (
-                    f"{self.MODEL_PREFIX}-stage{active_stage}-{cumulative_ts:08d}"
-                    if active_stage >= 9
-                    else f"{self.MODEL_PREFIX}-{cumulative_ts:08d}"
-                )
-                saved_model_path = policy.save(stage_model_root / model_name)
-            model_save_seconds = max(0.0, time.perf_counter() - model_save_start_perf)
-            total_eps_this_checkpoint = batch_starting_checkpoint_episode + _checkpoint_slot
-            run_id = self._loaded_state.get("run_id")
-            chk_id = f"chk_{run_id}_pv_{policy_version}_ts_{cumulative_ts}"
-            recorded_time = datetime.now(UTC).isoformat()
-            active_stage = self.config.rewards.instincts.curriculum_stage
-
-            self.evaluator.runtime_tracker = self.runtime_tracker
-            all_eval_seeds = tuple(train_config.evaluation_seeds)
-            quick_seed_count = max(1, int(train_config.quick_evaluation_seed_count))
-            quick_seeds = tuple(train_config.evaluation_seeds[:quick_seed_count])
-            ran_quick_eval = quick_seeds != all_eval_seeds
-            is_final_checkpoint = completed_checkpoints == n_checkpoints
-            evaluation_phase = (
-                self.runtime_tracker.phase("evaluation")
-                if self.runtime_tracker is not None
-                else contextlib.nullcontext()
-            )
-            ran_confidence_eval = False
-            quick_eval_seconds = 0.0
-            confidence_eval_seconds = 0.0
-            quick_summary: Any = None
-            quick_evaluation_json: Path | None = None
-            try:
-                with evaluation_phase:
-                    if ran_quick_eval:
-                        quick_eval_start_perf = time.perf_counter()
-                        quick_summary, quick_evaluation_json, _csv_path = self.evaluator.evaluate(
-                            policy,
-                            quick_seeds,
-                            checkpoint_episode=total_eps_this_checkpoint,
-                            capture_replays=True,
-                            capture_step_telemetry=False,
-                            evaluation_mode="quick",
-                            run_id=run_id,
-                            checkpoint_id=chk_id,
-                            policy_version=policy_version,
-                            curriculum_stage=active_stage,
-                            should_stop=should_stop,
-                            experiment_id=execution_context.experiment_id,
-                            activation_id=execution_context.activation_id,
-                            checkpoint_record_id=f"chk_rec_{chk_id}",
-                            record_in_registry=False,
-                        )
-                        quick_eval_seconds = max(0.0, time.perf_counter() - quick_eval_start_perf)
-                        confidence_candidate = (
-                            quick_summary.success_rate
-                            >= float(train_config.confidence_candidate_success_rate)
-                        )
-                        should_run_confidence = (
-                            is_final_checkpoint
-                            or confidence_candidate
-                            or len(quick_summary.records) < len(all_eval_seeds)
-                        )
-                    else:
-                        should_run_confidence = True
-
-                    if should_run_confidence:
-                        ran_confidence_eval = True
-                        confidence_eval_start_perf = time.perf_counter()
-                        summary, evaluation_json, _csv_path = self.evaluator.evaluate(
-                            policy,
-                            all_eval_seeds,
-                            checkpoint_episode=total_eps_this_checkpoint,
-                            capture_replays=True,
-                            capture_step_telemetry=False,
-                            evaluation_mode="confidence",
-                            run_id=run_id,
-                            checkpoint_id=chk_id,
-                            policy_version=policy_version,
-                            curriculum_stage=active_stage,
-                            evaluation_index=completed_checkpoints,
-                            should_stop=should_stop,
-                            experiment_id=execution_context.experiment_id,
-                            activation_id=execution_context.activation_id,
-                            checkpoint_record_id=f"chk_rec_{chk_id}",
-                            record_in_registry=False,
-                        )
-                        confidence_eval_seconds = max(
-                            0.0, time.perf_counter() - confidence_eval_start_perf
-                        )
-                    else:
-                        summary = quick_summary
-                        evaluation_json = quick_evaluation_json
-            except EvaluationInterruptedError:
-                logger.info("Evaluation at checkpoint %d interrupted by stop/pause request.", total_eps_this_checkpoint)
-                interrupted = True
-                break
-
-            current_stage = self.config.rewards.instincts.curriculum_stage
-            # Failure-directed training weight update from evaluation
-            failure_telemetry: dict[str, Any] = {}
-            failure_weights: dict[str, float] = {}
             if getattr(train_config, "failure_directed_training_enabled", False):
-                if self._failure_sampler is None:
-                    from sheepdog.training.scenario_sampler import ScenarioSampler
-                    self._failure_sampler = ScenarioSampler(train_config, self.config.environment)
-                    saved_fw = self._loaded_state.get("failure_directed_weights")
-                    if isinstance(saved_fw, dict):
-                        self._failure_sampler.set_failure_weights(saved_fw)
+                saved_fw = self._loaded_state.get("failure_directed_weights")
+                if isinstance(saved_fw, dict) and hasattr(policy.model, "get_env") and policy.model.get_env() is not None:
+                    venv = policy.model.get_env()
+                    try:
+                        if hasattr(venv, "env_method"):
+                            venv.env_method("update_failure_weights", saved_fw)
+                    except Exception as exc:
+                        logger.warning("Failed to restore failure weights on vec_env: %s", exc)
+
+            checkpoint_payloads: list[dict[str, Any]] = (
+                list(self._load_summary_checkpoints()) if resuming_policy else []
+            )
+            saved_model_path: Path | None = None
+            interrupted = False
+
+            # Stamp an in-progress batch marker before the loop so a crash mid-batch
+            # is resumable on the next call with the same episode count.
+            _batch_marker_pre: dict[str, Any] = {
+                "batch_completed_segments": skip_segments,
+                "batch_total_segments": n_checkpoints,
+                "batch_steps_per_segment": uniform_segment_timesteps,
+                "batch_timestep_targets": list(timestep_targets),
+                "batch_starting_checkpoint_episode": batch_starting_checkpoint_episode,
+            }
+            _pre_loop_state = dict(self._loaded_state)
+            _pre_loop_state["run_id"] = run_id
+            _pre_loop_state["experiment_id"] = experiment_id
+            if change_id:
+                _pre_loop_state["change_id"] = change_id
+            _pre_loop_state["incomplete_batch"] = _batch_marker_pre
+            atomic_write_json(self._state_path, _pre_loop_state)
+            self._loaded_state = _pre_loop_state
+
+            backup_mgr: Any = None
+            if getattr(self.config.training, "backup_enabled", True):
+                try:
+                    from sheepdog.training.backup import TrainingBackupManager
+
+                    backup_mgr = TrainingBackupManager(self.config.training.backup_dir)
+                except Exception as backup_init_exc:
+                    logger.warning("Failed to initialize backup manager: %s", backup_init_exc)
+
+            cumulative_ts = starting_total_timesteps
+            segment_learn_started = False
+            for completed_checkpoints, _checkpoint_slot in enumerate(
+                train_config.checkpoint_episodes,
+                start=1,
+            ):
+                if should_stop is not None and should_stop():
+                    interrupted = True
+                    break
+                if completed_checkpoints <= skip_segments:
+                    continue
+                try:
+                    free_bytes = ensure_free_disk_space(
+                        self.output_root,
+                        context=f"before segment {completed_checkpoints}/{n_checkpoints}",
+                    )
+                except DiskSpaceError as exc:
+                    logger.error("%s", exc)
+                    raise
+                if free_bytes is not None and free_bytes < DEFAULT_WARN_FREE_DISK_BYTES:
+                    logger.warning(
+                        "Low disk space warning before segment %d/%d: %.1f MB free",
+                        completed_checkpoints,
+                        n_checkpoints,
+                        free_bytes / (1024 * 1024),
+                    )
+                segment_start_perf = time.perf_counter()
+                new_segments = completed_checkpoints - skip_segments
+                segment_steps = segment_timesteps[completed_checkpoints - 1]
+                requested_segment_steps = int(segment_steps)
+                active_env = (
+                    policy.model.get_env()
+                    if hasattr(policy.model, "get_env")
+                    else None
+                )
+                effective_env_workers = int(
+                    getattr(active_env, "num_envs", None)
+                    or getattr(getattr(policy, "config", None), "env_workers", None)
+                    or getattr(train_config, "ppo_env_workers", 1)
+                    or 1
+                )
+                rollout_quantum = max(
+                    1, int(train_config.rollout_steps) * max(1, effective_env_workers)
+                )
+                aligned_segment_steps = (
+                    (requested_segment_steps + rollout_quantum - 1) // rollout_quantum
+                ) * rollout_quantum
+                is_first_segment_of_batch = not segment_learn_started
+                reset_num_timesteps = not segment_learn_started
+                num_timesteps_before = (
+                    0
+                    if reset_num_timesteps
+                    else int(getattr(policy.model, "num_timesteps", 0) or 0)
+                )
+                previous_target = (
+                    timestep_targets[completed_checkpoints - 2]
+                    if completed_checkpoints > 1
+                    else 0
+                )
+                emit(
+                    {
+                        "phase": "learning",
+                        "batch_completed_segments": completed_checkpoints - 1,
+                        "batch_total_segments": n_checkpoints,
+                        "batch_completed_episodes": completed_checkpoints - 1,
+                        "batch_total_timesteps": timestep_targets[-1],
+                        "batch_completed_timesteps": previous_target,
+                        "current_global_timestep": cumulative_ts,
+                        "current_episode": None,
+                        "total_episodes_trained": starting_total + new_segments - 1,
+                        "checkpoint_episode": None,
+                        "best_score": None,
+                        "message": (
+                            f"Learning neural policy: segment {completed_checkpoints}/{n_checkpoints}"
+                            f" (0/{aligned_segment_steps} timesteps)"
+                        ),
+                    }
+                )
+                progress_reporter = _TrainingProgressCallback(
+                    emit,
+                    should_stop=should_stop,
+                    # Emit progress frequently enough that long PPO segments do not
+                    # look stalled in the UI. Cap the update rate to avoid chatty logs.
+                    report_interval=max(250, min(5_000, aligned_segment_steps // 100)),
+                    total_timesteps=aligned_segment_steps,
+                    starting_total_episodes=starting_total + new_segments - 1,
+                    batch_total_episodes=batch_total,
+                    batch_total_timesteps=timestep_targets[-1],
+                    completed_timesteps=cumulative_ts,
+                    completed_segments=completed_checkpoints - 1,
+                    segment_index=completed_checkpoints - 1,
+                    policy_version=policy_version,
+                    starting_total=starting_environment_episodes,
+                    batch_total_segments=n_checkpoints,
+                    batch_completed_timesteps_offset=previous_target,
+                    segment_start_timesteps=num_timesteps_before,
+                )
+                from stable_baselines3.common.callbacks import CallbackList
+                callbacks_to_use = [progress_reporter]
+                if wandb_enabled:
+                    try:
+                        from wandb.integration.sb3 import WandbCallback
+                        callbacks_to_use.append(WandbCallback(verbose=0))
+                    # The optional integration may fail with version-specific SDK errors.
+                    except Exception as exc:  # pylint: disable=broad-exception-caught
+                        logging.getLogger(__name__).warning(
+                            "Failed to create W&B callback: %s", exc
+                        )
+
+                callback_list = CallbackList(callbacks_to_use)
+
+                # Adaptive learning rate & entropy controller with conservative staging and automatic curriculum reset
+                if getattr(train_config, "enable_adaptive_learning", True):
+                    adaptive_state = adaptive_controller.get_state()
+                    effective_lr = adaptive_state.effective_learning_rate
+                    effective_ent = adaptive_state.effective_entropy_coef
                 else:
-                    self._failure_sampler.update_env_config(self.config.environment)
-                failure_weights = self._failure_sampler.update_from_evaluation(summary.records)
-                # Propagate to vectorized environment workers
-                weight_update_status = "unavailable"
-                weight_update_error = None
+                    # Fallback: Linear LR annealing across the batch
+                    _batch_done = completed_checkpoints - skip_segments - 1
+                    _batch_span = max(1, n_checkpoints - skip_segments - 1)
+                    _batch_progress = _batch_done / _batch_span
+
+                    # Enforce 5e-5 floor on learning rate annealing
+                    effective_lr = max(
+                        5e-5,
+                        train_config.learning_rate
+                        + (train_config.learning_rate_final - train_config.learning_rate) * _batch_progress,
+                    )
+                    effective_ent = train_config.entropy_coef
+                    adaptive_state = adaptive_controller.get_state()
+
+                if hasattr(policy, "configure_for_training"):
+                    self.last_configured_training_parameters = policy.configure_for_training(
+                        self.config,
+                        effective_learning_rate=effective_lr,
+                        effective_entropy_coef=effective_ent,
+                        reset_rollout_buffer=is_first_segment_of_batch,
+                        set_seed=is_first_segment_of_batch,
+                    )
+                else:
+                    policy.model.learning_rate = effective_lr
+                    policy.model.lr_schedule = (
+                        lambda _, learning_rate=effective_lr: learning_rate
+                    )
+                    if hasattr(policy.model, "policy") and hasattr(policy.model.policy, "optimizer"):
+                        for param_group in policy.model.policy.optimizer.param_groups:
+                            param_group["lr"] = effective_lr
+                    policy.model.ent_coef = effective_ent
+                    policy.model.gae_lambda = train_config.gae_lambda
+                    if hasattr(policy.model, "gamma"):
+                        policy.model.gamma = train_config.gamma
+                    if hasattr(policy.model, "rollout_buffer") and policy.model.rollout_buffer is not None:
+                        if hasattr(policy.model.rollout_buffer, "gamma"):
+                            policy.model.rollout_buffer.gamma = train_config.gamma
+                        if hasattr(policy.model.rollout_buffer, "gae_lambda"):
+                            policy.model.rollout_buffer.gae_lambda = train_config.gae_lambda
+
+                training_phase = (
+                    self.runtime_tracker.phase("training")
+                    if self.runtime_tracker is not None
+                    else contextlib.nullcontext()
+                )
+                if hasattr(policy.model, "tensorboard_log") and policy.model.tensorboard_log:
+                    try:
+                        Path(policy.model.tensorboard_log).mkdir(parents=True, exist_ok=True)
+                    except Exception:
+                        policy.model.tensorboard_log = None
+
+                learn_start_perf = time.perf_counter()
+                with training_phase:
+                    try:
+                        policy.model.learn(
+                            total_timesteps=aligned_segment_steps,
+                            reset_num_timesteps=reset_num_timesteps,
+                            progress_bar=False,
+                            callback=callback_list,
+                        )
+                    except (FileNotFoundError, OSError) as tb_err:
+                        logger.warning("Tensorboard logging failed (%s). Continuing rollout without Tensorboard logging.", tb_err)
+                        policy.model.tensorboard_log = None
+                        if hasattr(policy.model, "_logger"):
+                            policy.model._logger = None
+                        policy.model.learn(
+                            total_timesteps=aligned_segment_steps,
+                            reset_num_timesteps=False,
+                            progress_bar=False,
+                            callback=callback_list,
+                        )
+                segment_learn_started = True
+                learn_seconds = max(0.0, time.perf_counter() - learn_start_perf)
+                raw_learned_timesteps = getattr(policy.model, "num_timesteps", None)
+                actual_segment_steps = (
+                    int(raw_learned_timesteps) - num_timesteps_before
+                    if isinstance(raw_learned_timesteps, (int, float))
+                    and int(raw_learned_timesteps) > num_timesteps_before
+                    else aligned_segment_steps
+                )
+                cumulative_ts += actual_segment_steps
+                transitions_per_sec = (
+                    float(actual_segment_steps) / learn_seconds if learn_seconds > 0 else None
+                )
+
+                # Increment policy update version
+                policy_version += 1
+                policy.policy_version = policy_version
+
+                environment_episodes_since_run_start = 0
+                try:
+                    if hasattr(policy.model, "get_env") and policy.model.get_env() is not None:
+                        environment_episodes_since_run_start = int(
+                            sum(policy.model.get_env().get_attr("_episode_counter"))
+                        )
+                except (AttributeError, RuntimeError, TypeError, ValueError):
+                    environment_episodes_since_run_start = 0
+                environment_episodes_total = (
+                    starting_environment_episodes + environment_episodes_since_run_start
+                )
+
+                # Retrieve training scenario coverage stats from env
+                eval_seeds = getattr(getattr(self.config, "training", None), "evaluation_seeds", (11, 23, 37, 41, 53, 59, 61, 67, 71, 73))
+                curr_coverage = self._loaded_state.get("training_scenario_coverage")
+                if not isinstance(curr_coverage, dict):
+                    curr_coverage = {
+                        "seeds_seen": [],
+                        "configs_seen": [],
+                        "min_sheep_to_pen": float("inf"),
+                        "max_sheep_to_pen": float("-inf"),
+                        "sum_sheep_to_pen": 0.0,
+                        "count_sheep_to_pen": 0,
+                        "min_dog_to_sheep": float("inf"),
+                        "max_dog_to_sheep": float("-inf"),
+                        "sum_dog_to_sheep": 0.0,
+                        "count_dog_to_sheep": 0,
+                        "similarity_episodes": {str(k): 0 for k in eval_seeds},
+                        "similarity_successes": {str(k): 0 for k in eval_seeds},
+                    }
+                curr_coverage["similarity_episodes"] = {str(k): v for k, v in curr_coverage.get("similarity_episodes", {}).items()}
+                curr_coverage["similarity_successes"] = {str(k): v for k, v in curr_coverage.get("similarity_successes", {}).items()}
+
                 if hasattr(policy.model, "get_env") and policy.model.get_env() is not None:
                     venv = policy.model.get_env()
                     try:
                         if hasattr(venv, "env_method"):
-                            venv.env_method("update_failure_weights", failure_weights)
-                            weight_update_status = "applied"
-                    except Exception as exc:
-                        weight_update_status = "failed"
-                        weight_update_error = str(exc)
-                        logger.warning("Failed to update failure weights on vec_env: %s", exc)
-                venv = policy.model.get_env() if hasattr(policy.model, "get_env") else None
-                failure_telemetry = collect_worker_scenario_usage(venv)
-                failure_telemetry["requested_failure_weights"] = failure_weights
-                failure_telemetry["weight_update_status"] = weight_update_status
-                failure_telemetry["weight_update_error"] = weight_update_error
+                            workers_stats = venv.env_method("get_coverage_stats")
+                            for ws in workers_stats:
+                                if not isinstance(ws, dict):
+                                    continue
+                                seeds_list = set(curr_coverage.get("seeds_seen", []))
+                                seeds_list.update(ws.get("seeds_seen_list", []))
+                                curr_coverage["seeds_seen"] = list(seeds_list)
 
-            if getattr(train_config, "enable_adaptive_learning", True):
-                adaptive_state = adaptive_controller.update(
-                    eval_success_rate=summary.success_rate,
-                    current_curriculum_stage=current_stage,
-                )
-            else:
-                adaptive_state = adaptive_controller.get_state()
+                                configs_list = set(curr_coverage.get("configs_seen", []))
+                                configs_list.update(ws.get("configs_seen_list", []))
+                                curr_coverage["configs_seen"] = list(configs_list)
 
-            is_new_best = summary.promotion_eligible and (
-                current_stage > best_model_curriculum_stage
-                or (
-                    current_stage == best_model_curriculum_stage
-                    and (
-                        summary.success_rate > best_success_rate
-                        or (
-                            summary.success_rate == best_success_rate
-                            and summary.average_reward > best_average_reward
+                                if ws.get("count_sheep_to_pen", 0) > 0:
+                                    curr_coverage["min_sheep_to_pen"] = min(curr_coverage["min_sheep_to_pen"], ws["min_sheep_to_pen"])
+                                    curr_coverage["max_sheep_to_pen"] = max(curr_coverage["max_sheep_to_pen"], ws["max_sheep_to_pen"])
+                                    curr_coverage["sum_sheep_to_pen"] += ws["sum_sheep_to_pen"]
+                                    curr_coverage["count_sheep_to_pen"] += ws["count_sheep_to_pen"]
+
+                                if ws.get("count_dog_to_sheep", 0) > 0:
+                                    curr_coverage["min_dog_to_sheep"] = min(curr_coverage["min_dog_to_sheep"], ws["min_dog_to_sheep"])
+                                    curr_coverage["max_dog_to_sheep"] = max(curr_coverage["max_dog_to_sheep"], ws["max_dog_to_sheep"])
+                                    curr_coverage["sum_dog_to_sheep"] += ws["sum_dog_to_sheep"]
+                                    curr_coverage["count_dog_to_sheep"] += ws["count_dog_to_sheep"]
+
+                                ws_sim_episodes = ws.get("similarity_episodes", {})
+                                ws_sim_successes = ws.get("similarity_successes", {})
+                                all_keys = set(eval_seeds) | {int(k) for k in ws_sim_episodes if str(k).isdigit()}
+                                for k in all_keys:
+                                    k_str = str(k)
+                                    ep_val = ws_sim_episodes.get(k, ws_sim_episodes.get(k_str, 0))
+                                    suc_val = ws_sim_successes.get(k, ws_sim_successes.get(k_str, 0))
+                                    curr_coverage["similarity_episodes"][k_str] = curr_coverage["similarity_episodes"].get(k_str, 0) + ep_val
+                                    curr_coverage["similarity_successes"][k_str] = curr_coverage["similarity_successes"].get(k_str, 0) + suc_val
+                    except (AttributeError, RuntimeError, TypeError, ValueError):
+                        logging.getLogger(__name__).debug(
+                            "PPO environment coverage statistics are unavailable",
+                            exc_info=True,
                         )
-                        or (
-                            summary.success_rate == best_success_rate
-                            and summary.average_reward == best_average_reward
-                            and summary.average_completion_steps < best_completion_steps
-                        )
-                    )
-                )
-            )
-            periodic_replay = int(train_config.replay_export_every_n_checkpoints)
-            should_export_replay = summary.promotion_eligible and (
-                (is_new_best and train_config.replay_export_on_new_best)
-                or (is_final_checkpoint and train_config.replay_export_on_final)
-                or (
-                    summary.success_rate == 0
-                    and train_config.replay_export_on_failed_diagnostic
-                )
-                or (periodic_replay > 0 and completed_checkpoints % periodic_replay == 0)
-            )
-            representative_replay_path: Path | None = None
-            if should_export_replay:
-                if (
-                    summary.records
-                    and summary.records[0].replay_path
-                    and Path(summary.records[0].replay_path).exists()
-                ):
-                    representative_replay_path = Path(summary.records[0].replay_path)
-                else:
-                    representative_replay_path = self.evaluator.export_replay(
-                        policy,
-                        int(summary.records[0].seed),
-                        total_eps_this_checkpoint,
-                    )
-                    records = list(summary.records)
-                    records[0] = replace(
-                        records[0], replay_path=str(representative_replay_path)
-                    )
-                    summary = replace(summary, records=tuple(records))
 
-            runtime_snapshot = (
-                self.runtime_tracker.episode_snapshot()
-                if self.runtime_tracker is not None
-                else {}
-            )
-            metadata = CheckpointMetadata(
-                checkpoint_episode=total_eps_this_checkpoint,
-                total_training_episodes=total_eps_this_checkpoint,
-                policy_name=policy.name,
-                trainer_type=policy.trainer_type,
-                policy_type=policy.policy_type,
-                seed=train_config.train_seed,
-                success_rate=summary.success_rate,
-                average_completion_steps=summary.average_completion_steps,
-                timeout_rate=summary.timeout_rate,
-                average_sheep_penned=summary.average_sheep_penned,
-                average_reward=summary.average_reward,
-                environment_config=self.config.to_dict()["environment"],
-                reward_config=self.config.to_dict()["rewards"],
-                policy_state_path=str(saved_model_path),
-                policy_config=policy.config.to_dict(),
-                evaluation_replay_path=(
-                    str(representative_replay_path)
-                    if representative_replay_path is not None
-                    else None
-                ),
-                run_id=run_id,
-                checkpoint_id=chk_id,
-                environment_episodes_total=environment_episodes_total,
-                environment_episodes_since_run_start=environment_episodes_since_run_start,
-                parent_run_id=self._loaded_state.get("parent_run_id"),
-                parent_checkpoint_id=self._loaded_state.get("parent_checkpoint_id"),
-                global_timestep=cumulative_ts,
-                observation_schema_hash=get_observation_schema_hash(self.config),
-                action_space_hash=get_action_space_hash(),
-                reward_schema_version=REWARD_SCHEMA_VERSION,
-                env_config_version=ENV_CONFIG_VERSION,
-                created_timestamp=recorded_time,
-                deterministic_evaluation=True,
-                evaluation_seeds=[record.seed for record in summary.records],
-                policy_version=policy_version,
-                policy_gradient_loss=policy_gradient_loss,
-                value_loss=value_loss,
-                entropy_loss=entropy_loss,
-                loss=loss,
-                approx_kl=approx_kl,
-                clip_fraction=clip_fraction,
-                explained_variance=explained_variance,
-                training_scenario_coverage=curr_coverage,
-                curriculum_stage=active_stage,
-                evaluation_seed_set_id=compute_seed_set_id(
-                    [record.seed for record in summary.records]
-                ),
-                evaluation_seed_count=len(summary.records),
-                environment_config_hash=compute_env_config_hash(self.config.to_dict()["environment"]),
-                evaluation_timestamp=recorded_time,
-                evaluation_id=summary.evaluation_id,
-                evaluation_mode=summary.evaluation_mode,
-                promotion_eligible=summary.promotion_eligible,
-                adaptive_lr_stage=adaptive_state.stage,
-                adaptive_lr_stage_max=adaptive_state.max_stages,
-                adaptive_lr_stage_label=adaptive_state.label,
-                adaptive_lr_multiplier=adaptive_state.multiplier,
-                effective_learning_rate=adaptive_state.effective_learning_rate,
-                effective_mutation_scale=adaptive_state.effective_mutation_scale,
-                experiment_id=execution_context.experiment_id,
-                activation_id=execution_context.activation_id,
-                change_id=execution_context.change_id,
-                **runtime_snapshot,
-            )
-            post_eval_save_start_perf = time.perf_counter()
-            if is_new_best:
-                best_success_rate = summary.success_rate
-                best_average_reward = summary.average_reward
-                best_completion_steps = summary.average_completion_steps
-                best_model_curriculum_stage = current_stage
-                best_model_name = f"stage{current_stage}-best-model" if current_stage >= 9 else "best-model"
-                tracked_best_model_path = policy.save(stage_model_root / best_model_name)
-                consecutive_collapse_count = 0
-            else:
-                auto_rollback = getattr(train_config, "auto_rollback_on_collapse", True)
-                collapse_thresh = getattr(train_config, "collapse_threshold_success", 0.35)
-                if auto_rollback and best_success_rate >= 0.80 and tracked_best_model_path is not None:
-                    if summary.success_rate < collapse_thresh:
-                        consecutive_collapse_count += 1
-                        if consecutive_collapse_count >= 3:
-                            logging.getLogger(__name__).warning(
-                                "Catastrophic policy collapse detected: success dropped to %.1f%% (< %.1f%%) for %d consecutive checkpoints. Rolling back to best model %s.",
-                                summary.success_rate * 100.0,
-                                collapse_thresh * 100.0,
-                                consecutive_collapse_count,
-                                tracked_best_model_path,
+                self._loaded_state["training_scenario_coverage"] = curr_coverage
+
+                # Extract PPO diagnostics from model logger
+                logger_obj = getattr(policy.model, "logger", None)
+                approx_kl: float | None = None
+                clip_fraction: float | None = None
+                explained_variance: float | None = None
+                policy_gradient_loss: float | None = None
+                value_loss: float | None = None
+                entropy_loss: float | None = None
+                loss: float | None = None
+                if logger_obj is not None:
+                    name_to_value = getattr(logger_obj, "name_to_value", {})
+                    if "train/approx_kl" in name_to_value:
+                        approx_kl = float(name_to_value["train/approx_kl"])
+                    if "train/clip_fraction" in name_to_value:
+                        clip_fraction = float(name_to_value["train/clip_fraction"])
+                    if "train/explained_variance" in name_to_value:
+                        explained_variance = float(name_to_value["train/explained_variance"])
+                    if "train/policy_gradient_loss" in name_to_value:
+                        policy_gradient_loss = float(name_to_value["train/policy_gradient_loss"])
+                    if "train/value_loss" in name_to_value:
+                        value_loss = float(name_to_value["train/value_loss"])
+                    if "train/entropy_loss" in name_to_value:
+                        entropy_loss = float(name_to_value["train/entropy_loss"])
+                    if "train/loss" in name_to_value:
+                        loss = float(name_to_value["train/loss"])
+
+                if should_stop is not None and should_stop():
+                    interrupted = True
+                    break
+                model_save_phase = (
+                    self.runtime_tracker.phase("checkpoint_save")
+                    if self.runtime_tracker is not None
+                    else contextlib.nullcontext()
+                )
+                model_save_start_perf = time.perf_counter()
+                with model_save_phase:
+                    active_stage = self.config.rewards.instincts.curriculum_stage
+                    model_name = (
+                        f"{self.MODEL_PREFIX}-stage{active_stage}-{cumulative_ts:08d}"
+                        if active_stage >= 9
+                        else f"{self.MODEL_PREFIX}-{cumulative_ts:08d}"
+                    )
+                    saved_model_path = policy.save(stage_model_root / model_name)
+                model_save_seconds = max(0.0, time.perf_counter() - model_save_start_perf)
+                total_eps_this_checkpoint = batch_starting_checkpoint_episode + _checkpoint_slot
+                run_id = self._loaded_state.get("run_id")
+                chk_id = f"chk_{run_id}_pv_{policy_version}_ts_{cumulative_ts}"
+                recorded_time = datetime.now(UTC).isoformat()
+                active_stage = self.config.rewards.instincts.curriculum_stage
+
+                self.evaluator.runtime_tracker = self.runtime_tracker
+                all_eval_seeds = tuple(train_config.evaluation_seeds)
+                quick_seed_count = max(1, int(train_config.quick_evaluation_seed_count))
+                quick_seeds = tuple(train_config.evaluation_seeds[:quick_seed_count])
+                ran_quick_eval = quick_seeds != all_eval_seeds
+                is_final_checkpoint = completed_checkpoints == n_checkpoints
+                evaluation_phase = (
+                    self.runtime_tracker.phase("evaluation")
+                    if self.runtime_tracker is not None
+                    else contextlib.nullcontext()
+                )
+                ran_confidence_eval = False
+                quick_eval_seconds = 0.0
+                confidence_eval_seconds = 0.0
+                quick_summary: Any = None
+                quick_evaluation_json: Path | None = None
+                try:
+                    with evaluation_phase:
+                        if ran_quick_eval:
+                            quick_eval_start_perf = time.perf_counter()
+                            quick_summary, quick_evaluation_json, _csv_path = self.evaluator.evaluate(
+                                policy,
+                                quick_seeds,
+                                checkpoint_episode=total_eps_this_checkpoint,
+                                capture_replays=True,
+                                capture_step_telemetry=False,
+                                evaluation_mode="quick",
+                                run_id=run_id,
+                                checkpoint_id=chk_id,
+                                policy_version=policy_version,
+                                curriculum_stage=active_stage,
+                                should_stop=should_stop,
+                                experiment_id=execution_context.experiment_id,
+                                activation_id=execution_context.activation_id,
+                                checkpoint_record_id=f"chk_rec_{chk_id}",
+                                record_in_registry=False,
                             )
-                            if hasattr(policy, "reload_from") and policy.reload_from(tracked_best_model_path):
-                                logging.getLogger(__name__).info("Successfully restored weights from best model checkpoint.")
+                            quick_eval_seconds = max(0.0, time.perf_counter() - quick_eval_start_perf)
+                            confidence_candidate = (
+                                quick_summary.success_rate
+                                >= float(train_config.confidence_candidate_success_rate)
+                            )
+                            should_run_confidence = (
+                                is_final_checkpoint
+                                or confidence_candidate
+                                or len(quick_summary.records) < len(all_eval_seeds)
+                            )
+                        else:
+                            should_run_confidence = True
+
+                        if should_run_confidence:
+                            ran_confidence_eval = True
+                            confidence_eval_start_perf = time.perf_counter()
+                            summary, evaluation_json, _csv_path = self.evaluator.evaluate(
+                                policy,
+                                all_eval_seeds,
+                                checkpoint_episode=total_eps_this_checkpoint,
+                                capture_replays=True,
+                                capture_step_telemetry=False,
+                                evaluation_mode="confidence",
+                                run_id=run_id,
+                                checkpoint_id=chk_id,
+                                policy_version=policy_version,
+                                curriculum_stage=active_stage,
+                                evaluation_index=completed_checkpoints,
+                                should_stop=should_stop,
+                                experiment_id=execution_context.experiment_id,
+                                activation_id=execution_context.activation_id,
+                                checkpoint_record_id=f"chk_rec_{chk_id}",
+                                record_in_registry=False,
+                            )
+                            confidence_eval_seconds = max(
+                                0.0, time.perf_counter() - confidence_eval_start_perf
+                            )
+                        else:
+                            summary = quick_summary
+                            evaluation_json = quick_evaluation_json
+                except EvaluationInterruptedError:
+                    logger.info("Evaluation at checkpoint %d interrupted by stop/pause request.", total_eps_this_checkpoint)
+                    interrupted = True
+                    break
+
+                current_stage = self.config.rewards.instincts.curriculum_stage
+                # Failure-directed training weight update from evaluation
+                failure_telemetry: dict[str, Any] = {}
+                failure_weights: dict[str, float] = {}
+                if getattr(train_config, "failure_directed_training_enabled", False):
+                    if self._failure_sampler is None:
+                        from sheepdog.training.scenario_sampler import ScenarioSampler
+                        self._failure_sampler = ScenarioSampler(train_config, self.config.environment)
+                        saved_fw = self._loaded_state.get("failure_directed_weights")
+                        if isinstance(saved_fw, dict):
+                            self._failure_sampler.set_failure_weights(saved_fw)
+                    else:
+                        self._failure_sampler.update_env_config(self.config.environment)
+                    failure_weights = self._failure_sampler.update_from_evaluation(summary.records)
+                    # Propagate to vectorized environment workers
+                    weight_update_status = "unavailable"
+                    weight_update_error = None
+                    if hasattr(policy.model, "get_env") and policy.model.get_env() is not None:
+                        venv = policy.model.get_env()
+                        try:
+                            if hasattr(venv, "env_method"):
+                                venv.env_method("update_failure_weights", failure_weights)
+                                weight_update_status = "applied"
+                        except Exception as exc:
+                            weight_update_status = "failed"
+                            weight_update_error = str(exc)
+                            logger.warning("Failed to update failure weights on vec_env: %s", exc)
+                    venv = policy.model.get_env() if hasattr(policy.model, "get_env") else None
+                    failure_telemetry = collect_worker_scenario_usage(venv)
+                    failure_telemetry["requested_failure_weights"] = failure_weights
+                    failure_telemetry["weight_update_status"] = weight_update_status
+                    failure_telemetry["weight_update_error"] = weight_update_error
+
+                if getattr(train_config, "enable_adaptive_learning", True):
+                    adaptive_state = adaptive_controller.update(
+                        eval_success_rate=summary.success_rate,
+                        current_curriculum_stage=current_stage,
+                    )
+                else:
+                    adaptive_state = adaptive_controller.get_state()
+
+                is_new_best = summary.promotion_eligible and (
+                    current_stage > best_model_curriculum_stage
+                    or (
+                        current_stage == best_model_curriculum_stage
+                        and (
+                            summary.success_rate > best_success_rate
+                            or (
+                                summary.success_rate == best_success_rate
+                                and summary.average_reward > best_average_reward
+                            )
+                            or (
+                                summary.success_rate == best_success_rate
+                                and summary.average_reward == best_average_reward
+                                and summary.average_completion_steps < best_completion_steps
+                            )
+                        )
+                    )
+                )
+                periodic_replay = int(train_config.replay_export_every_n_checkpoints)
+                should_export_replay = summary.promotion_eligible and (
+                    (is_new_best and train_config.replay_export_on_new_best)
+                    or (is_final_checkpoint and train_config.replay_export_on_final)
+                    or (
+                        summary.success_rate == 0
+                        and train_config.replay_export_on_failed_diagnostic
+                    )
+                    or (periodic_replay > 0 and completed_checkpoints % periodic_replay == 0)
+                )
+                representative_replay_path: Path | None = None
+                if should_export_replay:
+                    if (
+                        summary.records
+                        and summary.records[0].replay_path
+                        and Path(summary.records[0].replay_path).exists()
+                    ):
+                        representative_replay_path = Path(summary.records[0].replay_path)
+                    else:
+                        representative_replay_path = self.evaluator.export_replay(
+                            policy,
+                            int(summary.records[0].seed),
+                            total_eps_this_checkpoint,
+                        )
+                        records = list(summary.records)
+                        records[0] = replace(
+                            records[0], replay_path=str(representative_replay_path)
+                        )
+                        summary = replace(summary, records=tuple(records))
+
+                runtime_snapshot = (
+                    self.runtime_tracker.episode_snapshot()
+                    if self.runtime_tracker is not None
+                    else {}
+                )
+                metadata = CheckpointMetadata(
+                    checkpoint_episode=total_eps_this_checkpoint,
+                    total_training_episodes=total_eps_this_checkpoint,
+                    policy_name=policy.name,
+                    trainer_type=policy.trainer_type,
+                    policy_type=policy.policy_type,
+                    seed=train_config.train_seed,
+                    success_rate=summary.success_rate,
+                    average_completion_steps=summary.average_completion_steps,
+                    timeout_rate=summary.timeout_rate,
+                    average_sheep_penned=summary.average_sheep_penned,
+                    average_reward=summary.average_reward,
+                    environment_config=self.config.to_dict()["environment"],
+                    reward_config=self.config.to_dict()["rewards"],
+                    policy_state_path=str(saved_model_path),
+                    policy_config=policy.config.to_dict(),
+                    evaluation_replay_path=(
+                        str(representative_replay_path)
+                        if representative_replay_path is not None
+                        else None
+                    ),
+                    run_id=run_id,
+                    checkpoint_id=chk_id,
+                    environment_episodes_total=environment_episodes_total,
+                    environment_episodes_since_run_start=environment_episodes_since_run_start,
+                    parent_run_id=self._loaded_state.get("parent_run_id"),
+                    parent_checkpoint_id=self._loaded_state.get("parent_checkpoint_id"),
+                    global_timestep=cumulative_ts,
+                    observation_schema_hash=get_observation_schema_hash(self.config),
+                    action_space_hash=get_action_space_hash(),
+                    reward_schema_version=REWARD_SCHEMA_VERSION,
+                    env_config_version=ENV_CONFIG_VERSION,
+                    created_timestamp=recorded_time,
+                    deterministic_evaluation=True,
+                    evaluation_seeds=[record.seed for record in summary.records],
+                    policy_version=policy_version,
+                    policy_gradient_loss=policy_gradient_loss,
+                    value_loss=value_loss,
+                    entropy_loss=entropy_loss,
+                    loss=loss,
+                    approx_kl=approx_kl,
+                    clip_fraction=clip_fraction,
+                    explained_variance=explained_variance,
+                    training_scenario_coverage=curr_coverage,
+                    curriculum_stage=active_stage,
+                    evaluation_seed_set_id=compute_seed_set_id(
+                        [record.seed for record in summary.records]
+                    ),
+                    evaluation_seed_count=len(summary.records),
+                    environment_config_hash=compute_env_config_hash(self.config.to_dict()["environment"]),
+                    evaluation_timestamp=recorded_time,
+                    evaluation_id=summary.evaluation_id,
+                    evaluation_mode=summary.evaluation_mode,
+                    promotion_eligible=summary.promotion_eligible,
+                    adaptive_lr_stage=adaptive_state.stage,
+                    adaptive_lr_stage_max=adaptive_state.max_stages,
+                    adaptive_lr_stage_label=adaptive_state.label,
+                    adaptive_lr_multiplier=adaptive_state.multiplier,
+                    effective_learning_rate=adaptive_state.effective_learning_rate,
+                    effective_mutation_scale=adaptive_state.effective_mutation_scale,
+                    experiment_id=execution_context.experiment_id,
+                    activation_id=execution_context.activation_id,
+                    change_id=execution_context.change_id,
+                    **runtime_snapshot,
+                )
+                post_eval_save_start_perf = time.perf_counter()
+                if is_new_best:
+                    best_success_rate = summary.success_rate
+                    best_average_reward = summary.average_reward
+                    best_completion_steps = summary.average_completion_steps
+                    best_model_curriculum_stage = current_stage
+                    best_model_name = f"stage{current_stage}-best-model" if current_stage >= 9 else "best-model"
+                    tracked_best_model_path = policy.save(stage_model_root / best_model_name)
+                    consecutive_collapse_count = 0
+                else:
+                    auto_rollback = getattr(train_config, "auto_rollback_on_collapse", True)
+                    collapse_thresh = getattr(train_config, "collapse_threshold_success", 0.35)
+                    if auto_rollback and best_success_rate >= 0.80 and tracked_best_model_path is not None:
+                        if summary.success_rate < collapse_thresh:
+                            consecutive_collapse_count += 1
+                            if consecutive_collapse_count >= 3:
+                                logging.getLogger(__name__).warning(
+                                    "Catastrophic policy collapse detected: success dropped to %.1f%% (< %.1f%%) for %d consecutive checkpoints. Rolling back to best model %s.",
+                                    summary.success_rate * 100.0,
+                                    collapse_thresh * 100.0,
+                                    consecutive_collapse_count,
+                                    tracked_best_model_path,
+                                )
+                                if hasattr(policy, "reload_from") and policy.reload_from(tracked_best_model_path):
+                                    logging.getLogger(__name__).info("Successfully restored weights from best model checkpoint.")
+                                consecutive_collapse_count = 0
+                        else:
                             consecutive_collapse_count = 0
                     else:
                         consecutive_collapse_count = 0
+                checkpoint_write_phase = (
+                    self.runtime_tracker.phase("checkpoint_save")
+                    if self.runtime_tracker is not None
+                    else contextlib.nullcontext()
+                )
+                with checkpoint_write_phase:
+                    checkpoint_path = self.checkpoint_store.write(metadata)
+                if ran_quick_eval and quick_summary is not None and quick_evaluation_json is not None:
+                    self.evaluator.record_evaluation_in_registry(
+                        summary=quick_summary,
+                        json_path=quick_evaluation_json,
+                        policy=policy,
+                        experiment_id=execution_context.experiment_id,
+                        activation_id=execution_context.activation_id,
+                        checkpoint_record_id=f"chk_rec_{chk_id}",
+                    )
+                if ran_confidence_eval:
+                    self.evaluator.record_evaluation_in_registry(
+                        summary=summary,
+                        json_path=evaluation_json,
+                        policy=policy,
+                        experiment_id=execution_context.experiment_id,
+                        activation_id=execution_context.activation_id,
+                        checkpoint_record_id=f"chk_rec_{chk_id}",
+                    )
+                ppo_env_workers = int(getattr(train_config, "ppo_env_workers", 1) or 1)
+                save_and_export_seconds = model_save_seconds + max(
+                    0.0, time.perf_counter() - post_eval_save_start_perf
+                )
+                segment_total_seconds = max(0.0, time.perf_counter() - segment_start_perf)
+                eval_overhead_pct = (
+                    100.0 * (quick_eval_seconds + confidence_eval_seconds) / segment_total_seconds
+                    if segment_total_seconds > 0
+                    else 0.0
+                )
+                segment_timing: dict[str, Any] = {
+                    "segment_steps": int(actual_segment_steps),
+                    "requested_segment_steps": requested_segment_steps,
+                    "aligned_segment_steps": aligned_segment_steps,
+                    "actual_segment_steps": int(actual_segment_steps),
+                    "learn_seconds": learn_seconds,
+                    "transitions_per_sec": transitions_per_sec,
+                    "quick_eval_seconds": quick_eval_seconds,
+                    "confidence_eval_seconds": confidence_eval_seconds,
+                    "save_and_export_seconds": save_and_export_seconds,
+                    "segment_total_seconds": segment_total_seconds,
+                    "eval_overhead_pct": eval_overhead_pct,
+                    "ppo_env_workers": ppo_env_workers,
+                }
+                checkpoint_payload = {
+                    "checkpoint_episode": total_eps_this_checkpoint,
+                    "recorded_at": recorded_time,
+                    "checkpoint": checkpoint_path.name,
+                    "evaluation": evaluation_json.name,
+                    "replay": (
+                        str(representative_replay_path)
+                        if representative_replay_path is not None
+                        else None
+                    ),
+                    "policy_name": policy.name,
+                    "trainer_type": policy.trainer_type,
+                    "policy_type": policy.policy_type,
+                    "policy_mode": policy.name,
+                    "replay_mode": self.REPLAY_MODE,
+                    "total_training_episodes": total_eps_this_checkpoint,
+                    "policy_state_path": str(saved_model_path),
+                    "success_rate": summary.success_rate,
+                    "timeout_rate": summary.timeout_rate,
+                    "average_completion_steps": summary.average_completion_steps,
+                    "average_completion_seconds": summary.average_completion_seconds,
+                    "average_sheep_penned": summary.average_sheep_penned,
+                    "average_reward": summary.average_reward,
+                    "average_distance_to_pen": summary.average_distance_to_pen,
+                    "average_flock_spread": summary.average_flock_spread,
+                    "environment_config": self.config.to_dict()["environment"],
+                    "reward_config": self.config.to_dict()["rewards"],
+                    "records": [record.to_dict() for record in summary.records],
+                    "run_id": run_id,
+                    "checkpoint_id": chk_id,
+                    "adaptive_lr_stage": adaptive_state.stage,
+                    "adaptive_lr_stage_max": adaptive_state.max_stages,
+                    "adaptive_lr_stage_label": adaptive_state.label,
+                    "adaptive_lr_multiplier": adaptive_state.multiplier,
+                    "effective_learning_rate": adaptive_state.effective_learning_rate,
+                    "effective_mutation_scale": adaptive_state.effective_mutation_scale,
+                    "environment_episodes_total": environment_episodes_total,
+                    "environment_episodes_since_run_start": environment_episodes_since_run_start,
+                    "parent_run_id": self._loaded_state.get("parent_run_id"),
+                    "parent_checkpoint_id": self._loaded_state.get("parent_checkpoint_id"),
+                    "global_timestep": cumulative_ts,
+                    "observation_schema_hash": get_observation_schema_hash(self.config),
+                    "action_space_hash": get_action_space_hash(),
+                    "reward_schema_version": REWARD_SCHEMA_VERSION,
+                    "env_config_version": ENV_CONFIG_VERSION,
+                    "created_timestamp": recorded_time,
+                    "deterministic_evaluation": True,
+                    "evaluation_seeds": [record.seed for record in summary.records],
+                    "policy_version": policy_version,
+                    "policy_gradient_loss": policy_gradient_loss,
+                    "value_loss": value_loss,
+                    "entropy_loss": entropy_loss,
+                    "loss": loss,
+                    "approx_kl": approx_kl,
+                    "clip_fraction": clip_fraction,
+                    "explained_variance": explained_variance,
+                    "training_scenario_coverage": curr_coverage,
+                    "curriculum_stage": active_stage,
+                    "evaluation_seed_set_id": compute_seed_set_id(
+                        [record.seed for record in summary.records]
+                    ),
+                    "evaluation_seed_count": len(summary.records),
+                    "environment_config_hash": compute_env_config_hash(self.config.to_dict()["environment"]),
+                    "evaluation_timestamp": recorded_time,
+                    "evaluation_id": summary.evaluation_id,
+                    "evaluation_mode": summary.evaluation_mode,
+                    "promotion_eligible": summary.promotion_eligible,
+                    "failure_directed_weights": failure_weights if getattr(train_config, "failure_directed_training_enabled", False) else None,
+                    "failure_directed_telemetry": failure_telemetry if getattr(train_config, "failure_directed_training_enabled", False) else None,
+                    "segment_timing": segment_timing,
+                    **runtime_snapshot,
+                }
+                checkpoint_payloads = self._merge_checkpoint(checkpoint_payloads, checkpoint_payload)
+                # Persist state after every checkpoint so progress survives a
+                # restart or reboot mid-run.  Without this, only a fully-completed
+                # batch is durable; every in-flight episode is lost on crash.
+                intermediate_state: dict[str, Any] = {
+                    "total_episodes_trained": total_eps_this_checkpoint,
+                    "total_environment_episodes": environment_episodes_total,
+                    "total_timesteps": cumulative_ts,
+                    "policy_state_path": str(saved_model_path),
+                    "best_model_path": str(tracked_best_model_path)
+                    if tracked_best_model_path
+                    else None,
+                    "best_model_curriculum_stage": best_model_curriculum_stage,
+                    "best_success_rate": best_success_rate,
+                    "best_average_reward": best_average_reward,
+                    "best_completion_steps": best_completion_steps,
+                    "adaptive_step_state": adaptive_state.to_dict(),
+                    "policy_config": policy.config.to_dict(),
+                    "training_signature": self._training_signature(),
+                    "incomplete_batch": {
+                        "batch_completed_segments": completed_checkpoints,
+                        "batch_total_segments": n_checkpoints,
+                        "batch_steps_per_segment": uniform_segment_timesteps,
+                        "batch_timestep_targets": list(timestep_targets),
+                        "batch_starting_checkpoint_episode": batch_starting_checkpoint_episode,
+                    },
+                    "run_id": self._loaded_state.get("run_id"),
+                    "parent_run_id": self._loaded_state.get("parent_run_id"),
+                    "parent_checkpoint_id": self._loaded_state.get("parent_checkpoint_id"),
+                    "policy_version": policy_version,
+                    "training_scenario_coverage": curr_coverage,
+                    "failure_directed_weights": failure_weights if getattr(train_config, "failure_directed_training_enabled", False) else None,
+                    "failure_directed_telemetry": failure_telemetry if getattr(train_config, "failure_directed_training_enabled", False) else None,
+                    "stage_transition_baseline": self._loaded_state.get("stage_transition_baseline"),
+                    "last_segment_timing": segment_timing,
+                }
+                state_export_phase = (
+                    self.runtime_tracker.phase("checkpoint_save")
+                    if self.runtime_tracker is not None
+                    else contextlib.nullcontext()
+                )
+                with state_export_phase:
+                    atomic_write_json(self._state_path, intermediate_state)
+                    self._loaded_state = intermediate_state
+                    # Keep history current so a resumed run retains every checkpoint.
+                    try:
+                        self._export_neural_training_summary(
+                            checkpoint_payloads,
+                            str(saved_model_path),
+                            total_eps_this_checkpoint,
+                            policy.config.to_dict(),
+                        )
+                        self._export_web_assets(
+                            web_export_dir,
+                            checkpoint_payloads,
+                            summary,
+                            representative_replay_path,
+                            checkpoint_path,
+                        )
+                    except Exception as exc:
+                        logging.getLogger(__name__).warning(
+                            "Optional summary/web asset export failed: %s", exc, exc_info=True
+                        )
+                save_and_export_seconds = model_save_seconds + max(
+                    0.0, time.perf_counter() - post_eval_save_start_perf
+                )
+                segment_total_seconds = max(0.0, time.perf_counter() - segment_start_perf)
+                eval_overhead_pct = (
+                    100.0 * (quick_eval_seconds + confidence_eval_seconds) / segment_total_seconds
+                    if segment_total_seconds > 0
+                    else 0.0
+                )
+                segment_timing["save_and_export_seconds"] = save_and_export_seconds
+                segment_timing["segment_total_seconds"] = segment_total_seconds
+                segment_timing["eval_overhead_pct"] = eval_overhead_pct
+                tps_str = (
+                    f"{transitions_per_sec:.0f} steps/s"
+                    if transitions_per_sec is not None
+                    else "n/a"
+                )
+                print(
+                    f"[Sheepdog] Timing | total={segment_total_seconds:.2f}s | "
+                    f"learn={learn_seconds:.2f}s ({tps_str}) | "
+                    f"quick_eval={quick_eval_seconds:.2f}s | "
+                    f"conf_eval={confidence_eval_seconds:.2f}s | "
+                    f"save_export={save_and_export_seconds:.2f}s | "
+                    f"eval_overhead={eval_overhead_pct:.1f}%",
+                    flush=True,
+                )
+                if getattr(self.config.training, "backup_enabled", True) and backup_mgr is not None:
+                    try:
+                        active_sec = (
+                            self.runtime_tracker.active_seconds_total
+                            if self.runtime_tracker is not None
+                            else None
+                        )
+                        backup_mgr.backup_hourly_snapshot(
+                            stage=active_stage,
+                            model_path=saved_model_path,
+                            training_state=intermediate_state,
+                            checkpoint_payload=checkpoint_payload,
+                            active_runtime_seconds=active_sec,
+                            interval_seconds=float(getattr(self.config.training, "hourly_backup_interval_seconds", 3600.0)),
+                            max_snapshots_per_stage=int(getattr(self.config.training, "max_hourly_backups_per_stage", 24)),
+                        )
+                    except Exception as backup_exc:
+                        logger.warning("Periodic backup snapshot failed: %s", backup_exc)
+                if self.should_evaluate_saved_scenarios(
+                    completed_checkpoints, n_checkpoints
+                ):
+                    self._evaluate_saved_scenarios(policy, total_eps_this_checkpoint)
+                emit(
+                    {
+                        "phase": "checkpoint",
+                        "batch_completed_segments": completed_checkpoints,
+                        "batch_total_segments": n_checkpoints,
+                        "batch_completed_episodes": completed_checkpoints,
+                        "current_episode": total_eps_this_checkpoint,
+                        "total_episodes_trained": total_eps_this_checkpoint,
+                        "checkpoint_episode": total_eps_this_checkpoint,
+                        "checkpoint_path": str(checkpoint_path),
+                        "replay_path": (
+                            str(representative_replay_path)
+                            if representative_replay_path is not None
+                            else None
+                        ),
+                        "summary": summary.to_dict(),
+                        "best_score": summary.average_reward,
+                        "message": f"Checkpoint {total_eps_this_checkpoint} exported",
+                        "approx_kl": approx_kl,
+                        "clip_fraction": clip_fraction,
+                        "explained_variance": explained_variance,
+                        "total_timesteps": cumulative_ts,
+                        "current_global_timestep": cumulative_ts,
+                        "batch_total_timesteps": timestep_targets[-1],
+                        "batch_completed_timesteps": timestep_targets[
+                            completed_checkpoints - 1
+                        ],
+                        "environment_episodes_total": environment_episodes_total,
+                        "environment_episodes_since_run_start": (
+                            environment_episodes_since_run_start
+                        ),
+                        "policy_version": policy_version,
+                        "last_policy_update_time": datetime.now(UTC).isoformat(),
+                        "last_evaluation_time": datetime.now(UTC).isoformat(),
+                        "run_id": self._loaded_state.get("run_id"),
+                        "segment_timing": segment_timing,
+                    }
+                )
+
+            if interrupted:
+                return NeuralTrainingRunSummary(
+                    checkpoints=checkpoint_payloads,
+                    final_model_path=str(saved_model_path) if saved_model_path is not None else "",
+                    policy_config=policy.config.to_dict(),
+                )
+
+            if checkpoint_payloads and checkpoint_payloads[-1].get("total_training_episodes", 0) > 0:
+                total_episodes_trained = int(checkpoint_payloads[-1]["total_training_episodes"])
+            else:
+                last_ep = (
+                    train_config.checkpoint_episodes[-1]
+                    if train_config.checkpoint_episodes
+                    else 0
+                )
+                if last_ep > 0:
+                    skipped_ep = (
+                        train_config.checkpoint_episodes[skip_segments - 1]
+                        if (
+                            skip_segments > 0
+                            and skip_segments <= len(train_config.checkpoint_episodes)
+                        )
+                        else 0
+                    )
+                    total_episodes_trained = starting_total + (last_ep - skipped_ep)
                 else:
-                    consecutive_collapse_count = 0
-            checkpoint_write_phase = (
-                self.runtime_tracker.phase("checkpoint_save")
-                if self.runtime_tracker is not None
-                else contextlib.nullcontext()
+                    total_episodes_trained = starting_total + max(1, batch_total - skip_segments)
+
+            final_model_path_str = str(saved_model_path) if saved_model_path is not None else ""
+            total_environment_episodes = (
+                int(checkpoint_payloads[-1].get("environment_episodes_total", 0))
+                if checkpoint_payloads
+                else starting_environment_episodes
             )
-            with checkpoint_write_phase:
-                checkpoint_path = self.checkpoint_store.write(metadata)
-            if ran_quick_eval and quick_summary is not None and quick_evaluation_json is not None:
-                self.evaluator.record_evaluation_in_registry(
-                    summary=quick_summary,
-                    json_path=quick_evaluation_json,
-                    policy=policy,
-                    experiment_id=execution_context.experiment_id,
-                    activation_id=execution_context.activation_id,
-                    checkpoint_record_id=f"chk_rec_{chk_id}",
-                )
-            if ran_confidence_eval:
-                self.evaluator.record_evaluation_in_registry(
-                    summary=summary,
-                    json_path=evaluation_json,
-                    policy=policy,
-                    experiment_id=execution_context.experiment_id,
-                    activation_id=execution_context.activation_id,
-                    checkpoint_record_id=f"chk_rec_{chk_id}",
-                )
-            ppo_env_workers = int(getattr(train_config, "ppo_env_workers", 1) or 1)
-            save_and_export_seconds = model_save_seconds + max(
-                0.0, time.perf_counter() - post_eval_save_start_perf
-            )
-            segment_total_seconds = max(0.0, time.perf_counter() - segment_start_perf)
-            eval_overhead_pct = (
-                100.0 * (quick_eval_seconds + confidence_eval_seconds) / segment_total_seconds
-                if segment_total_seconds > 0
-                else 0.0
-            )
-            segment_timing: dict[str, Any] = {
-                "segment_steps": int(actual_segment_steps),
-                "requested_segment_steps": int(segment_steps),
-                "actual_segment_steps": int(actual_segment_steps),
-                "learn_seconds": learn_seconds,
-                "transitions_per_sec": transitions_per_sec,
-                "quick_eval_seconds": quick_eval_seconds,
-                "confidence_eval_seconds": confidence_eval_seconds,
-                "save_and_export_seconds": save_and_export_seconds,
-                "segment_total_seconds": segment_total_seconds,
-                "eval_overhead_pct": eval_overhead_pct,
-                "ppo_env_workers": ppo_env_workers,
-            }
-            checkpoint_payload = {
-                "checkpoint_episode": total_eps_this_checkpoint,
-                "recorded_at": recorded_time,
-                "checkpoint": checkpoint_path.name,
-                "evaluation": evaluation_json.name,
-                "replay": (
-                    str(representative_replay_path)
-                    if representative_replay_path is not None
-                    else None
-                ),
-                "policy_name": policy.name,
-                "trainer_type": policy.trainer_type,
-                "policy_type": policy.policy_type,
-                "policy_mode": policy.name,
-                "replay_mode": self.REPLAY_MODE,
-                "total_training_episodes": total_eps_this_checkpoint,
-                "policy_state_path": str(saved_model_path),
-                "success_rate": summary.success_rate,
-                "timeout_rate": summary.timeout_rate,
-                "average_completion_steps": summary.average_completion_steps,
-                "average_completion_seconds": summary.average_completion_seconds,
-                "average_sheep_penned": summary.average_sheep_penned,
-                "average_reward": summary.average_reward,
-                "average_distance_to_pen": summary.average_distance_to_pen,
-                "average_flock_spread": summary.average_flock_spread,
-                "environment_config": self.config.to_dict()["environment"],
-                "reward_config": self.config.to_dict()["rewards"],
-                "records": [record.to_dict() for record in summary.records],
-                "run_id": run_id,
-                "checkpoint_id": chk_id,
-                "adaptive_lr_stage": adaptive_state.stage,
-                "adaptive_lr_stage_max": adaptive_state.max_stages,
-                "adaptive_lr_stage_label": adaptive_state.label,
-                "adaptive_lr_multiplier": adaptive_state.multiplier,
-                "effective_learning_rate": adaptive_state.effective_learning_rate,
-                "effective_mutation_scale": adaptive_state.effective_mutation_scale,
-                "environment_episodes_total": environment_episodes_total,
-                "environment_episodes_since_run_start": environment_episodes_since_run_start,
-                "parent_run_id": self._loaded_state.get("parent_run_id"),
-                "parent_checkpoint_id": self._loaded_state.get("parent_checkpoint_id"),
-                "global_timestep": cumulative_ts,
-                "observation_schema_hash": get_observation_schema_hash(self.config),
-                "action_space_hash": get_action_space_hash(),
-                "reward_schema_version": REWARD_SCHEMA_VERSION,
-                "env_config_version": ENV_CONFIG_VERSION,
-                "created_timestamp": recorded_time,
-                "deterministic_evaluation": True,
-                "evaluation_seeds": [record.seed for record in summary.records],
-                "policy_version": policy_version,
-                "policy_gradient_loss": policy_gradient_loss,
-                "value_loss": value_loss,
-                "entropy_loss": entropy_loss,
-                "loss": loss,
-                "approx_kl": approx_kl,
-                "clip_fraction": clip_fraction,
-                "explained_variance": explained_variance,
-                "training_scenario_coverage": curr_coverage,
-                "curriculum_stage": active_stage,
-                "evaluation_seed_set_id": compute_seed_set_id(
-                    [record.seed for record in summary.records]
-                ),
-                "evaluation_seed_count": len(summary.records),
-                "environment_config_hash": compute_env_config_hash(self.config.to_dict()["environment"]),
-                "evaluation_timestamp": recorded_time,
-                "evaluation_id": summary.evaluation_id,
-                "evaluation_mode": summary.evaluation_mode,
-                "promotion_eligible": summary.promotion_eligible,
-                "failure_directed_weights": failure_weights if getattr(train_config, "failure_directed_training_enabled", False) else None,
-                "failure_directed_telemetry": failure_telemetry if getattr(train_config, "failure_directed_training_enabled", False) else None,
-                "segment_timing": segment_timing,
-                **runtime_snapshot,
-            }
-            checkpoint_payloads = self._merge_checkpoint(checkpoint_payloads, checkpoint_payload)
-            # Persist state after every checkpoint so progress survives a
-            # restart or reboot mid-run.  Without this, only a fully-completed
-            # batch is durable; every in-flight episode is lost on crash.
-            intermediate_state: dict[str, Any] = {
-                "total_episodes_trained": total_eps_this_checkpoint,
-                "total_environment_episodes": environment_episodes_total,
+            state_payload = {
+                "total_episodes_trained": total_episodes_trained,
+                "total_environment_episodes": total_environment_episodes,
                 "total_timesteps": cumulative_ts,
-                "policy_state_path": str(saved_model_path),
-                "best_model_path": str(tracked_best_model_path)
-                if tracked_best_model_path
-                else None,
+                "policy_state_path": final_model_path_str,
+                "best_model_path": str(tracked_best_model_path) if tracked_best_model_path else None,
                 "best_model_curriculum_stage": best_model_curriculum_stage,
                 "best_success_rate": best_success_rate,
                 "best_average_reward": best_average_reward,
@@ -1669,242 +1925,70 @@ class MaskablePPOTrainer(Trainer):
                 "adaptive_step_state": adaptive_state.to_dict(),
                 "policy_config": policy.config.to_dict(),
                 "training_signature": self._training_signature(),
-                "incomplete_batch": {
-                    "batch_completed_segments": completed_checkpoints,
-                    "batch_total_segments": n_checkpoints,
-                    "batch_steps_per_segment": uniform_segment_timesteps,
-                    "batch_timestep_targets": list(timestep_targets),
-                    "batch_starting_checkpoint_episode": batch_starting_checkpoint_episode,
-                },
-                "run_id": self._loaded_state.get("run_id"),
+                "incomplete_batch": None,
+                "run_id": run_id,
+                "experiment_id": experiment_id,
+                "change_id": change_id,
                 "parent_run_id": self._loaded_state.get("parent_run_id"),
                 "parent_checkpoint_id": self._loaded_state.get("parent_checkpoint_id"),
                 "policy_version": policy_version,
-                "training_scenario_coverage": curr_coverage,
-                "failure_directed_weights": failure_weights if getattr(train_config, "failure_directed_training_enabled", False) else None,
-                "failure_directed_telemetry": failure_telemetry if getattr(train_config, "failure_directed_training_enabled", False) else None,
                 "stage_transition_baseline": self._loaded_state.get("stage_transition_baseline"),
-                "last_segment_timing": segment_timing,
+                "last_segment_timing": self._loaded_state.get("last_segment_timing"),
             }
-            state_export_phase = (
-                self.runtime_tracker.phase("checkpoint_save")
-                if self.runtime_tracker is not None
-                else contextlib.nullcontext()
-            )
-            with state_export_phase:
-                atomic_write_json(self._state_path, intermediate_state)
-                self._loaded_state = intermediate_state
-                # Keep history current so a resumed run retains every checkpoint.
-                try:
-                    self._export_neural_training_summary(
-                        checkpoint_payloads,
-                        str(saved_model_path),
-                        total_eps_this_checkpoint,
-                        policy.config.to_dict(),
-                    )
-                    self._export_web_assets(
-                        web_export_dir,
-                        checkpoint_payloads,
-                        summary,
-                        representative_replay_path,
-                        checkpoint_path,
-                    )
-                except Exception as exc:
-                    logging.getLogger(__name__).warning(
-                        "Optional summary/web asset export failed: %s", exc, exc_info=True
-                    )
-            save_and_export_seconds = model_save_seconds + max(
-                0.0, time.perf_counter() - post_eval_save_start_perf
-            )
-            segment_total_seconds = max(0.0, time.perf_counter() - segment_start_perf)
-            eval_overhead_pct = (
-                100.0 * (quick_eval_seconds + confidence_eval_seconds) / segment_total_seconds
-                if segment_total_seconds > 0
-                else 0.0
-            )
-            segment_timing["save_and_export_seconds"] = save_and_export_seconds
-            segment_timing["segment_total_seconds"] = segment_total_seconds
-            segment_timing["eval_overhead_pct"] = eval_overhead_pct
-            tps_str = (
-                f"{transitions_per_sec:.0f} steps/s"
-                if transitions_per_sec is not None
-                else "n/a"
-            )
-            print(
-                f"[Sheepdog] Timing | total={segment_total_seconds:.2f}s | "
-                f"learn={learn_seconds:.2f}s ({tps_str}) | "
-                f"quick_eval={quick_eval_seconds:.2f}s | "
-                f"conf_eval={confidence_eval_seconds:.2f}s | "
-                f"save_export={save_and_export_seconds:.2f}s | "
-                f"eval_overhead={eval_overhead_pct:.1f}%",
-                flush=True,
-            )
-            if getattr(self.config.training, "backup_enabled", True):
-                try:
-                    from sheepdog.training.backup import TrainingBackupManager
-                    backup_mgr = TrainingBackupManager(self.config.training.backup_dir)
-                    active_sec = (
-                        self.runtime_tracker.active_seconds_total
-                        if self.runtime_tracker is not None
-                        else None
-                    )
-                    backup_mgr.backup_hourly_snapshot(
-                        stage=active_stage,
-                        model_path=saved_model_path,
-                        training_state=intermediate_state,
-                        checkpoint_payload=checkpoint_payload,
-                        active_runtime_seconds=active_sec,
-                        interval_seconds=float(getattr(self.config.training, "hourly_backup_interval_seconds", 3600.0)),
-                        max_snapshots_per_stage=int(getattr(self.config.training, "max_hourly_backups_per_stage", 24)),
-                    )
-                except Exception as backup_exc:
-                    logger.warning("Periodic backup snapshot failed: %s", backup_exc)
-            if self.should_evaluate_saved_scenarios(
-                completed_checkpoints, n_checkpoints
-            ):
-                self._evaluate_saved_scenarios(policy, total_eps_this_checkpoint)
+            atomic_write_json(self._state_path, state_payload)
+            self._loaded_state = state_payload
+            try:
+                self._export_neural_training_summary(
+                    checkpoint_payloads,
+                    final_model_path_str,
+                    total_episodes_trained,
+                    policy.config.to_dict(),
+                )
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "Optional summary export at batch completion failed: %s", exc, exc_info=True
+                )
             emit(
                 {
-                    "phase": "checkpoint",
-                    "batch_completed_segments": completed_checkpoints,
+                    "phase": "complete",
+                    "batch_completed_segments": n_checkpoints,
                     "batch_total_segments": n_checkpoints,
-                    "batch_completed_episodes": completed_checkpoints,
-                    "current_episode": total_eps_this_checkpoint,
-                    "total_episodes_trained": total_eps_this_checkpoint,
-                    "checkpoint_episode": total_eps_this_checkpoint,
-                    "checkpoint_path": str(checkpoint_path),
-                    "replay_path": (
-                        str(representative_replay_path)
-                        if representative_replay_path is not None
-                        else None
-                    ),
-                    "summary": summary.to_dict(),
-                    "best_score": summary.average_reward,
-                    "message": f"Checkpoint {total_eps_this_checkpoint} exported",
-                    "approx_kl": approx_kl,
-                    "clip_fraction": clip_fraction,
-                    "explained_variance": explained_variance,
-                    "total_timesteps": cumulative_ts,
-                    "current_global_timestep": cumulative_ts,
+                    "batch_completed_episodes": train_config.checkpoint_episodes[-1]
+                    if train_config.checkpoint_episodes
+                    else batch_total,
                     "batch_total_timesteps": timestep_targets[-1],
-                    "batch_completed_timesteps": timestep_targets[
-                        completed_checkpoints - 1
-                    ],
-                    "environment_episodes_total": environment_episodes_total,
-                    "environment_episodes_since_run_start": (
-                        environment_episodes_since_run_start
-                    ),
-                    "policy_version": policy_version,
-                    "last_policy_update_time": datetime.now(UTC).isoformat(),
-                    "last_evaluation_time": datetime.now(UTC).isoformat(),
-                    "run_id": self._loaded_state.get("run_id"),
-                    "segment_timing": segment_timing,
+                    "batch_completed_timesteps": timestep_targets[-1],
+                    "current_global_timestep": state_payload["total_timesteps"],
+                    "current_episode": checkpoint_payloads[-1]["checkpoint_episode"]
+                    if checkpoint_payloads
+                    else None,
+                    "total_episodes_trained": total_episodes_trained,
+                    "cumulative_environment_episodes": total_environment_episodes,
+                    "checkpoint_episode": checkpoint_payloads[-1]["checkpoint_episode"]
+                    if checkpoint_payloads
+                    else None,
+                    "checkpoint_path": None,
+                    "replay_path": checkpoint_payloads[-1]["replay"] if checkpoint_payloads else None,
+                    "summary": None,
+                    "best_score": checkpoint_payloads[-1]["average_reward"]
+                    if checkpoint_payloads
+                    else None,
+                    "message": "Training complete",
                 }
             )
-
-        if interrupted:
             return NeuralTrainingRunSummary(
                 checkpoints=checkpoint_payloads,
-                final_model_path=str(saved_model_path) if saved_model_path is not None else "",
+                final_model_path=final_model_path_str,
                 policy_config=policy.config.to_dict(),
             )
-
-        if checkpoint_payloads and checkpoint_payloads[-1].get("total_training_episodes", 0) > 0:
-            total_episodes_trained = int(checkpoint_payloads[-1]["total_training_episodes"])
-        else:
-            last_ep = (
-                train_config.checkpoint_episodes[-1]
-                if train_config.checkpoint_episodes
-                else 0
-            )
-            if last_ep > 0:
-                skipped_ep = (
-                    train_config.checkpoint_episodes[skip_segments - 1]
-                    if (
-                        skip_segments > 0
-                        and skip_segments <= len(train_config.checkpoint_episodes)
-                    )
-                    else 0
-                )
-                total_episodes_trained = starting_total + (last_ep - skipped_ep)
-            else:
-                total_episodes_trained = starting_total + max(1, batch_total - skip_segments)
-
-        final_model_path_str = str(saved_model_path) if saved_model_path is not None else ""
-        total_environment_episodes = (
-            int(checkpoint_payloads[-1].get("environment_episodes_total", 0))
-            if checkpoint_payloads
-            else starting_environment_episodes
-        )
-        state_payload = {
-            "total_episodes_trained": total_episodes_trained,
-            "total_environment_episodes": total_environment_episodes,
-            "total_timesteps": cumulative_ts,
-            "policy_state_path": final_model_path_str,
-            "best_model_path": str(tracked_best_model_path) if tracked_best_model_path else None,
-            "best_model_curriculum_stage": best_model_curriculum_stage,
-            "best_success_rate": best_success_rate,
-            "best_average_reward": best_average_reward,
-            "best_completion_steps": best_completion_steps,
-            "adaptive_step_state": adaptive_state.to_dict(),
-            "policy_config": policy.config.to_dict(),
-            "training_signature": self._training_signature(),
-            "incomplete_batch": None,
-            "run_id": run_id,
-            "experiment_id": experiment_id,
-            "change_id": change_id,
-            "parent_run_id": self._loaded_state.get("parent_run_id"),
-            "parent_checkpoint_id": self._loaded_state.get("parent_checkpoint_id"),
-            "policy_version": policy_version,
-            "stage_transition_baseline": self._loaded_state.get("stage_transition_baseline"),
-            "last_segment_timing": self._loaded_state.get("last_segment_timing"),
-        }
-        atomic_write_json(self._state_path, state_payload)
-        self._loaded_state = state_payload
-        try:
-            self._export_neural_training_summary(
-                checkpoint_payloads,
-                final_model_path_str,
-                total_episodes_trained,
-                policy.config.to_dict(),
-            )
-        except Exception as exc:
-            logging.getLogger(__name__).warning(
-                "Optional summary export at batch completion failed: %s", exc, exc_info=True
-            )
-        emit(
-            {
-                "phase": "complete",
-                "batch_completed_segments": n_checkpoints,
-                "batch_total_segments": n_checkpoints,
-                "batch_completed_episodes": train_config.checkpoint_episodes[-1]
-                if train_config.checkpoint_episodes
-                else batch_total,
-                "batch_total_timesteps": timestep_targets[-1],
-                "batch_completed_timesteps": timestep_targets[-1],
-                "current_global_timestep": state_payload["total_timesteps"],
-                "current_episode": checkpoint_payloads[-1]["checkpoint_episode"]
-                if checkpoint_payloads
-                else None,
-                "total_episodes_trained": total_episodes_trained,
-                "cumulative_environment_episodes": total_environment_episodes,
-                "checkpoint_episode": checkpoint_payloads[-1]["checkpoint_episode"]
-                if checkpoint_payloads
-                else None,
-                "checkpoint_path": None,
-                "replay_path": checkpoint_payloads[-1]["replay"] if checkpoint_payloads else None,
-                "summary": None,
-                "best_score": checkpoint_payloads[-1]["average_reward"]
-                if checkpoint_payloads
-                else None,
-                "message": "Training complete",
-            }
-        )
-        return NeuralTrainingRunSummary(
-            checkpoints=checkpoint_payloads,
-            final_model_path=final_model_path_str,
-            policy_config=policy.config.to_dict(),
-        )
+        finally:
+            if hasattr(policy, "close"):
+                with contextlib.suppress(Exception):
+                    policy.close()
+            evaluator = getattr(self, "evaluator", None)
+            if evaluator is not None and hasattr(evaluator, "close"):
+                with contextlib.suppress(Exception):
+                    evaluator.close()
 
     def _export_neural_training_summary(
         self,

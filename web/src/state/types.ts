@@ -158,6 +158,18 @@ export interface EpisodeRecord {
   move_history?: ReplayFrame[];
 }
 
+export interface SegmentTiming {
+  segment_steps: number;
+  learn_seconds: number;
+  transitions_per_sec: number | null;
+  quick_eval_seconds: number;
+  confidence_eval_seconds: number;
+  save_and_export_seconds: number;
+  segment_total_seconds: number;
+  eval_overhead_pct: number;
+  ppo_env_workers: number;
+}
+
 export interface TrainingStatus {
   running: boolean;
   fast_mode: boolean;
@@ -170,6 +182,7 @@ export interface TrainingStatus {
   handler_target_enabled?: boolean;
   debug_reward_breakdown: boolean;
   auto_promote?: boolean;
+  continuous?: boolean;
   auto_promote_threshold?: number;
   auto_promote_stages_completed?: number;
   auto_promote_gate?: AutoPromoteGateDiagnostics;
@@ -184,6 +197,8 @@ export interface TrainingStatus {
   batch_completed_episodes: number;
   batch_total_segments?: number;
   batch_completed_segments?: number;
+  batch_total_timesteps?: number;
+  batch_completed_timesteps?: number;
   total_episodes_trained: number;
   stage_history: Record<string, number>;
   grand_total_episodes: number;
@@ -286,6 +301,12 @@ export interface TrainingStatus {
   evaluation_recent_results?: EvaluationSeedResult[];
   mode?: string;
   read_only_preview?: boolean;
+  last_segment_timing?: SegmentTiming | null;
+  stage_queue?: number[] | null;
+  stage_queue_index?: number | null;
+  stage_spec?: string | null;
+  pass_label?: string | null;
+  active_pass_id?: string | null;
 }
 
 export interface EvaluationSeedResult {
@@ -338,11 +359,69 @@ export interface TrainingRuntimeSummary {
   offline_or_unknown_seconds: number;
   session_id?: string | null;
   current_phase?: string | null;
+  curriculum_stage?: number | null;
+  stage_totals?: StageRuntimeTotals[];
   session_count: number;
   sessions: RuntimeSessionRecord[];
   episodes_per_active_hour?: number | null;
   timesteps_per_training_second?: number | null;
   training_time_percentage?: number | null;
+}
+
+export interface StageRuntimeTotals {
+  run_id: string;
+  curriculum_stage: number;
+  training_seconds: number;
+  evaluation_seconds: number;
+  active_seconds: number;
+}
+
+export interface StageSeedOutcome {
+  termination_reason: string | null;
+  sheep_penned: number | null;
+  total_sheep: number | null;
+  replay_id: string | null;
+  replay_path?: string | null;
+}
+
+export interface StageEvaluationReport {
+  checkpoint_id: string | null;
+  checkpoint_episode: number | null;
+  evaluation_id: string | null;
+  seed_set_id: string | null;
+  seed_set_role: "development" | "held_out" | "unknown";
+  evaluation_mode: string | null;
+  environment_config_hash: string | null;
+  evaluation_timestamp?: string | null;
+  observation_schema_hash?: string | null;
+  action_space_hash?: string | null;
+  assistance_mode?: string | null;
+  policy_version?: number | null;
+  experiment_id?: string | null;
+  activation_id?: string | null;
+  change_id?: string | null;
+  verified_source_revision?: string | null;
+  model_sha256?: string | null;
+  seeds: Array<StageSeedOutcome & { seed: number; success: boolean }>;
+}
+
+export interface StageTrainingReport {
+  run_id: string | null;
+  curriculum_stage: number;
+  journey?: string;
+  timing: StageRuntimeTotals | null;
+  training: {
+    sample_limit: number;
+    sampled_episodes: number;
+    seeds: Array<{
+      seed: number;
+      attempts: number;
+      failures: number;
+      latest: StageSeedOutcome & { checkpoint_id: string | null };
+    }>;
+  };
+  evaluation_limit?: number;
+  evaluations: StageEvaluationReport[];
 }
 
 export interface SessionEventParamDiff {
@@ -447,10 +526,15 @@ export interface TrainingStartRequest {
   episodes: number;
   fast_mode: boolean;
   enable_instinct_rewards: boolean;
-  curriculum_stage: number;
+  curriculum_stage?: number;
   debug_reward_breakdown: boolean;
   auto_promote?: boolean;
+  continuous?: boolean;
   promote_from_checkpoint_episode?: number | null;
+  stage_spec?: string;
+  stage_queue?: number[];
+  pass_label?: string;
+  starting_model_source?: string;
   resume?: boolean;
 }
 
@@ -608,6 +692,7 @@ export interface CheckpointEntry {
   adaptive_lr_multiplier?: number;
   effective_learning_rate?: number;
   effective_mutation_scale?: number;
+  segment_timing?: SegmentTiming | null;
 }
 
 export interface EvaluationSummary {
@@ -1624,3 +1709,198 @@ export interface TemporalDiagnosticExample {
 }
 
 
+
+export interface StageTimingRecord {
+  promotion_event_id: string | null;
+  run_id: string | null;
+  stage: number;
+  to_stage: number | null;
+  source: "recorded" | "derived";
+  started_at: string | null;
+  ended_at: string | null;
+  wall_seconds: number | null;
+  training_seconds: number | null;
+  training_seconds_note?: string | null;
+  evaluation_seconds?: number | null;
+  episodes?: number | null;
+  policy_timesteps: number | null;
+  world_steps: number | null;
+  steps_per_second: number | null;
+  steps_per_second_basis?: string | null;
+  success_rate: number | null;
+  success_count: number | null;
+  trigger_checkpoint_id?: string | null;
+  trigger_checkpoint_episode?: number | null;
+  trigger_policy_version?: number | null;
+  config_hash: string | null;
+  assistance_mode: string | null;
+  run_label: string | null;
+  git_revision: string | null;
+  git_dirty: boolean | null;
+  timing_confidence?: string;
+}
+
+export interface StageTimingMetricDelta {
+  latest: number | null;
+  reference: number | null;
+  pct_delta: number | null;
+}
+
+export interface StageTimingComparisonPair {
+  run_id: string | null;
+  deltas: Record<string, StageTimingMetricDelta>;
+  config_hash_differs: boolean;
+  assistance_differs: boolean;
+  comparable: boolean;
+  notes: string[];
+}
+
+export interface StageTimingComparison {
+  stage: number;
+  run_count: number;
+  latest_run_id: string | null;
+  best_run_id: string | null;
+  vs_previous: StageTimingComparisonPair | null;
+  vs_best: StageTimingComparisonPair | null;
+}
+
+export interface StageTimingsResponse {
+  schema_version: number;
+  records: StageTimingRecord[];
+  comparison: StageTimingComparison[];
+  definitions?: Record<string, string>;
+}
+
+export interface ModelStageRunRecord {
+  stage_run_id: string;
+  pass_id: string;
+  run_id: string | null;
+  stage: number;
+  sequence_order: number;
+  status: string;
+  started_at: string;
+  ended_at: string | null;
+  start_checkpoint_id: string | null;
+  start_checkpoint_sha256: string | null;
+  end_checkpoint_id: string | null;
+  end_checkpoint_path: string | null;
+  end_checkpoint_sha256: string | null;
+  start_policy_timesteps: number | null;
+  end_policy_timesteps: number | null;
+  policy_timesteps: number | null;
+  episodes: number | null;
+  training_seconds: number | null;
+  evaluation_seconds: number | null;
+  checkpoint_save_seconds: number | null;
+  replay_serialization_seconds: number | null;
+  active_seconds: number | null;
+  wall_seconds: number | null;
+  steps_per_second: number | null;
+  initial_success_rate: number | null;
+  final_success_rate: number | null;
+  best_success_rate: number | null;
+  final_avg_steps: number | null;
+  final_avg_reward: number | null;
+  eval_seed_count: number | null;
+  promotion_event_id: string | null;
+  source: string;
+}
+
+export interface ModelPassRecord {
+  pass_id: string;
+  label: string | null;
+  run_id: string | null;
+  parent_pass_id: string | null;
+  parent_checkpoint_id: string | null;
+  parent_checkpoint_path: string | null;
+  parent_checkpoint_sha256: string | null;
+  resulting_checkpoint_id: string | null;
+  resulting_checkpoint_path: string | null;
+  resulting_checkpoint_sha256: string | null;
+  pass_type: string;
+  stage_spec: string;
+  planned_stages: number[];
+  completed_stages_count: number;
+  status: string;
+  started_at: string;
+  ended_at: string | null;
+  total_training_seconds: number;
+  total_evaluation_seconds: number;
+  total_checkpoint_save_seconds: number;
+  total_replay_serialization_seconds: number;
+  total_active_seconds: number;
+  total_wall_seconds: number | null;
+  total_policy_timesteps: number;
+  assistance_mode: string | null;
+  observation_mode: string | null;
+  env_config_version: string | null;
+  config_hash: string | null;
+  git_revision: string | null;
+  git_dirty: boolean | null;
+  source: string;
+  notes: string | null;
+  stage_runs: ModelStageRunRecord[];
+}
+
+export interface ModelLineageCumulative {
+  pass_count: number;
+  stage_runs_count: number;
+  completed_stage_runs_count: number;
+  total_training_seconds: number;
+  total_evaluation_seconds: number;
+  total_checkpoint_save_seconds: number;
+  total_replay_serialization_seconds: number;
+  total_active_seconds: number;
+  total_wall_seconds: number;
+  total_policy_timesteps: number;
+}
+
+export interface ModelStageComparisonRun {
+  pass_id: string;
+  pass_index: number;
+  label: string | null;
+  sequence_order: number;
+  status: string;
+  active_seconds: number | null;
+  training_seconds: number | null;
+  evaluation_seconds: number | null;
+  wall_seconds: number | null;
+  policy_timesteps: number | null;
+  steps_per_second: number | null;
+  initial_success_rate: number | null;
+  final_success_rate: number | null;
+  best_success_rate: number | null;
+  final_avg_steps: number | null;
+}
+
+export interface ModelStageComparisonDelta {
+  active_seconds_pct: number | null;
+  training_seconds_pct: number | null;
+  policy_timesteps_pct: number | null;
+}
+
+export interface ModelStageComparisonRow {
+  stage: number;
+  runs: ModelStageComparisonRun[];
+  delta_vs_first: ModelStageComparisonDelta;
+  delta_vs_previous: ModelStageComparisonDelta;
+}
+
+export interface ModelLineageResponse {
+  target_pass_id: string;
+  lineage: ModelPassRecord[];
+  cumulative: ModelLineageCumulative;
+  stage_comparison: ModelStageComparisonRow[];
+}
+
+export interface ModelHistoryResponse {
+  schema_version: number;
+  passes: ModelPassRecord[];
+  active_pass_id: string | null;
+  selected_lineage: ModelLineageResponse | null;
+  stage_matrix: Array<{
+    stage: number;
+    run_count: number;
+    runs: Array<ModelStageRunRecord & { pass_id: string; label: string | null }>;
+  }>;
+}

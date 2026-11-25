@@ -197,6 +197,7 @@ class EpisodeStore:
             "CREATE INDEX IF NOT EXISTS idx_episodes_id ON training_episodes(id);",
             "CREATE INDEX IF NOT EXISTS idx_episodes_run_id ON training_episodes(run_id);",
             "CREATE INDEX IF NOT EXISTS idx_episodes_stage ON training_episodes(curriculum_stage);",
+            "CREATE INDEX IF NOT EXISTS idx_episodes_run_stage ON training_episodes(run_id, curriculum_stage);",
             "CREATE INDEX IF NOT EXISTS idx_episodes_global_ep ON training_episodes(global_environment_episode);",
             "CREATE INDEX IF NOT EXISTS idx_episodes_global_ts ON training_episodes(global_timestep);",
             "CREATE INDEX IF NOT EXISTS idx_episodes_completed_at ON training_episodes(completed_at);",
@@ -743,6 +744,55 @@ class EpisodeStore:
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         self.close()
+
+    def get_stage_seed_sample(
+        self, run_id: str, stage: int, limit: int
+    ) -> list[dict[str, Any]]:
+        """Return a bounded recent training sample containing only seed-report fields."""
+        if not self.db_path.exists():
+            return []
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT seed, success, result, sheep_penned, total_sheep, checkpoint_id, replay_id
+                FROM training_episodes
+                WHERE run_id = ? AND curriculum_stage = ?
+                    AND seed IS NOT NULL AND success IS NOT NULL
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (run_id, stage, limit),
+            )
+            return [dict(row) for row in rows]
+
+    def get_stage_registry_evaluations(
+        self, run_id: str, stage: int, limit: int
+    ) -> list[dict[str, Any]]:
+        """Read recent evaluation suites linked to this run and stage by checkpoint identity."""
+        if not self.db_path.exists():
+            return []
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT e.legacy_evaluation_id AS evaluation_id, e.evaluated_at AS evaluation_timestamp,
+                       e.seed_set_id, e.evaluation_mode, e.assistance_mode, e.environment_config_hash,
+                       e.source_file, e.model_sha256, e.per_seed_results,
+                       CASE WHEN json_valid(e.metadata)
+                            THEN json_extract(e.metadata, '$.seed_set_role') END AS seed_set_role,
+                       c.checkpoint_id, c.checkpoint_label_episode AS checkpoint_episode,
+                       c.policy_version, c.experiment_id, c.activation_id,
+                       a.change_id, a.verified_source_revision
+                FROM registry_evaluations AS e
+                JOIN registry_checkpoints AS c ON c.checkpoint_id = e.checkpoint_id
+                    AND c.checkpoint_record_id = COALESCE(e.checkpoint_record_id, 'chk_rec_' || e.checkpoint_id)
+                LEFT JOIN registry_activations AS a ON a.activation_id = c.activation_id
+                WHERE c.run_id = ? AND c.curriculum_stage = ?
+                ORDER BY e.evaluated_at DESC, e.registry_eval_id DESC
+                LIMIT ?
+                """,
+                (run_id, stage, limit),
+            )
+            return [dict(row) for row in rows]
 
     def get_max_episode(self, run_id: str | None = None) -> int:
         """Return the highest global_environment_episode persisted in the database."""

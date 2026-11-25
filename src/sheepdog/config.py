@@ -2,11 +2,41 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 from sheepdog.policies.base import PolicyMode, PolicyType, TrainerType
+
+
+def validate_observation_history_strides(strides: Sequence[int]) -> tuple[int, ...]:
+    """Validate and normalize strided observation history offsets.
+
+    Offsets must form a non-empty, strictly increasing sequence of non-negative
+    integers starting at ``0`` (for example, ``(0,)`` or ``(0, 4, 8, 16)``).
+    """
+    if isinstance(strides, str | bytes) or not isinstance(strides, Sequence):
+        raise ValueError(
+            f"observation_history_strides must be a sequence of ints, got {type(strides).__name__}"
+        )
+    normalized: list[int] = []
+    for item in strides:
+        if isinstance(item, bool) or not isinstance(item, int):
+            raise ValueError(f"observation_history_strides entries must be ints, got {item!r}")
+        if item < 0:
+            raise ValueError(f"observation_history_strides entries must be non-negative, got {item}")
+        normalized.append(int(item))
+    if not normalized or normalized[0] != 0:
+        raise ValueError(
+            f"observation_history_strides must be non-empty and start with 0, got {normalized!r}"
+        )
+    for prev, curr in zip(normalized, normalized[1:], strict=False):
+        if curr <= prev:
+            raise ValueError(
+                f"observation_history_strides must be strictly increasing, got {normalized!r}"
+            )
+    return tuple(normalized)
 
 
 def resolve_workspace_path(path_str: str | Path) -> Path:
@@ -133,6 +163,10 @@ class EnvironmentConfig:
     sheep_surge_multiplier: float = 1.3
     # Radius within which unpenned sheep surge toward penned centroid (R_flock)
     sheep_surge_cohesion_radius: float = 24.0
+    # Opt-in regrouping no-progress reset (allows bounded spread-reduction progress
+    # even when current_flock_spread > _best_flock_spread).
+    regroup_no_progress_reset: bool = False
+    regroup_no_progress_max_resets: int = 80
 
 
 # Sheep spawn layout modes understood by the environment.
@@ -147,6 +181,10 @@ SPAWN_MODES: tuple[str, ...] = (
     "scattered_sheep",
     "all_corners",
     "wall_recovery",
+    "wrong_side_recovery",
+    "coherent_wall_recovery",
+    "wrong_side_mild",
+    "wrong_side_safe_radius",
 )
 
 # Pen placement modes understood by the environment.
@@ -217,6 +255,7 @@ class RewardConfig:
     instincts: InstinctRewardConfig = field(default_factory=InstinctRewardConfig)
     farthest_sheep_progress_scale: float = 0.0
     stray_ignore_penalty_scale: float = 0.0
+    regrouping_approach_scale: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,7 +286,7 @@ class TrainingConfig:
     value_coef: float = 0.5
     # Number of vectorized RL environments used by neural PPO training.
     # >1 enables process-based parallel stepping (SubprocVecEnv).
-    ppo_env_workers: int = 8
+    ppo_env_workers: int = 16
     quick_evaluation_seed_count: int = 10
     confidence_candidate_success_rate: float = 0.5
     replay_export_on_new_best: bool = True
@@ -283,8 +322,14 @@ class TrainingConfig:
     # Observation mode: "guided" (default, 54 features) includes scripted role labels and
     # strategy targets; "emergent" (50 features) strips roles/targets so the model must learn
     # herding purely from raw observations and reward signal; "guided_gate_control" and
-    # "guided_gate_treatment" (58 features) append 4 zero-padded or explicit gate features.
+    # "guided_gate_treatment" (58 features) append 4 zero-padded or explicit gate features;
+    # "emergent_gate" (54 features) combines raw emergent features with 4 explicit gate
+    # features without TeamStrategy roles or targets.
     observation_mode: str = "guided"
+    # World-step history strides stacked into each dog observation (default (0,) = current step only).
+    observation_history_strides: tuple[int, ...] = (0,)
+    # Include revisits_recent_position and two_position_loop flags in observations (default True).
+    include_loop_flags_in_observation: bool = True
     # Weights & Biases telemetry tracking integration toggle.
     wandb_enabled: bool = False
     # Adaptive step-size / learning rate controller toggle.
@@ -299,6 +344,20 @@ class TrainingConfig:
     # Automatic rollback safeguard against catastrophic policy collapse during late-stage training.
     auto_rollback_on_collapse: bool = True
     collapse_threshold_success: float = 0.35
+    # Cap PyTorch intra-op CPU threads in the main training process to avoid
+    # OpenMP/MKL oversubscription alongside vectorized environment workers.
+    torch_num_threads: int = 4
+
+    def __post_init__(self) -> None:
+        if int(self.torch_num_threads) < 1:
+            raise ValueError(
+                f"torch_num_threads must be >= 1, got {self.torch_num_threads!r}"
+            )
+        if type(self.torch_num_threads) is not int:
+            object.__setattr__(self, "torch_num_threads", int(self.torch_num_threads))
+        validated = validate_observation_history_strides(self.observation_history_strides)
+        if validated != self.observation_history_strides:
+            object.__setattr__(self, "observation_history_strides", validated)
 
 
 @dataclass(frozen=True, slots=True)
@@ -351,6 +410,20 @@ class LabConfig:
             training_payload["neural_hidden_sizes"] = tuple(hidden_sizes)
         if "ppo_env_workers" in training_payload:
             training_payload["ppo_env_workers"] = int(training_payload["ppo_env_workers"])
+        if "torch_num_threads" in training_payload:
+            raw_threads = training_payload["torch_num_threads"]
+            training_payload["torch_num_threads"] = 4 if raw_threads is None else int(raw_threads)
+        if "observation_history_strides" in training_payload:
+            raw_strides = training_payload["observation_history_strides"]
+            training_payload["observation_history_strides"] = (
+                validate_observation_history_strides(list(raw_strides))
+                if raw_strides is not None
+                else (0,)
+            )
+        if "include_loop_flags_in_observation" in training_payload:
+            training_payload["include_loop_flags_in_observation"] = bool(
+                training_payload["include_loop_flags_in_observation"]
+            )
         instincts = (
             InstinctRewardConfig(**instincts_payload)
             if isinstance(instincts_payload, dict)

@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { isDocumentVisible } from "../hooks/useVisibility";
 import { acknowledgeEarlyWarning, loadEarlyWarnings } from "../lib/api";
 import type { EarlyWarningItem, EarlyWarningsPayload } from "../state/types";
 
@@ -27,6 +28,7 @@ export function EarlyWarningsPanel({
   const mountedRef = useRef<boolean>(true);
   const ackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const ackInFlightRef = useRef<boolean>(false);
+  const inFlightRef = useRef<boolean>(false);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -39,9 +41,10 @@ export function EarlyWarningsPanel({
   }, []);
 
   const fetchWarnings = useCallback(async (force = false) => {
-    if (!force && ackInFlightRef.current) {
+    if (!force && (ackInFlightRef.current || inFlightRef.current)) {
       return;
     }
+    inFlightRef.current = true;
     const reqSeq = ++requestSeqRef.current;
     if (mountedRef.current) {
       setLoading(true);
@@ -52,6 +55,7 @@ export function EarlyWarningsPanel({
         setData(payload);
       }
     } finally {
+      inFlightRef.current = false;
       if (mountedRef.current && reqSeq === requestSeqRef.current) {
         setLoading(false);
       }
@@ -59,11 +63,24 @@ export function EarlyWarningsPanel({
   }, [curriculumStage]);
 
   useEffect(() => {
-    void fetchWarnings();
+    if (isDocumentVisible()) {
+      void fetchWarnings();
+    }
     const timer = window.setInterval(() => {
-      void fetchWarnings(false);
+      if (isDocumentVisible()) {
+        void fetchWarnings(false);
+      }
     }, 10000);
-    return () => window.clearInterval(timer);
+    const handleVisibilityChange = () => {
+      if (isDocumentVisible()) {
+        void fetchWarnings(false);
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
   }, [fetchWarnings]);
 
   const handleAcknowledge = async (warningId: string) => {
@@ -146,9 +163,21 @@ export function EarlyWarningsPanel({
         data-testid="early-warnings-toggle"
       >
         <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
-          <span style={{ fontSize: "1.05rem" }}>
-            {summary.critical_count > 0 ? "🚨" : summary.warning_count > 0 ? "⚠️" : "🛡️"}
-          </span>
+          <span
+            aria-hidden="true"
+            style={{
+              width: 8,
+              height: 8,
+              borderRadius: "50%",
+              flexShrink: 0,
+              background:
+                summary.critical_count > 0
+                  ? "var(--sd-rose-bright, #f87171)"
+                  : summary.warning_count > 0
+                  ? "var(--sd-amber-bright, #facc15)"
+                  : "var(--sd-emerald-bright, #4ade80)",
+            }}
+          />
           <span style={{ fontWeight: 600, fontSize: "0.85rem", color: "var(--sd-text-primary, #f8fafc)" }}>
             Advisory Early Warnings
           </span>
@@ -188,7 +217,7 @@ export function EarlyWarningsPanel({
             style={{ fontSize: "0.74rem" }}
             aria-label={isOpen ? "Collapse early warnings" : "Expand early warnings"}
           >
-            {isOpen ? "Hide ▲" : "Details ▼"}
+            {isOpen ? "Hide" : "Details"}
           </button>
         </div>
       </div>
@@ -221,7 +250,6 @@ export function EarlyWarningsPanel({
               }}
               data-testid="early-warnings-preview-banner"
             >
-              <span>🔬</span>
               <span>
                 <strong>Preview Mode:</strong> Displaying authentic recorded evaluation evidence.
                 Active training sessions are not running in isolated preview.
@@ -346,7 +374,7 @@ export function EarlyWarningsPanel({
                 disabled={loading}
                 title="Force refresh early warning telemetry"
               >
-                {loading ? "Refreshing..." : "↻ Refresh"}
+                {loading ? "Refreshing..." : "Refresh"}
               </button>
             </div>
           </div>
@@ -544,7 +572,7 @@ function WarningCard({ item, onAcknowledge, isAckBusy, isAckSuccess, onOpenRepla
               title={`Inspect replay in viewer at lead-in step ${item.replay_step ?? 0}`}
               data-testid={`replay-btn-${item.id}`}
             >
-              🔬 Open Evaluation Replay {item.replay_step != null ? `(Step ${item.replay_step})` : ""}
+              Open Evaluation Replay{item.replay_step != null ? ` (Step ${item.replay_step})` : ""}
             </button>
           ) : (
             <span style={{ fontStyle: "italic", color: "var(--sd-text-muted, #64748b)" }}>

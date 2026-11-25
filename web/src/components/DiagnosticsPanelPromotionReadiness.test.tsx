@@ -128,7 +128,7 @@ describe("DiagnosticsPanel & TrainingPanel Promotion Readiness Integrity", () =>
     expect(screen.getByText(/promo bar 90%/i)).toBeInTheDocument();
   });
 
-  it("reports 'Accumulating qualified streak' when at 90% but required 6 evals not yet reached", () => {
+  it("reports 'Accumulating qualified evals' when at 90% but required 6 evals not yet reached", () => {
     const stage25Checkpoints = Array.from({ length: 10 }, (_, i) => ({
       checkpoint_id: `chk_25_${i + 1}`,
       curriculum_stage: 25,
@@ -242,8 +242,8 @@ describe("DiagnosticsPanel & TrainingPanel Promotion Readiness Integrity", () =>
     expect(screen.queryByText("Promote to the next stage")).toBeNull();
     expect(screen.queryByText("Stage 25 ready")).toBeNull();
 
-    // Should report accumulating streak
-    expect(screen.getByText(/Accumulating qualified streak \(1\/6\)/i)).toBeInTheDocument();
+    // Should report accumulating qualified evals
+    expect(screen.getByText(/Accumulating qualified evals \(1\/6\)/i)).toBeInTheDocument();
   });
 
   it("accurately reflects Stage 25 90% target in TrainingPanel promotion locks", () => {

@@ -1,7 +1,8 @@
-import { render, screen, waitFor, within, fireEvent } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
+import { setIsBackendOffline } from "./lib/api";
 
 function jsonResponse(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload), {
@@ -349,6 +350,7 @@ const replay = {
 };
 
 beforeEach(() => {
+  setIsBackendOffline(false);
   localStorage.clear();
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const path = String(input);
@@ -375,6 +377,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  cleanup();
+  setIsBackendOffline(false);
+  window.history.replaceState({}, "", "/");
   window.localStorage.clear();
   vi.unstubAllGlobals();
 });
@@ -383,12 +388,14 @@ describe("App", () => {
   it("renders the simplified controls and run button", async () => {
     render(<App />);
 
-    fireEvent.click(screen.getByRole("tab", { name: "Playback" }));
-    await waitFor(() => expect(screen.getByText("Live Replay")).toBeInTheDocument());
+    await waitFor(
+      () => expect(screen.getByRole("button", { name: "Run best model (ep 0)" })).toBeInTheDocument(),
+      { timeout: 4000 },
+    );
+    expect(screen.getByText("Live Replay")).toBeInTheDocument();
     expect(screen.getByLabelText("Playback controls")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Run best model (ep 0)" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Replay selected" })).toBeInTheDocument();
-    expect(screen.getByText(/Checkpoint 0/)).toBeInTheDocument();
+    expect(screen.getByText(/Checkpoint Ep 0 seeds/)).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /Seed 11/ })).toBeInTheDocument();
   });
 
@@ -448,41 +455,44 @@ describe("App", () => {
     render(<App />);
 
     await waitFor(() => expect(screen.getByLabelText("Training controls")).toBeInTheDocument());
-    await userEvent.click(screen.getAllByRole("button", { name: /^Curriculum/i })[0]);
     expect(screen.getByText("Stage 2", { selector: ".stage-chip__label" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Promote → Stage 3" })).toBeInTheDocument();
     expect(window.localStorage.getItem("sheepdog_curriculum_stage")).toBe("2");
   });
 
   it("shows current live run status from loaded replay data", async () => {
     render(<App />);
 
-    fireEvent.click(screen.getByRole("tab", { name: "Playback" }));
-    await waitFor(() => expect(screen.getByText("Live Replay")).toBeInTheDocument());
-    await waitFor(() => expect(within(screen.getByLabelText("Run status")).getByText("idle")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/rear_pressure, left_flanker/i)).toBeInTheDocument());
+    expect(screen.getByText("Live Replay")).toBeInTheDocument();
+    expect(within(screen.getByLabelText("Run status")).getByText("idle")).toBeInTheDocument();
     expect(screen.getByLabelText("Run status")).toBeInTheDocument();
     expect(screen.getByText("Trained policy")).toBeInTheDocument();
     expect(screen.getByText("Pen-directed behavior here comes from learned training weights rather than default instinct.")).toBeInTheDocument();
     expect(screen.getByText(/No-progress guard is active/)).toBeInTheDocument();
-    expect(screen.getByText(/rear_pressure, left_flanker/i)).toBeInTheDocument();
   });
 
-  it("shows the read-only health dashboard in Insights", async () => {
+  it("shows the read-only health dashboard in Progress", async () => {
     const user = userEvent.setup();
 
     render(<App />);
 
-    await user.click(screen.getByRole("tab", { name: "Insights" }));
-    await user.click(screen.getByRole("tab", { name: "Health" }));
+    await user.click(screen.getByRole("tab", { name: "Progress" }));
 
-    await waitFor(() => expect(screen.getByLabelText("Training health overview")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByLabelText("Promotion gate and stage health")).toBeInTheDocument());
 
-    expect(screen.getByText(/Live training diagnostics/)).toBeInTheDocument();
-    expect(screen.getByText(/Latest success/)).toBeInTheDocument();
-    expect(screen.getByText(/Latest timeout rate/)).toBeInTheDocument();
-    expect(screen.getByText(/No-progress guard/)).toBeInTheDocument();
+    expect(screen.getByText("Stage 1 Progress")).toBeInTheDocument();
+    expect(screen.getByText("Formal Evals")).toBeInTheDocument();
+    expect(screen.getByText("Qualified (Last 8)")).toBeInTheDocument();
+    expect(screen.getByText("Pass Threshold")).toBeInTheDocument();
+    expect(screen.getByText("Recent Avg Success")).toBeInTheDocument();
+    expect(screen.getByText("Learning Curve & Recent 10-Seed Evaluations")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: /Checkpoints/i }));
+    expect(screen.getByText("Recent Checkpoints")).toBeInTheDocument();
   });
 
-  it("lets you browse insights across all stages or one specific stage", async () => {
+  it("lets you browse checkpoints across all stages or one specific stage in Progress", async () => {
     const user = userEvent.setup();
     const fetchMock = vi.mocked(fetch);
 
@@ -507,9 +517,8 @@ describe("App", () => {
 
     render(<App />);
 
-    await user.click(screen.getByRole("tab", { name: "Insights" }));
-    const diagSection = screen.getByRole("region", { name: "Diagnostics" });
-    await user.click(within(diagSection).getByRole("tab", { name: "History" }));
+    await user.click(screen.getByRole("tab", { name: "Progress" }));
+    await user.click(screen.getByRole("tab", { name: /Checkpoints/i }));
     const historyTable = await screen.findByRole("table");
     const historyRows = () => within(historyTable).getAllByRole("row").slice(1);
     const rowEpisodes = () =>
@@ -523,40 +532,31 @@ describe("App", () => {
 
     // Defaults to the current stage being worked on (stage 3)
     expect(historyRows()).toHaveLength(1);
-    expect(rowEpisodes()).toEqual([{ episode: "90", stage: "3" }]);
+    expect(rowEpisodes()).toEqual([{ episode: "90", stage: "S3" }]);
 
-    // Select current journey to browse all stages in current journey
-    await user.selectOptions(screen.getByLabelText("Stage scope"), "current-journey");
+    // Switch to all stages to see every current-journey checkpoint (excluding archived journey-20260625-193907 Stage 11)
+    const filterSelect = screen.getByLabelText("Checkpoint history filter");
+    await user.selectOptions(filterSelect, "all");
     await waitFor(() => expect(historyRows()).toHaveLength(3));
     expect(rowEpisodes()).toEqual(
       expect.arrayContaining([
-        { episode: "90", stage: "3" },
-        { episode: "40", stage: "2" },
-        { episode: "0", stage: "1" },
+        { episode: "90", stage: "S3" },
+        { episode: "40", stage: "S2" },
+        { episode: "0", stage: "S1" },
       ]),
     );
+    expect(rowEpisodes()).not.toContainEqual({ episode: "200", stage: "S11" });
+    expect(within(filterSelect).queryByRole("option", { name: "Stage 11" })).toBeNull();
 
-    // Switch to all journeys to see the archived checkpoints
-    await user.selectOptions(screen.getByLabelText("Stage scope"), "all");
-    await waitFor(() => expect(historyRows()).toHaveLength(4));
-    expect(rowEpisodes()).toEqual(
-      expect.arrayContaining([
-        { episode: "90", stage: "3" },
-        { episode: "40", stage: "2" },
-        { episode: "0", stage: "1" },
-        { episode: "200", stage: "11" },
-      ]),
-    );
-
-    // Select archived stage 11
-    await user.selectOptions(screen.getByLabelText("Stage scope"), "11");
+    // Select stage 1
+    await user.selectOptions(filterSelect, "1");
     await waitFor(() => expect(historyRows()).toHaveLength(1));
-    expect(rowEpisodes()).toEqual([{ episode: "200", stage: "11" }]);
+    expect(rowEpisodes()).toEqual([{ episode: "0", stage: "S1" }]);
 
-    // Select current journey stage 2
-    await user.selectOptions(screen.getByLabelText("Stage scope"), "2");
+    // Select stage 2
+    await user.selectOptions(filterSelect, "2");
     await waitFor(() => expect(historyRows()).toHaveLength(1));
-    expect(rowEpisodes()).toEqual([{ episode: "40", stage: "2" }]);
+    expect(rowEpisodes()).toEqual([{ episode: "40", stage: "S2" }]);
   });
 
   it("clears training artifacts from the UI", async () => {
@@ -616,11 +616,12 @@ describe("App", () => {
 
     render(<App />);
 
+    await waitFor(() => expect(screen.getByText("Advanced options")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("Advanced options"));
     await waitFor(() => expect(screen.getByRole("button", { name: "Clear" })).toBeInTheDocument());
     await user.click(screen.getByRole("button", { name: "Clear" }));
 
     await waitFor(() => expect(screen.getByText("Training cleared. Baseline replay restored")).toBeInTheDocument());
-    await user.click(screen.getByRole("tab", { name: "Playback" }));
     expect(within(screen.getByLabelText("Run status")).getByText("11")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Replay selected" })).toBeInTheDocument();
   });
@@ -652,6 +653,7 @@ describe("App", () => {
 
     await waitFor(() => expect(screen.getByLabelText("Training controls")).toBeInTheDocument());
 
+    fireEvent.click(screen.getByText("Advanced options"));
     fireEvent.click(screen.getByRole("button", { name: "Clear" }));
 
     await waitFor(() => expect(screen.getByText("Training history cleared")).toBeInTheDocument());
@@ -696,7 +698,6 @@ describe("App", () => {
 
     render(<App />);
 
-    fireEvent.click(screen.getByRole("tab", { name: "Playback" }));
     await waitFor(() => expect(screen.getByText("Instinct-only dogs do not know the pen. Pen-directed behavior requires training, heuristic expert mode, or a handler target command.")).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Run best model" }));
 
@@ -754,7 +755,6 @@ describe("App", () => {
 
     render(<App />);
 
-    await user.click(screen.getByRole("tab", { name: "Playback" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Run best model (ep 0)" })).toBeInTheDocument());
     await user.click(screen.getByRole("button", { name: "Run best model (ep 0)" }));
 
@@ -801,7 +801,7 @@ describe("App", () => {
     expect(screen.queryByText(/Unexpected token/)).not.toBeInTheDocument();
   });
 
-  it("starts training with instincts disabled and curriculum stage one by default", async () => {
+  it.each([false, true])("starts Stage 1 with instincts off (continuous: %s)", async (continuous) => {
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
       const path = String(input);
@@ -831,7 +831,11 @@ describe("App", () => {
     render(<App />);
 
     await waitFor(() => expect(screen.getByLabelText("Training controls")).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Train 50 more" }));
+    if (continuous) {
+      fireEvent.click(screen.getByRole("checkbox", { name: "Continuous training" }));
+      expect(screen.getByLabelText("Episode target per batch")).toBeInTheDocument();
+    }
+    fireEvent.click(screen.getByRole("button", { name: continuous ? "Start continuous training" : "Train 50 more" }));
 
     const trainingStartCall = fetchMock.mock.calls.find(([request]) =>
       String(request).includes("/api/training/start"),
@@ -848,6 +852,7 @@ describe("App", () => {
           curriculum_stage: 1,
           debug_reward_breakdown: false,
           auto_promote: true,
+          ...(continuous ? { continuous: true } : {}),
         }),
       }),
     );
@@ -901,7 +906,7 @@ describe("App", () => {
     );
   });
 
-  it("resumes a saved training session using only the remaining episodes", async () => {
+  it.each([false, true])("resumes a saved training session (continuous: %s)", async (continuous) => {
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
       const path = String(input);
@@ -924,7 +929,7 @@ describe("App", () => {
           curriculum_stage: 4,
           enable_instinct_rewards: true,
           resume_available: true,
-          resume_remaining_episodes: 12,
+          resume_remaining_episodes: continuous ? 0 : 12,
           resume_request: {
             episodes: 50,
             fast_mode: true,
@@ -932,6 +937,7 @@ describe("App", () => {
             curriculum_stage: 4,
             debug_reward_breakdown: false,
             auto_promote: true,
+            ...(continuous ? { continuous: true } : {}),
           },
         });
       }
@@ -946,8 +952,9 @@ describe("App", () => {
 
     render(<App />);
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Resume 12 remaining" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Resume 12 remaining" }));
+    const resumeLabel = continuous ? "Resume continuous training" : "Resume 12 remaining";
+    await waitFor(() => expect(screen.getByRole("button", { name: resumeLabel })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: resumeLabel }));
 
     const resumeCall = fetchMock.mock.calls.find(([request]) =>
       String(request).includes("/api/training/start"),
@@ -957,12 +964,13 @@ describe("App", () => {
         cache: "no-store",
         method: "POST",
         body: JSON.stringify({
-          episodes: 12,
+          episodes: continuous ? 50 : 12,
           fast_mode: true,
           enable_instinct_rewards: true,
           curriculum_stage: 4,
           debug_reward_breakdown: false,
           auto_promote: true,
+          ...(continuous ? { continuous: true, resume: true } : {}),
         }),
       }),
     );
@@ -998,17 +1006,16 @@ describe("App", () => {
 
     render(<App />);
 
-    fireEvent.click(screen.getByRole("tab", { name: "Playback" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "End episode" })).toBeEnabled());
 
     fireEvent.click(screen.getByRole("button", { name: "End episode" }));
 
     const statusPanel = screen.getByLabelText("Run status");
     expect(within(statusPanel).getByText("3")).toBeInTheDocument();
-    expect(within(statusPanel).getAllByText("timeout")).toHaveLength(2);
+    expect(within(statusPanel).getByText("timeout")).toBeInTheDocument();
   });
 
-  it("persists insights view filters in localStorage", async () => {
+  it("persists progress view filters in localStorage", async () => {
     const user = userEvent.setup();
     const fetchMock = vi.mocked(fetch);
 
@@ -1028,35 +1035,33 @@ describe("App", () => {
       return new Response("not found", { status: 404 });
     });
 
-    // Populate localStorage
-    window.localStorage.setItem("sheepdog_insights_view_window", "25");
-    window.localStorage.setItem("sheepdog_insights_stage_scope", "current");
-    window.localStorage.setItem("sheepdog_insights_active_chart", "history");
+    // Populate localStorage with saved progress checkpoint filter
+    window.localStorage.setItem("sheepdog_progress_stage_filter", "all");
 
     render(<App />);
 
-    // Go to Insights tab
-    await user.click(screen.getByRole("tab", { name: "Insights" }));
+    // Go to Progress tab (defaults to Learning Curve subtab)
+    await user.click(screen.getByRole("tab", { name: "Progress" }));
 
-    // Verify localStorage values are loaded
-    const stageSelect = screen.getByLabelText("Stage scope") as HTMLSelectElement;
-    expect(stageSelect.value).toBe("current");
-
-    const activeChartTab = screen.getByRole("tab", { name: "History", selected: true });
-    expect(activeChartTab).toBeInTheDocument();
-
-    const last25Button = screen.getByRole("button", { name: "Last 25" });
-    expect(last25Button.className).toContain("chart-tab--active");
-
-    // Change filters
-    await user.selectOptions(stageSelect, "all");
+    // Interact with learning curve controls
     await user.click(screen.getByRole("button", { name: "Last 50" }));
-    await user.click(screen.getByRole("tab", { name: "Avg Reward" }));
+    await user.click(screen.getByRole("button", { name: "Return" }));
+    await user.click(screen.getByRole("button", { name: "All Stages" }));
+    expect(screen.getByRole("button", { name: "Last 50" }).className).toContain("sd-pill-btn--active");
+    expect(screen.getByRole("button", { name: "Return" }).className).toContain("sd-pill-btn--active");
+    expect(screen.getByRole("button", { name: "All Stages" }).className).toContain("sd-pill-btn--active");
 
-    // Verify changes are persisted in localStorage
-    expect(window.localStorage.getItem("sheepdog_insights_stage_scope")).toBe("all");
-    expect(window.localStorage.getItem("sheepdog_insights_view_window")).toBe("50");
-    expect(window.localStorage.getItem("sheepdog_insights_active_chart")).toBe("reward");
+    // Switch to Checkpoints subtab and verify localStorage filter restores "all" (excluding archived Stage 11)
+    await user.click(screen.getByRole("tab", { name: /Checkpoints/i }));
+    const filterSelect = screen.getByLabelText("Checkpoint history filter") as HTMLSelectElement;
+    expect(filterSelect.value).toBe("all");
+    const historyTable = await screen.findByRole("table");
+    await waitFor(() => expect(within(historyTable).getAllByRole("row").slice(1)).toHaveLength(3));
+
+    // Change checkpoint filter and verify localStorage updates
+    await user.selectOptions(filterSelect, "2");
+    expect(window.localStorage.getItem("sheepdog_progress_stage_filter")).toBe("2");
+    await waitFor(() => expect(within(historyTable).getAllByRole("row").slice(1)).toHaveLength(1));
   });
 
   it("displays 'Backend disconnected' when backend polling fails during active training", async () => {
@@ -1154,7 +1159,6 @@ describe("App", () => {
 
     render(<App />);
 
-    fireEvent.click(screen.getByRole("tab", { name: "Playback" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Replay selected" })).toBeInTheDocument());
     await waitFor(() => expect(within(screen.getByLabelText("Run status")).getByText("idle")).toBeInTheDocument());
 
@@ -1239,5 +1243,455 @@ describe("App", () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(screen.queryByText("Stale idle poll")).not.toBeInTheDocument();
     expect(screen.getByText("Training batch active")).toBeInTheDocument();
+  });
+
+  it("renders exactly 4 top-level tabs, zero Studio v2 links, and zero duplicate evaluation banners", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.includes("/api/training/status")) {
+        return jsonResponse({
+          ...idleTrainingStatus,
+          phase: "evaluation_complete",
+          auto_promote_gate: {
+            ready: true,
+            decision: "promote_ready",
+            reason: "Promotion gate satisfied.",
+          },
+          evaluation_status: {
+            in_progress: false,
+            mode: "confidence",
+            total_seeds: 10,
+            completed_seeds: 10,
+            success_count: 10,
+            recent_results: [
+              {
+                seed: 11,
+                success: true,
+                timeout: false,
+                status: "success",
+                reward: 45,
+                penned: 2,
+                total_sheep: 2,
+                steps: 80,
+              },
+            ],
+          },
+        });
+      }
+      if (path.includes("checkpoint-index.json")) {
+        return jsonResponse(checkpointIndex);
+      }
+      if (path.includes("checkpoint-000000-seed-000011.json")) {
+        return jsonResponse(replay);
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByLabelText("Training controls")).toBeInTheDocument());
+
+    const topNav = screen.getByRole("tablist", { name: "Workspace sections" });
+    const tabs = within(topNav).getAllByRole("tab");
+    expect(tabs.map((tab) => tab.textContent)).toEqual([
+      "Train",
+      "Progress",
+      "Trouble Spots & Replays",
+      "Settings",
+    ]);
+    expect(screen.queryByText(/Studio v2/i)).not.toBeInTheDocument();
+    expect(screen.queryAllByTestId("evaluation-banner")).toHaveLength(0);
+    expect(screen.getAllByRole("button", { name: "Promote → Stage 2" })).toHaveLength(1);
+  });
+
+  it("navigates Trouble Spots & Replays sub-views cleanly", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("tab", { name: "Trouble Spots & Replays" }));
+
+    await waitFor(() =>
+      expect(screen.getByText("Failure Breakdown & Hardest Seeds")).toBeInTheDocument(),
+    );
+    expect(
+      screen.getByText("Stage Learning Bottlenecks & Spatial Heatmap"),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Step-by-Step Inspector" }));
+    expect(screen.getByRole("tab", { name: "Step-by-Step Inspector" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(
+      screen.getByRole("region", { name: "Temporal Interaction Diagnostics" }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Scenario Sandbox" }));
+    expect(screen.getByRole("tab", { name: "Scenario Sandbox" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByLabelText("Scenario status")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Scenario & Seed Failures" }));
+    expect(screen.getByText("Failure Breakdown & Hardest Seeds")).toBeInTheDocument();
+  });
+
+  it("renders Settings with ConfigPanel and collapsed disclosures until expanded", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.includes("/api/training/status")) {
+        return jsonResponse(idleTrainingStatus);
+      }
+      if (path.includes("checkpoint-index.json")) {
+        return jsonResponse(checkpointIndex);
+      }
+      if (path.includes("checkpoint-000000-seed-000011.json")) {
+        return jsonResponse(replay);
+      }
+      if (path.includes("/api/network/topology")) {
+        return jsonResponse({
+          observation_mode: "guided",
+          hidden_layer_sizes: [128, 128],
+          observation_size: 54,
+          action_size: 9,
+          actor_head: { type: "linear", node_count: 9, output: "logits" },
+          critic_head: { type: "linear", node_count: 1, output: "value" },
+          action_masking_enabled: true,
+          connectivity: "dense",
+        });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    render(<App />);
+
+    await user.click(screen.getByRole("tab", { name: "Settings" }));
+
+    await waitFor(() => expect(screen.getByLabelText("Config")).toBeInTheDocument());
+
+    const disclosureSummaries = [
+      "Checkpoint Browser, Restore & Fork",
+      "Policy Network Topology",
+      "Observation & Action Layers",
+      "Curriculum Stages & RL Glossary",
+      "Raw Episode Telemetry Log",
+    ];
+    for (const label of disclosureSummaries) {
+      const summary = screen.getByText(label);
+      const details = summary.closest("details");
+      expect(details).not.toBeNull();
+      expect(details).not.toHaveAttribute("open");
+    }
+
+    await user.click(screen.getByText("Policy Network Topology"));
+    await waitFor(() => {
+      expect(screen.getByText("Policy Network Topology").closest("details")).toHaveAttribute(
+        "open",
+      );
+    });
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(([req]) => String(req).includes("/api/network/topology")),
+      ).toBe(true);
+    });
+  });
+
+  it("deep-links directly to Step-by-Step Inspector from ?workspace=temporal&replay=...", async () => {
+    window.history.replaceState(
+      {},
+      "",
+      "/?workspace=temporal&replay=checkpoint-039909-seed-000041",
+    );
+
+    render(<App />);
+
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Trouble Spots & Replays" })).toHaveAttribute(
+        "aria-selected",
+        "true",
+      ),
+    );
+    expect(screen.getByRole("tab", { name: "Step-by-Step Inspector" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    const replayInput = screen.getByLabelText(
+      "Or Open Any Approved Replay ID:",
+    ) as HTMLInputElement;
+    expect(replayInput.value).toBe("checkpoint-039909-seed-000041");
+  });
+
+  it("displays live PPO timestep progress and rollout telemetry mid-segment even when batch_completed_episodes is 0", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.includes("/api/training/status")) {
+        return jsonResponse({
+          ...idleTrainingStatus,
+          running: true,
+          phase: "episode_complete",
+          curriculum_stage: 7,
+          requested_episodes: 34,
+          batch_total_episodes: 34,
+          batch_completed_episodes: 0,
+          batch_total_segments: 35,
+          batch_completed_segments: 0,
+          message: "Learning neural policy: 17328/32768 timesteps (53%)",
+          latest_completed_environment_episode: 19212,
+          latest_episode_result: "SUCCESS",
+          latest_episode_reward: 347.53,
+          live_rollout_window_count: 65,
+          live_rollout_success_rate: 0.98,
+        });
+      }
+      if (path.includes("checkpoint-index.json")) {
+        return jsonResponse(checkpointIndex);
+      }
+      if (path.includes("checkpoint-000000-seed-000011.json")) {
+        return jsonResponse(replay);
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    render(<App />);
+
+    await waitFor(() =>
+      expect(screen.getByText("17,328 / 32,768 timesteps (53%)")).toBeInTheDocument(),
+    );
+    expect(screen.getByText("Next checkpoint")).toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "Training batch progress" })).toHaveAttribute(
+      "aria-valuenow",
+      "53",
+    );
+    expect(
+      screen.getByText("Batch checkpoints: 0 / 35 saved · 0 / 34 episodes"),
+    ).toBeInTheDocument();
+
+    const rolloutStrip = screen.getByTestId("live-rollout-telemetry");
+    expect(within(rolloutStrip).getByText("Ep #19,212")).toBeInTheDocument();
+    expect(within(rolloutStrip).getByText("SUCCESS")).toBeInTheDocument();
+    expect(within(rolloutStrip).getByText("+347.5")).toBeInTheDocument();
+    expect(
+      within(rolloutStrip).getByText("65 rollouts since last checkpoint · 98% rollout win rate"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Learning neural policy: 17328/32768 timesteps (53%)"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Field shows last saved checkpoint replay — background workers export a new replay at each checkpoint.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Training · Ckpt 0/35 (53%) · Ep #19,212"),
+    ).toBeInTheDocument();
+  });
+
+  it("prevents mid-batch status oscillation and defers insight polling until Progress is active", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.mocked(fetch);
+    let statusPollCount = 0;
+
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.includes("/api/training/status")) {
+        statusPollCount += 1;
+        if (statusPollCount === 1) {
+          return jsonResponse({
+            ...idleTrainingStatus,
+            running: true,
+            phase: "learning",
+            curriculum_stage: 7,
+            requested_episodes: 34,
+            completed_episodes: 18,
+            batch_total_episodes: 34,
+            batch_completed_episodes: 18,
+            batch_total_segments: 35,
+            batch_completed_segments: 0.53,
+            current_global_timestep: 500000,
+            message: "Learning neural policy: 17328/32768 timesteps (53%)",
+            latest_completed_environment_episode: 19212,
+            latest_episode_result: "SUCCESS",
+            latest_episode_reward: 347.53,
+            live_rollout_window_count: 65,
+            live_rollout_success_rate: 0.98,
+          });
+        }
+        return jsonResponse({
+          ...idleTrainingStatus,
+          running: true,
+          phase: "episode_complete",
+          curriculum_stage: 7,
+          requested_episodes: 34,
+          completed_episodes: 0,
+          batch_total_episodes: 34,
+          batch_completed_episodes: 0,
+          batch_total_segments: undefined,
+          batch_completed_segments: 0,
+          current_global_timestep: 499000,
+          message: "Learning neural policy: 16000/32768 timesteps (49%)",
+          latest_completed_environment_episode: 19213,
+          latest_episode_result: "TIMEOUT",
+          latest_episode_reward: -12.4,
+          live_rollout_window_count: 66,
+          live_rollout_success_rate: 0.97,
+        });
+      }
+      if (path.includes("/api/insights/training-episodes")) {
+        return jsonResponse({ episodes: [], total: 0 });
+      }
+      if (path.includes("/api/insights/session-events")) {
+        return jsonResponse({ events: [], total_sessions: 0 });
+      }
+      if (path.includes("checkpoint-index.json")) {
+        return jsonResponse(checkpointIndex);
+      }
+      if (path.includes("checkpoint-000000-seed-000011.json")) {
+        return jsonResponse(replay);
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    render(<App />);
+
+    await waitFor(() =>
+      expect(screen.getByText("17,328 / 32,768 timesteps (53%)")).toBeInTheDocument(),
+    );
+    await waitFor(() => expect(statusPollCount).toBeGreaterThanOrEqual(2), { timeout: 2000 });
+
+    // Non-regression: second poll's zeroed segment/episode counts and lower timestep message must not regress UI.
+    expect(screen.getByText("17,328 / 32,768 timesteps (53%)")).toBeInTheDocument();
+    expect(
+      screen.getByText("Batch checkpoints: 0 / 35 saved · 18 / 34 episodes"),
+    ).toBeInTheDocument();
+    // Latest rollout metadata from poll 2 still updates live.
+    expect(screen.getByText("Ep #19,213")).toBeInTheDocument();
+
+    // Insights endpoints must not be polled while viewing Train tab.
+    expect(
+      fetchMock.mock.calls.some(
+        ([req]) =>
+          String(req).includes("/api/insights/training-episodes") ||
+          String(req).includes("/api/insights/session-events"),
+      ),
+    ).toBe(false);
+
+    // Switching to Progress immediately triggers insights polling.
+    await user.click(screen.getByRole("tab", { name: "Progress" }));
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(([req]) => String(req).includes("/api/insights/training-episodes")),
+      ).toBe(true);
+      expect(
+        fetchMock.mock.calls.some(([req]) => String(req).includes("/api/insights/session-events")),
+      ).toBe(true);
+    });
+  });
+
+  it("renders prominent curriculum stage indicators in the topbar, Train view, and Progress view", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByTestId("topbar-stage-pill")).toBeInTheDocument());
+    const topbarPill = screen.getByTestId("topbar-stage-pill");
+    expect(topbarPill).toHaveTextContent("Stage 1 / 32");
+    expect(topbarPill).toHaveTextContent("· 2d / 2s");
+
+    const trainCallout = screen.getByTestId("train-stage-callout");
+    expect(trainCallout).toHaveTextContent("Stage 1");
+    expect(trainCallout).toHaveTextContent("of 32");
+
+    await user.click(screen.getByRole("tab", { name: "Progress" }));
+    await waitFor(() => expect(screen.getByTestId("progress-stage-pill")).toBeInTheDocument());
+    expect(screen.getByTestId("progress-stage-pill")).toHaveTextContent("Stage 1 of 32");
+  });
+
+  it("validates and launches a stage-queue training pass without calling cross-stage-fork", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.mocked(fetch);
+    const startedBodies: Array<Record<string, unknown>> = [];
+    let forkCalls = 0;
+
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.includes("/api/training/status")) {
+        return jsonResponse({
+          ...idleTrainingStatus,
+          max_curriculum_stage: 38,
+        });
+      }
+      if (path.includes("/api/training/cross-stage-fork")) {
+        forkCalls += 1;
+        return jsonResponse(idleTrainingStatus);
+      }
+      if (path.includes("/api/training/start")) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+        startedBodies.push(body);
+        return jsonResponse({
+          ...idleTrainingStatus,
+          max_curriculum_stage: 38,
+          running: true,
+          phase: "learning",
+          curriculum_stage: 10,
+          continuous: true,
+          auto_promote: true,
+          stage_queue: [10, 11, 12, 15, 16, 17, 18, 19, 20, 25, 33, 34, 35, 36, 37, 38],
+          stage_queue_index: 0,
+          stage_spec: String(body.stage_spec ?? ""),
+          message: "Running stage queue",
+        });
+      }
+      if (path.includes("checkpoint-index.json")) {
+        return jsonResponse(checkpointIndex);
+      }
+      if (path.includes("checkpoint-000000-seed-000011.json")) {
+        return jsonResponse(replay);
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    render(<App />);
+
+    const stageSpecInput = await screen.findByLabelText("Stages to run (optional)");
+
+    // Invalid spec shows alert and disables Start button
+    await user.type(stageSpecInput, "39");
+    expect(screen.getByRole("alert")).toHaveTextContent(/39/);
+    const startWhileInvalid = screen.getByRole("button", { name: "Train 50 more" });
+    expect(startWhileInvalid).toBeDisabled();
+
+    // Valid multi-range spec shows preview, pass label input, and Run 16 stages button
+    await user.clear(stageSpecInput);
+    await user.type(stageSpecInput, "10-12, 15-20, 25, 33-38");
+
+    expect(screen.getByTestId("stage-spec-preview")).toHaveTextContent(
+      "Queued 16 stages (10-12, 15-20, 25, 33-38) · uses current trained model",
+    );
+    const passLabelInput = screen.getByLabelText("Pass label");
+    await user.type(passLabelInput, "Hard tail polish");
+
+    const runQueueButton = screen.getByRole("button", { name: "Run 16 stages" });
+    expect(runQueueButton).toBeEnabled();
+    await user.click(runQueueButton);
+
+    await waitFor(() => expect(startedBodies).toHaveLength(1));
+    expect(forkCalls).toBe(0);
+    expect(startedBodies[0]).toMatchObject({
+      stage_spec: "10-12, 15-20, 25, 33-38",
+      pass_label: "Hard tail polish",
+      starting_model_source: "latest",
+      continuous: true,
+      auto_promote: true,
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("stage-queue-progress")).toHaveTextContent(
+        "Stage queue: 1 / 16 · Stage 10 (10-12, 15-20, 25, 33-38)",
+      ),
+    );
   });
 });

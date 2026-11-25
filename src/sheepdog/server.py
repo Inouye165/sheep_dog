@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime
+import gzip
 import json
 import logging
 import math
@@ -20,6 +21,7 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 import shutil
+import sqlite3
 import threading
 import time
 import traceback
@@ -31,7 +33,14 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlsplit
 
-from sheepdog.atomic_io import atomic_write_json, atomic_write_text
+from sheepdog.atomic_io import (
+    DEFAULT_WARN_FREE_DISK_BYTES,
+    DiskSpaceError,
+    atomic_write_json,
+    atomic_write_text,
+    ensure_free_disk_space,
+    get_free_disk_bytes,
+)
 from sheepdog.checkpoints.store import CheckpointMetadata
 from sheepdog.config import (
     EnvironmentConfig,
@@ -42,7 +51,7 @@ from sheepdog.config import (
     validate_observation_history_strides,
 )
 from sheepdog.curriculum import apply_training_profile, available_stages, validate_curriculum_stage
-from sheepdog.environment import ACTION_ORDER, SheepdogEnvironment
+from sheepdog.environment import ACTION_ORDER, ENV_CONFIG_VERSION, SheepdogEnvironment
 from sheepdog.evaluation.scenario_evaluator import (
     config_for_scenario,
     evaluate_scenario,
@@ -56,11 +65,24 @@ from sheepdog.policies.base import Policy, PolicyMode
 from sheepdog.policies.factory import load_playable_policy
 from sheepdog.policies.heuristic import InstinctOnlyPolicy
 from sheepdog.rewards import REWARD_SCHEMA_VERSION
+from sheepdog.tracking.model_history import (
+    MODEL_HISTORY_DB_FILENAME,
+    ModelHistoryStore,
+    compute_file_sha256,
+    format_stage_spec,
+    parse_stage_spec,
+)
+from sheepdog.tracking.registry import classify_assistance_mode
+from sheepdog.training import stage_timing
 from sheepdog.training.backup import TrainingBackupManager
 from sheepdog.training.factory import create_trainer
 from sheepdog.training.runtime import TrainingRuntimeTracker
 from sheepdog.training.telemetry import CurriculumTelemetryManager
-from sheepdog.training.trainer import Trainer
+from sheepdog.training.trainer import Trainer, slim_web_checkpoint_entry
+
+_GZIP_FILE_CACHE_MAX_ENTRIES = 4
+_GZIP_FILE_CACHE_LOCK = threading.Lock()
+_GZIP_FILE_CACHE: OrderedDict[tuple[str, int, int], bytes] = OrderedDict()
 
 
 def _setup_server_logger() -> logging.Logger:
@@ -139,6 +161,22 @@ class _EarlyPromotionSignal(Exception):
         self.qualified_streak = qualified_streak
         self.seed_gate_hits = seed_gate_hits
         self.full_success_hits = full_success_hits
+
+
+class _EarlyMaxStageStopSignal(Exception):
+    """Internal control-flow signal for immediate stop on final stage mastery or plateau."""
+
+    def __init__(
+        self,
+        *,
+        checkpoint_episode: int,
+        reason: str,
+        message: str,
+    ) -> None:
+        super().__init__("early-max-stage-stop")
+        self.checkpoint_episode = checkpoint_episode
+        self.reason = reason
+        self.message = message
 
 
 class DiagnosticsHTTPException(Exception):
@@ -382,6 +420,32 @@ def _resolve_stage_active_model_path(
             if legacy_cand.exists() and legacy_cand.is_file():
                 return legacy_cand
     return None
+
+
+def _resolve_existing_model_file(output_root: Path, raw_path: Any) -> Path | None:
+    """Resolve an existing model or artifact file path from training/run state."""
+    if not isinstance(raw_path, str) or not raw_path:
+        return None
+    cand = Path(raw_path)
+    if cand.is_absolute():
+        return cand if cand.is_file() else None
+    for base in (output_root, output_root.parent, Path.cwd()):
+        probe = base / cand
+        if probe.is_file():
+            return probe
+    return None
+
+
+def _set_model_history_pass_status(
+    history_store: ModelHistoryStore, pass_id: str, status: str
+) -> None:
+    """Update a model pass status in SQLite without altering rollup fields."""
+    with history_store._lock, history_store._connect() as conn:
+        conn.execute(
+            "UPDATE model_passes SET status = ?, ended_at = NULL WHERE pass_id = ?",
+            (status, pass_id),
+        )
+        conn.commit()
 
 
 def _get_rw_episode_store(db_path: Path) -> Any:
@@ -724,6 +788,20 @@ def _recover_incomplete_batch_status(output_root: Path, status: dict[str, Any]) 
     except Exception as exc:
         logger.warning("Failed to recover incomplete batch status: %s", exc)
         return False
+
+
+def _clear_incomplete_batch(output_root: Path) -> None:
+    """Clear incomplete_batch in training-state.json when a batch stops cleanly."""
+    state_path = output_root / "training-state.json"
+    if not state_path.exists():
+        return
+    try:
+        t_state = _load_json(state_path)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return
+    if isinstance(t_state, dict) and t_state.get("incomplete_batch") is not None:
+        t_state["incomplete_batch"] = None
+        atomic_write_json(state_path, t_state)
 
 
 
@@ -1654,9 +1732,15 @@ def _append_promotion_history(output_root: Path, event: dict[str, Any]) -> list[
     """Append a promotion audit event and return the full persisted list."""
 
     history = _read_promotion_history(output_root)
+    prior_events = list(history)
     history.append(event)
     path = output_root / PROMOTION_HISTORY_FILENAME
     atomic_write_json(path, history)
+    try:  # timing is observability only; never break the promotion path
+        stage_timing.backfill_from_promotion_history(output_root, prior_events)
+        stage_timing.record_promotion(output_root, event)
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).warning("stage timing record failed", exc_info=True)
     return history
 
 
@@ -1835,6 +1919,26 @@ class _BaselineExportTrainer(Trainer):
         )
 
 
+_RECENT_EVAL_DROPPED_KEYS = (
+    "failure_directed_telemetry",
+    "failure_directed_weights",
+    "policy_weights",
+    "training_scenario_coverage",
+)
+
+
+def _slim_recent_evaluation(data: dict[str, Any]) -> None:
+    """Drop heavy diagnostic blobs from an in-memory evaluation summary dict."""
+    for key in _RECENT_EVAL_DROPPED_KEYS:
+        data.pop(key, None)
+    records = data.get("records")
+    if isinstance(records, list):
+        for rec in records:
+            if isinstance(rec, dict):
+                rec.pop("failed_trajectory_summary", None)
+                rec.pop("observation_diagnostics", None)
+
+
 class TrainingManager:
     """Track one background training job at a time."""
 
@@ -1848,6 +1952,7 @@ class TrainingManager:
         self._confidence_info_cache: dict[
             tuple[str, int], tuple[int, int, tuple[int | None, int | None]]
         ] = {}
+        self._recent_eval_files_cache: dict[tuple[str, int], list[Path]] = {}
         self._maintenance_busy = False
         self._thread: threading.Thread | None = None
         self._control_request: str | None = None
@@ -2545,16 +2650,54 @@ class TrainingManager:
                 ]
                 highest_recorded_stage = max(recorded_stages, default=0)
                 promotion_history = _read_promotion_history(output_root)
+                latest_stage_event = None
                 latest_promo_stage = None
                 if promotion_history:
                     stage_events = [ev for ev in promotion_history if ev.get("to_stage") is not None]
-                    if stage_events:
-                        latest_promo_stage = stage_events[-1].get("to_stage")
+                    latest_stage_event = stage_events[-1] if stage_events else None
+                    if latest_stage_event is not None:
+                        latest_promo_stage = latest_stage_event.get("to_stage")
 
                 is_stale = False
                 sess_status = session_state.get("status") if isinstance(session_state.get("status"), dict) else {}
                 sess_stage = sess_status.get("curriculum_stage")
-                if sess_stage is not None and int(sess_stage) != int(active_stg):
+                if (
+                    isinstance(req, dict)
+                    and req.get("continuous")
+                    and latest_stage_event is not None
+                    and latest_stage_event.get("event_type") == "promotion"
+                    and latest_promo_stage == active_stg
+                    and latest_stage_event.get("from_stage") == req_stage
+                    and resolved.get("run_id")
+                    and resolved["run_id"] == latest_stage_event.get("run_id") == sess_status.get("run_id")
+                    and resolved.get("active_checkpoint_episode") is not None
+                    and resolved["active_checkpoint_episode"] == latest_stage_event.get("trigger_checkpoint_episode")
+                ):
+                    # A crash can land after recording promotion but before
+                    # replacing its resume marker. The durable checkpoint and
+                    # the same-run promotion event establish the next stage.
+                    req = {
+                        **req,
+                        "curriculum_stage": active_stg,
+                        "promote_from_checkpoint_episode": resolved["active_checkpoint_episode"],
+                    }
+                    req_stage = sess_stage = active_stg
+                    session_state = {
+                        **session_state,
+                        "training_request": req,
+                        "status": {**sess_status, "curriculum_stage": active_stg},
+                    }
+                    _write_training_session_state(output_root, session_state)
+                is_queued_req = isinstance(req, dict) and bool(req.get("stage_queue"))
+                if is_queued_req:
+                    queue_stages = [int(s) for s in req["stage_queue"]]
+                    if (
+                        req_stage is None
+                        or int(req_stage) not in queue_stages
+                        or (sess_stage is not None and int(sess_stage) != int(req_stage))
+                    ):
+                        is_stale = True
+                elif sess_stage is not None and int(sess_stage) != int(active_stg):
                     is_stale = True
                 elif req_stage is not None:
                     req_stage_int = int(req_stage)
@@ -2581,6 +2724,19 @@ class TrainingManager:
                 else:
                     self._status["resume_available"] = bool(session_state.get("training_request"))
                     self._status["resume_request"] = session_state.get("training_request")
+                    self._status["continuous"] = bool(isinstance(req, dict) and req.get("continuous"))
+                    if is_queued_req:
+                        self._status["stage_queue"] = [int(s) for s in req["stage_queue"]]
+                        self._status["stage_queue_index"] = (
+                            int(req["stage_queue_index"])
+                            if req.get("stage_queue_index") is not None
+                            else 0
+                        )
+                        self._status["stage_spec"] = req.get("stage_spec")
+                        self._status["pass_label"] = req.get("pass_label")
+                        self._status["active_pass_id"] = req.get("pass_id")
+                        if req_stage is not None:
+                            self._status["curriculum_stage"] = int(req_stage)
                     resume_remaining = session_state.get("remaining_episodes")
                     if isinstance(resume_remaining, (int, float)):
                         self._status["resume_remaining_episodes"] = max(0, int(resume_remaining))
@@ -2588,6 +2744,8 @@ class TrainingManager:
                     if isinstance(resume_remaining_timesteps, (int, float)):
                         self._status["resume_remaining_timesteps"] = max(0, int(resume_remaining_timesteps))
                     sess_phase = str(session_state.get("state") or "stopped")
+                    if self._status["continuous"] and sess_phase == "running":
+                        sess_phase = "stopped"
                     self._status["phase"] = sess_phase
                     rem_ep = self._status.get("resume_remaining_episodes")
                     if isinstance(rem_ep, int) and rem_ep > 0:
@@ -2639,6 +2797,12 @@ class TrainingManager:
                 "debug_reward_breakdown", instincts.debug_reward_breakdown
             ),
             "auto_promote": persisted.get("auto_promote", True),
+            "continuous": False,
+            "stage_queue": None,
+            "stage_queue_index": None,
+            "stage_spec": None,
+            "pass_label": None,
+            "active_pass_id": None,
             "auto_promote_threshold": _get_success_threshold(stg),
             "auto_promote_stages_completed": 0,
             "anti_collapse_warning": None,
@@ -2769,6 +2933,11 @@ class TrainingManager:
                 )
             status["resume_available"] = bool(session_state.get("training_request"))
             status["resume_request"] = session_state.get("training_request")
+            request = status["resume_request"]
+            status["continuous"] = bool(isinstance(request, dict) and request.get("continuous"))
+            if status["continuous"] and status["phase"] == "running":
+                status["phase"] = "stopped"
+                status["message"] = "Continuous training interrupted; resume available"
             if status.get("message") in {None, "Idle", ""}:
                 state_label = "paused" if status["phase"] == "paused" else "stopped"
                 remaining = status.get("resume_remaining_episodes")
@@ -3030,10 +3199,18 @@ class TrainingManager:
         auto_promote: bool | None = None,
         promote_from_checkpoint_episode: int | None = None,
         evaluation_mode: str = "quick",
+        continuous: bool = False,
+        stage_queue: list[int] | None = None,
+        stage_queue_index: int | None = None,
+        stage_spec: str | None = None,
+        pass_label: str | None = None,
+        pass_id: str | None = None,
+        active_stage_run_id: str | None = None,
+        starting_model_source: str | None = None,
     ) -> dict[str, Any]:
         """Return a JSON-serializable request payload for resume prompts."""
 
-        payload = {
+        payload: dict[str, Any] = {
             "enable_instinct_rewards": enable_instinct_rewards,
             "curriculum_stage": curriculum_stage,
             "debug_reward_breakdown": debug_reward_breakdown,
@@ -3041,6 +3218,22 @@ class TrainingManager:
             "promote_from_checkpoint_episode": promote_from_checkpoint_episode,
             "evaluation_mode": evaluation_mode,
         }
+        if continuous:
+            payload["continuous"] = True
+        if stage_queue is not None:
+            payload["stage_queue"] = [int(s) for s in stage_queue]
+        if stage_queue_index is not None:
+            payload["stage_queue_index"] = int(stage_queue_index)
+        if stage_spec is not None:
+            payload["stage_spec"] = stage_spec
+        if pass_label is not None:
+            payload["pass_label"] = pass_label
+        if pass_id is not None:
+            payload["pass_id"] = pass_id
+        if active_stage_run_id is not None:
+            payload["active_stage_run_id"] = active_stage_run_id
+        if starting_model_source is not None:
+            payload["starting_model_source"] = starting_model_source
         if total_timesteps is not None:
             payload["total_timesteps"] = int(total_timesteps)
             payload["training_request_migrated"] = False
@@ -3078,7 +3271,15 @@ class TrainingManager:
             "training_request": request,
             "status": status,
         }
-        _write_training_session_state(output_root, payload)
+        with self._lock:
+            if (
+                state == "running"
+                and request
+                and request.get("continuous")
+                and self._control_request in {"paused", "stopped"}
+            ):
+                return
+            _write_training_session_state(output_root, payload)
 
     def _resume_interrupted_session(self) -> None:
         """Auto-resume an interrupted run after crash/reboot from the last safe point."""
@@ -3092,6 +3293,8 @@ class TrainingManager:
         request = session_state.get("training_request")
         if not isinstance(request, dict):
             return
+        if request.get("continuous") or request.get("stage_queue"):
+            return  # Continuous/queued runs wait for an explicit resume after a backend restart.
         remaining_timesteps = session_state.get("remaining_timesteps")
         has_timestep_request = request.get("total_timesteps") is not None
         if has_timestep_request and isinstance(remaining_timesteps, (int, float)):
@@ -3219,19 +3422,64 @@ class TrainingManager:
         return self._early_warning_monitor.acknowledge_warning(warning_id=warning_id, note=note)
 
     def get_recent_evaluations(
-        self, limit: int = 5, stage: int | None = None
+        self, limit: int = 5, stage: int | None = None, *,
+        run_id: str | None = None, candidate_limit: int | None = None,
+        artifact_root: Path | None = None,
     ) -> list[dict[str, Any]]:
         """Retrieve recent formal evaluation summaries with per-seed episode records."""
-        output_root = Path(LabConfig().training.output_dir)
+        output_root = artifact_root or Path(LabConfig().training.output_dir)
         evals_dir = output_root / "evaluations"
-        if not evals_dir.exists():
+        cache_lock = getattr(self, "_cache_lock", None)
+        dir_key = str(evals_dir)
+        try:
+            dir_stat = evals_dir.stat()
+        except OSError:
+            if cache_lock is not None:
+                with cache_lock:
+                    cache = getattr(self, "_recent_eval_files_cache", None)
+                    if isinstance(cache, dict):
+                        for stale_key in [k for k in cache if k[0] == dir_key]:
+                            cache.pop(stale_key, None)
             return []
 
-        eval_files = [
-            f for f in evals_dir.glob("eval*.json")
-            if f.is_file() and not f.name.startswith("eval_retention_index")
-        ]
-        eval_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        cache_key = (dir_key, dir_stat.st_mtime_ns)
+        eval_files: list[Path] | None = None
+        if cache_lock is not None:
+            with cache_lock:
+                cache = getattr(self, "_recent_eval_files_cache", None)
+                if isinstance(cache, dict):
+                    eval_files = cache.get(cache_key)
+
+        if eval_files is None:
+            scanned: list[tuple[float, Path]] = []
+            try:
+                with os.scandir(evals_dir) as entries:
+                    for entry in entries:
+                        name = entry.name
+                        if not (
+                            name.startswith("eval")
+                            and name.endswith(".json")
+                            and not name.startswith("eval_retention_index")
+                        ):
+                            continue
+                        try:
+                            if not entry.is_file(follow_symlinks=False):
+                                continue
+                            mtime = entry.stat(follow_symlinks=False).st_mtime
+                        except OSError:
+                            continue
+                        scanned.append((mtime, Path(entry.path)))
+            except OSError:
+                return []
+            scanned.sort(key=lambda item: item[0], reverse=True)
+            eval_files = [path for _, path in scanned]
+            if cache_lock is not None:
+                with cache_lock:
+                    cache = getattr(self, "_recent_eval_files_cache", None)
+                    if isinstance(cache, dict):
+                        for stale_key in [k for k in cache if k[0] == dir_key]:
+                            cache.pop(stale_key, None)
+                        cache[cache_key] = eval_files
 
         from sheepdog.evaluation.retention import EvaluationReplayRetentionManager
         retention_mgr = EvaluationReplayRetentionManager(evals_dir)
@@ -3240,13 +3488,17 @@ class TrainingManager:
         results: list[dict[str, Any]] = []
         seen_eval_ids: set[str] = set()
 
-        for fpath in eval_files:
+        for fpath in eval_files[:candidate_limit]:
             if len(results) >= limit:
                 break
             try:
                 with fpath.open("r", encoding="utf-8") as fh:
                     data = json.load(fh)
                 if not isinstance(data, dict) or "records" not in data:
+                    continue
+                if run_id is not None and (
+                    data.get("run_id") != run_id or data.get("curriculum_stage") != stage
+                ):
                     continue
                 eval_id = data.get("evaluation_id") or fpath.stem
                 if eval_id in seen_eval_ids:
@@ -3256,6 +3508,7 @@ class TrainingManager:
                     if eval_stage is not None and int(eval_stage) != stage:
                         continue
                 seen_eval_ids.add(eval_id)
+                _slim_recent_evaluation(data)
                 data["pinned"] = (eval_id in pinned_ids) or bool(data.get("pinned", False))
                 e_idx = data.get("evaluation_index")
                 data["is_milestone"] = (e_idx is not None and int(e_idx) > 0 and int(e_idx) % 25 == 0)
@@ -3266,6 +3519,142 @@ class TrainingManager:
                 continue
 
         return results
+
+    def get_stage_report(
+        self, stage: int, run_id: str | None = None, *, journey: str | None = None
+    ) -> dict[str, Any]:
+        """Summarize recent observed seeds without pooling distinct evaluation suites."""
+        from sheepdog.checkpoints.store import compute_seed_set_id
+        from sheepdog.training.episode_store import EpisodeStore
+
+        config = LabConfig()
+        output_root = Path(config.training.output_dir)
+        if journey and journey != "current":
+            if re.fullmatch(r"[0-9]{8}-[0-9]{6}", journey) is None:
+                raise ValueError("Invalid archived journey identifier")
+            archive_root = (output_root / "archive").resolve()
+            output_root = (archive_root / f"journey-{journey}").resolve()
+            if output_root.parent != archive_root or not output_root.is_dir():
+                raise FileNotFoundError("Archived journey not found")
+            ledger = self._load_cached_json_dict(output_root / "training-runtime.json") or {}
+            stage_totals = TrainingRuntimeTracker.summarize_stages(ledger.get("sessions", []))
+            active_run_id = None
+        else:
+            runtime = self.runtime_tracker.snapshot()
+            stage_totals = runtime["stage_totals"]
+            active_run_id = runtime["run_id"]
+        if run_id is None:
+            train_state = self._load_cached_json_dict(output_root / Trainer.STATE_FILENAME) or {}
+            run_state = self._load_cached_json_dict(output_root / "run-state.json") or {}
+            run_id = active_run_id or train_state.get("run_id") or run_state.get("run_id")
+        timing = next(
+            (
+                total for total in stage_totals
+                if total["run_id"] == run_id and total["curriculum_stage"] == stage
+            ),
+            None,
+        )
+        sample_limit = 500
+        evaluation_limit = 8
+        training_seeds: dict[int, dict[str, Any]] = {}
+        training_rows: list[dict[str, Any]] = []
+        evaluations: list[dict[str, Any]] = []
+        if run_id:
+            store = EpisodeStore(output_root / "training-telemetry.sqlite", read_only=True)
+            try:
+                training_rows = store.get_stage_seed_sample(run_id, stage, sample_limit)
+            except (OSError, sqlite3.Error) as exc:
+                logger.warning("Training seed data unavailable for %s stage %s: %s", run_id, stage, exc)
+            try:
+                evaluations = store.get_stage_registry_evaluations(run_id, stage, evaluation_limit)
+            except (OSError, sqlite3.Error) as exc:
+                logger.debug("Evaluation registry unavailable for %s stage %s: %s", run_id, stage, exc)
+            if not evaluations:
+                evaluations = self.get_recent_evaluations(
+                    limit=evaluation_limit, stage=stage, run_id=run_id, candidate_limit=24,
+                    artifact_root=output_root,
+                )
+
+        for row in training_rows:
+            seed = row["seed"]
+            counts = training_seeds.setdefault(
+                seed,
+                {
+                    "seed": seed,
+                    "attempts": 0,
+                    "failures": 0,
+                    "latest": {
+                        "termination_reason": row["result"],
+                        "sheep_penned": row["sheep_penned"],
+                        "total_sheep": row["total_sheep"],
+                        "checkpoint_id": row["checkpoint_id"],
+                        "replay_id": row["replay_id"],
+                    },
+                },
+            )
+            counts["attempts"] += 1
+            counts["failures"] += int(not row["success"])
+
+        standard_seed_set_ids = {
+            compute_seed_set_id(config.training.evaluation_seeds),
+            compute_seed_set_id(config.training.candidate_evaluation_seeds),
+        }
+        suites = []
+        for evaluation in evaluations:
+            records = evaluation.get("records")
+            if records is None:
+                try:
+                    records = json.loads(evaluation.get("per_seed_results") or "[]")
+                except ValueError:
+                    continue
+            if not isinstance(records, list):
+                continue
+            seed_set_id = evaluation.get("evaluation_seed_set_id") or evaluation.get("seed_set_id")
+            role = evaluation.get("seed_set_role")
+            if role not in {"development", "held_out"}:
+                role = "development" if seed_set_id in standard_seed_set_ids else "unknown"
+            seeds = []
+            for record in records:
+                if not isinstance(record, dict) or record.get("seed") is None:
+                    continue
+                replay_path = record.get("replay_path")
+                seeds.append({
+                    "seed": record["seed"],
+                    "success": bool(record.get("success")),
+                    "termination_reason": record.get("stop_reason") or record.get("termination_reason"),
+                    "sheep_penned": record.get("sheep_penned"),
+                    "total_sheep": record.get("total_sheep"),
+                    "replay_id": record.get("replay_id"),
+                    "replay_path": replay_path,
+                })
+            suites.append({
+                **{
+                    name: evaluation.get(name) for name in (
+                        "checkpoint_id", "checkpoint_episode", "evaluation_id", "evaluation_mode",
+                        "evaluation_timestamp", "environment_config_hash", "observation_schema_hash",
+                        "action_space_hash", "assistance_mode", "policy_version", "experiment_id",
+                        "activation_id", "change_id", "verified_source_revision", "model_sha256",
+                    )
+                },
+                "seed_set_id": seed_set_id,
+                "seed_set_role": role,
+                "seeds": seeds,
+            })
+        return {
+            "run_id": run_id,
+            "journey": journey or "current",
+            "curriculum_stage": stage,
+            "timing": timing,
+            "training": {
+                "sample_limit": sample_limit,
+                "sampled_episodes": len(training_rows),
+                "seeds": sorted(
+                    training_seeds.values(), key=lambda rec: (-rec["failures"], rec["seed"])
+                ),
+            },
+            "evaluation_limit": evaluation_limit,
+            "evaluations": suites,
+        }
 
     def _clear_training_session(self) -> None:
         """Clear any persisted pause/stop marker."""
@@ -3282,8 +3671,16 @@ class TrainingManager:
             logger.warning("Failed to flush episode store on control request: %s", exc)
 
         with self._lock:
-            self._control_request = state
             is_running = self._thread is not None and self._thread.is_alive()
+            request = self._active_start_request
+            if not is_running and self._status.get("continuous"):
+                # Shutdown may follow an already-completed pause. Preserve its
+                # resumable request even though there is no longer a live worker.
+                request = self._status.get("resume_request")
+                if not isinstance(request, dict):
+                    return dict(self._status)
+                message = f"Training {state}; resume available"
+            self._control_request = state
             status = dict(self._status)
             status["running"] = is_running
             status["phase"] = state
@@ -3294,6 +3691,7 @@ class TrainingManager:
                     "phase": state,
                     "message": message,
                     "resume_available": True,
+                    "resume_request": request,
                     "resume_remaining_episodes": max(
                         0,
                         int(status.get("requested_episodes", 0))
@@ -3301,10 +3699,7 @@ class TrainingManager:
                     ),
                 }
             )
-            request = self._active_start_request
-
-        self._persist_training_session(state=state, status=status, request=request)
-        with self._lock:
+            self._persist_training_session(state=state, status=status, request=request)
             return dict(self._status)
 
     @staticmethod
@@ -3344,12 +3739,91 @@ class TrainingManager:
         promote_from_checkpoint_episode: int | None = None,
         evaluation_mode: str = "quick",
         resume: bool = False,
+        continuous: bool = False,
+        stage_queue: list[int] | None = None,
+        stage_queue_index: int = 0,
+        stage_spec: str | None = None,
+        pass_label: str | None = None,
+        pass_id: str | None = None,
+        active_stage_run_id: str | None = None,
+        starting_model_source: str = "latest",
     ) -> dict[str, Any]:
         """Start a background training job and return the initial status."""
-        if total_timesteps is not None and total_timesteps <= 0:
-            raise ValueError("total_timesteps must be positive")
-        requested_episodes = max(1, int(requested_episodes or 1))
         with self._start_lock:
+            if starting_model_source not in {"latest", "fresh"}:
+                raise ValueError(
+                    f"Invalid starting_model_source {starting_model_source!r}: expected 'latest' or 'fresh'"
+                )
+            with self._lock:
+                if self._maintenance_busy:
+                    raise ValueError(
+                        "Cannot start training while a maintenance or restore operation is in progress"
+                    )
+                if self._thread is not None and self._thread.is_alive():
+                    return dict(self._status)
+                if resume:
+                    session = _read_training_session_state(Path(LabConfig().training.output_dir))
+                    saved = session.get("training_request") if isinstance(session, dict) else None
+                    has_saved_queue = isinstance(saved, dict) and bool(saved.get("stage_queue"))
+                    if continuous or has_saved_queue:
+                        if not isinstance(saved, dict) or not (
+                            saved.get("continuous") or saved.get("stage_queue")
+                        ):
+                            raise ValueError("No resumable continuous training session is available")
+                        requested_episodes = saved.get("episodes")
+                        total_timesteps = saved.get("total_timesteps")
+                        fast_mode = bool(saved.get("fast_mode", True))
+                        curriculum_stage = saved.get("curriculum_stage")
+                        enable_instinct_rewards = saved.get("enable_instinct_rewards")
+                        debug_reward_breakdown = saved.get("debug_reward_breakdown")
+                        evaluation_mode = saved.get("evaluation_mode", "quick")
+                        promote_from_checkpoint_episode = saved.get("promote_from_checkpoint_episode")
+                        continuous = bool(saved.get("continuous", continuous))
+                        if saved.get("stage_queue") is not None:
+                            stage_queue = [int(s) for s in saved["stage_queue"]]
+                            stage_queue_index = int(saved.get("stage_queue_index") or 0)
+                            stage_spec = saved.get("stage_spec")
+                            pass_label = saved.get("pass_label")
+                            pass_id = saved.get("pass_id")
+                            active_stage_run_id = saved.get("active_stage_run_id")
+                            starting_model_source = str(
+                                saved.get("starting_model_source") or starting_model_source or "latest"
+                            )
+                if total_timesteps is not None and total_timesteps <= 0:
+                    raise ValueError("total_timesteps must be positive")
+                requested_episodes = max(1, int(requested_episodes or 1))
+                if stage_queue is not None:
+                    _, max_stage = _curriculum_stage_metadata()
+                    stage_queue = parse_stage_spec(
+                        stage_queue,
+                        min_stage=1,
+                        max_stage=max(1, max_stage),
+                    )
+                    stage_queue_index = int(stage_queue_index)
+                    if not (0 <= stage_queue_index < len(stage_queue)):
+                        raise ValueError(
+                            f"stage_queue_index {stage_queue_index} is out of range for queue length {len(stage_queue)}"
+                        )
+                    curriculum_stage = stage_queue[stage_queue_index]
+                    continuous = True
+                    auto_promote = True
+                    if stage_spec is None:
+                        stage_spec = format_stage_spec(stage_queue)
+                if continuous:
+                    auto_promote = True
+
+                pre_phase = self._status.get("phase")
+                pre_recovery = self._status.get("recovery_status")
+
+            should_archive_fresh = (
+                starting_model_source == "fresh"
+                and not resume
+                and pre_phase not in ("restoring", "restore_failed")
+                and pre_recovery != "failed"
+            )
+            if should_archive_fresh:
+                self._archive_training_outputs(LabConfig())
+
             with self._lock:
                 if self._maintenance_busy:
                     raise ValueError(
@@ -3358,18 +3832,19 @@ class TrainingManager:
                 if self._thread is not None and self._thread.is_alive():
                     return dict(self._status)
 
-                # Preserve identity keys from current status
+                # Preserve identity keys from current status (unless starting fresh)
                 preserved = {}
-                for k in [
-                    "run_id", "session_id", "curriculum_stage", "trainer_type", "policy_type", "policy_mode",
-                    "active_model_path", "active_model_source", "active_checkpoint_id",
-                    "checkpoint_episode", "policy_version", "ppo_update_count",
-                    "last_policy_update_time", "last_evaluation_time",
-                    "recovery_status", "recovery_warnings", "phase",
-                    "target_environment_stage", "source_stage"
-                ]:
-                    if k in self._status:
-                        preserved[k] = self._status[k]
+                if not should_archive_fresh:
+                    for k in [
+                        "run_id", "session_id", "curriculum_stage", "trainer_type", "policy_type", "policy_mode",
+                        "active_model_path", "active_model_source", "active_checkpoint_id",
+                        "checkpoint_episode", "policy_version", "ppo_update_count",
+                        "last_policy_update_time", "last_evaluation_time",
+                        "recovery_status", "recovery_warnings", "phase",
+                        "target_environment_stage", "source_stage"
+                    ]:
+                        if k in self._status:
+                            preserved[k] = self._status[k]
 
                 self._control_request = None
                 candidate_status = self._initial_status()
@@ -3413,8 +3888,10 @@ class TrainingManager:
                     if float(episodes) > 0
                 ]
                 highest_recorded_stage = max(recorded_stages, default=0)
+                is_stage_queue_pass = stage_queue is not None
                 is_cross_stage = bool(
-                    candidate_status.get("target_environment_stage")
+                    is_stage_queue_pass
+                    or candidate_status.get("target_environment_stage")
                     or "from_stage" in str(candidate_status.get("run_id") or "")
                     or (active_stage is not None and requested_stage == active_stage)
                     or candidate_status.get("active_model_source") in {"forked", "original_stage8_baseline", "latest_stage9_checkpoint"}
@@ -3562,6 +4039,14 @@ class TrainingManager:
                                         candidate_status["active_model_path"] = model_path_str
                                         break
 
+                if not model_path_str and is_stage_queue_pass and active_stage is not None:
+                    fallback_active_zip = _resolve_stage_active_model_path(
+                        output_root, int(active_stage)
+                    )
+                    if fallback_active_zip is not None and _candidate_matches_arch(fallback_active_zip):
+                        model_path_str = str(fallback_active_zip)
+                        candidate_status["active_model_path"] = model_path_str
+
                 if not model_path_str:
                     validation_errors.append("No active model loaded")
                 else:
@@ -3625,10 +4110,16 @@ class TrainingManager:
                     return dict(self._status)
                 if validation_errors:
                     raise ValueError("; ".join(validation_errors))
+                try:
+                    ensure_free_disk_space(output_dir_path, context="starting training")
+                except DiskSpaceError as exc:
+                    raise ValueError(str(exc)) from exc
 
                 self._status = candidate_status
                 self._eval_success_history = eval_history
                 old_stage = self._status.get("curriculum_stage")
+                if continuous and curriculum_stage is None:
+                    curriculum_stage = int(old_stage or 1)
                 if curriculum_stage is not None and int(curriculum_stage) != old_stage:
                     import uuid
                     output_root_promo = Path(cfg_now.training.output_dir)
@@ -3654,10 +4145,28 @@ class TrainingManager:
                     auto_promote=auto_promote,
                     promote_from_checkpoint_episode=promote_from_checkpoint_episode,
                     evaluation_mode=evaluation_mode,
+                    continuous=continuous,
+                    stage_queue=stage_queue,
+                    stage_queue_index=stage_queue_index if stage_queue is not None else None,
+                    stage_spec=stage_spec,
+                    pass_label=pass_label,
+                    pass_id=pass_id,
+                    active_stage_run_id=active_stage_run_id,
+                    starting_model_source=(
+                        starting_model_source
+                        if (stage_queue is not None or starting_model_source != "latest")
+                        else None
+                    ),
                 )
                 self._status.update(
                     {
                         "running": True,
+                        "continuous": continuous,
+                        "stage_queue": list(stage_queue) if stage_queue is not None else None,
+                        "stage_queue_index": int(stage_queue_index) if stage_queue is not None else None,
+                        "stage_spec": stage_spec,
+                        "pass_label": pass_label,
+                        "active_pass_id": pass_id,
                         "fast_mode": fast_mode,
                         "requested_timesteps": total_timesteps,
                         "batch_total_timesteps": total_timesteps,
@@ -3729,6 +4238,14 @@ class TrainingManager:
                         "promote_from_checkpoint_episode": promote_from_checkpoint_episode,
                         "evaluation_mode": evaluation_mode,
                         "resume": resume,
+                        "continuous": continuous,
+                        "stage_queue": stage_queue,
+                        "stage_queue_index": stage_queue_index,
+                        "stage_spec": stage_spec,
+                        "pass_label": pass_label,
+                        "pass_id": pass_id,
+                        "active_stage_run_id": active_stage_run_id,
+                        "starting_model_source": starting_model_source,
                     },
                     daemon=True,
                 )
@@ -4155,6 +4672,7 @@ class TrainingManager:
             return exported_record
 
         exported_checkpoints: list[dict[str, Any]] = []
+        latest_full_payload: dict[str, Any] | None = None
         for checkpoint in checkpoints:
             exported_checkpoint = dict(checkpoint)
             exported_checkpoint.pop("policy_weights", None)
@@ -4165,21 +4683,23 @@ class TrainingManager:
                 for record in records
                 if isinstance(record, dict)
             ]
-            exported_checkpoints.append(exported_checkpoint)
+            latest_full_payload = exported_checkpoint
+            exported_checkpoints.append(slim_web_checkpoint_entry(exported_checkpoint))
 
-        latest_payload = exported_checkpoints[-1] if exported_checkpoints else None
+        latest_slim_payload = exported_checkpoints[-1] if exported_checkpoints else None
         atomic_write_json(
             web_dir / "checkpoint-index.json",
-            {"checkpoints": exported_checkpoints, "latest": latest_payload},
+            {"checkpoints": exported_checkpoints, "latest": latest_slim_payload},
+            indent=None,
         )
 
-        if latest_payload is not None:
+        if latest_full_payload is not None:
             atomic_write_json(
                 web_dir / "latest-checkpoint.json",
-                {"checkpoint": latest_payload.get("checkpoint")},
+                {"checkpoint": latest_full_payload.get("checkpoint")},
             )
-            atomic_write_json(web_dir / "latest-evaluation.json", latest_payload)
-            latest_records = latest_payload.get("records") or []
+            atomic_write_json(web_dir / "latest-evaluation.json", latest_full_payload)
+            latest_records = latest_full_payload.get("records") or []
             if latest_records:
                 replay_rel = latest_records[0].get("replay_path", "")
                 replay_src = web_dir / str(replay_rel).removeprefix("/generated/")
@@ -5307,6 +5827,9 @@ class TrainingManager:
 
     def _clear_training_outputs(self, config: LabConfig) -> None:
         output_root = Path(config.training.output_dir)
+        owns_runtime_tracker = self.runtime_tracker.path == output_root / "training-runtime.json"
+        if owns_runtime_tracker:
+            self.runtime_tracker.end_session("cleared")
         generated_root = Path(config.training.web_export_dir)
         try:
             _close_active_episode_store(
@@ -5358,6 +5881,8 @@ class TrainingManager:
         ]
         for f in files_to_remove:
             self._remove_path(f)
+        if owns_runtime_tracker:
+            self.runtime_tracker.reload_after_archive()
 
         # Glob patterns for temporary and evaluation files
         for p in output_root.glob("evaluation-checkpoint-*"):
@@ -5373,6 +5898,9 @@ class TrainingManager:
 
     def _archive_training_outputs(self, config: LabConfig) -> str | None:
         output_root = Path(config.training.output_dir)
+        owns_runtime_tracker = self.runtime_tracker.path == output_root / "training-runtime.json"
+        if owns_runtime_tracker:
+            self.runtime_tracker.end_session("archived")
         generated_root = Path(config.training.web_export_dir)
         timestamp = datetime.datetime.now(datetime.UTC).strftime("%Y%m%d-%H%M%S")
         archive_root = output_root / "archive" / f"journey-{timestamp}"
@@ -5384,6 +5912,7 @@ class TrainingManager:
             (output_root / Trainer.STATE_FILENAME, archive_root / Trainer.STATE_FILENAME),
             (output_root / "training-summary.json", archive_root / "training-summary.json"),
             (output_root / STAGE_HISTORY_FILENAME, archive_root / STAGE_HISTORY_FILENAME),
+            (output_root / "training-runtime.json", archive_root / "training-runtime.json"),
             (output_root / PROMOTION_HISTORY_FILENAME, archive_root / PROMOTION_HISTORY_FILENAME),
             (output_root / TRAINING_SETTINGS_FILENAME, archive_root / TRAINING_SETTINGS_FILENAME),
             (
@@ -5423,6 +5952,8 @@ class TrainingManager:
                         src,
                         dst,
                     )
+        if owns_runtime_tracker:
+            self.runtime_tracker.reload_after_archive()
         return str(archive_root) if moved_any else None
 
     def _export_untrained_baseline(self, config: LabConfig) -> None:
@@ -5792,7 +6323,25 @@ class TrainingManager:
         promote_from_checkpoint_episode: int | None = None,
         evaluation_mode: str = "quick",
         resume: bool = False,
+        continuous: bool = False,
+        stage_queue: list[int] | None = None,
+        stage_queue_index: int = 0,
+        stage_spec: str | None = None,
+        pass_label: str | None = None,
+        pass_id: str | None = None,
+        active_stage_run_id: str | None = None,
+        starting_model_source: str = "latest",
     ) -> None:
+        history_store: ModelHistoryStore | None = None
+        pass_initialized = False
+        stage_last_ckpt_id: str | None = None
+        stage_last_ckpt_path: Path | None = None
+        stage_last_global_ts: int | None = None
+        pass_result_ckpt_id: str | None = None
+        pass_result_ckpt_path: Path | None = None
+        pass_result_ckpt_sha: str | None = None
+        runtime_run_id: str | None = None
+        current_stage = 1
         try:
             is_first_resume_iteration = resume
             total_episodes = max(1, requested_episodes if requested_episodes is not None else 1)
@@ -5806,13 +6355,55 @@ class TrainingManager:
                     batch_episodes = orig_total
             available_stage_numbers, max_stage = _curriculum_stage_metadata()
             auto_promote_enabled = True if auto_promote is None else bool(auto_promote)
-            current_stage = max(1, int(curriculum_stage) if curriculum_stage is not None else 1)
-            if available_stage_numbers and current_stage not in available_stage_numbers:
-                current_stage = max(1, min(current_stage, max_stage))
+            is_queued_mode = bool(stage_queue)
+            if is_queued_mode:
+                stage_queue = [int(s) for s in stage_queue]
+                stage_queue_index = max(0, min(int(stage_queue_index), len(stage_queue) - 1))
+                current_stage = stage_queue[stage_queue_index]
+                continuous = True
+                auto_promote_enabled = True
+                if stage_spec is None:
+                    stage_spec = format_stage_spec(stage_queue)
+            else:
+                current_stage = max(1, int(curriculum_stage) if curriculum_stage is not None else 1)
+                if available_stage_numbers and current_stage not in available_stage_numbers:
+                    current_stage = max(1, min(current_stage, max_stage))
             resume_checkpoint_episode = promote_from_checkpoint_episode
             promoted_stages = 0
             last_healthy_checkpoint_episode: int | None = None
             output_root = Path(LabConfig().training.output_dir)
+
+            try:
+                history_store = ModelHistoryStore(output_root / MODEL_HISTORY_DB_FILENAME)
+            except Exception as exc:
+                logger.warning("Failed to initialize ModelHistoryStore: %s", exc)
+                history_store = None
+
+            parent_checkpoint_path: str | None = None
+            parent_checkpoint_sha256: str | None = None
+            parent_checkpoint_id: str | None = None
+            if starting_model_source != "fresh":
+                pre_train_state = _load_json(output_root / Trainer.STATE_FILENAME)
+                pre_run_state = _load_json(output_root / "run-state.json")
+                raw_parent_path = None
+                if isinstance(pre_train_state, dict):
+                    raw_parent_path = pre_train_state.get(
+                        "policy_state_path"
+                    ) or pre_train_state.get("best_model_path")
+                if not raw_parent_path and isinstance(pre_run_state, dict):
+                    raw_parent_path = pre_run_state.get("active_model_path")
+                resolved_parent_file = _resolve_existing_model_file(
+                    output_root, raw_parent_path
+                )
+                if resolved_parent_file is not None:
+                    parent_checkpoint_path = str(resolved_parent_file)
+                    parent_checkpoint_sha256 = compute_file_sha256(resolved_parent_file)
+                elif isinstance(raw_parent_path, str) and raw_parent_path:
+                    parent_checkpoint_path = raw_parent_path
+                if isinstance(pre_run_state, dict):
+                    parent_checkpoint_id = pre_run_state.get("active_checkpoint_id")
+                if parent_checkpoint_id is None and isinstance(pre_train_state, dict):
+                    parent_checkpoint_id = pre_train_state.get("active_checkpoint_id")
 
             stage_best_checkpoint_episode: int | None = None
             stage_best_rank = (-1.0, float("-inf"), float("-inf"), float("-inf"))
@@ -5824,8 +6415,109 @@ class TrainingManager:
             stage_checkpoints_seen = 0
             stage_no_improvement_streak = 0
             stage_batch_completed_episodes = 0
+            last_continuous_config = None
+
+            def _resolve_stage_end_checkpoint(
+                stage_num: int,
+                *,
+                ckpt_id_hint: str | None = None,
+                cp_details: dict[str, Any] | None = None,
+            ) -> tuple[str | None, Path | None, str | None]:
+                end_path = stage_last_ckpt_path or _resolve_stage_active_model_path(
+                    output_root, stage_num, cp_details
+                )
+                if end_path is None:
+                    ts_data = _load_json(output_root / Trainer.STATE_FILENAME)
+                    if isinstance(ts_data, dict):
+                        end_path = _resolve_existing_model_file(
+                            output_root,
+                            ts_data.get("policy_state_path") or ts_data.get("best_model_path"),
+                        )
+                end_sha = compute_file_sha256(end_path)
+                with self._lock:
+                    status_ckpt_id = self._status.get("active_checkpoint_id")
+                end_id = ckpt_id_hint or stage_last_ckpt_id or status_ckpt_id
+                return end_id, end_path, end_sha
+
+            def _read_current_policy_timesteps() -> int | None:
+                if stage_last_global_ts is not None:
+                    return int(stage_last_global_ts)
+                ts_data = _load_json(output_root / Trainer.STATE_FILENAME)
+                if isinstance(ts_data, dict) and ts_data.get("total_timesteps") is not None:
+                    return int(ts_data["total_timesteps"])
+                return None
+
+            def _finalize_stage_run(
+                stage_num: int,
+                *,
+                sr_status: str,
+                episodes_count: int | None = None,
+                promotion_event_id: str | None = None,
+                ckpt_id_hint: str | None = None,
+                cp_details: dict[str, Any] | None = None,
+            ) -> None:
+                nonlocal active_stage_run_id
+                nonlocal pass_result_ckpt_id, pass_result_ckpt_path, pass_result_ckpt_sha
+                end_id, end_path, end_sha = _resolve_stage_end_checkpoint(
+                    stage_num, ckpt_id_hint=ckpt_id_hint, cp_details=cp_details
+                )
+                if end_id is not None:
+                    pass_result_ckpt_id = end_id
+                if end_path is not None:
+                    pass_result_ckpt_path = end_path
+                if end_sha is not None:
+                    pass_result_ckpt_sha = end_sha
+                if history_store is None or active_stage_run_id is None:
+                    active_stage_run_id = None
+                    return
+                try:
+                    rt_totals = self.runtime_tracker.get_stage_phase_totals(
+                        runtime_run_id, stage_num
+                    )
+                    history_store.finish_stage_run(
+                        active_stage_run_id,
+                        status=sr_status,
+                        runtime_totals=rt_totals,
+                        current_policy_timesteps=_read_current_policy_timesteps(),
+                        episodes=episodes_count,
+                        end_checkpoint_id=end_id,
+                        end_checkpoint_path=str(end_path) if end_path is not None else None,
+                        end_checkpoint_sha256=end_sha,
+                        promotion_event_id=promotion_event_id,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to finish ModelHistoryStore stage run: %s", exc)
+                finally:
+                    active_stage_run_id = None
+
+            def _finalize_pass(pass_status: str, *, notes: str | None = None) -> None:
+                if history_store is None or pass_id is None:
+                    return
+                try:
+                    history_store.finish_pass(
+                        pass_id,
+                        status=pass_status,
+                        resulting_checkpoint_id=pass_result_ckpt_id,
+                        resulting_checkpoint_path=(
+                            str(pass_result_ckpt_path)
+                            if pass_result_ckpt_path is not None
+                            else None
+                        ),
+                        resulting_checkpoint_sha256=pass_result_ckpt_sha,
+                        notes=notes,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to finish ModelHistoryStore pass: %s", exc)
 
             while True:
+                has_next_queued_stage = is_queued_mode and (
+                    stage_queue_index + 1
+                ) < len(stage_queue or [])
+                next_queued_stage = (
+                    stage_queue[stage_queue_index + 1]
+                    if (stage_queue is not None and has_next_queued_stage)
+                    else None
+                )
                 self._active_start_request = self._training_request_payload(
                     batch_episodes,
                     fast_mode,
@@ -5836,6 +6528,18 @@ class TrainingManager:
                     auto_promote=auto_promote_enabled,
                     promote_from_checkpoint_episode=resume_checkpoint_episode,
                     evaluation_mode=evaluation_mode,
+                    continuous=continuous,
+                    stage_queue=stage_queue,
+                    stage_queue_index=stage_queue_index if is_queued_mode else None,
+                    stage_spec=stage_spec,
+                    pass_label=pass_label,
+                    pass_id=pass_id,
+                    active_stage_run_id=active_stage_run_id,
+                    starting_model_source=(
+                        starting_model_source
+                        if (is_queued_mode or starting_model_source != "latest")
+                        else None
+                    ),
                 )
                 job_config = _build_training_job_config(
                     batch_episodes,
@@ -5924,10 +6628,22 @@ class TrainingManager:
                                 inc = training_state["incomplete_batch"]
                                 if isinstance(inc, dict):
                                     initial_completed = int(inc.get("batch_completed_segments", 0))
+                                    if continuous and initial_completed >= int(inc.get("batch_total_segments", 0)):
+                                        initial_completed = 0
                         except Exception:
                             pass
 
+                if continuous and hasattr(trainer, "prefer_latest_checkpoint"):
+                    trainer.prefer_latest_checkpoint = True
+
                 loaded_state = getattr(trainer, "_loaded_state", None)
+                starting_environment_episodes = (
+                    int(loaded_state.get("total_environment_episodes") or 0)
+                    if isinstance(loaded_state, dict)
+                    else 0
+                )
+                durable_environment_episodes = starting_environment_episodes
+                durable_checkpoint_observed = False
                 if isinstance(loaded_state, dict) and not loaded_state.get("run_id"):
                     import uuid
                     now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -5943,12 +6659,130 @@ class TrainingManager:
                 runtime_run_id = loaded_state.get("run_id") if isinstance(loaded_state, dict) else None
                 with self._lock:
                     active_sess_id = self._status.get("session_id")
-                sess_id = self.runtime_tracker.start_session(runtime_run_id, session_id=active_sess_id)
+                sess_id = self.runtime_tracker.start_session(
+                    runtime_run_id, session_id=active_sess_id, stage=current_stage
+                )
                 with self._lock:
                     if not self._status.get("session_id"):
                         self._status["session_id"] = sess_id or f"session_{uuid.uuid4().hex[:6]}"
                 self.runtime_tracker.transition("training")
                 last_learning_log_time = 0.0
+
+                if not pass_initialized:
+                    pass_initialized = True
+                    if history_store is not None:
+                        reused_pass = False
+                        if resume and pass_id:
+                            try:
+                                existing_pass = history_store.get_pass(pass_id)
+                                if existing_pass is not None:
+                                    _set_model_history_pass_status(history_store, pass_id, "running")
+                                    reused_pass = True
+                                    if active_stage_run_id:
+                                        existing_sr = history_store.get_stage_run(active_stage_run_id)
+                                        if (
+                                            existing_sr is None
+                                            or int(existing_sr.get("stage", -1)) != int(current_stage)
+                                            or existing_sr.get("ended_at") is not None
+                                            or existing_sr.get("status")
+                                            in {"promoted", "mastered", "completed", "stopped", "failed"}
+                                        ):
+                                            active_stage_run_id = None
+                                        else:
+                                            history_store.update_stage_run(
+                                                active_stage_run_id, status="running"
+                                            )
+                            except Exception as exc:
+                                logger.warning(
+                                    "Failed to resume ModelHistoryStore pass %s: %s",
+                                    pass_id,
+                                    exc,
+                                )
+                                pass_id = None
+                                active_stage_run_id = None
+
+                        if not reused_pass:
+                            active_stage_run_id = None
+                            try:
+                                planned_stages = (
+                                    list(stage_queue) if is_queued_mode and stage_queue else [int(current_stage)]
+                                )
+                                resolved_spec = stage_spec or format_stage_spec(planned_stages)
+                                obs_mode = getattr(job_config.training, "observation_mode", None)
+                                assistance_mode = classify_assistance_mode(obs_mode)
+                                pass_id = history_store.start_pass(
+                                    label=pass_label,
+                                    run_id=runtime_run_id,
+                                    parent_checkpoint_id=parent_checkpoint_id,
+                                    parent_checkpoint_path=parent_checkpoint_path,
+                                    parent_checkpoint_sha256=parent_checkpoint_sha256,
+                                    planned_stages=planned_stages,
+                                    stage_spec=resolved_spec,
+                                    assistance_mode=assistance_mode,
+                                    observation_mode=obs_mode,
+                                    env_config_version=ENV_CONFIG_VERSION,
+                                )
+                            except Exception as exc:
+                                logger.warning("Failed to start ModelHistoryStore pass: %s", exc)
+                                pass_id = None
+                    if pass_id is not None:
+                        with self._lock:
+                            self._status["active_pass_id"] = pass_id
+                            if isinstance(self._active_start_request, dict):
+                                self._active_start_request = {
+                                    **self._active_start_request,
+                                    "pass_id": pass_id,
+                                }
+
+                if history_store is not None and pass_id is not None and active_stage_run_id is None:
+                    stage_last_ckpt_id = None
+                    stage_last_ckpt_path = None
+                    stage_last_global_ts = None
+                    try:
+                        baseline_runtime = self.runtime_tracker.get_stage_phase_totals(
+                            runtime_run_id, current_stage
+                        )
+                        if starting_model_source == "fresh" and promoted_stages == 0 and not resume:
+                            start_policy_timesteps = 0
+                            start_ckpt_sha = None
+                            start_ckpt_id = None
+                        else:
+                            start_policy_timesteps = (
+                                int(loaded_state.get("total_timesteps") or 0)
+                                if isinstance(loaded_state, dict)
+                                else 0
+                            )
+                            pre_stage_model = _resolve_stage_active_model_path(
+                                output_root, current_stage
+                            )
+                            if pre_stage_model is None and isinstance(loaded_state, dict):
+                                raw_p = loaded_state.get("policy_state_path") or loaded_state.get(
+                                    "best_model_path"
+                                )
+                                pre_stage_model = _resolve_existing_model_file(output_root, raw_p)
+                            start_ckpt_sha = compute_file_sha256(pre_stage_model)
+                            with self._lock:
+                                start_ckpt_id = self._status.get("active_checkpoint_id")
+                        seq_order = stage_queue_index if is_queued_mode else promoted_stages
+                        active_stage_run_id = history_store.start_stage_run(
+                            pass_id,
+                            run_id=runtime_run_id,
+                            stage=current_stage,
+                            sequence_order=seq_order,
+                            start_checkpoint_id=start_ckpt_id,
+                            start_checkpoint_sha256=start_ckpt_sha,
+                            start_policy_timesteps=start_policy_timesteps,
+                            baseline_runtime=baseline_runtime,
+                        )
+                        with self._lock:
+                            if isinstance(self._active_start_request, dict):
+                                self._active_start_request = {
+                                    **self._active_start_request,
+                                    "active_stage_run_id": active_stage_run_id,
+                                }
+                    except Exception as exc:
+                        logger.warning("Failed to start ModelHistoryStore stage run: %s", exc)
+                        active_stage_run_id = None
 
                 if resume_checkpoint_episode is not None:
                     try:
@@ -5973,6 +6807,10 @@ class TrainingManager:
                     nonlocal last_persisted_completed_episodes
                     nonlocal last_healthy_checkpoint_episode
                     nonlocal last_learning_log_time
+                    nonlocal durable_environment_episodes
+                    nonlocal durable_checkpoint_observed
+                    nonlocal resume_checkpoint_episode
+                    nonlocal stage_last_ckpt_id, stage_last_ckpt_path, stage_last_global_ts
 
                     with self._lock:
                         status_snap = dict(self._status)
@@ -6501,6 +7339,7 @@ class TrainingManager:
                     if phase == "starting" and total_trained is not None:
                         update["starting_episode"] = total_trained
                     early_promotion_signal: _EarlyPromotionSignal | None = None
+                    early_max_stage_signal: _EarlyMaxStageStopSignal | None = None
                     if isinstance(summary, dict) and phase == "checkpoint":
                         # Auto-Demotion Gate (Rollback):
                         # check if the success rate plummets below 35% after a promotion
@@ -6573,20 +7412,59 @@ class TrainingManager:
                         )
                         should_auto_promote_now = (
                             auto_promote_enabled
-                            and stage < max_stage
                             and promotion_checkpoint_episode is not None
-                            and gate_snap.get("decision") == "promote_ready"
+                            and (
+                                (
+                                    is_queued_mode
+                                    and has_next_queued_stage
+                                    and stage < max_stage
+                                    and gate_snap.get("decision") == "promote_ready"
+                                )
+                                or (
+                                    not is_queued_mode
+                                    and stage < max_stage
+                                    and gate_snap.get("decision") == "promote_ready"
+                                )
+                            )
+                        )
+                        target_next_stage = (
+                            next_queued_stage
+                            if (is_queued_mode and next_queued_stage is not None)
+                            else (stage + 1)
                         )
                         update["auto_promote_gate_ready"] = bool(should_auto_promote_now)
                         update["auto_promote_gate"] = gate_snap
-                        if should_auto_promote_now and promotion_checkpoint_episode is not None:
+                        if (
+                            is_queued_mode
+                            and not has_next_queued_stage
+                            and stage < max_stage
+                            and auto_promote_enabled
+                            and promotion_checkpoint_episode is not None
+                            and gate_snap.get("decision") == "promote_ready"
+                        ):
+                            queue_len = len(stage_queue or [])
+                            gate_done = dict(gate_snap)
+                            gate_done["decision"] = "hold"
+                            gate_done["reason"] = "Stage queue complete"
+                            update["auto_promote_gate"] = gate_done
+                            update["auto_promote_gate_ready"] = False
+                            update["message"] = (
+                                f"Stage queue complete ({queue_len}/{queue_len}): "
+                                f"Stage {stage} criteria met."
+                            )
+                            early_max_stage_signal = _EarlyMaxStageStopSignal(
+                                checkpoint_episode=int(promotion_checkpoint_episode),
+                                reason="Stage queue complete",
+                                message=update["message"],
+                            )
+                        elif should_auto_promote_now and promotion_checkpoint_episode is not None:
                             with self._lock:
                                 self._eval_success_history = []
                             update["message"] = (
-                                f"Checkpoint Evaluation: {success_rate:.0%} — Promotion criteria satisfied. Advancing to Stage {stage + 1}."
+                                f"Checkpoint Evaluation: {success_rate:.0%} — Promotion criteria satisfied. Advancing to Stage {target_next_stage}."
                             )
                             print(
-                                f"[Sheepdog] PROMOTION: Stage {stage} -> Stage {stage + 1} "
+                                f"[Sheepdog] PROMOTION: Stage {stage} -> Stage {target_next_stage} "
                                 f"(mastered at ep {promotion_checkpoint_episode})",
                                 flush=True,
                             )
@@ -6597,6 +7475,72 @@ class TrainingManager:
                                 seed_gate_hits=stage_seed_gate_hits,
                                 full_success_hits=stage_full_success_hits,
                             )
+                        elif stage >= max_stage:
+                            stage_mastered_now = (
+                                stage_qualified_streak >= MAX_STAGE_MASTERY_QUALIFIED_STREAK
+                                and stage_full_success_hits >= MAX_STAGE_MASTERY_FULL_SUCCESS_HITS
+                            )
+                            plateaued_now = (
+                                stage_checkpoints_seen >= PLATEAU_STOP_MIN_CHECKPOINTS
+                                and stage_no_improvement_streak >= PLATEAU_STOP_NO_IMPROVEMENT_STREAK
+                            )
+                            if (
+                                is_queued_mode
+                                and has_next_queued_stage
+                                and stage_mastered_now
+                                and promotion_checkpoint_episode is not None
+                            ):
+                                with self._lock:
+                                    self._eval_success_history = []
+                                update["auto_promote_gate_ready"] = True
+                                update["message"] = (
+                                    f"Checkpoint Evaluation: {success_rate:.0%} — Stage {stage} mastered. Advancing to Stage {target_next_stage}."
+                                )
+                                print(
+                                    f"[Sheepdog] PROMOTION: Stage {stage} -> Stage {target_next_stage} "
+                                    f"(mastered at ep {promotion_checkpoint_episode})",
+                                    flush=True,
+                                )
+                                early_promotion_signal = _EarlyPromotionSignal(
+                                    checkpoint_episode=int(promotion_checkpoint_episode),
+                                    best_success=max(0.0, float(gate_snap.get("best_success", 0.0))),
+                                    qualified_streak=stage_qualified_streak,
+                                    seed_gate_hits=stage_seed_gate_hits,
+                                    full_success_hits=stage_full_success_hits,
+                                )
+                            elif stage_mastered_now or (plateaued_now and not continuous):
+                                gate_hold = dict(gate_snap)
+                                gate_hold["decision"] = "hold"
+                                gate_hold["reason"] = (
+                                    "Max stage mastered; stopping"
+                                    if stage_mastered_now
+                                    else "Likely plateau; stopping"
+                                )
+                                update["auto_promote_gate"] = gate_hold
+                                update["auto_promote_gate_ready"] = False
+                                update["message"] = (
+                                    f"Stopped at max stage {stage}: sustained mastery."
+                                    if stage_mastered_now
+                                    else (
+                                        f"Stopped at Stage {stage}: likely plateau after "
+                                        f"{stage_checkpoints_seen} checkpoints with no new best in "
+                                        f"the last {stage_no_improvement_streak}."
+                                    )
+                                )
+                                early_max_stage_signal = _EarlyMaxStageStopSignal(
+                                    checkpoint_episode=int(promotion_checkpoint_episode or 0),
+                                    reason=gate_hold["reason"],
+                                    message=update["message"],
+                                )
+                            elif phase == "checkpoint" and not update.get("anti_collapse_warning"):
+                                if gate_snap.get("decision") == "promote_ready":
+                                    update["message"] = (
+                                        f"Checkpoint Evaluation: {success_rate:.0%} — Final stage {stage} criteria met; verifying sustained mastery."
+                                    )
+                                else:
+                                    update["message"] = (
+                                        f"Checkpoint Evaluation: {success_rate:.0%} — Final stage {stage}; training continues."
+                                    )
                         elif phase == "checkpoint" and not update.get("anti_collapse_warning"):
                             update["message"] = (
                                 f"Checkpoint Evaluation: {success_rate:.0%} — Not ready for promotion. Training continues."
@@ -6604,6 +7548,20 @@ class TrainingManager:
                     self._update_status(update)
 
                     if phase == "checkpoint":
+                        if continuous:
+                            durable_checkpoint_observed |= checkpoint_episode is not None
+                            durable_environment_episodes = int(
+                                payload.get("environment_episodes_total") or durable_environment_episodes
+                            )
+                            if resume_checkpoint_episode is not None:
+                                resume_checkpoint_episode = None
+                                self._active_start_request = {
+                                    **self._active_start_request,
+                                    "promote_from_checkpoint_episode": None,
+                                }
+                        resolved_model: Path | None = None
+                        model_path_str: str | None = None
+                        active_cp_id: str | None = None
                         try:
                             from sheepdog.checkpoints.store import (
                                 get_action_space_hash,
@@ -6665,6 +7623,88 @@ class TrainingManager:
                                 exc,
                             )
 
+                        if resolved_model is not None:
+                            stage_last_ckpt_path = resolved_model
+                        if active_cp_id is not None:
+                            stage_last_ckpt_id = active_cp_id
+                        raw_global_ts = (
+                            payload.get("global_timestep")
+                            or payload.get("total_timesteps")
+                            or payload.get("current_global_timestep")
+                        )
+                        if raw_global_ts is not None:
+                            stage_last_global_ts = int(raw_global_ts)
+                        if history_store is not None and active_stage_run_id is not None:
+                            try:
+                                rt_totals = self.runtime_tracker.get_stage_phase_totals(
+                                    runtime_run_id, stage
+                                )
+                                global_ts = raw_global_ts
+                                if global_ts is None:
+                                    ts_state = _load_json(output_root / Trainer.STATE_FILENAME)
+                                    if isinstance(ts_state, dict):
+                                        global_ts = ts_state.get("total_timesteps")
+                                if global_ts is not None:
+                                    stage_last_global_ts = int(global_ts)
+                                avg_steps_val = None
+                                avg_reward_val = None
+                                eval_seed_count_val = None
+                                sr_val = None
+                                if isinstance(summary, dict):
+                                    avg_steps_val = summary.get("average_completion_steps")
+                                    if avg_steps_val is None:
+                                        avg_steps_val = summary.get("average_steps")
+                                    avg_reward_val = summary.get("average_reward")
+                                    records_list = summary.get("records")
+                                    eval_seed_count_val = summary.get("evaluation_seed_count") or (
+                                        len(records_list)
+                                        if isinstance(records_list, list)
+                                        else None
+                                    )
+                                    if (
+                                        "success_rate" in summary
+                                        and summary["success_rate"] is not None
+                                    ):
+                                        sr_val = float(summary["success_rate"])
+                                ep_count = int(
+                                    max(0, durable_environment_episodes - starting_environment_episodes)
+                                    if continuous
+                                    else batch_completed_segments
+                                )
+                                ckpt_sha = compute_file_sha256(resolved_model)
+                                history_store.update_stage_run(
+                                    active_stage_run_id,
+                                    runtime_totals=rt_totals,
+                                    current_policy_timesteps=(
+                                        int(global_ts) if global_ts is not None else None
+                                    ),
+                                    episodes=ep_count,
+                                    success_rate=sr_val,
+                                    avg_steps=(
+                                        float(avg_steps_val)
+                                        if avg_steps_val is not None
+                                        else None
+                                    ),
+                                    avg_reward=(
+                                        float(avg_reward_val)
+                                        if avg_reward_val is not None
+                                        else None
+                                    ),
+                                    eval_seed_count=(
+                                        int(eval_seed_count_val)
+                                        if eval_seed_count_val is not None
+                                        else None
+                                    ),
+                                    checkpoint_id=active_cp_id,
+                                    checkpoint_path=model_path_str,
+                                    checkpoint_sha256=ckpt_sha,
+                                )
+                            except Exception as exc:
+                                logger.warning(
+                                    "Failed to update ModelHistoryStore stage run at checkpoint: %s",
+                                    exc,
+                                )
+
                     completed_int = (
                         int(batch_completed)
                         if isinstance(batch_completed, (int, float))
@@ -6682,13 +7722,18 @@ class TrainingManager:
                         last_persisted_completed_episodes = completed_int
                         with self._lock:
                             persist_snap = dict(self._status)
-                        self._persist_training_session(
-                            state="running",
-                            status=persist_snap,
-                            request=self._active_start_request,
-                        )
+                        try:
+                            self._persist_training_session(
+                                state="running",
+                                status=persist_snap,
+                                request=self._active_start_request,
+                            )
+                        except OSError as exc:
+                            logger.warning("Failed to persist training session marker: %s", exc)
                     if early_promotion_signal is not None:
                         raise early_promotion_signal
+                    if early_max_stage_signal is not None:
+                        raise early_max_stage_signal
 
                 effective_config_path = (
                     Path(job_config.training.output_dir) / "effective-training-config.json"
@@ -6704,23 +7749,27 @@ class TrainingManager:
                     f"{'fast' if fast_mode else 'full'} mode \u00b7 "
                     f"{total_episodes} ep"
                 )
-                self.save_config_revision(
-                    {
-                        "source": "training_start",
-                        "label": label,
-                        "training_settings": {
-                            "episodes": total_episodes,
-                            "fast_mode": fast_mode,
-                            "enable_instinct_rewards": instincts_on,
-                            "curriculum_stage": stage,
-                            "debug_reward_breakdown": (
-                                job_config.rewards.instincts.debug_reward_breakdown
-                            ),
-                            "auto_promote": auto_promote_enabled,
-                        },
-                        "config": config_dict,
-                    }
-                )
+                if not continuous or config_dict != last_continuous_config:
+                    self.save_config_revision(
+                        {
+                            "source": "training_start",
+                            "label": label,
+                            "training_settings": {
+                                "episodes": total_episodes,
+                                "fast_mode": fast_mode,
+                                "enable_instinct_rewards": instincts_on,
+                                "curriculum_stage": stage,
+                                "debug_reward_breakdown": (
+                                    job_config.rewards.instincts.debug_reward_breakdown
+                                ),
+                                "auto_promote": auto_promote_enabled,
+                                "continuous": continuous,
+                            },
+                            "config": config_dict,
+                        }
+                    )
+                    if continuous:
+                        last_continuous_config = config_dict
                 settings_path = Path(job_config.training.output_dir) / TRAINING_SETTINGS_FILENAME
                 atomic_write_json(
                     settings_path,
@@ -6733,6 +7782,7 @@ class TrainingManager:
                             job_config.rewards.instincts.debug_reward_breakdown
                         ),
                         "auto_promote": auto_promote_enabled,
+                        "continuous": continuous,
                     },
                 )
 
@@ -6756,6 +7806,11 @@ class TrainingManager:
                             job_config.rewards.instincts.debug_reward_breakdown
                         ),
                         "curriculum_stage": stage,
+                        "stage_queue": list(stage_queue) if is_queued_mode and stage_queue else None,
+                        "stage_queue_index": stage_queue_index if is_queued_mode else None,
+                        "stage_spec": stage_spec,
+                        "pass_label": pass_label,
+                        "active_pass_id": pass_id,
                         "auto_promote": auto_promote_enabled,
                         "auto_promote_threshold": _get_success_threshold(stage),
                         "auto_promote_stages_completed": promoted_stages,
@@ -6783,11 +7838,14 @@ class TrainingManager:
                 last_persisted_completed_episodes = 0
                 with self._lock:
                     persist_snap = dict(self._status)
-                self._persist_training_session(
-                    state="running",
-                    status=persist_snap,
-                    request=self._active_start_request,
-                )
+                try:
+                    self._persist_training_session(
+                        state="running",
+                        status=persist_snap,
+                        request=self._active_start_request,
+                    )
+                except OSError as exc:
+                    logger.warning("Failed to persist training session marker: %s", exc)
 
                 policy_obj = getattr(trainer, "policy", None)
                 if policy_obj is not None:
@@ -6804,6 +7862,7 @@ class TrainingManager:
                         )
 
                 early_promotion: _EarlyPromotionSignal | None = None
+                early_max_stage_stop: _EarlyMaxStageStopSignal | None = None
                 try:
                     now_str = datetime.datetime.now().strftime("%H:%M:%S")
                     target_desc = (
@@ -6819,18 +7878,27 @@ class TrainingManager:
                     )
                     if hasattr(trainer, "evaluator") and trainer.evaluator is not None:
                         trainer.evaluator.progress_callback = progress_callback
-                    trainer.train(progress_callback=progress_callback, should_stop=should_stop)
+                    if not continuous or not should_stop():
+                        trainer.train(progress_callback=progress_callback, should_stop=should_stop)
                 except _EarlyPromotionSignal as signal:
                     early_promotion = signal
                     stage_best_checkpoint_episode = signal.checkpoint_episode
+                except _EarlyMaxStageStopSignal as signal:
+                    early_max_stage_stop = signal
 
                 control_request = self._control_request
 
                 completed_for_stage = (
                     stage_batch_completed_episodes
-                    if early_promotion is not None or control_request in {"paused", "stopped"}
+                    if (
+                        early_promotion is not None
+                        or early_max_stage_stop is not None
+                        or control_request in {"paused", "stopped"}
+                    )
                     else batch_episodes
                 )
+                if continuous:
+                    completed_for_stage = max(0, durable_environment_episodes - starting_environment_episodes)
                 history = _update_stage_history(output_root, stage, completed_for_stage)
                 self._update_status(
                     {
@@ -6840,6 +7908,45 @@ class TrainingManager:
                 )
 
                 if control_request in {"paused", "stopped"}:
+                    if control_request == "paused":
+                        if history_store is not None and active_stage_run_id is not None:
+                            try:
+                                rt_totals = self.runtime_tracker.get_stage_phase_totals(
+                                    runtime_run_id, stage
+                                )
+                                end_id, end_path, end_sha = _resolve_stage_end_checkpoint(stage)
+                                history_store.update_stage_run(
+                                    active_stage_run_id,
+                                    runtime_totals=rt_totals,
+                                    current_policy_timesteps=_read_current_policy_timesteps(),
+                                    episodes=int(completed_for_stage),
+                                    checkpoint_id=end_id,
+                                    checkpoint_path=(
+                                        str(end_path) if end_path is not None else None
+                                    ),
+                                    checkpoint_sha256=end_sha,
+                                    status="paused",
+                                )
+                            except Exception as exc:
+                                logger.warning(
+                                    "Failed to update ModelHistoryStore stage run on pause: %s",
+                                    exc,
+                                )
+                        if history_store is not None and pass_id is not None:
+                            try:
+                                _set_model_history_pass_status(history_store, pass_id, "paused")
+                            except Exception as exc:
+                                logger.warning(
+                                    "Failed to update ModelHistoryStore pass status on pause: %s",
+                                    exc,
+                                )
+                    else:
+                        _finalize_stage_run(
+                            stage,
+                            sr_status="stopped",
+                            episodes_count=int(completed_for_stage),
+                        )
+                        _finalize_pass("stopped")
                     with self._lock:
                         final_message = self._status.get("message") or (
                             "Training paused" if control_request == "paused" else "Training stopped"
@@ -6851,15 +7958,23 @@ class TrainingManager:
                             "running": False,
                             "phase": control_request,
                             "message": final_message,
+                            "resume_request": self._active_start_request,
                         }
                     )
                     with self._lock:
                         persist_snap = dict(self._status)
-                    self._persist_training_session(
-                        state=control_request,
-                        status=persist_snap,
-                        request=self._active_start_request,
-                    )
+                    try:
+                        self._persist_training_session(
+                            state=control_request,
+                            status=persist_snap,
+                            request=self._active_start_request,
+                        )
+                    except OSError as exc:
+                        logger.warning(
+                            "Failed to persist %s training session marker: %s",
+                            control_request,
+                            exc,
+                        )
                     if control_request == "paused":
                         self.runtime_tracker.transition("paused")
                         self.runtime_tracker.heartbeat()
@@ -6870,20 +7985,84 @@ class TrainingManager:
                 best_success = stage_best_rank[0]
                 with self._lock:
                     active_gate_snap = self._status.get("auto_promote_gate") or _auto_promote_gate_defaults(stage)
-                should_auto_promote = (
-                    auto_promote_enabled
+                stage_mastered = (
+                    stage >= max_stage
+                    and stage_qualified_streak >= MAX_STAGE_MASTERY_QUALIFIED_STREAK
+                    and stage_full_success_hits >= MAX_STAGE_MASTERY_FULL_SUCCESS_HITS
+                )
+                queue_final_ready = (
+                    is_queued_mode
+                    and not has_next_queued_stage
                     and stage < max_stage
+                    and auto_promote_enabled
                     and bool(active_gate_snap.get("ready", False))
+                )
+                should_auto_promote = (
+                    (not is_queued_mode or has_next_queued_stage)
+                    and (
+                        (
+                            auto_promote_enabled
+                            and stage < max_stage
+                            and bool(active_gate_snap.get("ready", False))
+                        )
+                        or (is_queued_mode and has_next_queued_stage and stage_mastered)
+                    )
                 )
                 if early_promotion is not None:
                     should_auto_promote = True
                     best_success = max(best_success, early_promotion.best_success)
                 if not should_auto_promote:
-                    stage_mastered = (
-                        stage >= max_stage
-                        and stage_qualified_streak >= MAX_STAGE_MASTERY_QUALIFIED_STREAK
-                        and stage_full_success_hits >= MAX_STAGE_MASTERY_FULL_SUCCESS_HITS
-                    )
+                    if early_max_stage_stop is not None:
+                        gate_hold = dict(active_gate_snap)
+                        gate_hold["decision"] = "hold"
+                        gate_hold["reason"] = early_max_stage_stop.reason
+                        self._update_status(
+                            {
+                                "auto_promote_gate": gate_hold,
+                                "auto_promote_gate_ready": False,
+                                "message": early_max_stage_stop.message,
+                            }
+                        )
+                        _clear_incomplete_batch(output_root)
+                        if early_max_stage_stop.reason == "Stage queue complete":
+                            sr_end_status = "completed"
+                            pass_end_status = "completed"
+                        elif "mastered" in early_max_stage_stop.reason.lower():
+                            sr_end_status = "mastered"
+                            pass_end_status = "completed"
+                        else:
+                            sr_end_status = "stopped"
+                            pass_end_status = "stopped"
+                        _finalize_stage_run(
+                            stage,
+                            sr_status=sr_end_status,
+                            episodes_count=int(completed_for_stage),
+                        )
+                        _finalize_pass(pass_end_status)
+                        break
+                    if queue_final_ready:
+                        queue_len = len(stage_queue or [])
+                        gate_done = dict(active_gate_snap)
+                        gate_done["decision"] = "hold"
+                        gate_done["reason"] = "Stage queue complete"
+                        self._update_status(
+                            {
+                                "auto_promote_gate": gate_done,
+                                "auto_promote_gate_ready": False,
+                                "message": (
+                                    f"Stage queue complete ({queue_len}/{queue_len}): "
+                                    f"Stage {stage} criteria met."
+                                ),
+                            }
+                        )
+                        _clear_incomplete_batch(output_root)
+                        _finalize_stage_run(
+                            stage,
+                            sr_status="completed",
+                            episodes_count=int(completed_for_stage),
+                        )
+                        _finalize_pass("completed")
+                        break
                     plateaued = (
                         stage_checkpoints_seen >= PLATEAU_STOP_MIN_CHECKPOINTS
                         and stage_no_improvement_streak >= PLATEAU_STOP_NO_IMPROVEMENT_STREAK
@@ -6895,19 +8074,28 @@ class TrainingManager:
                         self._update_status(
                             {
                                 "auto_promote_gate": gate_hold,
+                                "auto_promote_gate_ready": False,
                                 "message": (
                                     f"Stopped at max stage {stage}: sustained mastery."
                                 ),
                             }
                         )
+                        _clear_incomplete_batch(output_root)
+                        _finalize_stage_run(
+                            stage,
+                            sr_status="mastered",
+                            episodes_count=int(completed_for_stage),
+                        )
+                        _finalize_pass("completed")
                         break
-                    if stage >= max_stage and plateaued:
+                    if stage >= max_stage and plateaued and not continuous:
                         gate_hold = dict(active_gate_snap)
                         gate_hold["decision"] = "hold"
                         gate_hold["reason"] = "Likely plateau; stopping"
                         self._update_status(
                             {
                                 "auto_promote_gate": gate_hold,
+                                "auto_promote_gate_ready": False,
                                 "message": (
                                     f"Stopped at Stage {stage}: likely plateau after "
                                     f"{stage_checkpoints_seen} checkpoints with no new best in "
@@ -6915,9 +8103,24 @@ class TrainingManager:
                                 ),
                             }
                         )
+                        _clear_incomplete_batch(output_root)
+                        _finalize_stage_run(
+                            stage,
+                            sr_status="stopped",
+                            episodes_count=int(completed_for_stage),
+                        )
+                        _finalize_pass("stopped")
                         break
-                    # Batch complete: hold the stage and stop this run. The user can
-                    # inspect diagnostics and start the next batch intentionally.
+                    if continuous:
+                        if not durable_checkpoint_observed:
+                            raise RuntimeError("Continuous training stopped because the batch made no checkpoint progress")
+                        # Resume the trainer's latest durable model and optimizer.
+                        # The checkpoint override is only for the first batch of a stage.
+                        resume_checkpoint_episode = None
+                        stage_batch_completed_episodes = 0
+                        continue
+
+                    # A finite batch holds here until the user starts another.
                     gate_hold = dict(active_gate_snap)
                     gate_hold["decision"] = "hold"
                     gate_hold["reason"] = "Promotion criteria not met yet"
@@ -6931,6 +8134,12 @@ class TrainingManager:
                         }
                     )
                     resume_checkpoint_episode = stage_best_checkpoint_episode
+                    _finalize_stage_run(
+                        stage,
+                        sr_status="completed",
+                        episodes_count=int(completed_for_stage),
+                    )
+                    _finalize_pass("completed")
                     break
 
                 promotion_checkpoint_episode = (
@@ -6940,7 +8149,11 @@ class TrainingManager:
                 )
                 last_healthy_checkpoint_episode = promotion_checkpoint_episode
                 promoted_stages += 1
-                current_stage = stage + 1
+                if is_queued_mode and has_next_queued_stage and next_queued_stage is not None:
+                    stage_queue_index += 1
+                    current_stage = next_queued_stage
+                else:
+                    current_stage = stage + 1
 
                 trigger_cp: dict[str, Any] | None = None
                 try:
@@ -7013,6 +8226,38 @@ class TrainingManager:
                         ),
                     },
                 )
+                _finalize_stage_run(
+                    stage,
+                    sr_status="promoted",
+                    episodes_count=int(completed_for_stage),
+                    promotion_event_id=promo_id,
+                    ckpt_id_hint=trigger_checkpoint_id,
+                    cp_details=trigger_cp if isinstance(trigger_cp, dict) else None,
+                )
+                if continuous:
+                    with self._lock:
+                        control = self._control_request
+                        self._status["curriculum_stage"] = current_stage
+                        if is_queued_mode:
+                            self._status["stage_queue_index"] = stage_queue_index
+                        self._active_start_request = {
+                            **(self._active_start_request or {}),
+                            "curriculum_stage": current_stage,
+                            "promote_from_checkpoint_episode": promotion_checkpoint_episode,
+                            **(
+                                {
+                                    "stage_queue_index": stage_queue_index,
+                                    "active_stage_run_id": None,
+                                }
+                                if is_queued_mode
+                                else {"active_stage_run_id": None}
+                            ),
+                        }
+                        self._persist_training_session(
+                            state=control if control in {"paused", "stopped"} else "running",
+                            status=dict(self._status),
+                            request=self._active_start_request,
+                        )
                 if getattr(job_config.training, "backup_enabled", True):
                     try:
                         resolved_backup_model = _resolve_stage_active_model_path(
@@ -7039,7 +8284,8 @@ class TrainingManager:
                         )
                     except Exception as backup_err:
                         logger.warning("Stage milestone automated backup failed: %s", backup_err)
-                batch_episodes = RECOMMENDED_EPISODES_BY_STAGE.get(current_stage, 100)
+                if not continuous:
+                    batch_episodes = RECOMMENDED_EPISODES_BY_STAGE.get(current_stage, 100)
                 total_episodes = batch_episodes
                 resume_checkpoint_episode = promotion_checkpoint_episode
                 stage_best_checkpoint_episode = None
@@ -7055,6 +8301,7 @@ class TrainingManager:
                 self._update_status(
                     {
                         "curriculum_stage": current_stage,
+                        **({"stage_queue_index": stage_queue_index} if is_queued_mode else {}),
                         "auto_promote_stages_completed": promoted_stages,
                         "requested_episodes": total_episodes,
                         "batch_total_episodes": batch_episodes,
@@ -7093,7 +8340,12 @@ class TrainingManager:
                         self._status["message"] = "Training stopped"
                 else:
                     self._status["phase"] = "complete"
-                    if "Training complete" not in self._status.get("message", ""):
+                    current_msg = self._status.get("message", "")
+                    if (
+                        "Training complete" not in current_msg
+                        and not current_msg.startswith("Stopped at ")
+                        and not current_msg.startswith("Stage queue complete")
+                    ):
                         self._status["message"] = "Training complete"
                 complete_msg = self._status.get("message", "Training complete")
                 self._active_start_request = None
@@ -7101,9 +8353,44 @@ class TrainingManager:
             if final_control_request not in {"paused", "stopped"}:
                 now_str = datetime.datetime.now().strftime("%H:%M:%S")
                 print(f"[Sheepdog] [{now_str}] Training complete: {complete_msg}", flush=True)
-                self._clear_training_session()
-                self.runtime_tracker.end_session("completed")
+                try:
+                    self._clear_training_session()
+                except Exception as cleanup_exc:
+                    logger.warning(
+                        "Failed to clear training session on completion: %s",
+                        cleanup_exc,
+                    )
+                try:
+                    self.runtime_tracker.end_session("completed")
+                except Exception as cleanup_exc:
+                    logger.warning(
+                        "Failed to end runtime session on completion: %s",
+                        cleanup_exc,
+                    )
         except BaseException as exc:  # pragma: no cover  # pylint: disable=broad-exception-caught
+            if active_stage_run_id is not None and history_store is not None:
+                try:
+                    rt_totals = self.runtime_tracker.get_stage_phase_totals(
+                        runtime_run_id, current_stage
+                    )
+                    history_store.finish_stage_run(
+                        active_stage_run_id,
+                        status="failed",
+                        runtime_totals=rt_totals,
+                    )
+                except Exception as hist_exc:
+                    logger.warning("Failed to fail ModelHistoryStore stage run: %s", hist_exc)
+                finally:
+                    active_stage_run_id = None
+            if pass_id is not None and history_store is not None:
+                try:
+                    history_store.finish_pass(
+                        pass_id,
+                        status="failed",
+                        notes=f"{type(exc).__name__}: {exc}",
+                    )
+                except Exception as hist_exc:
+                    logger.warning("Failed to fail ModelHistoryStore pass: %s", hist_exc)
             full_traceback = traceback.format_exc()
             logger.error("\n===== TRAINING FAILED =====\n%s\n===========================\n", full_traceback)
             now_str = datetime.datetime.now().strftime("%H:%M:%S")
@@ -7119,9 +8406,18 @@ class TrainingManager:
                 self._status["traceback"] = full_traceback
                 self._active_start_request = None
                 err_status = dict(self._status)
-            self._persist_training_session(state="error", status=err_status, request=None)
-            self._clear_training_session()
-            self.runtime_tracker.end_session("error")
+            try:
+                self._persist_training_session(state="error", status=err_status, request=None)
+            except Exception as cleanup_exc:
+                logger.warning("Failed to persist error training session: %s", cleanup_exc)
+            try:
+                self._clear_training_session()
+            except Exception as cleanup_exc:
+                logger.warning("Failed to clear training session after error: %s", cleanup_exc)
+            try:
+                self.runtime_tracker.end_session("error")
+            except Exception as cleanup_exc:
+                logger.warning("Failed to end runtime session after error: %s", cleanup_exc)
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
         finally:
@@ -7282,6 +8578,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         payload: Any,
         status: int = HTTPStatus.OK,
         headers: dict[str, str] | None = None,
+        compact: bool = False,
     ) -> None:
         try:
             def _default(o: Any) -> Any:
@@ -7296,15 +8593,41 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                     return o.to_dict()
                 return str(o)
 
-            body = json.dumps(payload, indent=2, default=_default).encode("utf-8")
+            if compact:
+                body = json.dumps(
+                    payload, separators=(",", ":"), default=_default
+                ).encode("utf-8")
+            else:
+                body = json.dumps(payload, indent=2, default=_default).encode("utf-8")
+
+            extra_headers = dict(headers or {})
+            extra_header_names = {name.lower() for name in extra_headers}
+            req_headers = getattr(self, "headers", None)
+            accept_encoding = (
+                (req_headers.get("Accept-Encoding") or "").lower()
+                if req_headers is not None
+                else ""
+            )
+            use_gzip = (
+                "gzip" in accept_encoding
+                and len(body) >= 1024
+                and "content-encoding" not in extra_header_names
+            )
+            if use_gzip:
+                body = gzip.compress(body, compresslevel=1)
+
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            if use_gzip:
+                self.send_header("Content-Encoding", "gzip")
+                if "vary" not in extra_header_names:
+                    self.send_header("Vary", "Accept-Encoding")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
-            for header_name, header_value in (headers or {}).items():
+            for header_name, header_value in extra_headers.items():
                 self.send_header(header_name, header_value)
             self.end_headers()
             self.wfile.write(body)
@@ -7314,53 +8637,108 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             import traceback
             traceback.print_exc()
 
-    def _file_response(self, file_path: Path) -> None:
-        """Read *file_path* fully then send — avoids Content-Length races."""
-        try:
-            body = None
-            for attempt in range(6):
-                try:
-                    body = file_path.read_bytes()
-                    break
-                except PermissionError:
-                    if attempt == 5:
-                        raise
-                    import time
-                    time.sleep(0.05 * (attempt + 1))
-        except FileNotFoundError:
+    @staticmethod
+    def _retry_permission_error(fn: Any) -> Any:
+        for attempt in range(6):
             try:
-                self.send_response(HTTPStatus.NOT_FOUND)
-                self.send_header("Content-Length", "0")
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.end_headers()
-            except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
-                pass
+                return fn()
+            except PermissionError:
+                if attempt == 5:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
+        return fn()
+
+    def _send_file_not_found(self) -> None:
+        try:
+            self.send_response(HTTPStatus.NOT_FOUND)
+            self.send_header("Content-Length", "0")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            pass
+
+    def _send_file_read_error(self, file_path: Path, exc: Exception) -> None:
+        # Log the unexpected error to stderr so it shows in backend logs
+        print(f"Error serving file {file_path}: {exc}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+
+        # Send a graceful 500 JSON response instead of aborting the connection
+        try:
+            self.send_response(HTTPStatus.INTERNAL_SERVER_ERROR)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            body_payload = json.dumps(
+                {"error": f"Error reading file: {exc}"}, indent=2
+            ).encode("utf-8")
+            self.send_header("Content-Length", str(len(body_payload)))
+            self.end_headers()
+            self.wfile.write(body_payload)
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            pass
+
+    def _file_response(self, file_path: Path) -> None:
+        """Serve *file_path* with ETag/304 conditional caching and optional gzip."""
+        try:
+            stat_res: os.stat_result = self._retry_permission_error(file_path.stat)
+        except FileNotFoundError:
+            self._send_file_not_found()
             return
         except Exception as exc:
-            import sys
-            import traceback
-            # Log the unexpected error to stderr so it shows in backend logs
-            print(f"Error serving file {file_path}: {exc}", file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
+            self._send_file_read_error(file_path, exc)
+            return
 
-            # Send a graceful 500 JSON response instead of aborting the connection
+        etag = f'W/"{stat_res.st_mtime_ns}-{stat_res.st_size}"'
+        if_none_match = self.headers.get("If-None-Match")
+        if if_none_match:
+            candidates = [part.strip() for part in if_none_match.split(",")]
+            if etag in candidates or "*" in candidates:
+                try:
+                    self.send_response(HTTPStatus.NOT_MODIFIED)
+                    self.send_header("ETag", etag)
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("Vary", "Accept-Encoding")
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+                    pass
+                return
+
+        accept_encoding = (self.headers.get("Accept-Encoding") or "").lower()
+        use_gzip = (
+            "gzip" in accept_encoding
+            and file_path.suffix.lower() == ".json"
+            and stat_res.st_size >= 1024
+        )
+        cache_key = (str(file_path), stat_res.st_mtime_ns, stat_res.st_size)
+        payload_bytes: bytes | None = None
+        if use_gzip:
+            with _GZIP_FILE_CACHE_LOCK:
+                cached = _GZIP_FILE_CACHE.get(cache_key)
+                if cached is not None:
+                    _GZIP_FILE_CACHE.move_to_end(cache_key)
+                    payload_bytes = cached
+
+        if payload_bytes is None:
             try:
-                self.send_response(HTTPStatus.INTERNAL_SERVER_ERROR)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Access-Control-Allow-Origin", "*")
-                body_payload = json.dumps({"error": f"Error reading file: {exc}"}, indent=2).encode("utf-8")
-                self.send_header("Content-Length", str(len(body_payload)))
-                self.end_headers()
-                self.wfile.write(body_payload)
-            except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
-                pass
-            return
-        if body is None:
-            self._json_response(
-                {"error": f"Error reading file: {file_path}"},
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
-            return
+                raw_body: bytes = self._retry_permission_error(file_path.read_bytes)
+            except FileNotFoundError:
+                self._send_file_not_found()
+                return
+            except Exception as exc:
+                self._send_file_read_error(file_path, exc)
+                return
+            if use_gzip:
+                payload_bytes = gzip.compress(raw_body, compresslevel=6)
+                if len(raw_body) == stat_res.st_size:
+                    with _GZIP_FILE_CACHE_LOCK:
+                        _GZIP_FILE_CACHE[cache_key] = payload_bytes
+                        _GZIP_FILE_CACHE.move_to_end(cache_key)
+                        while len(_GZIP_FILE_CACHE) > _GZIP_FILE_CACHE_MAX_ENTRIES:
+                            _GZIP_FILE_CACHE.popitem(last=False)
+            else:
+                payload_bytes = raw_body
+
         suffix = file_path.suffix.lower()
         content_type = (
             "application/json; charset=utf-8" if suffix == ".json" else "application/octet-stream"
@@ -7369,10 +8747,14 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", content_type)
             self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
+            self.send_header("ETag", etag)
+            self.send_header("Vary", "Accept-Encoding")
+            self.send_header("Cache-Control", "no-cache")
+            if use_gzip:
+                self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(payload_bytes)))
             self.end_headers()
-            self.wfile.write(body)
+            self.wfile.write(payload_bytes)
         except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
             pass
 
@@ -8539,6 +9921,29 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
     _STARTUP_RETRY_AFTER_SECONDS = "2"
 
     @staticmethod
+    def _disk_telemetry_fields() -> dict[str, Any]:
+        """Return non-failing disk free-space fields for health/readiness probes."""
+        try:
+            from unittest.mock import NonCallableMock
+
+            cfg = LabConfig()
+            if isinstance(cfg, NonCallableMock):
+                return {}
+            training_cfg = getattr(cfg, "training", None)
+            output_dir = getattr(training_cfg, "output_dir", None)
+            if not isinstance(output_dir, (str, Path)) or not str(output_dir).strip():
+                return {}
+            free_bytes = get_free_disk_bytes(Path(output_dir))
+            if isinstance(free_bytes, int):
+                return {
+                    "disk_free_bytes": free_bytes,
+                    "disk_low": free_bytes < DEFAULT_WARN_FREE_DISK_BYTES,
+                }
+        except Exception:
+            pass
+        return {}
+
+    @staticmethod
     def _startup_payload() -> dict[str, Any]:
         elapsed = _MANAGER_STARTUP.elapsed_seconds()
         step = _MANAGER_STARTUP.step
@@ -8548,7 +9953,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             message = f"Restoring training state: {step} ({elapsed:.0f}s elapsed)"
         else:
             message = f"Restoring training state ({elapsed:.0f}s elapsed)"
-        return {
+        payload: dict[str, Any] = {
             "status": "starting" if _MANAGER_STARTUP.error is None else "error",
             "service": "sheepdog-api",
             "ready": False,
@@ -8559,6 +9964,8 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             "message": message,
             "elapsed_seconds": elapsed,
         }
+        payload.update(TrainingRequestHandler._disk_telemetry_fields())
+        return payload
 
     def _handle_probe(self, request_path: str) -> None:
         """Answer liveness/readiness probes without touching the TrainingManager."""
@@ -8568,6 +9975,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
             "service": "sheepdog-api",
             "ready": True,
         }
+        ready_payload.update(self._disk_telemetry_fields())
         if _READONLY_PREVIEW_MODE:
             ready_payload["mode"] = "read_only_preview"
             ready_payload["read_only_preview"] = True
@@ -8637,11 +10045,90 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                 try:
                     with open(history_path, encoding="utf-8") as f:
                         data = json.load(f)
-                    self._json_response(data)
+                    self._json_response(data, compact=True)
                 except Exception:
                     self._json_response([])
             else:
                 self._json_response([])
+            return
+        if request_path == "/api/model-history":
+            from urllib.parse import parse_qs
+
+            params = parse_qs(urlsplit(self.path).query)
+            pass_id_vals = params.get("pass_id")
+            pass_id = pass_id_vals[0].strip() if pass_id_vals and pass_id_vals[0].strip() else None
+
+            stage: int | None = None
+            if "stage" in params and params["stage"][0].strip():
+                try:
+                    stage = int(params["stage"][0])
+                except (ValueError, IndexError):
+                    self._json_response(
+                        {"error": "stage parameter must be an integer"},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+
+            limit = 50
+            if "limit" in params and params["limit"][0].strip():
+                try:
+                    limit = max(1, int(params["limit"][0]))
+                except (ValueError, IndexError):
+                    self._json_response(
+                        {"error": "limit parameter must be an integer"},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+
+            db_path = Path(LabConfig().training.output_dir) / MODEL_HISTORY_DB_FILENAME
+            active_pass_id = (
+                None
+                if _READONLY_PREVIEW_MODE
+                else self.manager.snapshot().get("active_pass_id")
+            )
+            store = ModelHistoryStore(db_path, read_only=True)
+            self._json_response(
+                store.build_api_payload(
+                    pass_id=pass_id,
+                    stage=stage,
+                    limit=limit,
+                    active_pass_id=active_pass_id,
+                ),
+                compact=True,
+            )
+            return
+        if request_path == "/api/model-history/lineage":
+            from urllib.parse import parse_qs
+
+            params = parse_qs(urlsplit(self.path).query)
+            pass_id_vals = params.get("pass_id")
+            pass_id = pass_id_vals[0].strip() if pass_id_vals and pass_id_vals[0].strip() else None
+            if not pass_id:
+                self._json_response(
+                    {"error": "pass_id parameter is required"},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+
+            db_path = Path(LabConfig().training.output_dir) / MODEL_HISTORY_DB_FILENAME
+            store = ModelHistoryStore(db_path, read_only=True)
+            lineage = store.get_lineage(pass_id)
+            if lineage is None:
+                self._json_response(
+                    {"error": f"Model pass not found: {pass_id}"},
+                    status=HTTPStatus.NOT_FOUND,
+                )
+                return
+            self._json_response(lineage, compact=True)
+            return
+        if request_path == "/api/stage-timings":
+            timing_root = Path(LabConfig().training.output_dir)
+            self._json_response(
+                stage_timing.build_payload(
+                    timing_root,
+                    None if _READONLY_PREVIEW_MODE else _read_promotion_history(timing_root),
+                )
+            )
             return
         if request_path == "/api/training/status":
             if _READONLY_PREVIEW_MODE:
@@ -8716,7 +10203,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                 else:
                     with target_file.open("r", encoding="utf-8") as f:
                         data = json.load(f)
-                self._json_response(data)
+                self._json_response(data, compact=True)
             except Exception as exc:
                 self._json_response(
                     {"error": f"Failed to read replay file: {exc}"},
@@ -8770,7 +10257,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                     )
                 finally:
                     store.close()
-                self._json_response(res)
+                self._json_response(res, compact=True)
                 return
 
             store = _get_rw_episode_store(db_path)
@@ -8782,7 +10269,7 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                 limit=limit,
                 order=order,
             )
-            self._json_response(res)
+            self._json_response(res, compact=True)
             return
         if request_path in ("/api/insights/failed-episodes", "/api/episodes/failed-replays"):
             query = urlsplit(self.path).query
@@ -8810,12 +10297,12 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                     res = store.get_recent_failed_episodes_with_replays(limit=limit)
                 finally:
                     store.close()
-                self._json_response({"episodes": res})
+                self._json_response({"episodes": res}, compact=True)
                 return
 
             store = _get_rw_episode_store(db_path)
             res = store.get_recent_failed_episodes_with_replays(limit=limit)
-            self._json_response({"episodes": res})
+            self._json_response({"episodes": res}, compact=True)
             return
         if _READONLY_PREVIEW_MODE:
             if request_path in ("/api/scenarios",):
@@ -8875,11 +10362,32 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                 stage = None
 
             evals = self.manager.get_recent_evaluations(limit=limit, stage=stage)
-            self._json_response({"evaluations": evals})
+            self._json_response({"evaluations": evals}, compact=True)
             return
         if request_path in ("/api/insights/session-events", "/api/insights/sessions"):
             res = self.manager.get_session_events()
             self._json_response(res)
+            return
+        if request_path == "/api/insights/stage-report":
+            from urllib.parse import parse_qs
+
+            params = parse_qs(urlsplit(self.path).query)
+            try:
+                stage = validate_curriculum_stage(int(params.get("stage", [""])[0]))
+            except ValueError:
+                self._json_response({"error": "A valid curriculum stage is required"}, HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                report = self.manager.get_stage_report(
+                    stage, run_id=params.get("run_id", [None])[0], journey=params.get("journey", [None])[0]
+                )
+            except ValueError as exc:
+                self._json_response({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+                return
+            except FileNotFoundError as exc:
+                self._json_response({"error": str(exc)}, HTTPStatus.NOT_FOUND)
+                return
+            self._json_response(report, compact=True)
             return
         if request_path == "/api/training/backups":
             self._json_response(self.manager.backup_manager.list_backups())
@@ -9365,18 +10873,87 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
         curriculum_stage = payload.get("curriculum_stage")
         debug_reward_breakdown = payload.get("debug_reward_breakdown")
         auto_promote = payload.get("auto_promote")
+        continuous = payload.get("continuous", False)
         promote_from_checkpoint_episode = payload.get("promote_from_checkpoint_episode")
         evaluation_mode = payload.get("evaluation_mode", "quick")
         resume = bool(payload.get("resume", False))
+
+        _, max_stage = _curriculum_stage_metadata()
+        max_stage = max(1, max_stage)
+        parsed_stage_queue: list[int] | None = None
+        resolved_stage_spec: str | None = None
+        try:
+            if "stage_spec" in payload and payload["stage_spec"] is not None:
+                raw_stage_spec = payload["stage_spec"]
+                if not isinstance(raw_stage_spec, str):
+                    raise ValueError("stage_spec must be a string")
+                parsed_stage_queue = parse_stage_spec(
+                    raw_stage_spec, min_stage=1, max_stage=max_stage
+                )
+                resolved_stage_spec = format_stage_spec(parsed_stage_queue)
+            if "stage_queue" in payload and payload["stage_queue"] is not None:
+                raw_stage_queue = payload["stage_queue"]
+                if not isinstance(raw_stage_queue, list):
+                    raise ValueError("stage_queue must be a list of stage integers")
+                parsed_from_list = parse_stage_spec(
+                    raw_stage_queue, min_stage=1, max_stage=max_stage
+                )
+                if parsed_stage_queue is not None and parsed_stage_queue != parsed_from_list:
+                    raise ValueError("stage_spec and stage_queue do not match")
+                parsed_stage_queue = parsed_from_list
+                if resolved_stage_spec is None:
+                    resolved_stage_spec = format_stage_spec(parsed_stage_queue)
+        except ValueError as exc:
+            self._json_response(
+                {"error": str(exc), "code": "INVALID_STAGE_SPEC"},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+
+        raw_pass_label = payload.get("pass_label")
+        if raw_pass_label is not None and not isinstance(raw_pass_label, str):
+            self._json_response(
+                {"error": "pass_label must be a string", "code": "INVALID_STAGE_SPEC"},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+        pass_label = (
+            raw_pass_label.strip() or None if isinstance(raw_pass_label, str) else None
+        )
+
+        raw_starting_source = payload.get("starting_model_source")
+        if raw_starting_source is not None:
+            if not isinstance(raw_starting_source, str) or raw_starting_source not in {
+                "latest",
+                "fresh",
+            }:
+                self._json_response(
+                    {
+                        "error": (
+                            f"Invalid starting_model_source {raw_starting_source!r}: "
+                            "expected 'latest' or 'fresh'"
+                        ),
+                        "code": "INVALID_STAGE_SPEC",
+                    },
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            starting_model_source = raw_starting_source
+        else:
+            starting_model_source = "latest"
+
         now_str = datetime.datetime.now().strftime("%H:%M:%S")
         print(
             f"[Sheepdog] [{now_str}] Received training start request (total_timesteps={total_timesteps}, "
-            f"legacy_episodes={requested_episodes}, stage={curriculum_stage or 1}, "
+            f"legacy_episodes={requested_episodes}, "
+            f"stage={curriculum_stage or (parsed_stage_queue[0] if parsed_stage_queue else 1)}, "
             f"resume={resume})",
             flush=True,
         )
         try:
-            start_kwargs = {
+            if not isinstance(continuous, bool):
+                raise ValueError("continuous must be a boolean")
+            start_kwargs: dict[str, Any] = {
                 "enable_instinct_rewards": (
                     None if enable_instinct_rewards is None else bool(enable_instinct_rewards)
                 ),
@@ -9395,6 +10972,15 @@ class TrainingRequestHandler(BaseHTTPRequestHandler):
                 "evaluation_mode": evaluation_mode,
                 "resume": resume,
             }
+            if raw_starting_source is not None:
+                start_kwargs["starting_model_source"] = starting_model_source
+            if parsed_stage_queue is not None:
+                start_kwargs["stage_queue"] = parsed_stage_queue
+                start_kwargs["stage_spec"] = resolved_stage_spec
+            if pass_label is not None:
+                start_kwargs["pass_label"] = pass_label
+            if continuous:
+                start_kwargs["continuous"] = True
             if total_timesteps is not None:
                 response = self.manager.start(
                     total_timesteps=total_timesteps,

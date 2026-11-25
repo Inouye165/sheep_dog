@@ -498,6 +498,26 @@ export function computeCheckpointEfficiency(c: CheckpointEntry): CheckpointEffic
 }
 
 /**
+ * Filters checkpoints to the active/current journey, excluding archived
+ * ``journey-*`` runs. When ``activeRunId`` is provided and present in the
+ * current journey, narrows to that run without ever falling back to archived
+ * journeys.
+ */
+export function filterCurrentJourneyCheckpoints(
+  checkpoints: CheckpointEntry[],
+  activeRunId?: string
+): CheckpointEntry[] {
+  if (!checkpoints || checkpoints.length === 0) return [];
+  const currentJourney = checkpoints.filter(
+    (c) => !c.journey || c.journey === "current"
+  );
+  if (activeRunId && currentJourney.some((c) => c.run_id === activeRunId)) {
+    return currentJourney.filter((c) => c.run_id === activeRunId);
+  }
+  return currentJourney;
+}
+
+/**
  * Builds landmark formal evaluation markers from checkpoint index.
  * Positioned strictly at their exact X coordinate (global_timestep, episode, or timestamp).
  */
@@ -506,19 +526,21 @@ export function buildFormalEvalMarkers(
   stageScope: StageScope,
   xAxisMode: XAxisMode,
   bestCheckpointEpisode?: number | null,
-  effectiveStage: number = 1
+  effectiveStage: number = 1,
+  activeRunId?: string
 ): FormalEvalMarker[] {
   if (!checkpoints || checkpoints.length === 0) return [];
 
-  const targetStage = stageScope === "current" || stageScope === "current-journey"
-    ? effectiveStage
-    : typeof stageScope === "number"
-    ? stageScope
-    : null;
+  const targetStage =
+    stageScope === "current"
+      ? effectiveStage
+      : typeof stageScope === "number"
+      ? stageScope
+      : null;
 
-  let filtered = checkpoints;
+  let filtered = filterCurrentJourneyCheckpoints(checkpoints, activeRunId);
   if (targetStage !== null && !isNaN(targetStage)) {
-    filtered = checkpoints.filter((c) => getCheckpointStage(c) === targetStage);
+    filtered = filtered.filter((c) => getCheckpointStage(c) === targetStage);
   }
 
   const markers: FormalEvalMarker[] = [];

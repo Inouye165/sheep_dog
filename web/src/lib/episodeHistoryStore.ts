@@ -1,6 +1,7 @@
 import type { EpisodeRecord, EpisodeOutcome, TrainingEpisode } from "../state/types";
 
 export const MAX_EPISODE_HISTORY_BUFFER_SIZE = 50;
+export const MAX_CACHED_REPLAY_HISTORIES = 3;
 
 /**
  * Format label according to specification:
@@ -133,10 +134,72 @@ export function createPreseededEpisodesForTesting(): EpisodeRecord[] {
 
 class EpisodeHistoryStore {
   private episodes: EpisodeRecord[] = [];
+  private hydratedReplayOrder: string[] = [];
 
   constructor() {
     // Production store starts empty. No preseeded mock data added.
     this.episodes = [];
+    this.hydratedReplayOrder = [];
+  }
+
+  private stripHydratedFields(record: EpisodeRecord): EpisodeRecord {
+    const totalMoves =
+      record.move_history && record.move_history.length > 0
+        ? Math.max(record.total_moves, record.move_history.length - 1)
+        : record.total_moves;
+    const stripped: EpisodeRecord = {
+      ...record,
+      total_moves: totalMoves,
+    };
+    delete stripped.move_history;
+    delete stripped.initial_state;
+    return stripped;
+  }
+
+  private touchHydratedEpisode(episodeId: string): void {
+    this.hydratedReplayOrder = this.hydratedReplayOrder.filter((id) => id !== episodeId);
+    this.hydratedReplayOrder.push(episodeId);
+  }
+
+  private enforceLimits(): void {
+    this.episodes.sort((a, b) => Number(b.episode_id) - Number(a.episode_id));
+    if (this.episodes.length > MAX_EPISODE_HISTORY_BUFFER_SIZE) {
+      const dropped = this.episodes.slice(MAX_EPISODE_HISTORY_BUFFER_SIZE);
+      for (const ep of dropped) {
+        delete ep.move_history;
+        delete ep.initial_state;
+      }
+      this.episodes = this.episodes.slice(0, MAX_EPISODE_HISTORY_BUFFER_SIZE);
+    }
+
+    const byId = new Map(this.episodes.map((ep, index) => [String(ep.episode_id), { ep, index }]));
+    this.hydratedReplayOrder = this.hydratedReplayOrder.filter((id) => {
+      const entry = byId.get(id);
+      return Boolean(entry?.ep.move_history && entry.ep.move_history.length > 0);
+    });
+
+    const tracked = new Set(this.hydratedReplayOrder);
+    for (let i = this.episodes.length - 1; i >= 0; i -= 1) {
+      const ep = this.episodes[i];
+      const id = String(ep.episode_id);
+      if (ep.move_history && ep.move_history.length > 0 && !tracked.has(id)) {
+        this.hydratedReplayOrder.push(id);
+        tracked.add(id);
+      }
+    }
+
+    while (this.hydratedReplayOrder.length > MAX_CACHED_REPLAY_HISTORIES) {
+      const evictId = this.hydratedReplayOrder.shift();
+      if (!evictId) break;
+      const entry = byId.get(evictId);
+      if (entry) {
+        const stripped = this.stripHydratedFields(entry.ep);
+        delete entry.ep.move_history;
+        delete entry.ep.initial_state;
+        this.episodes[entry.index] = stripped;
+        byId.set(evictId, { ep: stripped, index: entry.index });
+      }
+    }
   }
 
   public getEpisodes(): EpisodeRecord[] {
@@ -174,7 +237,7 @@ class EpisodeHistoryStore {
           capture_status: freshRecord.capture_status !== "not_requested" ? freshRecord.capture_status : existing.capture_status,
           initial_state: existing.initial_state || freshRecord.initial_state,
           move_history: existing.move_history || freshRecord.move_history,
-          total_moves: (existing.move_history && existing.move_history.length > 0) ? (existing.move_history.length - 1) : freshRecord.total_moves,
+          total_moves: (existing.move_history && existing.move_history.length > 0) ? (existing.move_history.length - 1) : Math.max(freshRecord.total_moves, existing.total_moves),
         });
       } else {
         map.set(key, freshRecord);
@@ -188,23 +251,23 @@ class EpisodeHistoryStore {
    * Sets the episodes list to explicit records, capped at MAX_EPISODE_HISTORY_BUFFER_SIZE.
    */
   public setEpisodes(records: EpisodeRecord[]): void {
-    this.episodes = [...records].sort((a, b) => Number(b.episode_id) - Number(a.episode_id));
-    if (this.episodes.length > MAX_EPISODE_HISTORY_BUFFER_SIZE) {
-      this.episodes = this.episodes.slice(0, MAX_EPISODE_HISTORY_BUFFER_SIZE);
-    }
+    this.episodes = [...records];
+    this.enforceLimits();
   }
 
   /**
    * Adds an episode record to the rolling buffer.
    */
   public addEpisode(record: EpisodeRecord): void {
-    this.episodes = this.episodes.filter((ep) => String(ep.episode_id) !== String(record.episode_id));
+    const id = String(record.episode_id);
+    this.episodes = this.episodes.filter((ep) => String(ep.episode_id) !== id);
     this.episodes.push(record);
-    this.episodes.sort((a, b) => Number(b.episode_id) - Number(a.episode_id));
-
-    if (this.episodes.length > MAX_EPISODE_HISTORY_BUFFER_SIZE) {
-      this.episodes = this.episodes.slice(0, MAX_EPISODE_HISTORY_BUFFER_SIZE);
+    if (record.move_history && record.move_history.length > 0) {
+      this.touchHydratedEpisode(id);
+    } else {
+      this.hydratedReplayOrder = this.hydratedReplayOrder.filter((trackedId) => trackedId !== id);
     }
+    this.enforceLimits();
   }
 
   public updateEpisode(record: EpisodeRecord): void {
@@ -212,7 +275,12 @@ class EpisodeHistoryStore {
   }
 
   public clear(): void {
+    for (const ep of this.episodes) {
+      delete ep.move_history;
+      delete ep.initial_state;
+    }
     this.episodes = [];
+    this.hydratedReplayOrder = [];
   }
 }
 

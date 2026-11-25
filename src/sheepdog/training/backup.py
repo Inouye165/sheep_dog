@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import shutil
 import time
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sheepdog.atomic_io import atomic_write_json
+from sheepdog.atomic_io import atomic_replace, atomic_write_json
 from sheepdog.checkpoints.sidecar import get_sidecar_path_for_model
 
 logger = logging.getLogger("sheepdog.training.backup")
@@ -27,13 +29,25 @@ def _find_sidecar_for_model(model_path: Path) -> Path | None:
     return None
 
 
+def _atomic_copy_file(src: Path, dst: Path) -> None:
+    """Atomically copy *src* to *dst* via a unique sibling temporary file."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_name(f"{dst.stem}-{uuid.uuid4().hex}.tmp")
+    try:
+        shutil.copy2(src, tmp)
+        atomic_replace(tmp, dst)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+        raise
+
+
 def _copy_model_with_canonical_sidecar(src_model: Path, dst_model: Path) -> None:
     """Copy *src_model* to *dst_model* and write canonical sidecar if present."""
-    dst_model.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src_model, dst_model)
+    _atomic_copy_file(src_model, dst_model)
     sidecar = _find_sidecar_for_model(src_model)
     if sidecar is not None:
-        shutil.copy2(sidecar, get_sidecar_path_for_model(dst_model))
+        _atomic_copy_file(sidecar, get_sidecar_path_for_model(dst_model))
 
 
 def _resolve_path_under_output_root(raw_path: str | Path, output_root: Path) -> Path | None:
@@ -69,6 +83,32 @@ class TrainingBackupManager:
         self._ensure_dirs()
         self._last_hourly_backup_time: float = time.time()
         self._last_hourly_active_seconds: float = 0.0
+        self._seed_hourly_backup_watermark()
+
+    def _seed_hourly_backup_watermark(self) -> None:
+        """Seed hourly backup watermarks from the latest valid snapshot on disk."""
+        if not self.hourly_dir.exists():
+            return
+        dated_snapshots: list[tuple[float, Path]] = []
+        for snap_path in self.hourly_dir.glob("snapshot_stage*.json"):
+            try:
+                if snap_path.is_file():
+                    dated_snapshots.append((float(snap_path.stat().st_mtime), snap_path))
+            except OSError:
+                continue
+        dated_snapshots.sort(key=lambda item: item[0])
+        for latest_mtime, latest_path in reversed(dated_snapshots):
+            try:
+                payload = json.loads(latest_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            self._last_hourly_backup_time = float(latest_mtime)
+            active_sec = payload.get("active_runtime_seconds")
+            if isinstance(active_sec, (int, float)) and not isinstance(active_sec, bool):
+                self._last_hourly_active_seconds = float(active_sec)
+            return
 
     def _ensure_dirs(self) -> None:
         """Ensure backup directory structure exists."""
@@ -94,16 +134,22 @@ class TrainingBackupManager:
             src_model = Path(model_path)
             if src_model.exists():
                 dst_model = stage_dir / f"stage_{stage}_best_model.zip"
+                canonical_sidecar_dst = get_sidecar_path_for_model(dst_model)
+                legacy_sidecar_dst = dst_model.with_name(f"{dst_model.name}.sidecar.json")
                 try:
-                    shutil.copy2(src_model, dst_model)
-                    copied_model_path = str(dst_model)
-                    logger.info("Backed up Stage %d model to %s", stage, dst_model)
+                    _atomic_copy_file(src_model, dst_model)
                     # Also copy sidecar if present (canonical and legacy naming)
                     sidecar = _find_sidecar_for_model(src_model)
                     if sidecar is not None:
-                        shutil.copy2(sidecar, get_sidecar_path_for_model(dst_model))
-                        shutil.copy2(sidecar, dst_model.with_name(f"{dst_model.name}.sidecar.json"))
+                        _atomic_copy_file(sidecar, canonical_sidecar_dst)
+                        _atomic_copy_file(sidecar, legacy_sidecar_dst)
+                    copied_model_path = str(dst_model)
+                    logger.info("Backed up Stage %d model to %s", stage, dst_model)
                 except Exception as exc:
+                    for cleanup_path in (dst_model, canonical_sidecar_dst, legacy_sidecar_dst):
+                        with contextlib.suppress(OSError):
+                            cleanup_path.unlink(missing_ok=True)
+                    copied_model_path = None
                     logger.warning("Failed to copy model for Stage %d backup: %s", stage, exc)
 
         if checkpoint_payload:
@@ -163,30 +209,49 @@ class TrainingBackupManager:
         snapshot_prefix = f"snapshot_stage{stage}_{timestamp_str}"
 
         dst_model: Path | None = None
+        model_copied = False
         if model_path:
             src_model = Path(model_path)
             if src_model.exists():
                 dst_model = self.hourly_dir / f"{snapshot_prefix}.zip"
+                canonical_sidecar_dst = get_sidecar_path_for_model(dst_model)
+                legacy_sidecar_dst = dst_model.with_name(f"{dst_model.name}.sidecar.json")
                 try:
-                    shutil.copy2(src_model, dst_model)
+                    _atomic_copy_file(src_model, dst_model)
                     sidecar = _find_sidecar_for_model(src_model)
                     if sidecar is not None:
-                        shutil.copy2(sidecar, get_sidecar_path_for_model(dst_model))
-                        shutil.copy2(sidecar, dst_model.with_name(f"{dst_model.name}.sidecar.json"))
+                        _atomic_copy_file(sidecar, canonical_sidecar_dst)
+                        _atomic_copy_file(sidecar, legacy_sidecar_dst)
+                    model_copied = True
                 except Exception as exc:
+                    for cleanup_path in (dst_model, canonical_sidecar_dst, legacy_sidecar_dst):
+                        with contextlib.suppress(OSError):
+                            cleanup_path.unlink(missing_ok=True)
+                    model_copied = False
                     logger.warning("Failed to copy active model for hourly backup: %s", exc)
 
         metadata = {
             "snapshot_id": snapshot_prefix,
             "stage": stage,
             "created_at": datetime.now(UTC).isoformat(),
-            "model_saved": dst_model is not None and dst_model.exists(),
+            "model_saved": model_copied,
             "training_state": training_state or {},
             "checkpoint_payload": checkpoint_payload or {},
             "active_runtime_seconds": active_runtime_seconds,
         }
         metadata_path = self.hourly_dir / f"{snapshot_prefix}.json"
-        atomic_write_json(metadata_path, metadata)
+        try:
+            atomic_write_json(metadata_path, metadata)
+        except BaseException:
+            if dst_model is not None and model_copied:
+                for cleanup_path in (
+                    dst_model,
+                    get_sidecar_path_for_model(dst_model),
+                    dst_model.with_name(f"{dst_model.name}.sidecar.json"),
+                ):
+                    with contextlib.suppress(OSError):
+                        cleanup_path.unlink(missing_ok=True)
+            raise
 
         self._last_hourly_backup_time = now
         if active_runtime_seconds is not None:

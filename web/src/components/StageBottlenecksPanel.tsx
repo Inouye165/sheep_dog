@@ -86,50 +86,68 @@ export const StageBottlenecksPanel: React.FC<StageBottlenecksPanelProps> = ({
     };
   }, [fetchDiagnostics]);
 
-  const getWinRateColor = (rate: number, total: number): { bg: string; border: string; text: string } => {
-    if (total === 0) return { bg: "bg-slate-900/40", border: "border-slate-800", text: "text-slate-500" };
-    if (rate >= 0.75) return { bg: "bg-emerald-950/40", border: "border-emerald-700/60", text: "text-emerald-400" };
-    if (rate >= 0.45) return { bg: "bg-amber-950/40", border: "border-amber-700/60", text: "text-amber-400" };
-    return { bg: "bg-rose-950/50", border: "border-rose-700/70", text: "text-rose-400" };
+  const getZoneTone = (rate: number, total: number): "empty" | "pass" | "warn" | "fail" => {
+    if (total === 0) return "empty";
+    if (rate >= 0.75) return "pass";
+    if (rate >= 0.45) return "warn";
+    return "fail";
   };
 
-  const getSeverityBadge = (severity: string) => {
+  const getRateTone = (rate: number): "pass" | "warn" | "fail" => {
+    if (rate >= 0.75) return "pass";
+    if (rate >= 0.45) return "warn";
+    return "fail";
+  };
+
+  const getSeverityVariant = (severity: string): "critical" | "warning" | "info" | "success" => {
     switch (severity) {
       case "critical":
-        return "bg-rose-500/20 text-rose-300 border-rose-500/40";
+        return "critical";
       case "warning":
-        return "bg-amber-500/20 text-amber-300 border-amber-500/40";
+        return "warning";
       case "info":
-        return "bg-sky-500/20 text-sky-300 border-sky-500/40";
+        return "info";
       default:
-        return "bg-emerald-500/20 text-emerald-300 border-emerald-500/40";
+        return "success";
     }
   };
 
+  const sortedPenStats = useMemo(() => {
+    return Object.values(report?.pen_stats ?? {}).sort(
+      (a, b) => a.win_rate - b.win_rate || b.total - a.total || a.placement.localeCompare(b.placement)
+    );
+  }, [report]);
+
+  const sortedSetupStats = useMemo(() => {
+    return Object.values(report?.setup_stats ?? {}).sort(
+      (a, b) => a.win_rate - b.win_rate || b.total - a.total || a.setup.localeCompare(b.setup)
+    );
+  }, [report]);
+
+  const overallRateTone = report ? getRateTone(report.overall_success_rate) : "fail";
+
   return (
-    <div className="space-y-6 mt-6 p-6 bg-slate-950 border border-slate-800 rounded-xl shadow-2xl text-slate-200">
+    <div className="ui-bottlenecks">
       {/* Header & Stage Selection Controls */}
-      <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-4">
-        <div>
-          <div className="flex items-center gap-3">
-            <span className="text-2xl">🎯</span>
-            <h2 className="text-xl font-bold tracking-tight text-slate-100">
-              Stage Learning Bottlenecks & Spatial Heatmap
-            </h2>
-          </div>
-          <p className="text-xs text-slate-400 mt-1">
+      <div className="ui-bottlenecks__header">
+        <div className="ui-bottlenecks__title-wrap">
+          <h2 className="ui-bottlenecks__title">
+            Stage Learning Bottlenecks & Spatial Heatmap
+          </h2>
+          <p className="ui-bottlenecks__subtitle">
             Historical failure and entrapment diagnosis across the lifetime of curriculum stages.
           </p>
         </div>
 
-        <div className="flex items-center gap-3">
-          <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+        <div className="ui-bottlenecks__controls">
+          <label htmlFor="bottlenecks-stage-select" className="ui-bottlenecks__stage-label">
             Curriculum Stage:
           </label>
           <select
+            id="bottlenecks-stage-select"
             value={selectedStage}
             onChange={(e) => setSelectedStage(Number(e.target.value))}
-            className="bg-slate-900 border border-slate-700 text-slate-200 text-sm rounded-lg px-3 py-1.5 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+            className="ui-bottlenecks__select"
           >
             {stageOptions.map((s) => (
               <option key={s} value={s}>
@@ -138,9 +156,10 @@ export const StageBottlenecksPanel: React.FC<StageBottlenecksPanelProps> = ({
             ))}
           </select>
           <button
+            type="button"
             onClick={() => void fetchDiagnostics()}
             disabled={loading}
-            className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-lg border border-slate-700 transition flex items-center gap-1.5 disabled:opacity-50"
+            className="ui-bottlenecks__refresh-btn"
           >
             {loading ? "Analyzing..." : "Refresh"}
           </button>
@@ -148,74 +167,69 @@ export const StageBottlenecksPanel: React.FC<StageBottlenecksPanelProps> = ({
       </div>
 
       {error && (
-        <div className="p-4 bg-rose-950/40 border border-rose-800 text-rose-300 rounded-lg text-sm">
+        <div className="ui-bottlenecks__error">
           {error}
         </div>
       )}
 
       {/* Stage Summary Statistics Banner */}
       {report && (
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-          <div className="p-3 bg-slate-900/60 border border-slate-800 rounded-lg">
-            <div className="text-[11px] font-semibold text-slate-400 uppercase">Stage Episodes</div>
-            <div className="text-xl font-bold text-slate-100 mt-0.5">{report.total_episodes}</div>
+        <div className="ui-bottlenecks__kpi-grid">
+          <div className="ui-bottlenecks__kpi-card">
+            <div className="ui-bottlenecks__kpi-label">Stage Episodes</div>
+            <div className="ui-bottlenecks__kpi-value">{report.total_episodes}</div>
           </div>
-          <div className="p-3 bg-slate-900/60 border border-slate-800 rounded-lg">
-            <div className="text-[11px] font-semibold text-slate-400 uppercase">Overall Win Rate</div>
-            <div className={`text-xl font-bold mt-0.5 ${report.overall_success_rate >= 0.75 ? "text-emerald-400" : report.overall_success_rate >= 0.45 ? "text-amber-400" : "text-rose-400"}`}>
+          <div className="ui-bottlenecks__kpi-card">
+            <div className="ui-bottlenecks__kpi-label">Overall Win Rate</div>
+            <div className={`ui-bottlenecks__kpi-value ui-bottlenecks__kpi-value--${overallRateTone}`}>
               {`${Math.round(report.overall_success_rate * 100)}%`}
             </div>
           </div>
-          <div className="p-3 bg-slate-900/60 border border-slate-800 rounded-lg">
-            <div className="text-[11px] font-semibold text-slate-400 uppercase">Corner Stuck Fails</div>
-            <div className="text-xl font-bold text-rose-400 mt-0.5">{report.corner_stuck_count}</div>
+          <div className="ui-bottlenecks__kpi-card">
+            <div className="ui-bottlenecks__kpi-label">Corner Stuck Fails</div>
+            <div className={`ui-bottlenecks__kpi-value ${report.corner_stuck_count > 0 ? "ui-bottlenecks__kpi-value--fail" : ""}`}>
+              {report.corner_stuck_count}
+            </div>
           </div>
-          <div className="p-3 bg-slate-900/60 border border-slate-800 rounded-lg">
-            <div className="text-[11px] font-semibold text-slate-400 uppercase">Avg Corner Time</div>
-            <div className="text-xl font-bold text-slate-100 mt-0.5">
+          <div className="ui-bottlenecks__kpi-card">
+            <div className="ui-bottlenecks__kpi-label">Avg Corner Time</div>
+            <div className="ui-bottlenecks__kpi-value">
               {`${Math.round(report.avg_corner_time_pct * 100)}%`}
             </div>
           </div>
-          <div className="p-3 bg-slate-900/60 border border-slate-800 rounded-lg">
-            <div className="text-[11px] font-semibold text-slate-400 uppercase">Avg Wall Time</div>
-            <div className="text-xl font-bold text-slate-100 mt-0.5">
+          <div className="ui-bottlenecks__kpi-card">
+            <div className="ui-bottlenecks__kpi-label">Avg Wall Time</div>
+            <div className="ui-bottlenecks__kpi-value">
               {`${Math.round(report.avg_wall_time_pct * 100)}%`}
             </div>
           </div>
-          <div className="p-3 bg-slate-900/60 border border-slate-800 rounded-lg">
-            <div className="text-[11px] font-semibold text-slate-400 uppercase">Avg Episode Steps</div>
-            <div className="text-xl font-bold text-slate-100 mt-0.5">{report.avg_steps}</div>
+          <div className="ui-bottlenecks__kpi-card">
+            <div className="ui-bottlenecks__kpi-label">Avg Episode Steps</div>
+            <div className="ui-bottlenecks__kpi-value">{report.avg_steps}</div>
           </div>
         </div>
       )}
 
       {/* Identified Root Cause Bottleneck Insights */}
       {report && report.insights && report.insights.length > 0 && (
-        <div className="space-y-3">
-          <h3 className="text-sm font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
-            <span>🔍</span> Identified Bottlenecks & Diagnostic Insights
+        <div className="ui-bottlenecks__section">
+          <h3 className="ui-bottlenecks__section-title">
+            Identified Bottlenecks & Diagnostic Insights
           </h3>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div className="ui-bottlenecks__insights-grid">
             {report.insights.map((insight, idx) => (
-              <div
-                key={idx}
-                className="p-4 bg-slate-900/80 border border-slate-800/80 rounded-xl space-y-2 relative overflow-hidden"
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="font-semibold text-slate-200 text-sm flex items-center gap-2">
-                    {insight.severity === "critical" && "🚨"}
-                    {insight.severity === "warning" && "⚠️"}
-                    {insight.severity === "info" && "ℹ️"}
-                    {insight.severity === "success" && "✅"}
+              <div key={idx} className="ui-bottlenecks__insight-card">
+                <div className="ui-bottlenecks__insight-header">
+                  <span className="ui-bottlenecks__insight-title">
                     {insight.title}
                   </span>
-                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border uppercase ${getSeverityBadge(insight.severity)}`}>
+                  <span className={`ui-bottlenecks__severity ui-bottlenecks__severity--${getSeverityVariant(insight.severity)}`}>
                     {insight.severity}
                   </span>
                 </div>
-                <p className="text-xs text-slate-300 leading-relaxed">{insight.message}</p>
+                <p className="ui-bottlenecks__insight-message">{insight.message}</p>
                 {insight.metric && (
-                  <div className="text-[11px] font-mono text-indigo-300 bg-indigo-950/40 px-2 py-1 rounded border border-indigo-800/40 inline-block">
+                  <div className="ui-bottlenecks__insight-metric">
                     {insight.metric}
                   </div>
                 )}
@@ -227,67 +241,70 @@ export const StageBottlenecksPanel: React.FC<StageBottlenecksPanelProps> = ({
 
       {/* 2D Spatial Arena Heatmap Matrix */}
       {report && report.zone_stats && (
-        <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
-              <span>🗺️</span> Spatial Zone Success Matrix (Initial Sheep Positions)
+        <div className="ui-bottlenecks__section">
+          <div className="ui-bottlenecks__section-header">
+            <h3 className="ui-bottlenecks__section-title">
+              Spatial Zone Success Matrix (Initial Sheep Positions)
             </h3>
-            <span className="text-xs text-slate-500">
+            <span className="ui-bottlenecks__section-meta">
               Discretized 9-Zone Field Matrix
             </span>
           </div>
 
-          <div className="grid grid-cols-3 gap-3">
+          <div className="ui-bottlenecks__zone-grid">
             {ZONE_GRID_LAYOUT.map((layout) => {
               const stat: ZoneMetricSummary | undefined = report.zone_stats[layout.id];
               const total = stat ? stat.total : 0;
               const wins = stat ? stat.wins : 0;
               const winRate = stat ? stat.win_rate : 0.0;
               const trapped = stat ? stat.trapped_at_end : 0;
-              const colors = getWinRateColor(winRate, total);
+              const tone = getZoneTone(winRate, total);
 
               return (
                 <div
                   key={layout.id}
-                  className={`p-4 rounded-xl border transition duration-200 ${colors.bg} ${colors.border} flex flex-col justify-between min-h-[140px]`}
+                  className={`ui-bottlenecks__zone-card ui-bottlenecks__zone-card--${tone}`}
                 >
                   <div>
-                    <div className="flex items-center justify-between gap-1 mb-1">
-                      <span className="text-xs font-bold text-slate-200 truncate">{layout.label}</span>
+                    <div className="ui-bottlenecks__zone-header">
+                      <span className="ui-bottlenecks__zone-label">{layout.label}</span>
                       {layout.isCorner && (
-                        <span className="text-[10px] px-1.5 py-0.2 bg-purple-950 text-purple-300 border border-purple-800 rounded font-semibold uppercase">
+                        <span className="ui-bottlenecks__zone-tag ui-bottlenecks__zone-tag--corner">
                           Corner
                         </span>
                       )}
                       {layout.isWall && (
-                        <span className="text-[10px] px-1.5 py-0.2 bg-blue-950 text-blue-300 border border-blue-800 rounded font-semibold uppercase">
+                        <span className="ui-bottlenecks__zone-tag ui-bottlenecks__zone-tag--wall">
                           Wall
                         </span>
                       )}
                     </div>
 
-                    <div className="mt-2 flex items-baseline justify-between">
-                      <span className={`text-2xl font-black ${colors.text}`}>
+                    <div className="ui-bottlenecks__zone-metrics">
+                      <span className="ui-bottlenecks__zone-rate">
                         {total > 0 ? `${Math.round(winRate * 100)}%` : "—"}
                       </span>
-                      <span className="text-xs text-slate-400 font-medium">
+                      <span className="ui-bottlenecks__zone-count">
                         {wins} / {total} wins
                       </span>
                     </div>
 
                     {total > 0 && (
-                      <div className="w-full bg-slate-800/80 rounded-full h-1.5 mt-2 overflow-hidden">
+                      <div className="ui-bottlenecks__zone-bar">
                         <div
-                          className={`h-1.5 rounded-full ${winRate >= 0.75 ? "bg-emerald-500" : winRate >= 0.45 ? "bg-amber-500" : "bg-rose-500"}`}
+                          className={`ui-bottlenecks__zone-bar-fill ui-bottlenecks__zone-bar-fill--${tone}`}
                           style={{ width: `${Math.round(winRate * 100)}%` }}
                         />
                       </div>
                     )}
                   </div>
 
-                  <div className="mt-3 pt-2 border-t border-slate-800/60 flex items-center justify-between text-[11px] text-slate-400">
+                  <div className="ui-bottlenecks__zone-footer">
                     <span>
-                      Trapped fails: <strong className={trapped > 0 ? "text-rose-400 font-bold" : "text-slate-300"}>{trapped}</strong>
+                      Trapped fails:{" "}
+                      <strong className={trapped > 0 ? "ui-bottlenecks__trapped--fail" : ""}>
+                        {trapped}
+                      </strong>
                     </span>
                     {stat && stat.avg_corner_pct > 0 && (
                       <span>
@@ -302,40 +319,40 @@ export const StageBottlenecksPanel: React.FC<StageBottlenecksPanelProps> = ({
         </div>
       )}
 
-      {/* Pen Placement & Setup Mix Breakdown Tables */}
+      {/* Pen Placement & Setup Mix Breakdown Tables (worst win-rate first) */}
       {report && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-2">
+        <div className="ui-bottlenecks__tables-grid">
           {/* Pen Placement Breakdown */}
-          <div className="space-y-3">
-            <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400">
+          <div className="ui-bottlenecks__table-section">
+            <h4 className="ui-bottlenecks__table-title">
               Pen Placement Performance
             </h4>
-            <div className="overflow-hidden border border-slate-800 rounded-xl bg-slate-900/40">
-              <table className="w-full text-left text-xs">
-                <thead className="bg-slate-900/90 text-slate-400 border-b border-slate-800 uppercase font-semibold">
+            <div className="ui-bottlenecks__table-wrap">
+              <table className="ui-bottlenecks__table">
+                <thead>
                   <tr>
-                    <th className="py-2.5 px-3">Pen Location</th>
-                    <th className="py-2.5 px-3">Episodes</th>
-                    <th className="py-2.5 px-3">Wins</th>
-                    <th className="py-2.5 px-3">Win %</th>
+                    <th>Pen Location</th>
+                    <th>Episodes</th>
+                    <th>Wins</th>
+                    <th>Win %</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-800/60">
-                  {Object.values(report.pen_stats ?? {}).length === 0 ? (
+                <tbody>
+                  {sortedPenStats.length === 0 ? (
                     <tr>
-                      <td colSpan={4} className="py-4 text-center text-slate-500">
+                      <td colSpan={4} className="ui-bottlenecks__table-empty">
                         No pen placement records recorded.
                       </td>
                     </tr>
                   ) : (
-                    Object.values(report.pen_stats ?? {}).map((p, idx) => (
-                      <tr key={idx} className="hover:bg-slate-900/60 transition">
-                        <td className="py-2.5 px-3 font-medium text-slate-200 capitalize">
-                          {p.placement.replace("_", " ")}
+                    sortedPenStats.map((p) => (
+                      <tr key={p.placement}>
+                        <td className="ui-bottlenecks__cell-label">
+                          {p.placement.replace(/_/g, " ")}
                         </td>
-                        <td className="py-2.5 px-3 text-slate-400">{p.total}</td>
-                        <td className="py-2.5 px-3 text-slate-300">{p.wins}</td>
-                        <td className={`py-2.5 px-3 font-bold ${p.win_rate >= 0.75 ? "text-emerald-400" : p.win_rate >= 0.45 ? "text-amber-400" : "text-rose-400"}`}>
+                        <td className="ui-bottlenecks__cell-num">{p.total}</td>
+                        <td className="ui-bottlenecks__cell-num">{p.wins}</td>
+                        <td className={`ui-bottlenecks__rate ui-bottlenecks__rate--${getRateTone(p.win_rate)}`}>
                           {`${Math.round(p.win_rate * 100)}%`}
                         </td>
                       </tr>
@@ -347,36 +364,36 @@ export const StageBottlenecksPanel: React.FC<StageBottlenecksPanelProps> = ({
           </div>
 
           {/* Setup / Spawn Mode Breakdown */}
-          <div className="space-y-3">
-            <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400">
+          <div className="ui-bottlenecks__table-section">
+            <h4 className="ui-bottlenecks__table-title">
               Setup & Spawn Mode Performance
             </h4>
-            <div className="overflow-hidden border border-slate-800 rounded-xl bg-slate-900/40">
-              <table className="w-full text-left text-xs">
-                <thead className="bg-slate-900/90 text-slate-400 border-b border-slate-800 uppercase font-semibold">
+            <div className="ui-bottlenecks__table-wrap">
+              <table className="ui-bottlenecks__table">
+                <thead>
                   <tr>
-                    <th className="py-2.5 px-3">Setup / Mode</th>
-                    <th className="py-2.5 px-3">Episodes</th>
-                    <th className="py-2.5 px-3">Wins</th>
-                    <th className="py-2.5 px-3">Win %</th>
+                    <th>Setup / Mode</th>
+                    <th>Episodes</th>
+                    <th>Wins</th>
+                    <th>Win %</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-800/60">
-                  {Object.values(report.setup_stats ?? {}).length === 0 ? (
+                <tbody>
+                  {sortedSetupStats.length === 0 ? (
                     <tr>
-                      <td colSpan={4} className="py-4 text-center text-slate-500">
+                      <td colSpan={4} className="ui-bottlenecks__table-empty">
                         No setup configuration records recorded.
                       </td>
                     </tr>
                   ) : (
-                    Object.values(report.setup_stats ?? {}).map((s, idx) => (
-                      <tr key={idx} className="hover:bg-slate-900/60 transition">
-                        <td className="py-2.5 px-3 font-medium text-slate-200 capitalize">
-                          {s.setup.replace("_", " ")}
+                    sortedSetupStats.map((s) => (
+                      <tr key={s.setup}>
+                        <td className="ui-bottlenecks__cell-label">
+                          {s.setup.replace(/_/g, " ")}
                         </td>
-                        <td className="py-2.5 px-3 text-slate-400">{s.total}</td>
-                        <td className="py-2.5 px-3 text-slate-300">{s.wins}</td>
-                        <td className={`py-2.5 px-3 font-bold ${s.win_rate >= 0.75 ? "text-emerald-400" : s.win_rate >= 0.45 ? "text-amber-400" : "text-rose-400"}`}>
+                        <td className="ui-bottlenecks__cell-num">{s.total}</td>
+                        <td className="ui-bottlenecks__cell-num">{s.wins}</td>
+                        <td className={`ui-bottlenecks__rate ui-bottlenecks__rate--${getRateTone(s.win_rate)}`}>
                           {`${Math.round(s.win_rate * 100)}%`}
                         </td>
                       </tr>

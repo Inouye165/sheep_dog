@@ -44,10 +44,41 @@ class RewardBreakdown:
     farthest_sheep_progress: float = 0.0
     stray_ignore_penalty: float = 0.0
     stray_approach_progress: float = 0.0
+    regrouping_approach: float = 0.0
 
     def to_dict(self) -> dict[str, float]:
         """Serialize to a plain dict."""
-        return asdict(self)
+        return {
+            "progress_to_pen": self.progress_to_pen,
+            "sheep_penned": self.sheep_penned,
+            "flock_cohesion": self.flock_cohesion,
+            "scatter_penalty": self.scatter_penalty,
+            "time_penalty": self.time_penalty,
+            "no_progress_penalty": self.no_progress_penalty,
+            "wall_pressure_penalty": self.wall_pressure_penalty,
+            "wait_penalty": self.wait_penalty,
+            "sprint_cost": self.sprint_cost,
+            "gate_progress": self.gate_progress,
+            "gate_corridor_progress": self.gate_corridor_progress,
+            "gate_alignment": self.gate_alignment,
+            "lane_crowding_penalty": self.lane_crowding_penalty,
+            "stalled_control_penalty": self.stalled_control_penalty,
+            "wrong_hold_penalty": self.wrong_hold_penalty,
+            "terminal_success": self.terminal_success,
+            "terminal_failure": self.terminal_failure,
+            "pressure_zone": self.pressure_zone,
+            "safe_pressure": self.safe_pressure,
+            "grouping": self.grouping,
+            "target_progress": self.target_progress,
+            "chaos_penalty": self.chaos_penalty,
+            "overpressure_penalty": self.overpressure_penalty,
+            "split_flock_penalty": self.split_flock_penalty,
+            "total": self.total,
+            "farthest_sheep_progress": self.farthest_sheep_progress,
+            "stray_ignore_penalty": self.stray_ignore_penalty,
+            "stray_approach_progress": self.stray_approach_progress,
+            "regrouping_approach": self.regrouping_approach,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,7 +273,13 @@ class RewardComputer:
             + instincts["split_flock_penalty"]
         )
         stray_approach_progress = self._compute_approach_progress(inputs)
-        total += farthest_sheep_progress + stray_ignore_penalty + stray_approach_progress
+        regrouping_approach = self._compute_regrouping_approach(inputs)
+        total += (
+            farthest_sheep_progress
+            + stray_ignore_penalty
+            + stray_approach_progress
+            + regrouping_approach
+        )
         total = max(-15.0, total)
         return RewardBreakdown(
             progress_to_pen=progress_to_pen,
@@ -273,6 +310,7 @@ class RewardComputer:
             farthest_sheep_progress=farthest_sheep_progress,
             stray_ignore_penalty=stray_ignore_penalty,
             stray_approach_progress=stray_approach_progress,
+            regrouping_approach=regrouping_approach,
         )
 
     def _compute_instincts(self, inputs: RewardInputs) -> dict[str, float]:
@@ -451,6 +489,31 @@ class RewardComputer:
         # At the saved stage-34 scale (0.013), absolute progress is at most 0.26.
         # Skip penning transitions to avoid bonuses from removing sheep slots.
         return (previous - current) * scale * 20.0
+
+    def _compute_regrouping_approach(self, inputs: RewardInputs) -> float:
+        """Pure potential-based shaping for approaching unpenned sheep during regrouping.
+
+        Uses ``_approach_potential`` so any closed state loop or oscillation sums
+        to exact ``0.0``. Zeroed on penning or terminal transitions.
+        """
+        scale = self._config.regrouping_approach_scale
+        if (
+            scale == 0.0
+            or not inputs.previous_dog_positions
+            or not inputs.dog_positions
+            or not inputs.previous_sheep_positions
+            or not inputs.sheep_positions
+            or inputs.newly_penned > 0
+            or inputs.terminated
+            or inputs.timeout
+            or inputs.success
+        ):
+            return 0.0
+        previous = self._approach_potential(
+            inputs.previous_dog_positions, inputs.previous_sheep_positions
+        )
+        current = self._approach_potential(inputs.dog_positions, inputs.sheep_positions)
+        return (previous - current) * scale
 
     def _lane_crowding_penalty(self, inputs: RewardInputs) -> float:
         target = inputs.target_position

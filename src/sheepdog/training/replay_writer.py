@@ -11,6 +11,7 @@ import os
 import queue
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -246,7 +247,9 @@ class AsyncReplayWriter:
         tmp_path: Path | None = None
         try:
             job.output_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = job.output_path.with_suffix(job.output_path.suffix + ".tmp")
+            tmp_path = job.output_path.with_suffix(
+                f"{job.output_path.suffix}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
+            )
 
             if job.use_gzip:
                 with gzip.open(tmp_path, "wt", encoding="utf-8") as handle:

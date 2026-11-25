@@ -3,10 +3,12 @@
 # pylint: disable=protected-access
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from math import hypot
 from typing import TYPE_CHECKING, Any
 
+from sheepdog.config import validate_observation_history_strides
 from sheepdog.entities import DogRole, Point
 from sheepdog.shepherd import COMMAND_INDEX, COMMAND_ORDER, ShepherdCommand
 from sheepdog.team_strategy import RoleAssignment
@@ -36,6 +38,7 @@ GATE_FEATURE_NAMES: tuple[str, ...] = (
     "gate_normal_y",
 )
 GATE_OBSERVATION_SCHEMA_VERSION: str = "guided_gate_v1"
+EMERGENT_GATE_OBSERVATION_SCHEMA_VERSION: str = "emergent_gate_v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +59,9 @@ class DogObservation:
 
 class RoleAwareObservationBuilder:
     """Build comparable dog observations for linear and neural policies."""
+
+    def __init__(self, *, include_loop_flags: bool = True) -> None:
+        self.include_loop_flags = bool(include_loop_flags)
 
     def build(self, environment: SheepdogEnvironment, dog_index: int) -> DogObservation:
         """Return a flat observation vector for one dog."""
@@ -96,8 +102,11 @@ class RoleAwareObservationBuilder:
                 "wall_bottom",
                 "blocked_steps",
                 "no_progress_steps",
-                "revisits_recent_position",
-                "two_position_loop",
+                *(
+                    ("revisits_recent_position", "two_position_loop")
+                    if self.include_loop_flags
+                    else ()
+                ),
                 "stray_present",
             )
         )
@@ -117,10 +126,16 @@ class RoleAwareObservationBuilder:
                 min(dog.blocked_steps, 10) / 10.0,
                 min(environment._no_progress_steps, environment.env_config.no_progress_window)
                 / max(1, environment.env_config.no_progress_window),
-                1.0
-                if environment._revisits_recent_position(dog.recent_positions, dog.position)
-                else 0.0,
-                1.0 if environment._in_two_position_loop(dog.recent_positions) else 0.0,
+                *(
+                    (
+                        1.0
+                        if environment._revisits_recent_position(dog.recent_positions, dog.position)
+                        else 0.0,
+                        1.0 if environment._in_two_position_loop(dog.recent_positions) else 0.0,
+                    )
+                    if self.include_loop_flags
+                    else ()
+                ),
                 1.0 if stray_sheep is not None else 0.0,
             )
         )
@@ -354,6 +369,9 @@ class EmergentObservationBuilder:
     - Other dog positions (HERD_DOG_SLOTS - 1 slots)
     """
 
+    def __init__(self, *, include_loop_flags: bool = True) -> None:
+        self.include_loop_flags = bool(include_loop_flags)
+
     def build(self, environment: SheepdogEnvironment, dog_index: int) -> DogObservation:
         """Return a flat emergent observation vector for one dog."""
         dog = environment.dogs[dog_index]
@@ -392,8 +410,11 @@ class EmergentObservationBuilder:
                 "wall_bottom",
                 "blocked_steps",
                 "no_progress_steps",
-                "revisits_recent_position",
-                "two_position_loop",
+                *(
+                    ("revisits_recent_position", "two_position_loop")
+                    if self.include_loop_flags
+                    else ()
+                ),
                 "stray_present",
             )
         )
@@ -414,10 +435,16 @@ class EmergentObservationBuilder:
                 min(dog.blocked_steps, 10) / 10.0,
                 min(environment._no_progress_steps, environment.env_config.no_progress_window)  # pylint: disable=protected-access
                 / max(1, environment.env_config.no_progress_window),
-                1.0
-                if environment._revisits_recent_position(dog.recent_positions, dog.position)  # pylint: disable=protected-access
-                else 0.0,
-                1.0 if environment._in_two_position_loop(dog.recent_positions) else 0.0,  # pylint: disable=protected-access
+                *(
+                    (
+                        1.0
+                        if environment._revisits_recent_position(dog.recent_positions, dog.position)  # pylint: disable=protected-access
+                        else 0.0,
+                        1.0 if environment._in_two_position_loop(dog.recent_positions) else 0.0,  # pylint: disable=protected-access
+                    )
+                    if self.include_loop_flags
+                    else ()
+                ),
                 stray_present,
             )
         )
@@ -539,39 +566,58 @@ class EmergentObservationBuilder:
         )
 
 
-class GateAwareObservationBuilder(RoleAwareObservationBuilder):
-    """Extend the 54-feature role-aware builder with 4 explicit gate features."""
+def _compute_gate_feature_values(
+    environment: SheepdogEnvironment,
+    dog_index: int,
+    *,
+    zero_gate_features: bool = False,
+) -> tuple[float, float, float, float]:
+    """Compute the 4 normalized gate entrance offset and outward normal features."""
+    if zero_gate_features:
+        return (0.0, 0.0, 0.0, 0.0)
+    dog = environment.dogs[dog_index]
+    gate_center = environment._gate_entrance_center()
+    vx, vy = environment._gate_vector_into_pen()
+    gate_normal_x = 0.0 if vx == 0.0 else float(-vx)
+    gate_normal_y = 0.0 if vy == 0.0 else float(-vy)
+    width_denom = max(1, environment.env_config.width - 1)
+    height_denom = max(1, environment.env_config.height - 1)
+    gate_center_dx = max(
+        -1.0,
+        min(1.0, (gate_center.x - dog.position.x) / width_denom),
+    )
+    gate_center_dy = max(
+        -1.0,
+        min(1.0, (gate_center.y - dog.position.y) / height_denom),
+    )
+    return (
+        float(gate_center_dx),
+        float(gate_center_dy),
+        gate_normal_x,
+        gate_normal_y,
+    )
 
-    def __init__(self, *, zero_gate_features: bool = False) -> None:
+
+class GateAwareObservationBuilder(RoleAwareObservationBuilder):
+    """Extend the role-aware builder with 4 explicit gate features."""
+
+    def __init__(
+        self,
+        *,
+        zero_gate_features: bool = False,
+        include_loop_flags: bool = True,
+    ) -> None:
+        super().__init__(include_loop_flags=include_loop_flags)
         self.zero_gate_features = bool(zero_gate_features)
 
     def build(self, environment: SheepdogEnvironment, dog_index: int) -> DogObservation:
-        """Return a 58-feature observation vector appending gate features or zeros."""
+        """Return a role-aware observation vector appending gate features or zeros."""
         base = super().build(environment, dog_index)
-        if self.zero_gate_features:
-            gate_values = (0.0, 0.0, 0.0, 0.0)
-        else:
-            dog = environment.dogs[dog_index]
-            gate_center = environment._gate_entrance_center()
-            vx, vy = environment._gate_vector_into_pen()
-            gate_normal_x = 0.0 if vx == 0.0 else float(-vx)
-            gate_normal_y = 0.0 if vy == 0.0 else float(-vy)
-            width_denom = max(1, environment.env_config.width - 1)
-            height_denom = max(1, environment.env_config.height - 1)
-            gate_center_dx = max(
-                -1.0,
-                min(1.0, (gate_center.x - dog.position.x) / width_denom),
-            )
-            gate_center_dy = max(
-                -1.0,
-                min(1.0, (gate_center.y - dog.position.y) / height_denom),
-            )
-            gate_values = (
-                float(gate_center_dx),
-                float(gate_center_dy),
-                gate_normal_x,
-                gate_normal_y,
-            )
+        gate_values = _compute_gate_feature_values(
+            environment,
+            dog_index,
+            zero_gate_features=self.zero_gate_features,
+        )
         return DogObservation(
             dog_index=base.dog_index,
             role=base.role,
@@ -585,16 +631,85 @@ class GateAwareObservationBuilder(RoleAwareObservationBuilder):
         )
 
 
+class EmergentGateObservationBuilder(EmergentObservationBuilder):
+    """Extend the role-free emergent builder with 4 explicit gate features."""
+
+    def build(self, environment: SheepdogEnvironment, dog_index: int) -> DogObservation:
+        """Return a role-free emergent observation vector appending gate features."""
+        base = super().build(environment, dog_index)
+        gate_values = _compute_gate_feature_values(
+            environment,
+            dog_index,
+            zero_gate_features=False,
+        )
+        return DogObservation(
+            dog_index=base.dog_index,
+            role=base.role,
+            feature_names=base.feature_names + GATE_FEATURE_NAMES,
+            values=base.values + gate_values,
+            metadata={
+                **base.metadata,
+                "observation_schema_version": EMERGENT_GATE_OBSERVATION_SCHEMA_VERSION,
+            },
+        )
+
+
+def stack_strided_observations(
+    history_by_step: Mapping[int, DogObservation],
+    current_step: int,
+    strides: tuple[int, ...],
+) -> DogObservation:
+    """Stack base observations at ``(current_step - s for s in strides)``, clamping at step 0."""
+    validated_strides = validate_observation_history_strides(strides)
+    if current_step not in history_by_step:
+        raise KeyError(f"Missing current_step={current_step} in observation history")
+    current_obs = history_by_step[current_step]
+    feature_names: list[str] = []
+    values: list[float] = []
+    for stride in validated_strides:
+        sample_step = max(0, current_step - stride)
+        if sample_step not in history_by_step:
+            raise KeyError(
+                f"Missing sample_step={sample_step} (current_step={current_step}, stride={stride}) in observation history"
+            )
+        sample_obs = history_by_step[sample_step]
+        if stride == 0:
+            feature_names.extend(sample_obs.feature_names)
+        else:
+            feature_names.extend(f"{name}@t-{stride}" for name in sample_obs.feature_names)
+        values.extend(sample_obs.values)
+    return DogObservation(
+        dog_index=current_obs.dog_index,
+        role=current_obs.role,
+        feature_names=tuple(feature_names),
+        values=tuple(values),
+        metadata={
+            **current_obs.metadata,
+            "observation_history_strides": validated_strides,
+        },
+    )
+
+
 def build_observation_builder(
     observation_mode: str,
+    *,
+    include_loop_flags: bool = True,
 ) -> RoleAwareObservationBuilder | EmergentObservationBuilder:
     """Return the observation builder corresponding to *observation_mode*."""
     if observation_mode == "guided":
-        return RoleAwareObservationBuilder()
+        return RoleAwareObservationBuilder(include_loop_flags=include_loop_flags)
     if observation_mode == "emergent":
-        return EmergentObservationBuilder()
+        return EmergentObservationBuilder(include_loop_flags=include_loop_flags)
     if observation_mode == "guided_gate_control":
-        return GateAwareObservationBuilder(zero_gate_features=True)
+        return GateAwareObservationBuilder(
+            zero_gate_features=True,
+            include_loop_flags=include_loop_flags,
+        )
     if observation_mode == "guided_gate_treatment":
-        return GateAwareObservationBuilder(zero_gate_features=False)
+        return GateAwareObservationBuilder(
+            zero_gate_features=False,
+            include_loop_flags=include_loop_flags,
+        )
+    if observation_mode == "emergent_gate":
+        return EmergentGateObservationBuilder(include_loop_flags=include_loop_flags)
     raise ValueError(f"Unsupported observation_mode: {observation_mode!r}")

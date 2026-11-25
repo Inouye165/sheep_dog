@@ -1,0 +1,53 @@
+{
+ "split": {
+  "0": [
+   "collector",
+   58,
+   87
+  ],
+  "1": [
+   "rear_pressure",
+   73,
+   56
+  ],
+  "2": [
+   "left_flanker",
+   84,
+   37
+  ]
+ },
+ "corner": {
+  "0": [
+   "collector",
+   3,
+   100
+  ],
+  "1": [
+   "rear_pressure",
+   63,
+   59
+  ],
+  "2": [
+   "left_flanker",
+   88,
+   26
+  ]
+ },
+ "clustered": {
+  "0": [
+   "right_flanker",
+   67,
+   49
+  ],
+  "1": [
+   "rear_pressure",
+   75,
+   49
+  ],
+  "2": [
+   "left_flanker",
+   75,
+   41
+  ]
+ }
+}

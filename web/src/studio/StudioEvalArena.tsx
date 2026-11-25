@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { isDocumentVisible } from "../hooks/useVisibility";
 import {
   fetchReplayById,
   loadRecentEvaluations,
@@ -16,7 +17,22 @@ import type {
 import { StudioFieldCanvas, snapshotFromReplay, type AnyReplayPayload } from "./StudioFieldCanvas";
 
 const DEFAULT_BENCHMARK_SEEDS = [11, 23, 37, 41, 53, 59, 61, 67, 71, 73];
-const MAX_ARENA_REPLAY_CACHE_ENTRIES = 40;
+const MAX_ARENA_REPLAY_CACHE_ENTRIES = 12;
+
+function buildEvaluationSummarySignature(
+  stageFilter: "current" | "all",
+  effectiveStage: number,
+  list: EvaluationSummaryPayload[],
+): string {
+  const entriesSig = list
+    .map((ev) => {
+      const recordCount =
+        ev.records?.length ?? (ev as { episodes?: unknown[] }).episodes?.length ?? 0;
+      return `${ev.evaluation_id ?? ""}:${ev.checkpoint_episode}:${ev.evaluation_timestamp ?? ""}:${recordCount}`;
+    })
+    .join("|");
+  return `${stageFilter}:${effectiveStage}::${entriesSig}`;
+}
 
 export interface UnifiedSeedEpisode {
   seed: number;
@@ -85,6 +101,18 @@ export const StudioEvalArena: React.FC<StudioEvalArenaProps> = ({
   const [loadingSeeds, setLoadingSeeds] = useState<Record<number, boolean>>({});
   const [simulatingAll, setSimulatingAll] = useState<boolean>(false);
   const replayCacheRef = useRef<Map<string, AnyReplayPayload>>(new Map());
+  const evalFetchInFlightRef = useRef<boolean>(false);
+  const lastEvalSignatureRef = useRef<string>("");
+  const mountedRef = useRef<boolean>(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    const cache = replayCacheRef.current;
+    return () => {
+      mountedRef.current = false;
+      cache.clear();
+    };
+  }, []);
 
   const cacheArenaReplay = useCallback((key: string, payload: AnyReplayPayload) => {
     const map = replayCacheRef.current;
@@ -101,21 +129,47 @@ export const StudioEvalArena: React.FC<StudioEvalArenaProps> = ({
 
   // Fetch recent evaluations from API
   const fetchEvaluations = useCallback(async () => {
+    if (evalFetchInFlightRef.current || !isDocumentVisible()) {
+      return;
+    }
+    evalFetchInFlightRef.current = true;
     try {
       const stageParam = stageFilter === "current" ? effectiveStage : undefined;
       const list = await loadRecentEvaluations(25, stageParam);
+      if (!mountedRef.current) return;
       if (Array.isArray(list)) {
-        setApiEvaluations(list);
+        const sig = buildEvaluationSummarySignature(stageFilter, effectiveStage, list);
+        if (sig !== lastEvalSignatureRef.current) {
+          lastEvalSignatureRef.current = sig;
+          setApiEvaluations(list);
+        }
       }
     } catch {
       // Fallback to checkpoint index records silently
+    } finally {
+      evalFetchInFlightRef.current = false;
     }
   }, [effectiveStage, stageFilter]);
 
   useEffect(() => {
-    fetchEvaluations();
-    const timer = window.setInterval(fetchEvaluations, 6000);
-    return () => window.clearInterval(timer);
+    if (isDocumentVisible()) {
+      void fetchEvaluations();
+    }
+    const timer = window.setInterval(() => {
+      if (isDocumentVisible()) {
+        void fetchEvaluations();
+      }
+    }, 15000);
+    const handleVisibilityChange = () => {
+      if (isDocumentVisible()) {
+        void fetchEvaluations();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
   }, [fetchEvaluations]);
 
   // Merge API evaluations + CheckpointIndex entries into a unified list sorted newest first
@@ -247,6 +301,16 @@ export const StudioEvalArena: React.FC<StudioEvalArenaProps> = ({
     [unifiedEvaluations, selectedEvalKey]
   );
 
+  const activeEvaluationRef = useRef<UnifiedEvaluation | null>(activeEvaluation);
+  activeEvaluationRef.current = activeEvaluation;
+
+  const activeEvalSignature = useMemo(() => {
+    if (!activeEvaluation) return "";
+    return `${activeEvaluation.key}|${activeEvaluation.episodes
+      .map((e) => `${e.seed}:${e.replay_id ?? ""}:${e.replay_path ?? ""}`)
+      .join(",")}`;
+  }, [activeEvaluation]);
+
   // Per-seed cross-evaluation reliability analysis
   const reliabilityAnalysis = useMemo(
     () =>
@@ -268,7 +332,8 @@ export const StudioEvalArena: React.FC<StudioEvalArenaProps> = ({
 
   // Load replays for all 10 seeds of the active evaluation
   useEffect(() => {
-    if (!activeEvaluation) {
+    const currentEvaluation = activeEvaluationRef.current;
+    if (!currentEvaluation || !activeEvalSignature) {
       setReplaysBySeed({});
       return;
     }
@@ -277,8 +342,8 @@ export const StudioEvalArena: React.FC<StudioEvalArenaProps> = ({
     const nextReplays: Record<number, AnyReplayPayload | null> = {};
     const toLoad: UnifiedSeedEpisode[] = [];
 
-    for (const ep of activeEvaluation.episodes) {
-      const cacheKey = `${activeEvaluation.checkpoint_episode}:${ep.seed}`;
+    for (const ep of currentEvaluation.episodes) {
+      const cacheKey = `${currentEvaluation.checkpoint_episode}:${ep.seed}`;
       const cached = replayCacheRef.current.get(cacheKey);
       if (cached) {
         cacheArenaReplay(cacheKey, cached);
@@ -303,7 +368,7 @@ export const StudioEvalArena: React.FC<StudioEvalArenaProps> = ({
 
       await Promise.all(
         toLoad.map(async (ep) => {
-          const cacheKey = `${activeEvaluation.checkpoint_episode}:${ep.seed}`;
+          const cacheKey = `${currentEvaluation.checkpoint_episode}:${ep.seed}`;
           try {
             let payload: AnyReplayPayload | null = null;
             if (ep.replay_id) {
@@ -337,7 +402,7 @@ export const StudioEvalArena: React.FC<StudioEvalArenaProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [activeEvaluation, cacheArenaReplay]);
+  }, [activeEvalSignature, cacheArenaReplay]);
 
   // On-demand simulation for any seed whose historical replay was pruned
   const handleSimulateSeed = useCallback(
@@ -396,6 +461,9 @@ export const StudioEvalArena: React.FC<StudioEvalArenaProps> = ({
     if (!isPlaying || arenaLayout === "matrix") return;
     const intervalMs = Math.max(18, Math.round(110 / playbackSpeed));
     const timer = window.setInterval(() => {
+      if (!isDocumentVisible()) {
+        return;
+      }
       setCurrentStep((prev) => {
         if (prev >= maxSteps) {
           if (autoLoop) return 0;
@@ -492,7 +560,7 @@ export const StudioEvalArena: React.FC<StudioEvalArenaProps> = ({
                 <option key={ev.key} value={ev.key}>
                   Ep {ev.checkpoint_episode} (Stage {ev.stage}) — {ev.success_rate_pct}% (
                   {ev.episodes.filter((x) => x.success).length}/{ev.episodes.length} seeds)
-                  {ev.is_best ? " ★ BEST" : ""}
+                  {ev.is_best ? " (Best)" : ""}
                 </option>
               ))
             )}
@@ -501,10 +569,11 @@ export const StudioEvalArena: React.FC<StudioEvalArenaProps> = ({
           <button
             type="button"
             className={`sd-btn sd-btn--sm ${pinnedEval ? "sd-btn--amber" : ""}`}
+            aria-pressed={pinnedEval}
             onClick={() => setPinnedEval((p) => !p)}
             title="Pin current evaluation so background training doesn't auto-switch it"
           >
-            {pinnedEval ? "📌 Pinned" : "Pin"}
+            {pinnedEval ? "Pinned" : "Pin"}
           </button>
 
           {activeEvaluation && (
@@ -538,41 +607,45 @@ export const StudioEvalArena: React.FC<StudioEvalArenaProps> = ({
           <div className="sd-eval-master-scrubber">
             <button
               type="button"
-              className="sd-btn sd-btn--sm sd-btn--icon"
+              className="sd-btn sd-btn--sm"
               onClick={() => setCurrentStep(0)}
               title="Reset to step 0"
+              aria-label="Reset to step 0"
             >
-              ⏮
+              Start
             </button>
             <button
               type="button"
-              className="sd-btn sd-btn--sm sd-btn--icon"
+              className="sd-btn sd-btn--sm"
               onClick={() => {
                 setIsPlaying(false);
                 setCurrentStep((s) => Math.max(0, s - 1));
               }}
               title="Step backward"
+              aria-label="Step backward"
             >
-              ◀
+              -1
             </button>
             <button
               type="button"
               className="sd-btn sd-btn--sm sd-btn--primary"
               onClick={() => setIsPlaying((p) => !p)}
-              style={{ minWidth: 68 }}
+              style={{ minWidth: 64 }}
+              aria-label={isPlaying ? "Pause playback" : "Play"}
             >
-              {isPlaying ? "⏸ Pause" : "▶ Play"}
+              {isPlaying ? "Pause" : "Play"}
             </button>
             <button
               type="button"
-              className="sd-btn sd-btn--sm sd-btn--icon"
+              className="sd-btn sd-btn--sm"
               onClick={() => {
                 setIsPlaying(false);
                 setCurrentStep((s) => Math.min(maxSteps, s + 1));
               }}
               title="Step forward"
+              aria-label="Step forward"
             >
-              ▶
+              +1
             </button>
 
             <input
@@ -614,10 +687,11 @@ export const StudioEvalArena: React.FC<StudioEvalArenaProps> = ({
             <button
               type="button"
               className={`sd-btn sd-btn--sm ${autoLoop ? "sd-btn--emerald" : "sd-btn--ghost"}`}
+              aria-pressed={autoLoop}
               onClick={() => setAutoLoop((l) => !l)}
               title="Auto-loop all 10 episodes"
             >
-              🔁 Loop
+              Loop
             </button>
           </div>
         )}
@@ -633,8 +707,8 @@ export const StudioEvalArena: React.FC<StudioEvalArenaProps> = ({
               title="Simulate missing seed replays on-demand using checkpoint model"
             >
               {simulatingAll
-                ? "⚡ Simulating..."
-                : `⚡ Simulate ${missingReplayCount} Missing`}
+                ? "Simulating..."
+                : `Simulate ${missingReplayCount} Missing`}
             </button>
           )}
 
@@ -651,14 +725,14 @@ export const StudioEvalArena: React.FC<StudioEvalArenaProps> = ({
               className={`sd-pill-btn ${seedFilter === "passed" ? "sd-pill-btn--active" : ""}`}
               onClick={() => setSeedFilter("passed")}
             >
-              ✓ Pass ({passedCount})
+              Pass ({passedCount})
             </button>
             <button
               type="button"
               className={`sd-pill-btn ${seedFilter === "failed" ? "sd-pill-btn--active" : ""}`}
               onClick={() => setSeedFilter("failed")}
             >
-              ✗ Fail ({failedCount})
+              Fail ({failedCount})
             </button>
           </div>
 
@@ -747,20 +821,21 @@ export const StudioEvalArena: React.FC<StudioEvalArenaProps> = ({
                       }`}
                       style={{ padding: "0.08rem 0.4rem", fontSize: "0.62rem" }}
                     >
-                      {ep.success ? "✓ PASS" : "✗ FAIL"}
+                      {ep.success ? "PASS" : "FAIL"}
                     </span>
                     <button
                       type="button"
                       className="sd-btn sd-btn--sm sd-btn--ghost"
-                      style={{ padding: "0.05rem 0.3rem", fontSize: "0.65rem" }}
+                      style={{ padding: "0.05rem 0.35rem", fontSize: "0.65rem" }}
                       title="Focus this seed in Split Inspector"
+                      aria-label={`Focus Seed #${ep.seed}`}
                       onClick={(e) => {
                         e.stopPropagation();
                         setFocusedSeed(ep.seed);
                         setArenaLayout("focus");
                       }}
                     >
-                      ⤢
+                      Focus
                     </button>
                   </div>
                 </div>
@@ -790,7 +865,7 @@ export const StudioEvalArena: React.FC<StudioEvalArenaProps> = ({
                               handleSimulateSeed(ep.seed);
                             }}
                           >
-                            ⚡ Simulate Seed #{ep.seed}
+                            Simulate Seed #{ep.seed}
                           </button>
                         </>
                       )}
@@ -800,14 +875,14 @@ export const StudioEvalArena: React.FC<StudioEvalArenaProps> = ({
 
                 <div className="sd-seed-card__footer">
                   <span>
-                    🐑{" "}
+                    Penned:{" "}
                     <strong style={{ color: "var(--sd-text-primary)" }}>
                       {snapshot?.penned_count ?? ep.sheep_penned}
+                      {ep.total_sheep ? `/${ep.total_sheep}` : ""}
                     </strong>
-                    {ep.total_sheep ? `/${ep.total_sheep}` : ""} penned
                   </span>
                   <span>
-                    ⏱{" "}
+                    Steps:{" "}
                     <strong
                       style={{
                         color: isFinishedAtStep
@@ -818,8 +893,7 @@ export const StudioEvalArena: React.FC<StudioEvalArenaProps> = ({
                       }}
                     >
                       {clampedFrame}/{ep.steps}
-                    </strong>{" "}
-                    steps
+                    </strong>
                   </span>
                   <span>
                     R:{" "}
@@ -849,13 +923,13 @@ export const StudioEvalArena: React.FC<StudioEvalArenaProps> = ({
           <div className="sd-panel" style={{ display: "flex", flexDirection: "column" }}>
             <div className="sd-panel-header">
               <div className="sd-panel-title">
-                <span>🔍 Focus Seed #{focusedEpisode.seed}</span>
+                <span>Focus Seed #{focusedEpisode.seed}</span>
                 <span
                   className={`sd-badge ${
                     focusedEpisode.success ? "sd-badge--emerald" : "sd-badge--rose"
                   }`}
                 >
-                  {focusedEpisode.success ? "✓ PASSED" : "✗ FAILED"}
+                  {focusedEpisode.success ? "PASSED" : "FAILED"}
                 </span>
                 <span className="sd-badge sd-badge--neutral">
                   {focusedEpisode.steps} steps · Return {focusedEpisode.total_reward.toFixed(1)}
@@ -873,16 +947,17 @@ export const StudioEvalArena: React.FC<StudioEvalArenaProps> = ({
                   className={`sd-btn sd-btn--sm ${
                     showVectors ? "sd-btn--primary" : "sd-btn--ghost"
                   }`}
+                  aria-pressed={showVectors}
                   onClick={() => setShowVectors((v) => !v)}
                 >
-                  📐 Vectors
+                  Vectors
                 </button>
                 <button
                   type="button"
                   className="sd-btn sd-btn--sm"
                   onClick={() => setArenaLayout("grid")}
                 >
-                  ← Back to 5×2 Grid
+                  Back to 5×2 Grid
                 </button>
               </div>
             </div>
@@ -909,7 +984,7 @@ export const StudioEvalArena: React.FC<StudioEvalArenaProps> = ({
                     className="sd-btn sd-btn--primary"
                     onClick={() => handleSimulateSeed(focusedEpisode.seed)}
                   >
-                    ⚡ Simulate Seed #{focusedEpisode.seed} Now
+                    Simulate Seed #{focusedEpisode.seed} Now
                   </button>
                 </div>
               )}
@@ -978,7 +1053,7 @@ export const StudioEvalArena: React.FC<StudioEvalArenaProps> = ({
           <div className="sd-panel-header">
             <div>
               <div className="sd-panel-title">
-                <span>🎯 Cross-Evaluation 10-Seed Reliability Matrix</span>
+                <span>Cross-Evaluation 10-Seed Reliability Matrix</span>
                 {reliabilityAnalysis.blindSpotCount > 0 && (
                   <span className="sd-badge sd-badge--rose">
                     {reliabilityAnalysis.blindSpotCount} Blind Spot Seed(s):{" "}

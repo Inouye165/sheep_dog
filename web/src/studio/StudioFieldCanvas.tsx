@@ -118,7 +118,6 @@ export const StudioFieldCanvas: React.FC<StudioFieldCanvasProps> = ({
   if (!snapshot) {
     return (
       <div className="sd-empty-state">
-        <div style={{ fontSize: "1.5rem", opacity: 0.5 }}>🐕</div>
         <div style={{ fontWeight: 600, color: "var(--sd-text-secondary)" }}>
           No Episode Replay Loaded
         </div>

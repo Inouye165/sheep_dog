@@ -299,3 +299,94 @@ def test_flank_squirt_vs_containment_arc() -> None:
     )
     # Should drive forward toward gate (+x)
     assert move_contained.x > sheep_pos.x
+
+
+def _step_one_sheep_large_arena(
+    *,
+    personality: str,
+    strength: float,
+    sheep_position: Point,
+    dog_positions: list[Point],
+    panic_steps: int = 0,
+    flock_center: Point | None = None,
+) -> Point:
+    config = LabConfig(
+        environment=EnvironmentConfig(
+            width=144,
+            height=104,
+            sheep=1,
+            sheep_personality_strength=strength,
+        ),
+        rewards=RewardConfig(),
+        training=TrainingConfig(
+            episodes=0,
+            checkpoint_episodes=(0,),
+            evaluation_seeds=(11,),
+            output_dir="artifacts",
+            web_export_dir="web/public/generated",
+        ),
+    )
+    env = SheepdogEnvironment(config)
+    env.reset(seed=0)
+    sheep = SheepState(index=0, position=sheep_position, personality=personality)
+    env._sheep = [sheep]
+    return env._sheep_step(
+        sheep_position,
+        dog_positions,
+        flock_center,
+        panic_steps,
+        sheep=sheep,
+    )
+
+
+def test_escapist_far_from_flock_is_pushable_from_walls_and_corners() -> None:
+    flock_center = Point(72, 52)
+    positions = (Point(2, 2), Point(5, 2), Point(10, 10), Point(20, 20))
+    for strength in (0.3, 0.6, 0.9):
+        for pos in positions:
+            next_pos = _step_one_sheep_large_arena(
+                personality="escapist",
+                strength=strength,
+                sheep_position=pos,
+                dog_positions=[Point(pos.x - 1, pos.y)],
+                panic_steps=3,
+                flock_center=flock_center,
+            )
+            assert next_pos.x > pos.x, (
+                f"Expected escapist at {pos} (strength={strength}) to move inward, got {next_pos}"
+            )
+
+
+def test_escapist_still_bolts_away_from_flock_when_unblocked() -> None:
+    flock_center = Point(72, 52)
+    far_dog = [Point(140, 100)]
+    positions = (Point(67, 52), Point(22, 52))  # dist=5 and dist=50
+    for strength in (0.6, 0.9):
+        for pos in positions:
+            next_pos = _step_one_sheep_large_arena(
+                personality="escapist",
+                strength=strength,
+                sheep_position=pos,
+                dog_positions=far_dog,
+                panic_steps=3,
+                flock_center=flock_center,
+            )
+            assert next_pos.distance_to(flock_center) > pos.distance_to(flock_center), (
+                f"Expected escapist at {pos} (strength={strength}) to bolt away from "
+                f"{flock_center}, got {next_pos}"
+            )
+
+
+def test_escapist_zero_distance_to_flock_center_is_safe() -> None:
+    pos = Point(72, 52)
+    next_pos = _step_one_sheep_large_arena(
+        personality="escapist",
+        strength=0.9,
+        sheep_position=pos,
+        dog_positions=[Point(140, 100)],
+        panic_steps=3,
+        flock_center=pos,
+    )
+    assert isinstance(next_pos, Point)
+    assert 0 <= next_pos.x < 144
+    assert 0 <= next_pos.y < 104

@@ -1149,6 +1149,42 @@ CURRICULUM_TRAINING_OVERRIDES: dict[int, dict[str, object]] = {
     },
 }
 
+def default_stage_training_overrides(stage: int, dogs: int) -> dict[str, object]:
+    """Return stage- and dog-count-aware default PPO training overrides.
+
+    Dog-count-scaled ``gamma`` maintains a ~69-77 world-step effective horizon
+    under sequential shared-dog PPO, while ``learning_rate``,
+    ``learning_rate_final``, and ``target_kl`` tighten for later stages.
+    """
+
+    if dogs <= 1:
+        gamma = 0.99
+    elif dogs == 2:
+        gamma = 0.995
+    else:
+        gamma = 0.997
+
+    if stage <= 6:
+        learning_rate = 3.0e-4
+        learning_rate_final = 1.0e-4
+        target_kl = 0.03
+    elif stage <= 27:
+        learning_rate = 1.2e-4
+        learning_rate_final = 4.0e-5
+        target_kl = 0.02
+    else:
+        learning_rate = 1.0e-4
+        learning_rate_final = 3.0e-5
+        target_kl = 0.015
+
+    return {
+        "gamma": gamma,
+        "learning_rate": learning_rate,
+        "learning_rate_final": learning_rate_final,
+        "target_kl": target_kl,
+    }
+
+
 def apply_curriculum_stage(config: LabConfig, stage: int) -> LabConfig:
     """Return a copy of ``config`` with the stage's environment overrides applied.
 
@@ -1172,8 +1208,11 @@ def apply_curriculum_stage(config: LabConfig, stage: int) -> LabConfig:
             instincts=replace(new_rewards.instincts, curriculum_stage=stage),
         )
 
-    training_overrides = CURRICULUM_TRAINING_OVERRIDES.get(stage)
-    new_training = replace(config.training, **training_overrides) if training_overrides else config.training
+    training_overrides = {
+        **default_stage_training_overrides(stage, new_environment.dogs),
+        **(CURRICULUM_TRAINING_OVERRIDES.get(stage) or {}),
+    }
+    new_training = replace(config.training, **training_overrides)
 
     return replace(config, environment=new_environment, rewards=new_rewards, training=new_training)
 

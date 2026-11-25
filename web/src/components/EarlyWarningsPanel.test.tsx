@@ -238,7 +238,7 @@ describe("EarlyWarningsPanel", () => {
 
     await waitFor(() => {
       expect(screen.getByTestId("replay-btn-warn_rep_test")).toBeInTheDocument();
-      expect(screen.getByText("🔬 Open Evaluation Replay (Step 7)")).toBeInTheDocument();
+      expect(screen.getByText("Open Evaluation Replay (Step 7)")).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByTestId("replay-btn-warn_rep_test"));

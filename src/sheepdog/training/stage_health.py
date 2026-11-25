@@ -178,7 +178,12 @@ def compute_stage_health_summary(
     # Fast directory index of evaluation files (outside _CACHE_LOCK)
     eval_files: list[tuple[int, Path]] = []
     for entry in os.scandir(evals_dir):
-        if entry.is_file() and entry.name.endswith(".json") and entry.name.startswith("eval_"):
+        if (
+            entry.is_file()
+            and entry.name.endswith(".json")
+            and not entry.name.endswith(".inprogress.json")
+            and entry.name.startswith("eval_")
+        ):
             pv = _extract_pv_from_filename(entry.name)
             if pv is not None:
                 eval_files.append((pv, Path(entry.path)))
@@ -466,6 +471,7 @@ def compute_stage_health_summary(
     )
 
     # Prescriptive Recommendations
+    max_stage = max(CURRICULUM_STAGES) if CURRICULUM_STAGES else 38
     recommendations: list[PrescriptiveRecommendation] = []
 
     if total_cps < 8 and status != "green":
@@ -484,7 +490,11 @@ def compute_stage_health_summary(
                 type="continue",
                 title="Allow Live Training to Continue",
                 description="The policy is in a strong upward trajectory and actively hitting 90% benchmarks. Do not interrupt or reset weights.",
-                suggested_action="Keep training running. Monitor auto-promotion gate for consecutive qualification.",
+                suggested_action=(
+                    "Final curriculum stage reached. Monitor sustained mastery for automatic batch completion."
+                    if target_stage >= max_stage
+                    else "Keep training running. Monitor auto-promotion gate for consecutive qualification."
+                ),
                 priority="info",
             )
         )
@@ -535,7 +545,15 @@ def compute_stage_health_summary(
         status_label=status_label,
         status_explanation=status_explanation,
         promotion_ready=latest_few_max >= 0.90 and recent_sr >= 0.80,
-        promotion_status_text="Passes Pending" if latest_few_max < 0.90 else "Promotion Candidate",
+        promotion_status_text=(
+            (
+                "Final Stage Mastered"
+                if (latest_few_max >= 0.90 and recent_sr >= 0.80)
+                else "Final Stage · In Progress"
+            )
+            if target_stage >= max_stage
+            else ("Passes Pending" if latest_few_max < 0.90 else "Promotion Candidate")
+        ),
         failure_progress=failure_progress,
         seed_matrix=tuple(seed_health_list),
         recent_trajectory=tuple(recent_trajectory),

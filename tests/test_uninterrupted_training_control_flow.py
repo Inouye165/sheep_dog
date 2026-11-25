@@ -9,9 +9,28 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
-from sheepdog.config import LabConfig
-from sheepdog.server import TrainingManager, _EarlyPromotionSignal
+import pytest
+
+from sheepdog.config import LabConfig, TrainingConfig
+from sheepdog.curriculum import CURRICULUM_STAGES
+from sheepdog.server import (
+    MAX_STAGE_MASTERY_FULL_SUCCESS_HITS,
+    MAX_STAGE_MASTERY_QUALIFIED_STREAK,
+    TrainingManager,
+    _EarlyMaxStageStopSignal,
+    _EarlyPromotionSignal,
+)
+from sheepdog.training.stage_health import compute_stage_health_summary
+
+
+@pytest.fixture(autouse=True)
+def _isolate_training_manager(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prevent TrainingManager.__init__ from touching live artifacts or spawning threads."""
+    monkeypatch.setattr(TrainingManager, "_resume_interrupted_session", lambda self: None)
+    monkeypatch.setattr(TrainingManager, "restore_active_run_state", lambda self: None)
+    monkeypatch.setattr(TrainingManager, "_reconcile_web_exports", staticmethod(lambda: None))
 
 
 def test_1_evaluation_below_threshold_keeps_training_active(tmp_path: Path) -> None:
@@ -149,3 +168,150 @@ def test_9_deterministic_evaluation_remains_enabled_and_authoritative(tmp_path: 
     import inspect
     sig = inspect.signature(evaluator.evaluate)
     assert sig.parameters["deterministic"].default is True
+
+
+def test_10_final_stage_sustained_mastery_stops_early_without_promotion(tmp_path: Path) -> None:
+    """Final-stage sustained mastery interrupts trainer.train() and completes cleanly."""
+    max_stage = max(CURRICULUM_STAGES)
+    artifacts = tmp_path / "artifacts"
+    generated = tmp_path / "web" / "public" / "generated"
+    artifacts.mkdir(parents=True)
+    generated.mkdir(parents=True)
+
+    training_state_path = artifacts / "training-state.json"
+    training_state_path.write_text(
+        json.dumps(
+            {
+                "total_episodes_trained": 100,
+                "incomplete_batch": {
+                    "batch_completed_segments": 1,
+                    "batch_total_segments": 10,
+                    "batch_steps_per_segment": 1000,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = LabConfig(
+        training=TrainingConfig(
+            episodes=100,
+            output_dir=str(artifacts),
+            web_export_dir=str(generated),
+            evaluation_seeds=(101, 103, 107),
+        )
+    )
+
+    class TestConfig:
+        def __new__(cls):
+            return config
+
+    interrupted_by_signal = False
+    remaining_segments_ran = False
+
+    class FakeMaxStageTrainer:
+        total_episodes_trained = 100
+
+        def train(self, progress_callback=None, should_stop=None):
+            nonlocal interrupted_by_signal, remaining_segments_ran
+            assert progress_callback is not None
+            try:
+                progress_callback(
+                    {
+                        "phase": "checkpoint",
+                        "checkpoint_episode": 10,
+                        "batch_completed_segments": 1,
+                        "batch_total_segments": 10,
+                        "summary": {
+                            "curriculum_stage": max_stage,
+                            "success_rate": 1.0,
+                            "average_reward": 250.0,
+                            "timeout_rate": 0.0,
+                            "average_sheep_penned": 6.0,
+                            "evaluation_seed_count": 3,
+                            "records": [
+                                {"seed": 101, "success": True, "sheep_penned": 6, "reward_total": 250.0},
+                                {"seed": 103, "success": True, "sheep_penned": 6, "reward_total": 250.0},
+                                {"seed": 107, "success": True, "sheep_penned": 6, "reward_total": 250.0},
+                            ],
+                        },
+                    }
+                )
+            except _EarlyMaxStageStopSignal:
+                interrupted_by_signal = True
+                raise
+            remaining_segments_ran = True
+
+    gate_snapshot = {
+        "decision": "promote_ready",
+        "ready": True,
+        "qualified_streak": MAX_STAGE_MASTERY_QUALIFIED_STREAK,
+        "seed_gate_hits": 3,
+        "full_success_hits": MAX_STAGE_MASTERY_FULL_SUCCESS_HITS,
+        "best_success": 1.0,
+        "reason": "Promotion criteria satisfied",
+    }
+
+    with (
+        patch("sheepdog.server.LabConfig", TestConfig),
+        patch("sheepdog.server.create_trainer", return_value=FakeMaxStageTrainer()),
+        patch("sheepdog.server.compute_promotion_gate_snapshot", return_value=gate_snapshot),
+        patch.object(
+            TrainingManager,
+            "get_checkpoint_details",
+            return_value={
+                "curriculum_stage": max_stage,
+                "policy_version": None,
+                "checkpoint_id": None,
+                "evaluation_seeds": [101, 103, 107],
+            },
+        ),
+    ):
+        manager = TrainingManager()
+        manager._run_training(
+            100,
+            True,
+            curriculum_stage=max_stage,
+            auto_promote=True,
+        )
+
+    assert interrupted_by_signal is True
+    assert remaining_segments_ran is False
+    snap = manager.snapshot()
+    assert snap["phase"] == "complete"
+    assert snap["running"] is False
+    assert "Stopped at max stage" in snap["message"]
+    assert snap["curriculum_stage"] == max_stage
+    assert snap["auto_promote_stages_completed"] == 0
+    persisted_state = json.loads(training_state_path.read_text(encoding="utf-8"))
+    assert persisted_state["incomplete_batch"] is None
+
+
+def test_11_final_stage_health_does_not_report_promotion_candidate(tmp_path: Path) -> None:
+    """Final-stage health summary never labels max_stage as Promotion Candidate."""
+    max_stage = max(CURRICULUM_STAGES)
+    evals_dir = tmp_path / "evaluations"
+    evals_dir.mkdir(parents=True)
+
+    for idx, cp_ep in enumerate((10, 20, 30), start=1):
+        eval_payload = {
+            "checkpoint_episode": cp_ep,
+            "curriculum_stage": max_stage,
+            "success_rate": 1.0,
+            "average_reward": 260.0 + idx,
+            "average_steps": 120.0,
+            "records": [
+                {"seed": 101, "success": True, "sheep_penned": 6, "steps": 120},
+                {"seed": 103, "success": True, "sheep_penned": 6, "steps": 120},
+            ],
+        }
+        (evals_dir / f"eval_chk_test_pv_{idx}_ts_{cp_ep}.json").write_text(
+            json.dumps(eval_payload),
+            encoding="utf-8",
+        )
+
+    summary = compute_stage_health_summary(tmp_path, target_stage=max_stage, force_refresh=True)
+    assert summary["promotion_status_text"] != "Promotion Candidate"
+    assert summary["promotion_status_text"] == "Final Stage Mastered"
+    for rec in summary["prescriptive_recommendations"]:
+        assert "auto-promotion gate" not in rec["suggested_action"].lower()

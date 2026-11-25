@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
+import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -21,6 +24,78 @@ import pytest
 from sheepdog import server as server_module
 from sheepdog.config import LabConfig, TrainingConfig
 from sheepdog.server import TrainingManager, TrainingRequestHandler
+
+
+def _clear_handler_manager() -> None:
+    """Stop and clear any cached TrainingRequestHandler manager singleton."""
+    existing = getattr(TrainingRequestHandler, "_manager_instance", None)
+    if existing is not None:
+        watchdog_stop = getattr(existing, "_watchdog_stop_event", None)
+        if watchdog_stop is not None:
+            with contextlib.suppress(Exception):
+                watchdog_stop.set()
+        thread = getattr(existing, "_thread", None)
+        if thread is not None and thread.is_alive():
+            with contextlib.suppress(Exception):
+                existing._control_request = "stopped"  # pylint: disable=protected-access
+                thread.join(timeout=1.0)
+        runtime_tracker = getattr(existing, "runtime_tracker", None)
+        if runtime_tracker is not None:
+            with contextlib.suppress(Exception):
+                runtime_tracker.end_session("test_cleanup")
+            rt_stop = getattr(runtime_tracker, "_stop_event", None)
+            if rt_stop is not None:
+                with contextlib.suppress(Exception):
+                    rt_stop.set()
+        for attr_name in (
+            "telemetry_manager",
+            "backup_manager",
+            "_early_warning_monitor",
+        ):
+            component = getattr(existing, attr_name, None)
+            close_fn = getattr(component, "close", None)
+            if callable(close_fn):
+                with contextlib.suppress(Exception):
+                    close_fn()
+    TrainingRequestHandler._manager_instance = None  # pylint: disable=protected-access
+
+
+@pytest.fixture(autouse=True)
+def _isolate_default_lab_config_and_handler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Ensure unpatched LabConfig() calls and handler singletons stay in tmp_path."""
+    real_lab_config = LabConfig
+    isolated_root = tmp_path / "_isolated_default"
+    artifacts = isolated_root / "artifacts"
+    generated = isolated_root / "web" / "public" / "generated"
+    backups = isolated_root / "backups"
+    artifacts.mkdir(parents=True, exist_ok=True)
+    generated.mkdir(parents=True, exist_ok=True)
+    backups.mkdir(parents=True, exist_ok=True)
+
+    fallback_cfg = real_lab_config(
+        training=TrainingConfig(
+            output_dir=str(artifacts),
+            web_export_dir=str(generated),
+            backup_enabled=False,
+            backup_dir=str(backups),
+            wandb_enabled=False,
+        )
+    )
+
+    class _IsolatedLabConfig:
+        def __new__(cls, *args: object, **kwargs: object) -> LabConfig:
+            if not args and not kwargs:
+                return fallback_cfg
+            return real_lab_config(*args, **kwargs)  # type: ignore[arg-type]
+
+    _clear_handler_manager()
+    monkeypatch.setattr(server_module, "LabConfig", _IsolatedLabConfig)
+    try:
+        yield
+    finally:
+        _clear_handler_manager()
 
 
 @pytest.fixture(autouse=True)
@@ -76,19 +151,21 @@ def test_clear_training_restores_untrained_baseline(tmp_path: Path) -> None:
         manager = TrainingManager()
         payload, status = manager.clear()
 
-    assert status == 200
-    # clear() is async: it returns immediately with "Clearing..." and finishes
-    # the baseline export in a background thread.  Poll until the thread is done.
-    assert payload["message"] in {
-        "Clearing... restoring baseline replay",
-        "Training cleared. Baseline replay restored",
-    }
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        phase = manager.snapshot().get("phase")
-        if phase == "idle":
-            break
-        time.sleep(0.1)
+        assert status == 200
+        # clear() is async: it returns immediately with "Clearing..." and finishes
+        # the baseline export in a background thread.  Poll until the thread is done.
+        assert payload["message"] in {
+            "Clearing... restoring baseline replay",
+            "Training cleared. Baseline replay restored",
+        }
+        deadline = time.monotonic() + 30
+        phase: object = None
+        while time.monotonic() < deadline:
+            phase = manager.snapshot().get("phase")
+            if phase == "idle":
+                break
+            time.sleep(0.1)
+        assert phase == "idle"
     assert (artifacts / "training-state.json").exists()
     assert (artifacts / "training-summary.json").exists()
     assert (artifacts / "checkpoints" / "checkpoint-000000.json").exists()
@@ -137,16 +214,18 @@ def test_reset_journey_archives_and_resets_to_stage_one(tmp_path: Path) -> None:
         manager = TrainingManager()
         payload, status = manager.reset_journey()
 
-    assert status == 200
-    assert payload["phase"] in {"clearing", "idle"}
-    assert payload["curriculum_stage"] == 1
+        assert status == 200
+        assert payload["phase"] in {"clearing", "idle"}
+        assert payload["curriculum_stage"] == 1
 
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        snap = manager.snapshot()
-        if snap.get("phase") == "idle":
-            break
-        time.sleep(0.1)
+        deadline = time.monotonic() + 30
+        snap: dict[str, object] = {}
+        while time.monotonic() < deadline:
+            snap = manager.snapshot()
+            if snap.get("phase") == "idle":
+                break
+            time.sleep(0.1)
+        assert snap.get("phase") == "idle"
 
     archive_root = artifacts / "archive"
     archived_runs = sorted(path for path in archive_root.glob("journey-*") if path.is_dir())
@@ -886,7 +965,7 @@ def test_start_endpoint_returns_json_conflict_when_start_is_rejected() -> None:
             ),
         ),
     )
-    original_manager = TrainingRequestHandler.manager
+    original_manager = getattr(TrainingRequestHandler, "_manager_instance", None)
     TrainingRequestHandler.manager = manager
     server = ThreadingHTTPServer(("127.0.0.1", 0), TrainingRequestHandler)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -912,7 +991,7 @@ def test_start_endpoint_returns_json_conflict_when_start_is_rejected() -> None:
     finally:
         server.shutdown()
         server.server_close()
-        TrainingRequestHandler.manager = original_manager
+        TrainingRequestHandler._manager_instance = original_manager  # pylint: disable=protected-access
 
 
 def test_start_endpoint_accepts_canonical_timestep_request() -> None:
@@ -926,7 +1005,7 @@ def test_start_endpoint_accepts_canonical_timestep_request() -> None:
         TrainingManager,
         SimpleNamespace(_status={"phase": "idle"}, start=start),
     )
-    original_manager = TrainingRequestHandler.manager
+    original_manager = getattr(TrainingRequestHandler, "_manager_instance", None)
     TrainingRequestHandler.manager = manager
     server = ThreadingHTTPServer(("127.0.0.1", 0), TrainingRequestHandler)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -964,7 +1043,7 @@ def test_start_endpoint_accepts_canonical_timestep_request() -> None:
     finally:
         server.shutdown()
         server.server_close()
-        TrainingRequestHandler.manager = original_manager
+        TrainingRequestHandler._manager_instance = original_manager  # pylint: disable=protected-access
 
 
 def test_training_manager_error_handling_on_setup_failure(tmp_path: Path) -> None:
@@ -1399,6 +1478,7 @@ def test_diagnostics_endpoint_route_integration(tmp_path: Path) -> None:
         finally:
             server.shutdown()
             server.server_close()
+            _clear_handler_manager()
 
 
 def test_log_message_suppresses_routine_polling_noise() -> None:
@@ -1470,6 +1550,7 @@ def test_health_endpoint_routes(tmp_path: Path) -> None:
         finally:
             server.shutdown()
             server.server_close()
+            _clear_handler_manager()
 
 
 def test_worker_exception_handling_unexpected_vs_deliberate_shutdown(tmp_path: Path) -> None:
@@ -1827,7 +1908,8 @@ def test_build_training_job_config_preserves_fields_and_user_hyperparams(
     assert isinstance(job_cfg.training.neural_hidden_sizes, tuple)
     assert job_cfg.training.learning_rate == pytest.approx(1.23e-4)
     assert job_cfg.training.ppo_env_workers == 2
-    assert job_cfg.training.target_kl == pytest.approx(0.025)
+    assert job_cfg.training.target_kl == pytest.approx(0.015)
+    assert job_cfg.training.gamma == pytest.approx(0.997)
     assert job_cfg.training.backup_enabled is False
     assert job_cfg.training.backup_dir == str(backups)
 
@@ -2100,5 +2182,424 @@ def test_readonly_preview_episodes_endpoints_do_not_create_db(
         finally:
             server.shutdown()
             server.server_close()
+            _clear_handler_manager()
+
+
+def test_episode_complete_progress_preserves_segments_and_callback_emits_fields(
+    tmp_path: Path,
+) -> None:
+    """episode_complete without segment fields preserves prior batch progress and callback emits consistent fields."""
+    from sheepdog.training.maskable_ppo import _TrainingProgressCallback
+
+    artifacts = tmp_path / "artifacts"
+    generated = tmp_path / "web" / "public" / "generated"
+    backups = tmp_path / "backups"
+    artifacts.mkdir(parents=True)
+    generated.mkdir(parents=True)
+
+    config = LabConfig(
+        training=TrainingConfig(
+            episodes=200,
+            evaluation_seeds=(11,),
+            output_dir=str(artifacts),
+            web_export_dir=str(generated),
+            backup_enabled=False,
+            backup_dir=str(backups),
+            wandb_enabled=False,
+        )
+    )
+
+    class TestConfig:
+        def __new__(cls):
+            return config
+
+    captured_snapshots: list[dict[str, object]] = []
+
+    class FakeTrainer:
+        total_episodes_trained = 100
+
+        def train(self, progress_callback=None, should_stop=None):
+            assert progress_callback is not None
+            assert should_stop is not None
+            progress_callback(
+                {
+                    "phase": "learning",
+                    "batch_completed_segments": 1.5,
+                    "batch_total_segments": 35,
+                    "batch_completed_episodes": 1.5,
+                    "batch_total_episodes": 35,
+                    "batch_completed_timesteps": 15000,
+                    "batch_total_timesteps": 350000,
+                    "current_global_timestep": 515000,
+                    "actual_completed_episodes": 12,
+                    "current_episode": 112,
+                    "total_episodes_trained": 112,
+                    "message": "Learning neural policy: 5000/10000 timesteps (50%)",
+                }
+            )
+            captured_snapshots.append(manager.snapshot())
+
+            # Simulate an episode_complete payload omitting batch_* and current_global_timestep
+            progress_callback(
+                {
+                    "phase": "episode_complete",
+                    "episode": 113,
+                    "current_episode": 113,
+                    "total_episodes_trained": 113,
+                    "global_timestep": 515250,
+                    "reward": 14.5,
+                    "penned": 6,
+                    "total_sheep": 6,
+                    "success": True,
+                    "status": "SUCCESS",
+                }
+            )
+            captured_snapshots.append(manager.snapshot())
+
+    with (
+        patch("sheepdog.server.LabConfig", TestConfig),
+        patch("sheepdog.server.create_trainer", return_value=FakeTrainer()),
+        patch("sheepdog.server.CurriculumTelemetryManager.initialize_wandb"),
+    ):
+        manager = TrainingManager()
+        manager.start(requested_episodes=200, fast_mode=True, curriculum_stage=1)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and manager.snapshot()["running"]:
+            time.sleep(0.02)
+
+    assert len(captured_snapshots) == 2
+    after_learning, after_episode_complete = captured_snapshots
+
+    assert after_learning["batch_completed_segments"] == pytest.approx(1.5)
+    assert after_learning["batch_total_segments"] == 35
+    assert after_learning["batch_completed_episodes"] == pytest.approx(8.6)
+    assert after_learning["batch_completed_timesteps"] == 15000
+    assert after_learning["current_global_timestep"] == 515000
+    assert after_learning["completed_episodes"] == 12
+
+    assert after_episode_complete["batch_completed_segments"] == pytest.approx(1.5)
+    assert after_episode_complete["batch_total_segments"] == 35
+    assert after_episode_complete["batch_completed_episodes"] == pytest.approx(8.6)
+    assert after_episode_complete["batch_total_episodes"] == 200
+    assert after_episode_complete["batch_completed_timesteps"] == 15000
+    assert after_episode_complete["batch_total_timesteps"] == 350000
+    assert after_episode_complete["current_global_timestep"] == 515250
+    assert after_episode_complete["completed_episodes"] == 12
+
+    # Also verify _TrainingProgressCallback emits consistent fields on both phases
+    emitted: list[dict[str, object]] = []
+    cb = _TrainingProgressCallback(
+        emitted.append,
+        should_stop=None,
+        report_interval=100,
+        total_timesteps=10000,
+        starting_total_episodes=1,
+        batch_total_episodes=35,
+        batch_total_timesteps=350000,
+        completed_timesteps=500000,
+        completed_segments=1,
+        segment_index=1,
+        policy_version=4,
+        starting_total=100,
+        batch_total_segments=35,
+        batch_completed_timesteps_offset=10000,
+    )
+    mock_env = MagicMock()
+    mock_env.get_attr.return_value = [12]
+    cb.model = MagicMock()
+    cb.model._n_updates = 2
+    cb.model.get_env.return_value = mock_env
+    cb.num_timesteps = 5000
+    cb.locals = {
+        "dones": [True],
+        "infos": [
+            {
+                "episode": {
+                    "r": 14.0,
+                    "l": 120,
+                    "success": True,
+                    "penned": 6,
+                    "total_sheep": 6,
+                    "status": "SUCCESS",
+                }
+            }
+        ],
+    }
+    assert cb._on_step() is True
+
+    ep_events = [e for e in emitted if e.get("phase") == "episode_complete"]
+    learning_events = [e for e in emitted if e.get("phase") == "learning"]
+    assert len(ep_events) == 1
+    assert len(learning_events) == 1
+
+    for event in (ep_events[0], learning_events[0]):
+        assert event["batch_completed_segments"] == pytest.approx(1.5)
+        assert event["batch_total_segments"] == 35
+        assert event["batch_completed_episodes"] == pytest.approx(1.5)
+        assert event["batch_total_episodes"] == 35
+        assert event["batch_completed_timesteps"] == 15000
+        assert event["batch_total_timesteps"] == 350000
+        assert event["current_global_timestep"] == 505000
+
+
+def test_snapshot_and_confidence_info_cache_json_by_mtime_and_size(
+    tmp_path: Path,
+) -> None:
+    """snapshot() and _get_latest_confidence_info() cache JSON by (st_mtime_ns, st_size)."""
+    artifacts = tmp_path / "artifacts"
+    generated = tmp_path / "web" / "public" / "generated"
+    backups = tmp_path / "backups"
+    artifacts.mkdir(parents=True)
+    generated.mkdir(parents=True)
+
+    (artifacts / "training-settings.json").write_text(
+        json.dumps({"curriculum_stage": 34}),
+        encoding="utf-8",
+    )
+    state_path = artifacts / "training-state.json"
+    index_path = generated / "checkpoint-index.json"
+
+    state_path.write_text(
+        json.dumps({"total_timesteps": 1000, "adaptive_step_state": {"stage": 1}}),
+        encoding="utf-8",
+    )
+    index_path.write_text(
+        json.dumps(
+            {
+                "checkpoints": [
+                    {
+                        "curriculum_stage": 34,
+                        "total_training_episodes": 100,
+                        "global_timestep": 1000,
+                    }
+                ],
+                "latest": {
+                    "curriculum_stage": 34,
+                    "total_training_episodes": 100,
+                    "global_timestep": 1000,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = LabConfig(
+        training=TrainingConfig(
+            output_dir=str(artifacts),
+            web_export_dir=str(generated),
+            backup_enabled=False,
+            backup_dir=str(backups),
+        )
+    )
+
+    class TestConfig:
+        def __new__(cls):
+            return config
+
+    with patch("sheepdog.server.LabConfig", TestConfig):
+        manager = TrainingManager()
+        with patch.object(
+            server_module, "_load_json", wraps=server_module._load_json
+        ) as load_spy:
+            snap1 = manager.snapshot()
+            conf1 = manager._get_latest_confidence_info(34)
+
+            assert snap1["current_global_timestep"] == 1000
+            assert snap1["latest_confidence_environment_episode"] == 100
+            assert snap1["latest_checkpoint_global_timestep"] == 1000
+            assert conf1 == (100, 1000)
+
+            state_reads = [
+                c for c in load_spy.call_args_list if Path(c.args[0]).name == "training-state.json"
+            ]
+            index_reads = [
+                c for c in load_spy.call_args_list if Path(c.args[0]).name == "checkpoint-index.json"
+            ]
+            assert len(state_reads) == 1
+            assert len(index_reads) == 1
+
+            # Repeated snapshot() and _get_latest_confidence_info() calls reuse the cache
+            snap2 = manager.snapshot()
+            snap3 = manager.snapshot()
+            conf2 = manager._get_latest_confidence_info(34)
+
+            assert snap2["current_global_timestep"] == 1000
+            assert snap3["latest_confidence_environment_episode"] == 100
+            assert conf2 == (100, 1000)
+
+            assert (
+                len(
+                    [
+                        c
+                        for c in load_spy.call_args_list
+                        if Path(c.args[0]).name == "training-state.json"
+                    ]
+                )
+                == 1
+            )
+            assert (
+                len(
+                    [
+                        c
+                        for c in load_spy.call_args_list
+                        if Path(c.args[0]).name == "checkpoint-index.json"
+                    ]
+                )
+                == 1
+            )
+
+            # Mutate both files (changing size and advancing mtime_ns) and confirm cache refresh
+            old_state_mtime = state_path.stat().st_mtime_ns
+            old_index_mtime = index_path.stat().st_mtime_ns
+
+            state_path.write_text(
+                json.dumps({"total_timesteps": 25000, "adaptive_step_state": {"stage": 2}}),
+                encoding="utf-8",
+            )
+            index_path.write_text(
+                json.dumps(
+                    {
+                        "checkpoints": [
+                            {
+                                "curriculum_stage": 34,
+                                "total_training_episodes": 100,
+                                "global_timestep": 1000,
+                            },
+                            {
+                                "curriculum_stage": 34,
+                                "total_training_episodes": 150,
+                                "global_timestep": 25000,
+                            },
+                        ],
+                        "latest": {
+                            "curriculum_stage": 34,
+                            "total_training_episodes": 150,
+                            "global_timestep": 25000,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            os.utime(state_path, ns=(old_state_mtime + 1_000_000_000, old_state_mtime + 1_000_000_000))
+            os.utime(index_path, ns=(old_index_mtime + 1_000_000_000, old_index_mtime + 1_000_000_000))
+
+            snap4 = manager.snapshot()
+            snap5 = manager.snapshot()
+
+            assert snap4["current_global_timestep"] == 25000
+            assert snap4["latest_confidence_environment_episode"] == 150
+            assert snap4["latest_checkpoint_global_timestep"] == 25000
+            assert snap5["current_global_timestep"] == 25000
+
+            assert (
+                len(
+                    [
+                        c
+                        for c in load_spy.call_args_list
+                        if Path(c.args[0]).name == "training-state.json"
+                    ]
+                )
+                == 2
+            )
+            assert (
+                len(
+                    [
+                        c
+                        for c in load_spy.call_args_list
+                        if Path(c.args[0]).name == "checkpoint-index.json"
+                    ]
+                )
+                == 2
+            )
+
+
+def test_concurrent_early_warning_and_temporal_interaction_imports() -> None:
+    script = """
+import sys
+import threading
+import traceback
+
+barrier = threading.Barrier(2)
+errors = []
+lock = threading.Lock()
+
+def import_early_warning() -> None:
+    try:
+        barrier.wait(timeout=5.0)
+        from sheepdog.training.early_warning import EarlyWarningMonitor
+        assert EarlyWarningMonitor is not None
+    except BaseException:
+        with lock:
+            errors.append(traceback.format_exc())
+
+def import_temporal_interaction() -> None:
+    try:
+        barrier.wait(timeout=5.0)
+        from sheepdog.training.diagnostics.temporal_interaction import (
+            build_step_instrumentation_payload,
+        )
+        assert callable(build_step_instrumentation_payload)
+    except BaseException:
+        with lock:
+            errors.append(traceback.format_exc())
+
+t1 = threading.Thread(target=import_early_warning)
+t2 = threading.Thread(target=import_temporal_interaction)
+t1.start()
+t2.start()
+t1.join(timeout=15.0)
+t2.join(timeout=15.0)
+if t1.is_alive() or t2.is_alive():
+    print("Import thread timed out", file=sys.stderr)
+    sys.exit(2)
+if errors:
+    for err in errors:
+        print(err, file=sys.stderr)
+    sys.exit(1)
+
+from sheepdog.training.diagnostics import (
+    REPETITION_RECOVERY_METRICS_VERSION,
+    DeterministicDiagnosticsEngine,
+    analyze_episode_temporal_interactions,
+)
+
+assert REPETITION_RECOVERY_METRICS_VERSION == "2.0"
+assert DeterministicDiagnosticsEngine is not None
+assert callable(analyze_episode_temporal_interactions)
+"""
+    src_dir = str(Path(__file__).resolve().parents[1] / "src")
+    env = os.environ.copy()
+    existing_pp = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = f"{src_dir}{os.pathsep}{existing_pp}" if existing_pp else src_dir
+
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+        timeout=30,
+    )
+    assert proc.returncode == 0, (
+        f"Concurrent diagnostic import failed (rc={proc.returncode}):\n"
+        f"stdout={proc.stdout!r}\nstderr={proc.stderr!r}"
+    )
+
+
+def test_request_handler_manager_assignment_does_not_instantiate_manager() -> None:
+    assert getattr(TrainingRequestHandler, "_manager_instance", None) is None
+    dummy = cast(TrainingManager, SimpleNamespace(_status={"phase": "idle"}))
+    with patch.object(
+        server_module,
+        "TrainingManager",
+        side_effect=AssertionError("TrainingManager should not be instantiated"),
+    ):
+        try:
+            TrainingRequestHandler.manager = dummy
+            assert TrainingRequestHandler.manager is dummy
+        finally:
+            TrainingRequestHandler._manager_instance = None  # pylint: disable=protected-access
+
+
 
 

@@ -489,7 +489,10 @@ class EarlyWarningMonitor:
                     latest_entry = max(
                         (
                             e for e in os.scandir(evals_dir)
-                            if e.is_file() and e.name.startswith("eval_") and e.name.endswith(".json")
+                            if e.is_file()
+                            and e.name.startswith("eval_")
+                            and e.name.endswith(".json")
+                            and not e.name.endswith(".inprogress.json")
                         ),
                         key=lambda e: e.stat(follow_symlinks=False).st_mtime,
                         default=None,
@@ -704,6 +707,7 @@ class EarlyWarningMonitor:
                         entry.is_file()
                         and entry.name.startswith("eval_")
                         and entry.name.endswith(".json")
+                        and not entry.name.endswith(".inprogress.json")
                         and entry.name != eval_file.name
                     ):
                         try:

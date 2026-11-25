@@ -13,7 +13,7 @@ from pathlib import Path
 from statistics import fmean
 from typing import Any
 
-from sheepdog.atomic_io import atomic_write_json, atomic_write_text
+from sheepdog.atomic_io import atomic_write_bytes, atomic_write_json, atomic_write_text
 from sheepdog.checkpoints.store import (
     CheckpointMetadata,
     CheckpointStore,
@@ -32,6 +32,25 @@ from sheepdog.training.adaptive_learning import AdaptiveStepController
 from sheepdog.training.runtime import TrainingRuntimeTracker
 
 
+def _prune_unreferenced_web_replays(replay_output_dir: Path, referenced_names: set[str]) -> int:
+    """Remove replay files in *replay_output_dir* not referenced by exported web assets."""
+    if not replay_output_dir.is_dir():
+        return 0
+    removed = 0
+    try:
+        entries = list(replay_output_dir.iterdir())
+    except OSError:
+        return 0
+    for entry in entries:
+        try:
+            if entry.is_file() and entry.name not in referenced_names:
+                entry.unlink(missing_ok=True)
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 def _checkpoint_replay_mode(policy_name: str, total_training_episodes: int) -> str:
     """Return a truthfulness label for exported checkpoints."""
 
@@ -40,6 +59,57 @@ def _checkpoint_replay_mode(policy_name: str, total_training_episodes: int) -> s
     if policy_name == "trained_policy" and total_training_episodes > 0:
         return "trained_linear"
     return "baseline"
+
+
+_WEB_ENV_CONFIG_KEYS = ("dogs", "sheep", "width", "height", "curriculum_stage")
+_WEB_INSTINCT_CONFIG_KEYS = ("curriculum_stage", "enable_instinct_rewards")
+_WEB_DROPPED_CHECKPOINT_KEYS = (
+    "policy_weights",
+    "training_scenario_coverage",
+    "failure_directed_telemetry",
+    "failure_directed_weights",
+    "policy_config",
+)
+
+
+def slim_web_checkpoint_entry(checkpoint_payload: dict[str, Any]) -> dict[str, Any]:
+    """Return a slimmed copy of *checkpoint_payload* for ``checkpoint-index.json``."""
+    slimmed = dict(checkpoint_payload)
+    for key in _WEB_DROPPED_CHECKPOINT_KEYS:
+        slimmed.pop(key, None)
+
+    env_cfg = slimmed.get("environment_config")
+    if isinstance(env_cfg, dict):
+        slimmed["environment_config"] = {
+            k: env_cfg[k] for k in _WEB_ENV_CONFIG_KEYS if k in env_cfg
+        }
+
+    reward_cfg = slimmed.get("reward_config")
+    if isinstance(reward_cfg, dict):
+        instincts = reward_cfg.get("instincts")
+        if isinstance(instincts, dict):
+            slimmed["reward_config"] = {
+                "instincts": {
+                    k: instincts[k] for k in _WEB_INSTINCT_CONFIG_KEYS if k in instincts
+                }
+            }
+        else:
+            slimmed.pop("reward_config", None)
+
+    records = slimmed.get("records")
+    if isinstance(records, list):
+        cleaned_records: list[Any] = []
+        for record in records:
+            if isinstance(record, dict):
+                cleaned_record = dict(record)
+                cleaned_record.pop("failed_trajectory_summary", None)
+                cleaned_record.pop("observation_diagnostics", None)
+                cleaned_records.append(cleaned_record)
+            else:
+                cleaned_records.append(record)
+        slimmed["records"] = cleaned_records
+
+    return slimmed
 
 
 @dataclass(frozen=True, slots=True)
@@ -795,6 +865,7 @@ class Trainer:
         summary_payload = summary.to_dict()
         replay_output_dir = web_export_dir / "replays"
         replay_output_dir.mkdir(parents=True, exist_ok=True)
+        referenced_replay_names: set[str] = set()
 
         def _export_record(record: dict[str, Any]) -> dict[str, Any]:
             replay_value = record.get("replay_path")
@@ -802,6 +873,7 @@ class Trainer:
                 return dict(record)
             source_path = Path(replay_value)
             target_path = replay_output_dir / source_path.name
+            referenced_replay_names.add(target_path.name)
             try:
                 src_stat = source_path.stat()
             except OSError:
@@ -816,7 +888,7 @@ class Trainer:
                         needs_copy = True
                     if needs_copy:
                         target_path.parent.mkdir(parents=True, exist_ok=True)
-                        target_path.write_bytes(source_path.read_bytes())
+                        atomic_write_bytes(target_path, source_path.read_bytes())
                 except (FileNotFoundError, OSError):
                     pass
             exported_record = dict(record)
@@ -833,18 +905,18 @@ class Trainer:
         for index, checkpoint_payload in enumerate(checkpoint_payloads):
             exported_payload = dict(checkpoint_payload)
             exported_payload["journey"] = "current"
-            exported_payload.pop("policy_weights", None)
-            exported_payload.pop("training_scenario_coverage", None)
             if index >= records_start and "records" in checkpoint_payload and isinstance(checkpoint_payload["records"], list):
                 exported_payload["records"] = [
                     _export_record(record) for record in checkpoint_payload["records"]
                 ]
             else:
                 exported_payload.pop("records", None)
-            exported_checkpoints.append(exported_payload)
+            exported_checkpoints.append(slim_web_checkpoint_entry(exported_payload))
 
         # Prepend archived journey checkpoints so the full timeline is visible.
-        archived_checkpoints = self._load_archived_checkpoints()
+        archived_checkpoints = [
+            slim_web_checkpoint_entry(entry) for entry in self._load_archived_checkpoints()
+        ]
         all_checkpoints = archived_checkpoints + exported_checkpoints
 
         atomic_write_json(
@@ -853,7 +925,11 @@ class Trainer:
         atomic_write_json(web_export_dir / "latest-evaluation.json", summary_payload)
         atomic_write_json(
             web_export_dir / "checkpoint-index.json",
-            {"checkpoints": all_checkpoints, "latest": summary_payload},
+            {
+                "checkpoints": all_checkpoints,
+                "latest": slim_web_checkpoint_entry(summary_payload),
+            },
+            indent=None,
         )
         replay_target = web_export_dir / "latest-replay.json"
         if replay_path is not None and replay_path.exists():
@@ -864,6 +940,7 @@ class Trainer:
                 )
             else:
                 atomic_write_text(replay_target, replay_path.read_text(encoding="utf-8"))
+        _prune_unreferenced_web_replays(replay_output_dir, referenced_replay_names)
 
     def _load_archived_checkpoints(self) -> list[dict[str, Any]]:
         """Load checkpoints from all archived journeys.
@@ -902,14 +979,15 @@ class Trainer:
                 break  # use the first file that works
 
             for entry in loaded:
-                entry["journey"] = journey_label
+                if not isinstance(entry, dict):
+                    continue
+                slimmed = slim_web_checkpoint_entry(entry)
+                slimmed["journey"] = journey_label
                 # Strip heavyweight records — archived replays are unavailable
                 # from the live web server, so carrying hundreds of KB of per-seed
                 # data would bloat the checkpoint-index for no benefit.
-                entry.pop("records", None)
-                entry.pop("policy_weights", None)
-                entry.pop("training_scenario_coverage", None)
-            all_archived.extend(loaded)
+                slimmed.pop("records", None)
+                all_archived.append(slimmed)
 
         # Sort by recorded_at for a consistent timeline across journeys.
         all_archived.sort(
@@ -954,9 +1032,11 @@ class Trainer:
 
         web_latest = -1
         web_record_count = 0
+        needs_telemetry_slim = False
         try:
             index = json.loads(index_path.read_text(encoding="utf-8"))
-            web_latest = _episode(index.get("latest"))
+            latest_entry = index.get("latest")
+            web_latest = _episode(latest_entry)
             web_checkpoints = index.get("checkpoints", [])
             web_record_count = sum(
                 1
@@ -968,20 +1048,37 @@ class Trainer:
                     (_episode(item) for item in web_checkpoints),
                     default=-1,
                 )
+            needs_telemetry_slim = (
+                isinstance(latest_entry, dict)
+                and "failure_directed_telemetry" in latest_entry
+            ) or (
+                isinstance(web_checkpoints, list)
+                and bool(web_checkpoints)
+                and isinstance(web_checkpoints[-1], dict)
+                and "failure_directed_telemetry" in web_checkpoints[-1]
+            )
         except (OSError, json.JSONDecodeError):
             web_latest = -1
 
-        if web_latest >= summary_latest and web_record_count <= 10:
+        if web_latest >= summary_latest and web_record_count <= 10 and not needs_telemetry_slim:
             return None
 
         replay_output_dir = web_dir / "replays"
         replay_output_dir.mkdir(parents=True, exist_ok=True)
+        referenced_replay_names: set[str] = set()
 
         def _export_record(record: dict[str, Any]) -> dict[str, Any]:
-            source_path = Path(record["replay_path"])
+            replay_value = record.get("replay_path")
+            if not replay_value:
+                return dict(record)
+            source_path = Path(replay_value)
             target_path = replay_output_dir / source_path.name
-            if source_path.exists() and not target_path.exists():
-                target_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
+            referenced_replay_names.add(target_path.name)
+            try:
+                if source_path.exists() and not target_path.exists():
+                    atomic_write_bytes(target_path, source_path.read_bytes())
+            except OSError:
+                pass
             exported_record = dict(record)
             exported_record.pop("failed_trajectory_summary", None)
             exported_record.pop("observation_diagnostics", None)
@@ -991,6 +1088,7 @@ class Trainer:
         exported_checkpoints: list[dict[str, Any]] = []
         latest_episodes_to_keep = 10
         total_checkpoints = len(checkpoints)
+        latest_full_payload: dict[str, Any] | None = None
         for i, checkpoint_payload in enumerate(checkpoints):
             exported_payload = dict(checkpoint_payload)
             exported_payload["journey"] = "current"
@@ -1004,20 +1102,26 @@ class Trainer:
                 ]
             else:
                 exported_payload.pop("records", None)
-            exported_checkpoints.append(exported_payload)
+            if i == total_checkpoints - 1:
+                latest_full_payload = exported_payload
+            exported_checkpoints.append(slim_web_checkpoint_entry(exported_payload))
 
         # Prepend archived journey checkpoints so the full timeline is visible.
-        archived_checkpoints = self._load_archived_checkpoints()
+        archived_checkpoints = [
+            slim_web_checkpoint_entry(entry) for entry in self._load_archived_checkpoints()
+        ]
         all_checkpoints = archived_checkpoints + exported_checkpoints
 
-        latest_payload = exported_checkpoints[-1]
+        latest_slim_payload = exported_checkpoints[-1]
+        latest_payload = latest_full_payload if latest_full_payload is not None else latest_slim_payload
         atomic_write_json(
             web_dir / "latest-checkpoint.json", {"checkpoint": latest_payload.get("checkpoint")}
         )
         atomic_write_json(web_dir / "latest-evaluation.json", latest_payload)
         atomic_write_json(
             web_dir / "checkpoint-index.json",
-            {"checkpoints": all_checkpoints, "latest": latest_payload},
+            {"checkpoints": all_checkpoints, "latest": latest_slim_payload},
+            indent=None,
         )
         latest_records = latest_payload.get("records") or []
         if latest_records:
@@ -1027,6 +1131,7 @@ class Trainer:
                 atomic_write_text(
                     web_dir / "latest-replay.json", replay_src.read_text(encoding="utf-8")
                 )
+        _prune_unreferenced_web_replays(replay_output_dir, referenced_replay_names)
         return summary_latest
 
     @staticmethod

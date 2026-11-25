@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 
 from sheepdog.checkpoints.store import CheckpointMetadata, CheckpointStore
-from sheepdog.config import LabConfig, TrainingConfig
+from sheepdog.config import EnvironmentConfig, LabConfig, TrainingConfig
 from sheepdog.evaluation.evaluator import Evaluator
 from sheepdog.policies.base import Policy
 from sheepdog.tracking.execution import (
@@ -531,5 +531,232 @@ def test_server_startup_boundary_real_entry_path_divergence(tmp_path: Path, monk
             assert "Workspace diverged from process start" in (acts[0]["verification_notes"] or "")
     finally:
         reset_process_startup_boundary()
+
+
+def test_evaluator_handles_missing_foreign_keys_and_links_existing_parents(tmp_path: Path):
+    """Evaluator.evaluate nulls out absent FK parents instead of failing, and links valid parents."""
+    db_path = tmp_path / "telemetry.sqlite"
+    eval_dir = tmp_path / "evaluations"
+    registry = TrackingRegistry(db_path)
+
+    config = LabConfig(
+        environment=EnvironmentConfig(max_steps=5),
+        training=TrainingConfig(observation_mode="guided"),
+    )
+    evaluator = Evaluator(config=config, output_root=eval_dir, tracking_registry=registry)
+    policy = DummyPolicy()
+
+    # 1. Evaluate with non-existent experiment_id and checkpoint_record_id
+    summary_orphan, json_orphan, _ = evaluator.evaluate(
+        policy,
+        (101,),
+        checkpoint_episode=10,
+        capture_replays=False,
+        capture_step_telemetry=False,
+        evaluation_mode="stage_transition_baseline",
+        run_id="run_missing",
+        checkpoint_id="chk_missing_parent",
+        experiment_id="exp_does_not_exist",
+        checkpoint_record_id="chk_rec_does_not_exist",
+    )
+    assert json_orphan.exists()
+
+    with registry._get_connection() as conn:
+        rows = conn.execute("SELECT * FROM registry_evaluations;").fetchall()
+        assert len(rows) == 1
+        assert rows[0]["experiment_id"] is None
+        assert rows[0]["checkpoint_record_id"] is None
+        assert rows[0]["checkpoint_id"] == "chk_missing_parent"
+        assert rows[0]["legacy_evaluation_id"] == summary_orphan.evaluation_id
+
+    # 2. Create valid experiment and checkpoint records, then evaluate again
+    from sheepdog.tracking.registry import CheckpointRecord, ExperimentRecord
+
+    registry.record_experiment(
+        ExperimentRecord(
+            experiment_id="exp_valid",
+            created_at="2026-11-18T00:00:00Z",
+            name="Valid Experiment",
+            assistance_mode="guided",
+        )
+    )
+    registry.record_checkpoint(
+        CheckpointRecord(
+            checkpoint_record_id="chk_rec_valid",
+            checkpoint_id="chk_valid",
+            experiment_id="exp_valid",
+        )
+    )
+
+    summary_linked, _, _ = evaluator.evaluate(
+        policy,
+        (102,),
+        checkpoint_episode=20,
+        capture_replays=False,
+        capture_step_telemetry=False,
+        evaluation_mode="confidence",
+        run_id="run_valid",
+        checkpoint_id="chk_valid",
+        experiment_id="exp_valid",
+        checkpoint_record_id="chk_rec_valid",
+    )
+
+    evals = registry.list_evaluations_for_checkpoint("chk_rec_valid")
+    assert len(evals) == 1
+    assert evals[0].experiment_id == "exp_valid"
+    assert evals[0].checkpoint_record_id == "chk_rec_valid"
+    assert evals[0].legacy_evaluation_id == summary_linked.evaluation_id
+
+
+def test_quick_and_confidence_evaluations_recorded_after_checkpoint_write(tmp_path: Path):
+    """Quick and confidence evaluations deferred during evaluate() are both linked after checkpoint_store.write()."""
+    db_path = tmp_path / "telemetry.sqlite"
+    chk_dir = tmp_path / "checkpoints"
+    eval_dir = tmp_path / "evaluations"
+    registry = TrackingRegistry(db_path)
+
+    from sheepdog.tracking.registry import ExperimentRecord
+
+    registry.record_experiment(
+        ExperimentRecord(
+            experiment_id="exp_deferred",
+            created_at="2026-11-18T00:00:00Z",
+            name="Deferred Eval Test",
+            assistance_mode="guided",
+        )
+    )
+
+    config = LabConfig(
+        environment=EnvironmentConfig(max_steps=5),
+        training=TrainingConfig(observation_mode="guided"),
+    )
+    evaluator = Evaluator(config=config, output_root=eval_dir, tracking_registry=registry)
+    store = CheckpointStore(chk_dir, tracking_registry=registry)
+    policy = DummyPolicy()
+
+    chk_id = "chk_run_deferred_pv_1_ts_100"
+    quick_summary, quick_json, _ = evaluator.evaluate(
+        policy,
+        (101,),
+        checkpoint_episode=100,
+        capture_replays=False,
+        capture_step_telemetry=False,
+        evaluation_mode="quick",
+        run_id="run_deferred",
+        checkpoint_id=chk_id,
+        experiment_id="exp_deferred",
+        checkpoint_record_id=f"chk_rec_{chk_id}",
+        record_in_registry=False,
+    )
+    conf_summary, conf_json, _ = evaluator.evaluate(
+        policy,
+        (101, 102),
+        checkpoint_episode=100,
+        capture_replays=False,
+        capture_step_telemetry=False,
+        evaluation_mode="confidence",
+        run_id="run_deferred",
+        checkpoint_id=chk_id,
+        experiment_id="exp_deferred",
+        checkpoint_record_id=f"chk_rec_{chk_id}",
+        record_in_registry=False,
+    )
+
+    # Nothing in registry_evaluations yet
+    assert registry.list_evaluations_for_checkpoint(chk_id) == []
+
+    # Now write checkpoint metadata (inserts chk_rec_{chk_id} into registry_checkpoints)
+    meta = CheckpointMetadata(
+        checkpoint_episode=100,
+        total_training_episodes=100,
+        policy_name="dummy_policy",
+        seed=42,
+        success_rate=conf_summary.success_rate,
+        average_completion_steps=conf_summary.average_completion_steps,
+        timeout_rate=conf_summary.timeout_rate,
+        average_sheep_penned=conf_summary.average_sheep_penned,
+        average_reward=conf_summary.average_reward,
+        environment_config={"dogs": 3, "sheep": 6, "width": 150, "height": 105},
+        reward_config={},
+        run_id="run_deferred",
+        checkpoint_id=chk_id,
+        global_timestep=100,
+        experiment_id="exp_deferred",
+    )
+    store.write(meta)
+
+    assert evaluator.record_evaluation_in_registry(
+        summary=quick_summary,
+        json_path=quick_json,
+        policy=policy,
+        experiment_id="exp_deferred",
+        checkpoint_record_id=f"chk_rec_{chk_id}",
+    )
+    assert evaluator.record_evaluation_in_registry(
+        summary=conf_summary,
+        json_path=conf_json,
+        policy=policy,
+        experiment_id="exp_deferred",
+        checkpoint_record_id=f"chk_rec_{chk_id}",
+    )
+
+    recorded = registry.list_evaluations_for_checkpoint(chk_id)
+    assert len(recorded) == 2
+    assert {e.evaluation_mode for e in recorded} == {"quick", "confidence"}
+    assert all(e.experiment_id == "exp_deferred" for e in recorded)
+    assert all(e.checkpoint_record_id == f"chk_rec_{chk_id}" for e in recorded)
+
+
+def test_record_checkpoint_upsert_preserves_referenced_evaluations(tmp_path: Path):
+    """Updating an existing CheckpointRecord does not fail when registry_evaluations references it."""
+    from sheepdog.tracking.registry import (
+        CheckpointRecord,
+        EvaluationRecordEntry,
+        ExperimentRecord,
+    )
+
+    registry = TrackingRegistry(tmp_path / "telemetry.sqlite")
+    registry.record_experiment(
+        ExperimentRecord(
+            experiment_id="exp_upsert",
+            created_at="2026-11-18T00:00:00Z",
+            name="Upsert Test",
+            assistance_mode="guided",
+        )
+    )
+    registry.record_checkpoint(
+        CheckpointRecord(
+            checkpoint_record_id="chk_rec_upsert",
+            checkpoint_id="chk_upsert",
+            experiment_id="exp_upsert",
+            world_steps=100,
+        )
+    )
+    registry.record_evaluation(
+        EvaluationRecordEntry(
+            registry_eval_id="eval_reg_upsert",
+            evaluated_at="2026-11-18T00:01:00Z",
+            experiment_id="exp_upsert",
+            checkpoint_id="chk_upsert",
+            checkpoint_record_id="chk_rec_upsert",
+        )
+    )
+
+    # Updating the checkpoint must succeed under PRAGMA foreign_keys = ON
+    registry.record_checkpoint(
+        CheckpointRecord(
+            checkpoint_record_id="chk_rec_upsert",
+            checkpoint_id="chk_upsert",
+            experiment_id="exp_upsert",
+            world_steps=250,
+        )
+    )
+
+    updated = registry.get_checkpoint("chk_rec_upsert")
+    assert updated is not None
+    assert updated.world_steps == 250
+    evals = registry.list_evaluations_for_checkpoint("chk_rec_upsert")
+    assert len(evals) == 1
+    assert evals[0].registry_eval_id == "eval_reg_upsert"
 
 

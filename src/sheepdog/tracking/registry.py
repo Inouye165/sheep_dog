@@ -458,62 +458,62 @@ class TrackingRegistry:
                 finally:
                     conn.close()
 
+    @staticmethod
+    def _upsert_sql(table: str, pk_col: str, columns: Any) -> str:
+        cols_list = list(columns)
+        cols = ", ".join(cols_list)
+        placeholders = ", ".join(f":{k}" for k in cols_list)
+        update_cols = [c for c in cols_list if c != pk_col]
+        updates = ", ".join(f"{c} = excluded.{c}" for c in update_cols)
+        return (
+            f"INSERT INTO {table} ({cols}) VALUES ({placeholders}) "
+            f"ON CONFLICT({pk_col}) DO UPDATE SET {updates};"
+        )
+
     def record_change(self, change: ChangeRecord) -> None:
-        """Record or replace a change entry in registry_changes."""
+        """Record or update a change entry in registry_changes."""
         row = change.to_row()
-        cols = ", ".join(row.keys())
-        placeholders = ", ".join(f":{k}" for k in row)
-        sql = f"INSERT OR REPLACE INTO registry_changes ({cols}) VALUES ({placeholders});"
+        sql = self._upsert_sql("registry_changes", "change_id", row.keys())
         with self._get_connection() as conn:
             conn.execute(sql, row)
             conn.commit()
 
     def record_experiment(self, experiment: ExperimentRecord) -> None:
-        """Record or replace an experiment entry in registry_experiments."""
+        """Record or update an experiment entry in registry_experiments."""
         row = experiment.to_row()
-        cols = ", ".join(row.keys())
-        placeholders = ", ".join(f":{k}" for k in row)
-        sql = f"INSERT OR REPLACE INTO registry_experiments ({cols}) VALUES ({placeholders});"
+        sql = self._upsert_sql("registry_experiments", "experiment_id", row.keys())
         with self._get_connection() as conn:
             conn.execute(sql, row)
             conn.commit()
 
     def record_activation(self, activation: ActivationRecord) -> None:
-        """Record or replace an activation entry in registry_activations."""
+        """Record or update an activation entry in registry_activations."""
         row = activation.to_row()
-        cols = ", ".join(row.keys())
-        placeholders = ", ".join(f":{k}" for k in row)
-        sql = f"INSERT OR REPLACE INTO registry_activations ({cols}) VALUES ({placeholders});"
+        sql = self._upsert_sql("registry_activations", "activation_id", row.keys())
         with self._get_connection() as conn:
             conn.execute(sql, row)
             conn.commit()
 
     def record_checkpoint(self, checkpoint: CheckpointRecord) -> None:
-        """Record or replace a checkpoint entry in registry_checkpoints."""
+        """Record or update a checkpoint entry in registry_checkpoints."""
         row = checkpoint.to_row()
-        cols = ", ".join(row.keys())
-        placeholders = ", ".join(f":{k}" for k in row)
-        sql = f"INSERT OR REPLACE INTO registry_checkpoints ({cols}) VALUES ({placeholders});"
+        sql = self._upsert_sql("registry_checkpoints", "checkpoint_record_id", row.keys())
         with self._get_connection() as conn:
             conn.execute(sql, row)
             conn.commit()
 
     def record_evaluation(self, evaluation: EvaluationRecordEntry) -> None:
-        """Record or replace an evaluation entry in registry_evaluations."""
+        """Record or update an evaluation entry in registry_evaluations."""
         row = evaluation.to_row()
-        cols = ", ".join(row.keys())
-        placeholders = ", ".join(f":{k}" for k in row)
-        sql = f"INSERT OR REPLACE INTO registry_evaluations ({cols}) VALUES ({placeholders});"
+        sql = self._upsert_sql("registry_evaluations", "registry_eval_id", row.keys())
         with self._get_connection() as conn:
             conn.execute(sql, row)
             conn.commit()
 
     def record_conclusion(self, conclusion: ConclusionRecord) -> None:
-        """Record or replace a conclusion entry in registry_conclusions."""
+        """Record or update a conclusion entry in registry_conclusions."""
         row = conclusion.to_row()
-        cols = ", ".join(row.keys())
-        placeholders = ", ".join(f":{k}" for k in row)
-        sql = f"INSERT OR REPLACE INTO registry_conclusions ({cols}) VALUES ({placeholders});"
+        sql = self._upsert_sql("registry_conclusions", "conclusion_id", row.keys())
         with self._get_connection() as conn:
             conn.execute(sql, row)
             conn.commit()

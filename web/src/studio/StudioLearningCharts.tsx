@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from "react";
+import { ExplainTip } from "../components/ExplainTip";
 import type { CheckpointEntry, SessionChangeEvent, TrainingEpisode } from "../state/types";
 import {
   buildFormalEvalMarkers,
@@ -56,17 +57,19 @@ export const StudioLearningCharts: React.FC<StudioLearningChartsProps> = ({
       stageScope,
       "episode",
       bestCheckpointEpisode,
-      effectiveStage
+      effectiveStage,
+      activeRunId
     );
-    // Deduplicate by stage + checkpoint_episode in ascending episode order
+    // Deduplicate by run + stage + checkpoint_episode in ascending episode order
     const byKey = new Map<string, FormalEvalMarker>();
     for (const m of rawMarkers) {
-      byKey.set(`${m.stage}:${m.checkpoint.checkpoint_episode}`, m);
+      const runKey = m.checkpoint.run_id ?? m.checkpoint.journey ?? "current";
+      byKey.set(`${runKey}:${m.stage}:${m.checkpoint.checkpoint_episode}`, m);
     }
     return Array.from(byKey.values()).sort(
       (a, b) => a.checkpoint.checkpoint_episode - b.checkpoint.checkpoint_episode
     );
-  }, [checkpoints, stageScope, bestCheckpointEpisode, effectiveStage]);
+  }, [checkpoints, stageScope, bestCheckpointEpisode, effectiveStage, activeRunId]);
 
   // Slice formal evaluations to the user-selected window (e.g. Last 25)
   const visibleEvals = useMemo(() => {
@@ -197,7 +200,7 @@ export const StudioLearningCharts: React.FC<StudioLearningChartsProps> = ({
         results.push({
           event: evt,
           ep,
-          label: isArch ? "🧠 Arch" : "⚙ Params",
+          label: isArch ? "Arch" : "Params",
           color: isArch ? "#c084fc" : "#f59e0b",
         });
       }
@@ -247,11 +250,11 @@ export const StudioLearningCharts: React.FC<StudioLearningChartsProps> = ({
       : stageStats.latestEval;
 
   const W = 780;
-  const H = mode === "stacked" ? 165 : 220;
-  const padL = 44;
-  const padR = mode === "combined" ? 50 : 22;
-  const padT = 22;
-  const padB = 26;
+  const H = mode === "stacked" ? 165 : 248;
+  const padL = mode === "steps" || mode === "stacked" ? 74 : 48;
+  const padR = mode === "combined" ? 74 : 24;
+  const padT = 32;
+  const padB = 24;
   const plotW = W - padL - padR;
   const plotH = H - padT - padB;
 
@@ -396,6 +399,40 @@ export const StudioLearningCharts: React.FC<StudioLearningChartsProps> = ({
               </linearGradient>
             </defs>
 
+            {/* Axis Unit Headers */}
+            <text
+              x={padL - 7}
+              y={padT - 13}
+              textAnchor="end"
+              fill={
+                chartType === "steps"
+                  ? "#f59e0b"
+                  : chartType === "reward"
+                    ? "#818cf8"
+                    : "#94a3b8"
+              }
+              fontSize="8.5"
+              fontWeight="600"
+            >
+              {chartType === "steps"
+                ? "Steps (↑ faster)"
+                : chartType === "reward"
+                  ? "Return"
+                  : "Pass %"}
+            </text>
+            {chartType === "combined" && (
+              <text
+                x={W - padR + 7}
+                y={padT - 13}
+                textAnchor="start"
+                fill="#f59e0b"
+                fontSize="8.5"
+                fontWeight="600"
+              >
+                Steps (↑ faster)
+              </text>
+            )}
+
             {/* Horizontal Grid Lines & Left/Right Axis Labels */}
             {[0, 0.25, 0.5, 0.75, 1].map((frac) => {
               const y = padT + (1 - frac) * plotH;
@@ -405,7 +442,7 @@ export const StudioLearningCharts: React.FC<StudioLearningChartsProps> = ({
               } else if (chartType === "steps") {
                 // Inverted steps: top (frac=1) is min steps, bottom (frac=0) is max steps
                 const sVal = stepsBounds.max - frac * (stepsBounds.max - stepsBounds.min);
-                leftLabel = `${Math.round(sVal)}s`;
+                leftLabel = `${Math.round(sVal)}`;
               } else {
                 const val = rewardBounds.min + frac * (rewardBounds.max - rewardBounds.min);
                 leftLabel = `${Math.round(val)}`;
@@ -445,7 +482,7 @@ export const StudioLearningCharts: React.FC<StudioLearningChartsProps> = ({
                       fontSize="9.5"
                       fontFamily="var(--sd-font-mono)"
                     >
-                      {rightStepVal}s
+                      {rightStepVal}
                     </text>
                   )}
                 </g>
@@ -453,29 +490,42 @@ export const StudioLearningCharts: React.FC<StudioLearningChartsProps> = ({
             })}
 
             {/* Promotion Target Threshold Line (Success / Combined) */}
-            {(chartType === "combined" || chartType === "success") && (
-              <g>
-                <line
-                  x1={padL}
-                  y1={toYSuccess(promotionTargetPct)}
-                  x2={W - padR}
-                  y2={toYSuccess(promotionTargetPct)}
-                  stroke="rgba(52, 211, 153, 0.55)"
-                  strokeWidth="1.3"
-                  strokeDasharray="5 4"
-                />
-                <text
-                  x={W - padR - 4}
-                  y={toYSuccess(promotionTargetPct) - 4}
-                  textAnchor="end"
-                  fill="#34d399"
-                  fontSize="9.5"
-                  fontWeight="700"
-                >
-                  {promotionTargetPct}% Target
-                </text>
-              </g>
-            )}
+            {(chartType === "combined" || chartType === "success") && (() => {
+              const targetY = toYSuccess(promotionTargetPct);
+              const targetLabel = `${promotionTargetPct}% Target`;
+              const pillWidth = targetLabel.length * 5.6 + 10;
+              return (
+                <g>
+                  <line
+                    x1={padL}
+                    y1={targetY}
+                    x2={W - padR}
+                    y2={targetY}
+                    stroke="rgba(52, 211, 153, 0.55)"
+                    strokeWidth="1.3"
+                    strokeDasharray="5 4"
+                  />
+                  <rect
+                    x={padL + 3}
+                    y={targetY - 15}
+                    width={pillWidth}
+                    height={13}
+                    rx={3}
+                    fill="rgba(11, 15, 23, 0.82)"
+                  />
+                  <text
+                    x={padL + 6}
+                    y={targetY - 5}
+                    textAnchor="start"
+                    fill="#34d399"
+                    fontSize="9.5"
+                    fontWeight="700"
+                  >
+                    {targetLabel}
+                  </text>
+                </g>
+              );
+            })()}
 
             {/* Session / Parameter Event Vertical Cues */}
             {visibleSessionEvents.map((se, i) => {
@@ -738,8 +788,17 @@ export const StudioLearningCharts: React.FC<StudioLearningChartsProps> = ({
       <div className="sd-chart-header">
         <div>
           <div className="sd-panel-title">
-            <span className="sd-panel-title__icon">📈</span>
-            <span>Learning Curve & Recent 10-Seed Evaluations</span>
+            <span>Learning Curve &amp; Recent 10-Seed Evaluations</span>
+            <ExplainTip
+              title="Learning Curve & Recent 10-Seed Evaluations"
+              plain="The green line shows how reliably the dogs pen all 6 sheep (Pass %). The orange dashed line tracks speed in simulation steps — higher means faster. Gold dots mark the stage's best checkpoint; click any dot or recent chip to watch its replay."
+              technical={[
+                "Each point represents a 10-seed fixed-seed deterministic formal evaluation suite.",
+                "Steps axis is inverted (top = fewest steps / fastest). Uses median successful steps when available, else average completion steps.",
+                "Session Cues mark Arch or Params changes across training episodes.",
+                "In All window mode, a faint cyan curve overlays rolling training rollout success.",
+              ]}
+            />
             <span className="sd-badge sd-badge--emerald">
               Showing{" "}
               {evalWindow === "all"
@@ -874,7 +933,7 @@ export const StudioLearningCharts: React.FC<StudioLearningChartsProps> = ({
               checked={showSessionCues}
               onChange={(e) => setShowSessionCues(e.target.checked)}
             />
-            <span>⚙ Session Cues</span>
+            <span>Session Cues</span>
           </label>
         </div>
 
@@ -944,10 +1003,12 @@ export const StudioLearningCharts: React.FC<StudioLearningChartsProps> = ({
             display: "flex",
             alignItems: "center",
             gap: "0.35rem",
-            flexWrap: "wrap",
-            paddingTop: "0.4rem",
+            flexWrap: "nowrap",
+            overflowX: "auto",
+            paddingTop: "0.32rem",
             borderTop: "1px solid var(--sd-border-subtle)",
             fontSize: "0.68rem",
+            scrollbarWidth: "thin",
           }}
         >
           <span
@@ -957,6 +1018,7 @@ export const StudioLearningCharts: React.FC<StudioLearningChartsProps> = ({
               textTransform: "uppercase",
               letterSpacing: "0.04em",
               marginRight: "0.15rem",
+              flexShrink: 0,
             }}
             title={`Stage ${effectiveStage} All-Time Avg: ${stageStats.allTimeAvgPct.toFixed(
               1
@@ -1012,15 +1074,16 @@ export const StudioLearningCharts: React.FC<StudioLearningChartsProps> = ({
                   cursor: "pointer",
                   color: "var(--sd-text-primary)",
                   fontSize: "0.67rem",
+                  flexShrink: 0,
                 }}
               >
                 <span style={{ fontWeight: 700 }}>
-                  {i === 0 ? "★ " : ""}Ep {ep.toLocaleString()}
+                  {ev.isBest ? "Best · " : i === 0 ? "Latest · " : ""}Ep {ep.toLocaleString()}
                 </span>
                 <strong style={{ color: toneColor }}>{rate}%</strong>
                 {steps > 0 && (
                   <span style={{ color: "var(--sd-text-muted)", fontSize: "0.62rem" }}>
-                    {steps}s
+                    {steps} st
                   </span>
                 )}
               </button>
@@ -1033,6 +1096,8 @@ export const StudioLearningCharts: React.FC<StudioLearningChartsProps> = ({
               marginLeft: "auto",
               fontSize: "0.65rem",
               color: "var(--sd-text-secondary)",
+              flexShrink: 0,
+              whiteSpace: "nowrap",
             }}
           >
             Recent 5 Avg:{" "}

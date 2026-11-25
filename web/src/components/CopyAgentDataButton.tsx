@@ -82,6 +82,41 @@ function detectPlateau(checkpoints: CheckpointEntry[]): PlateauInfo | null {
   return null;
 }
 
+function computeAvailableStages(
+  checkpoints: CheckpointEntry[],
+  availableCurriculumStages: number[] | undefined,
+  curriculumStage: number,
+): number[] {
+  const stageSet = new Set<number>();
+  if (curriculumStage !== undefined && curriculumStage !== null) {
+    stageSet.add(curriculumStage);
+  }
+  if (Array.isArray(availableCurriculumStages)) {
+    for (const s of availableCurriculumStages) {
+      if (s !== undefined && s !== null) {
+        stageSet.add(s);
+      }
+    }
+  }
+  for (const c of checkpoints) {
+    const stage =
+      c.curriculum_stage ??
+      c.reward_config?.instincts?.curriculum_stage ??
+      c.environment_config?.curriculum_stage ??
+      0;
+    if (stage !== undefined && stage !== null) {
+      stageSet.add(stage);
+    }
+  }
+  const stages = Array.from(stageSet).sort((a, b) => a - b);
+  if (stages.length === 0) {
+    for (let i = 0; i <= 38; i += 1) {
+      stages.push(i);
+    }
+  }
+  return stages;
+}
+
 interface CopyAgentDataButtonProps {
   trainingStatus: TrainingStatus | null;
   checkpointIndex: CheckpointIndex | null;
@@ -115,6 +150,8 @@ export function CopyAgentDataButton({
     failed: boolean;
   }> | null>(null);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const checkpointIndexRef = useRef<CheckpointIndex | null>(null);
+  checkpointIndexRef.current = checkpointIndex;
 
   useEffect(() => {
     return () => {
@@ -124,20 +161,13 @@ export function CopyAgentDataButton({
     };
   }, []);
 
-  const checkpoints = checkpointIndex?.checkpoints ?? [];
-  const allStages = Array.from(
-    new Set([
-      curriculumStage,
-      ...(trainingStatus?.available_curriculum_stages ?? []),
-      ...checkpoints.map((c) => c.curriculum_stage ?? c.reward_config?.instincts?.curriculum_stage ?? c.environment_config?.curriculum_stage ?? 0)
-    ])
-  ).filter((s) => s !== undefined && s !== null).sort((a, b) => a - b);
-
-  if (allStages.length === 0) {
-    for (let i = 0; i <= 38; i++) {
-      allStages.push(i);
-    }
-  }
+  const allStages = isModalOpen
+    ? computeAvailableStages(
+        checkpointIndex?.checkpoints ?? [],
+        trainingStatus?.available_curriculum_stages,
+        curriculumStage,
+      )
+    : [];
 
   // Synchronize dropdown selections when curriculumStage changes
   useEffect(() => {
@@ -267,7 +297,7 @@ export function CopyAgentDataButton({
 
       setFailed(hasFailed);
 
-      const checkpointsList = checkpointIndex?.checkpoints ?? [];
+      const checkpointsList = checkpointIndexRef.current?.checkpoints ?? [];
       const report = formatAgentReport(
         trainingStatus,
         checkpointsList,
@@ -838,8 +868,10 @@ function formatAgentReport(
         if (gate) {
           const sc = gate.seed_count ?? gate.total_seed_trials ?? 10;
           const st = gate.success_threshold ?? 0.9;
+          const qualCount = gate.qualified_evaluations ?? gate.qualified_streak ?? 0;
+          const qualReq = gate.qualified_evaluations_required ?? gate.min_qualified_streak ?? 6;
           gateSectionText = `- Required success: ${Math.round(st * sc)}/${sc}\n` +
-                            `- Current streak: ${gate.qualified_streak ?? 0}/${gate.min_qualified_streak ?? 3}\n` +
+                            `- Qualified evals (rolling window): ${qualCount}/${qualReq}\n` +
                             `- Best success observed: ${gate.best_success ?? 0}/${sc}\n` +
                             `- Perfect batches observed: ${gate.full_success_hits ?? 0}\n`;
         } else {
@@ -1077,9 +1109,11 @@ function formatAgentReport(
 
   const gate = snap.current_stage_promotion_gate;
   if (gate) {
+    const qualCount = gate.qualified_evaluations ?? gate.qualified_streak ?? 0;
+    const qualReq = gate.qualified_evaluations_required ?? gate.min_qualified_streak ?? 6;
     md += `\n### Auto-Promote Gate Diagnostics\n`;
     md += `- **Gate Decision**: \`${gate.decision.toUpperCase()}\` (Reason: ${gate.reason})\n`;
-    md += `- **Streak Count**: ${gate.qualified_streak} / ${gate.min_qualified_streak} qualified batches\n`;
+    md += `- **Qualified Evals (Window)**: ${qualCount} / ${qualReq} qualified batches\n`;
     md += `- **Seed Check**: ${gate.seed_count} seeds evaluated (Gate target: ${gate.seed_gate_target_met ? "MET" : "NOT MET"})\n`;
     md += `- **Success Rate Check**: ${gate.success_count} fully success seeds (Gate target: ${gate.success_threshold * 100}% threshold, current average is ${gate.success_rate_ok ? "OK" : "BELOW TARGET"})\n`;
     md += `- **Timeout Rate Check**: ${gate.timeout_ok ? "OK" : "TOO HIGH"}\n`;

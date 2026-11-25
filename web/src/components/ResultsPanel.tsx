@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CheckpointEntry, CheckpointIndex, ReplayBundle, ReplaySnapshot } from "../state/types";
+import { isDocumentVisible } from "../hooks/useVisibility";
 import { loadReplay } from "../lib/api";
 import { exportResultsVideo, makeResultsVideoFileName } from "../lib/resultsVideo";
 
@@ -270,6 +271,19 @@ export function ResultsPanel({ checkpointIndex }: ResultsPanelProps) {
   );
 
   const [replays, setReplays] = useState<Map<number, MilestoneReplay>>(new Map());
+  const replaysRef = useRef<Map<number, MilestoneReplay>>(replays);
+  replaysRef.current = replays;
+  const milestoneCheckpointsRef = useRef<CheckpointEntry[]>(milestoneCheckpoints);
+  milestoneCheckpointsRef.current = milestoneCheckpoints;
+
+  const milestoneLoadKey = useMemo(
+    () =>
+      milestoneCheckpoints
+        .map((cp) => `${cp.checkpoint_episode}:${cp.records?.[0]?.replay_path ?? ""}`)
+        .join("|"),
+    [milestoneCheckpoints],
+  );
+
   const [playing, setPlaying] = useState(false);
   const [playbackSpeed, setPlaybackSpeed] = useState<"slow" | "normal" | "fast">("normal");
   const [exportStatus, setExportStatus] = useState<"idle" | "exporting" | "success" | "error">("idle");
@@ -282,6 +296,7 @@ export function ResultsPanel({ checkpointIndex }: ResultsPanelProps) {
       if (exportTimerRef.current) {
         clearTimeout(exportTimerRef.current);
       }
+      replaysRef.current = new Map();
     };
   }, []);
 
@@ -323,33 +338,55 @@ export function ResultsPanel({ checkpointIndex }: ResultsPanelProps) {
   }, [gridMilestones, replays, playbackSpeed, setExportProgress]);
 
   useEffect(() => {
-    if (!milestoneCheckpoints.length) {
+    const targetCheckpoints = milestoneCheckpointsRef.current;
+    if (!targetCheckpoints.length) {
       setReplays(new Map());
       return;
     }
 
-    const newReplays = new Map<number, MilestoneReplay>();
-    for (const checkpoint of milestoneCheckpoints) {
-      newReplays.set(checkpoint.checkpoint_episode, {
-        checkpoint,
-        bundle: null,
-        frameIndex: 0,
-        loading: true,
-        error: null,
-      });
+    const previousReplays = replaysRef.current;
+    const nextReplays = new Map<number, MilestoneReplay>();
+    const toFetch: CheckpointEntry[] = [];
+
+    for (const checkpoint of targetCheckpoints) {
+      const ep = checkpoint.checkpoint_episode;
+      const prevEntry = previousReplays.get(ep);
+      const prevPath = prevEntry?.checkpoint.records?.[0]?.replay_path ?? "";
+      const nextPath = checkpoint.records?.[0]?.replay_path ?? "";
+
+      if (prevEntry && prevPath === nextPath && (prevEntry.bundle !== null || prevEntry.error !== null)) {
+        nextReplays.set(
+          ep,
+          prevEntry.checkpoint === checkpoint ? prevEntry : { ...prevEntry, checkpoint },
+        );
+      } else {
+        nextReplays.set(ep, {
+          checkpoint,
+          bundle: null,
+          frameIndex: 0,
+          loading: true,
+          error: null,
+        });
+        toFetch.push(checkpoint);
+      }
     }
-    setReplays(newReplays);
+    setReplays(nextReplays);
+
+    if (toFetch.length === 0) {
+      return;
+    }
 
     let cancelled = false;
 
     const loadAll = async () => {
-      for (const checkpoint of milestoneCheckpoints) {
+      for (const checkpoint of toFetch) {
         if (cancelled) {
           return;
         }
 
         const record = checkpoint.records?.[0];
         if (!record || !record.replay_path) {
+          if (cancelled) return;
           setReplays((prev) => {
             const next = new Map(prev);
             const existing = next.get(checkpoint.checkpoint_episode);
@@ -410,7 +447,7 @@ export function ResultsPanel({ checkpointIndex }: ResultsPanelProps) {
     return () => {
       cancelled = true;
     };
-  }, [milestoneCheckpoints]);
+  }, [milestoneLoadKey]);
 
   useEffect(() => {
     if (!playing) {
@@ -421,6 +458,9 @@ export function ResultsPanel({ checkpointIndex }: ResultsPanelProps) {
     const delay = delays[playbackSpeed];
 
     const timer = window.setInterval(() => {
+      if (!isDocumentVisible()) {
+        return;
+      }
       setReplays((prev) => {
         const next = new Map(prev);
         let allComplete = true;

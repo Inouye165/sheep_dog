@@ -10,6 +10,7 @@ from typing import Any
 from sheepdog.config import EnvironmentConfig, TrainingConfig
 from sheepdog.evaluation.scenarios import Scenario
 from sheepdog.training.training_scenarios import (
+    boundary_split_failure_geometry,
     get_scenario_builder,
     list_scenario_types,
 )
@@ -125,20 +126,27 @@ class ScenarioSampler:
             seed += 100_000
         return seed
 
-    def sample(self, episode_index: int) -> ScenarioSelection:
+    def sample(self, episode_index: int, *, seed: int | None = None) -> ScenarioSelection:
         """Sample a scenario type for the given episode index.
 
         Uses the RNG to ensure reproducibility: the same seed produces
         the same sequence of scenario selections.
         """
-        raw_seed = self.config.train_seed + episode_index
+        raw_seed = self.config.train_seed + episode_index if seed is None else seed
         seed = self._safe_training_seed(raw_seed)
 
         # 1. Failure-Directed Training (Dynamic closed-loop targeting)
         if getattr(self.config, "failure_directed_training_enabled", False):
+            min_weight = getattr(self.config, "failure_directed_min_weight", 0.05)
+            boundary_split_eligible = not (
+                self.env_config.sheep < 3
+                or min(self.env_config.width, self.env_config.height) < 40
+                or self.env_config.dogs < 1
+            )
             active_weights = {
                 k: v for k, v in self._failure_weights.items()
-                if v >= getattr(self.config, "failure_directed_min_weight", 0.05)
+                if v >= min_weight
+                and (k != "boundary_split_flock" or boundary_split_eligible)
             }
             if active_weights:
                 target_ratio = float(getattr(self.config, "failure_directed_target_ratio", 0.25))
@@ -193,6 +201,16 @@ class ScenarioSampler:
 
             success = bool(get_val("success", False))
             if success:
+                continue
+
+            # Current geometry takes precedence over historical seed archetypes.
+            # Require zero penned sheep: final positions do not identify which
+            # animals are penned, so partial-completion cases are ambiguous.
+            if get_val("sheep_penned") == 0 and boundary_split_failure_geometry(
+                get_val("final_sheep_positions"), get_val("final_dog_positions"),
+                get_val("pen_position"), self.env_config
+            ):
+                failed_classes.add("boundary_split_flock")
                 continue
 
             seed_val = get_val("seed")

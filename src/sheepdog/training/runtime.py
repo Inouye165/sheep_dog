@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import contextlib
+import copy
+import logging
 import os
 import sys
 import threading
@@ -14,6 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from sheepdog.atomic_io import atomic_write_json
+
+logger = logging.getLogger(__name__)
 
 PHASE_FIELDS = {
     "training": "training_seconds",
@@ -63,8 +67,11 @@ class TrainingRuntimeTracker:
         return {"schema_version": 1, "sessions": []}
 
     def _persist(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_json(self.path, self._payload)
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(self.path, self._payload)
+        except OSError as exc:
+            logger.warning("Failed to persist training runtime state to %s: %s", self.path, exc)
 
     def _close_stale_session(self) -> None:
         sessions = self._payload["sessions"]
@@ -118,15 +125,25 @@ class TrainingRuntimeTracker:
         except (OSError, OverflowError, ValueError, Exception):
             return False
 
-    def start_session(self, run_id: str | None, *, session_id: str | None = None) -> str:
+    def start_session(
+        self, run_id: str | None, *, session_id: str | None = None, stage: int | None = None
+    ) -> str:
         """Start a measured process session and its heartbeat."""
         with self._lock:
             if self._session is not None:
-                return str(self._session["session_id"])
+                if self._session["run_id"] == run_id:
+                    if self._session.get("curriculum_stage") != stage:
+                        self._accumulate(self._monotonic())
+                        self._session["curriculum_stage"] = stage
+                        self.heartbeat()
+                    return str(self._session["session_id"])
+                self.end_session("run_changed")
             now = self._utc_now().isoformat()
             session = {
                 "session_id": session_id or f"session_{uuid.uuid4().hex}",
                 "run_id": run_id,
+                "curriculum_stage": stage,
+                "stage_seconds": {},
                 "process_id": os.getpid(),
                 "started_at": now,
                 "last_heartbeat_at": now,
@@ -147,18 +164,21 @@ class TrainingRuntimeTracker:
     def _ensure_heartbeat_thread(self) -> None:
         if not self._start_heartbeat_thread or self._heartbeat_thread is not None:
             return
-        self._stop_event.clear()
+        self._stop_event = threading.Event()
         self._heartbeat_thread = threading.Thread(
             target=self._heartbeat_loop,
+            args=(self._stop_event,),
             name="training-runtime-heartbeat",
             daemon=True,
         )
         self._heartbeat_thread.start()
 
-    def _heartbeat_loop(self) -> None:
-        while not self._stop_event.wait(self.heartbeat_seconds):
+    def _heartbeat_loop(self, stop_event: threading.Event) -> None:
+        while not stop_event.wait(self.heartbeat_seconds):
             try:
-                self.heartbeat()
+                with self._lock:
+                    if not stop_event.is_set():
+                        self.heartbeat()
             except OSError:
                 continue
 
@@ -170,6 +190,10 @@ class TrainingRuntimeTracker:
         field = PHASE_FIELDS.get(str(phase))
         if field is not None:
             self._session[field] = float(self._session.get(field, 0.0)) + elapsed
+            stage = self._session.get("curriculum_stage")
+            if stage is not None and phase != "paused":
+                stage_seconds = self._session["stage_seconds"].setdefault(str(stage), {})
+                stage_seconds[field] = stage_seconds.get(field, 0.0) + elapsed
         self._session["active_seconds_total"] = sum(
             float(self._session.get(name, 0.0)) for name in PHASE_FIELDS.values()
         )
@@ -212,24 +236,29 @@ class TrainingRuntimeTracker:
         with self._lock:
             if self._session is None:
                 return
-            self._accumulate(self._monotonic())
-            now = self._utc_now().isoformat()
-            self._session.update(
-                {
-                    "last_heartbeat_at": now,
-                    "ended_at": now,
-                    "end_reason": reason,
-                    "status": "ended",
-                    "current_phase": None,
-                }
-            )
-            self._persist()
-            self._session = None
-            self._phase_started_monotonic = None
-            self._stop_event.set()
-            self._heartbeat_thread = None
+            try:
+                self._accumulate(self._monotonic())
+                now = self._utc_now().isoformat()
+                self._session.update(
+                    {
+                        "last_heartbeat_at": now,
+                        "ended_at": now,
+                        "end_reason": reason,
+                        "status": "ended",
+                        "current_phase": None,
+                    }
+                )
+                try:
+                    self._persist()
+                except OSError as exc:
+                    logger.warning("Failed to flush runtime session on end: %s", exc)
+            finally:
+                self._session = None
+                self._phase_started_monotonic = None
+                self._stop_event.set()
+                self._heartbeat_thread = None
 
-    def snapshot(self) -> dict[str, Any]:
+    def snapshot(self, *, include_history: bool = True) -> dict[str, Any]:
         """Return cumulative measured and wall-clock timing."""
         with self._lock:
             if self._session is not None:
@@ -261,13 +290,85 @@ class TrainingRuntimeTracker:
                 "session_id": current.get("session_id") if current else None,
                 "run_id": current.get("run_id") if current else None,
                 "current_phase": current.get("current_phase") if current else None,
+                "curriculum_stage": current.get("curriculum_stage") if current else None,
                 "session_count": len(sessions),
-                "sessions": [dict(session) for session in sessions],
+                **(
+                    {"stage_totals": self.summarize_stages(sessions), "sessions": copy.deepcopy(sessions)}
+                    if include_history else {}
+                ),
             }
+
+    def stage_totals(self) -> list[dict[str, Any]]:
+        """Group measured time by run and stage, leaving older sessions unassigned."""
+        with self._lock:
+            self._accumulate(self._monotonic())
+            return self.summarize_stages(self._payload["sessions"])
+
+    def get_stage_phase_totals(self, run_id: str | None, stage: int) -> dict[str, float]:
+        """Return cumulative phase durations for one run and curriculum stage."""
+        phases = (
+            "training_seconds",
+            "evaluation_seconds",
+            "checkpoint_save_seconds",
+            "replay_serialization_seconds",
+        )
+        totals = {name: 0.0 for name in phases}
+        stage_key = str(stage)
+        with self._lock:
+            self._accumulate(self._monotonic())
+            for session in self._payload.get("sessions", []):
+                if not isinstance(session, dict) or session.get("run_id") != run_id:
+                    continue
+                stage_map = session.get("stage_seconds")
+                if not isinstance(stage_map, dict):
+                    continue
+                stage_block = stage_map.get(stage_key)
+                if not isinstance(stage_block, dict):
+                    continue
+                for name in phases:
+                    val = stage_block.get(name)
+                    if isinstance(val, int | float) and not isinstance(val, bool):
+                        totals[name] += float(val)
+        totals["active_seconds"] = sum(totals[name] for name in phases)
+        return totals
+
+    @staticmethod
+    def summarize_stages(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Summarize stage timing from live or archived runtime sessions."""
+        totals: dict[tuple[str, int], dict[str, Any]] = {}
+        for session in sessions:
+            run_id = session.get("run_id")
+            if not run_id:
+                continue
+            for stage, phases in session.get("stage_seconds", {}).items():
+                key = (run_id, int(stage))
+                total = totals.setdefault(
+                    key,
+                    {
+                        "run_id": run_id,
+                        "curriculum_stage": int(stage),
+                        "training_seconds": 0.0,
+                        "evaluation_seconds": 0.0,
+                        "active_seconds": 0.0,
+                    },
+                )
+                total["training_seconds"] += phases.get("training_seconds", 0.0)
+                total["evaluation_seconds"] += phases.get("evaluation_seconds", 0.0)
+                total["active_seconds"] += sum(phases.values())
+        return sorted(totals.values(), key=lambda total: (total["run_id"], total["curriculum_stage"]))
+
+    def reload_after_archive(self) -> None:
+        """Discard in-memory results after the manager archives or clears the ledger."""
+        with self._lock:
+            self._session = None
+            self._phase_started_monotonic = None
+            self._stop_event.set()
+            self._heartbeat_thread = None
+            self._payload = self._load()
 
     def episode_snapshot(self) -> dict[str, Any]:
         """Return additive cumulative fields for checkpoint history records."""
-        summary = self.snapshot()
+        summary = self.snapshot(include_history=False)
         return {
             "active_runtime_seconds_total": summary["active_seconds_total"],
             "training_seconds_total": summary["training_seconds"],
@@ -279,4 +380,4 @@ class TrainingRuntimeTracker:
     @property
     def active_seconds_total(self) -> float:
         """Return cumulative active runtime across all sessions."""
-        return float(self.snapshot().get("active_seconds_total", 0.0))
+        return float(self.snapshot(include_history=False).get("active_seconds_total", 0.0))

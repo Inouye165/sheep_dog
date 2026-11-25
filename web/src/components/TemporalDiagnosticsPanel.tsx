@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { isDocumentVisible } from "../hooks/useVisibility";
 import {
   checkBackendHealth,
   fetchReplayById,
@@ -301,15 +302,30 @@ export function TemporalDiagnosticsPanel({
 
   useEffect(() => {
     let active = true;
+    let probeInFlight = false;
     const check = async () => {
-      if (!active) return;
-      await probeBackendConnection(false);
+      if (!active || probeInFlight || !isDocumentVisible()) return;
+      probeInFlight = true;
+      try {
+        await probeBackendConnection(false);
+      } finally {
+        probeInFlight = false;
+      }
     };
     void check();
-    const timer = window.setInterval(check, 3000);
+    const timer = window.setInterval(() => {
+      void check();
+    }, 3000);
+    const handleVisibilityChange = () => {
+      if (isDocumentVisible()) {
+        void check();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
       active = false;
       window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [probeBackendConnection]);
 
@@ -682,6 +698,9 @@ export function TemporalDiagnosticsPanel({
 
     const intervalMs = Math.max(30, Math.round(220 / Math.max(1, playbackSpeed)));
     playTimerRef.current = window.setInterval(() => {
+      if (!isDocumentVisible()) {
+        return;
+      }
       setCurrentWorldStep((prevStep) => {
         const idx = stepIndexByWorldStep.get(prevStep) ?? currentStepIndex;
         const maxBoundStep =

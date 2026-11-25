@@ -31,6 +31,7 @@ export function WandbTab({
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(50);
 
   // Fork overrides state
   const [forkEpisodes, setForkEpisodes] = useState(100);
@@ -45,6 +46,14 @@ export function WandbTab({
   const checkpoints = useMemo(() => {
     return checkpointIndex?.checkpoints ?? [];
   }, [checkpointIndex]);
+
+  const reversedCheckpoints = useMemo(() => {
+    return [...checkpoints].reverse();
+  }, [checkpoints]);
+
+  const visibleCheckpoints = useMemo(() => {
+    return reversedCheckpoints.slice(0, visibleCount);
+  }, [reversedCheckpoints, visibleCount]);
 
   // Load detailed checkpoint payload
   useEffect(() => {
@@ -482,7 +491,7 @@ export function WandbTab({
       {trainingStatus?.anti_collapse_warning?.triggered && (
         <div style={styles.warningBanner}>
           <div style={styles.alertHeader}>
-            ⚠️ POLICY COLLAPSE DETECTED
+            POLICY COLLAPSE DETECTED
           </div>
           <p style={{ margin: "4px 0 0 0" }}>
             {trainingStatus.anti_collapse_warning.message}
@@ -498,7 +507,7 @@ export function WandbTab({
       {hasRegressed && !trainingStatus?.anti_collapse_warning?.triggered && (
         <div style={styles.collapseBanner}>
           <div style={styles.alertHeader}>
-            📈 POLICY REGRESSION WARNING
+            POLICY REGRESSION WARNING
           </div>
           <p style={{ margin: "4px 0 0 0" }}>
             Latest success rate ({Math.round(latestSuccess * 100)}%) has fallen significantly below the peak performance ({Math.round(peakSuccess * 100)}%) reached earlier. Consider restoring or forking from an earlier successful checkpoint (e.g. around episode 896).
@@ -572,7 +581,7 @@ export function WandbTab({
                   </td>
                 </tr>
               ) : (
-                [...checkpoints].reverse().map((cp, idx) => {
+                visibleCheckpoints.map((cp, idx) => {
                   const isSelected = selectedCheckpoint
                     ? (selectedCheckpoint.checkpoint_id && cp.checkpoint_id
                         ? selectedCheckpoint.checkpoint_id === cp.checkpoint_id
@@ -593,12 +602,6 @@ export function WandbTab({
                       style={{
                         ...styles.tr,
                         background: isSelected ? "rgba(245, 158, 11, 0.15)" : "transparent",
-                      }}
-                      onMouseEnter={(e) => {
-                        if (!isSelected) e.currentTarget.style.backgroundColor = "rgba(255, 255, 255, 0.03)";
-                      }}
-                      onMouseLeave={(e) => {
-                        if (!isSelected) e.currentTarget.style.backgroundColor = "transparent";
                       }}
                     >
                       <td style={styles.td}><strong>{cp.checkpoint_episode}</strong></td>
@@ -626,6 +629,29 @@ export function WandbTab({
               )}
             </tbody>
           </table>
+          {reversedCheckpoints.length > visibleCheckpoints.length && (
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", borderTop: "1px solid rgba(255, 255, 255, 0.06)", fontSize: "0.8rem", color: "#94a3b8" }}>
+              <span>
+                Showing {visibleCheckpoints.length} of {reversedCheckpoints.length} checkpoints
+              </span>
+              <div style={{ display: "flex", gap: "8px" }}>
+                <button
+                  type="button"
+                  style={styles.secondaryBtn}
+                  onClick={() => setVisibleCount((c) => c + 50)}
+                >
+                  Show 50 more
+                </button>
+                <button
+                  type="button"
+                  style={styles.secondaryBtn}
+                  onClick={() => setVisibleCount(reversedCheckpoints.length)}
+                >
+                  Show all
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 

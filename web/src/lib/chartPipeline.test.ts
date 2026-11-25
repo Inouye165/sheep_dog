@@ -357,4 +357,78 @@ describe("Chart Pipeline Architecture & Integrity", () => {
     expect(calculateAdaptiveBlockSize("all", 15)).toBe(3);
     expect(calculateAdaptiveBlockSize("all", 0)).toBe(1);
   });
+
+  it("excludes archived journey-* checkpoints from buildFormalEvalMarkers even when archived episodes are higher", () => {
+    const archived: CheckpointEntry[] = Array.from({ length: 11 }, (_, i) => ({
+      checkpoint_episode: 2940 + i,
+      curriculum_stage: 24,
+      journey: "journey-20261124-172927",
+      run_id: "run_stage9_from_stage8_20261119_063250_40a1",
+      success_rate: 1.0,
+      timeout_rate: 0.0,
+      average_completion_steps: 90,
+      average_completion_seconds: 9,
+      average_sheep_penned: 6,
+      average_reward: 500,
+      checkpoint: `arch_${2940 + i}.zip`,
+      evaluation: `eval_arch_${2940 + i}.json`,
+      replay: `rep_arch_${2940 + i}.json`,
+      records: [],
+    }));
+    const current: CheckpointEntry[] = Array.from({ length: 11 }, (_, i) => ({
+      checkpoint_episode: 1019 + i,
+      curriculum_stage: 24,
+      journey: "current",
+      run_id: "run_20261124_093542_33c5",
+      success_rate: 0.4,
+      timeout_rate: 0.6,
+      average_completion_steps: 210,
+      average_completion_seconds: 21,
+      average_sheep_penned: 3.8,
+      average_reward: 110,
+      checkpoint: `cur_${1019 + i}.zip`,
+      evaluation: `eval_cur_${1019 + i}.json`,
+      replay: `rep_cur_${1019 + i}.json`,
+      records: [],
+    }));
+    const mixed = [...archived, ...current];
+
+    const withRunId = buildFormalEvalMarkers(
+      mixed,
+      "current",
+      "episode",
+      null,
+      24,
+      "run_20261124_093542_33c5"
+    );
+    expect(withRunId.map((m) => m.checkpoint.checkpoint_episode)).toEqual(
+      Array.from({ length: 11 }, (_, i) => 1019 + i)
+    );
+    expect(withRunId.every((m) => m.successRatePct === 40)).toBe(true);
+
+    // Without activeRunId, archived journeys are still excluded
+    const withoutRunId = buildFormalEvalMarkers(mixed, "current", "episode", null, 24);
+    expect(withoutRunId.map((m) => m.checkpoint.checkpoint_episode)).toEqual(
+      Array.from({ length: 11 }, (_, i) => 1019 + i)
+    );
+    expect(withoutRunId.some((m) => m.checkpoint.checkpoint_episode === 2950)).toBe(false);
+
+    // "current-journey" ("All Stages") also excludes archived journeys and never falls back to them
+    const allStagesCurrentJourney = buildFormalEvalMarkers(
+      mixed,
+      "current-journey",
+      "episode",
+      null,
+      24,
+      "run_20261124_093542_33c5"
+    );
+    expect(allStagesCurrentJourney.map((m) => m.checkpoint.checkpoint_episode)).toEqual(
+      Array.from({ length: 11 }, (_, i) => 1019 + i)
+    );
+
+    // If only archived checkpoints exist, never fall back to them
+    expect(
+      buildFormalEvalMarkers(archived, "current", "episode", null, 24, "run_20261124_093542_33c5")
+    ).toEqual([]);
+  });
 });

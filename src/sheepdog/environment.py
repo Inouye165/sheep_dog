@@ -45,7 +45,8 @@ from sheepdog.team_strategy import RoleAssignment, StrategySnapshot, TeamStrateg
 from sheepdog.training.replay_writer import validate_telemetry_config
 from sheepdog.training.spatial_analytics import SpatialEpisodeTracker
 
-ENV_CONFIG_VERSION = "1.1"
+ENV_CONFIG_VERSION = "1.2"
+ESCAPIST_MAX_BOLT_DISTANCE = 10.0
 
 ACTION_DELTAS: dict[Action, tuple[int, int]] = {
     "up": (0, -1),
@@ -274,6 +275,7 @@ class SheepdogEnvironment:
         self._previous_flock_spread = 0.0
         self._previous_farthest_distance = 0.0
         self._no_progress_steps = 0
+        self._regroup_resets_used = 0
         self._entry_stall_steps = 0
         self._best_entry_distance: float | None = None
         self._best_flock_spread: float | None = None
@@ -455,6 +457,7 @@ class SheepdogEnvironment:
         self._step_count = 0
         self._simulated_seconds = 0.0
         self._no_progress_steps = 0
+        self._regroup_resets_used = 0
         self._entry_stall_steps = 0
         self._best_entry_distance = None
         self._best_flock_spread = None
@@ -552,6 +555,7 @@ class SheepdogEnvironment:
         self._step_count = 0
         self._simulated_seconds = 0.0
         self._no_progress_steps = 0
+        self._regroup_resets_used = 0
         self._entry_stall_steps = 0
         self._best_entry_distance = None
         self._best_flock_spread = None
@@ -860,7 +864,8 @@ class SheepdogEnvironment:
         reserved_positions: set[Point] | None = None,
     ) -> dict[Action, bool]:
         """Return a legal-action mask for the specified dog."""
-        self.prepare_policy_step(weights=weights)
+        if self._uses_team_strategy():
+            self.prepare_policy_step(weights=weights)
         dog = self._dogs[dog_index]
         blocked_positions = self._blocked_positions_for_dog(dog_index)
         movement_mask: dict[Action, bool] = {
@@ -953,6 +958,13 @@ class SheepdogEnvironment:
             action,
             steps,
             blocked_positions=blocked_positions,
+        )
+
+    def _uses_team_strategy(self) -> bool:
+        """Return True when TeamStrategy role assignments should be prepared."""
+        return not (
+            self.config.policy.policy_mode == "neural_policy"
+            and isinstance(self._observation_builder, EmergentObservationBuilder)
         )
 
     def prepare_policy_step(self, weights: Any | None = None) -> None:
@@ -1309,7 +1321,8 @@ class SheepdogEnvironment:
         if len(actions) != len(self._dogs):
             raise ValueError("Action count does not match dog count.")
         validated_actions: list[Action] = [self._validate_action(action) for action in actions]
-        self.prepare_policy_step()
+        if self._uses_team_strategy():
+            self.prepare_policy_step()
         invalid_action_attempts = tuple(
             action != "wait"
             and self.project_dog_action(dog_index, action) == self._dogs[dog_index].position
@@ -1396,6 +1409,21 @@ class SheepdogEnvironment:
             farthest_to_flock_center_delta=farthest_to_flock_center_delta,
             farthest_to_pen_delta=farthest_to_pen_delta if best_entry_progress else 0.0,
         )
+        if (
+            not progress_made
+            and self.env_config.regroup_no_progress_reset
+            and self._regroup_resets_used < self.env_config.regroup_no_progress_max_resets
+            and current_flock_spread > 6.0
+            and (previous_flock_spread - current_flock_spread) >= 0.15
+            and any(
+                dog.position.distance_to(sheep.position) <= 15.0
+                for dog in self._dogs
+                for sheep in self._sheep
+                if not sheep.penned
+            )
+        ):
+            progress_made = True
+            self._regroup_resets_used += 1
         if progress_made:
             self._no_progress_steps = max(0, self._no_progress_steps - 1)
         else:
@@ -1484,7 +1512,8 @@ class SheepdogEnvironment:
                 current_flock_spread=current_flock_spread,
                 newly_penned=newly_penned,
                 no_progress_step=not progress_made,
-                touched_wall=self._touched_wall_this_step(validated_actions),
+                # Use pre-move blocked-action detection so legal moves ending adjacent to obstacles are not penalized.
+                touched_wall=any(invalid_action_attempts),
                 waited_without_reason=self._waited_without_reason(validated_actions),
                 sprint_count=sum(
                     1 for action in validated_actions if self._is_sprint_action(action)
@@ -1979,6 +2008,306 @@ class SheepdogEnvironment:
                     )
                     occupied.add(position)
                     append_sheep(index, position)
+                return sheep
+
+            # wrong_side_recovery
+            if mode == "wrong_side_recovery":
+                pen_center = self._pen.center
+                center: Point | None = None
+                best_center: Point | None = None
+                best_dist = -1.0
+                for _ in range(120):
+                    candidate = self._random_sheep_spawn_center(set())
+                    dist_to_pen = candidate.distance_to(pen_center)
+                    if dist_to_pen >= 30.0:
+                        center = candidate
+                        break
+                    if dist_to_pen > best_dist:
+                        best_dist = dist_to_pen
+                        best_center = candidate
+                if center is None:
+                    center = (
+                        best_center
+                        if best_center is not None
+                        else self._random_sheep_spawn_center(set())
+                    )
+
+                # Reposition dogs onto the pen side of the sampled flock, so clear occupied first.
+                occupied = set()
+                for index in range(self.env_config.sheep):
+                    position = self._sample_unique_position(
+                        preferred_x=center.x,
+                        preferred_y=center.y,
+                        occupied=occupied,
+                        jitter_x=2,
+                        jitter_y=2,
+                    )
+                    occupied.add(position)
+                    append_sheep(index, position)
+
+                flock_x = fmean(s.position.x for s in sheep)
+                flock_y = fmean(s.position.y for s in sheep)
+                dx = float(pen_center.x) - flock_x
+                dy = float(pen_center.y) - flock_y
+                dist = hypot(dx, dy)
+                if dist > 1e-6:
+                    ux, uy = dx / dist, dy / dist
+                else:
+                    ux, uy = 1.0, 0.0
+                perp_x, perp_y = -uy, ux
+
+                for dog in self._dogs:
+                    forward = self._rng.uniform(8.0, 18.0)
+                    lateral = self._rng.uniform(-4.0, 4.0)
+                    pref_x = int(round(flock_x + ux * forward + perp_x * lateral))
+                    pref_y = int(round(flock_y + uy * forward + perp_y * lateral))
+                    dog_position = self._sample_unique_position(
+                        preferred_x=pref_x,
+                        preferred_y=pref_y,
+                        occupied=occupied,
+                        jitter_x=2,
+                        jitter_y=2,
+                    )
+                    occupied.add(dog_position)
+                    dog.position = dog_position
+                return sheep
+
+            # coherent_wall_recovery
+            if mode == "coherent_wall_recovery":
+                wall_choice = self._rng.choice(["top", "bottom", "left", "right", "corner"])
+                w_max = self.env_config.width - 1
+                h_max = self.env_config.height - 1
+                dist = self._rng.choice([0, 1, 2, 3])
+
+                def _in_pen_zone(x: int, y: int) -> bool:
+                    if 94 <= x <= 107 and 1 <= y <= 14:
+                        return True
+                    return (
+                        self._pen.origin.x - 2 <= x <= self._pen.origin.x + self._pen.width + 1
+                        and self._pen.origin.y - 2 <= y <= self._pen.origin.y + self._pen.height + 1
+                    )
+
+                ax, ay = 0, 0
+                for _ in range(100):
+                    if wall_choice == "top":
+                        cx = self._rng.randint(10, max(11, w_max - 10))
+                        cy = dist
+                    elif wall_choice == "bottom":
+                        cx = self._rng.randint(10, max(11, w_max - 10))
+                        cy = max(0, h_max - dist)
+                    elif wall_choice == "left":
+                        cx = dist
+                        cy = self._rng.randint(10, max(11, h_max - 10))
+                    elif wall_choice == "right":
+                        cx = max(0, w_max - dist)
+                        cy = self._rng.randint(10, max(11, h_max - 10))
+                    else:
+                        cx = self._rng.choice([dist, max(0, w_max - dist)])
+                        cy = self._rng.choice([dist, max(0, h_max - dist)])
+                    pt = Point(cx, cy)
+                    if not _in_pen_zone(cx, cy) and not self._pen.contains(pt) and pt not in self._fence_cells:
+                        ax, ay = cx, cy
+                        break
+                else:
+                    ax, ay = max(0, min(w_max, dist)), max(0, min(h_max, h_max - dist))
+
+                for index in range(self.env_config.sheep):
+                    position = self._sample_unique_position(
+                        preferred_x=ax,
+                        preferred_y=ay,
+                        occupied=occupied,
+                        jitter_x=2,
+                        jitter_y=2,
+                    )
+                    occupied.add(position)
+                    append_sheep(index, position)
+                return sheep
+
+            # wrong_side_mild
+            if mode == "wrong_side_mild":
+                pen_center = self._pen.center
+                center = None
+                best_center = None
+                best_dist = -1.0
+                for _ in range(120):
+                    candidate = self._random_sheep_spawn_center(set())
+                    dist_to_pen = candidate.distance_to(pen_center)
+                    if dist_to_pen >= 25.0:
+                        center = candidate
+                        break
+                    if dist_to_pen > best_dist:
+                        best_dist = dist_to_pen
+                        best_center = candidate
+                if center is None:
+                    center = (
+                        best_center
+                        if best_center is not None
+                        else self._random_sheep_spawn_center(set())
+                    )
+
+                occupied = set()
+                for index in range(self.env_config.sheep):
+                    position = self._sample_unique_position(
+                        preferred_x=center.x,
+                        preferred_y=center.y,
+                        occupied=occupied,
+                        jitter_x=2,
+                        jitter_y=2,
+                    )
+                    occupied.add(position)
+                    append_sheep(index, position)
+
+                flock_x = fmean(s.position.x for s in sheep)
+                flock_y = fmean(s.position.y for s in sheep)
+                dx = float(pen_center.x) - flock_x
+                dy = float(pen_center.y) - flock_y
+                dist = hypot(dx, dy)
+                if dist > 1e-6:
+                    ux, uy = dx / dist, dy / dist
+                else:
+                    ux, uy = 1.0, 0.0
+                perp_x, perp_y = -uy, ux
+
+                for dog in self._dogs:
+                    forward = self._rng.uniform(4.0, 10.0)
+                    lateral_mag = self._rng.uniform(4.0, 8.0)
+                    lateral = self._rng.choice((-1.0, 1.0)) * lateral_mag
+                    pref_x = int(round(flock_x + ux * forward + perp_x * lateral))
+                    pref_y = int(round(flock_y + uy * forward + perp_y * lateral))
+                    dog_position = self._sample_unique_position(
+                        preferred_x=pref_x,
+                        preferred_y=pref_y,
+                        occupied=occupied,
+                        jitter_x=1,
+                        jitter_y=1,
+                    )
+                    occupied.add(dog_position)
+                    dog.position = dog_position
+                return sheep
+
+            # wrong_side_safe_radius
+            if mode == "wrong_side_safe_radius":
+                pen_center = self._pen.center
+                center = None
+                best_center = None
+                best_dist = -1.0
+                for _ in range(120):
+                    candidate = self._random_sheep_spawn_center(set())
+                    dist_to_pen = candidate.distance_to(pen_center)
+                    if dist_to_pen >= 28.0:
+                        center = candidate
+                        break
+                    if dist_to_pen > best_dist:
+                        best_dist = dist_to_pen
+                        best_center = candidate
+                if center is None:
+                    center = (
+                        best_center
+                        if best_center is not None
+                        else self._random_sheep_spawn_center(set())
+                    )
+
+                occupied = set()
+                for index in range(self.env_config.sheep):
+                    position = self._sample_unique_position(
+                        preferred_x=center.x,
+                        preferred_y=center.y,
+                        occupied=occupied,
+                        jitter_x=2,
+                        jitter_y=2,
+                    )
+                    occupied.add(position)
+                    append_sheep(index, position)
+
+                flock_x = fmean(s.position.x for s in sheep)
+                flock_y = fmean(s.position.y for s in sheep)
+                dx = float(pen_center.x) - flock_x
+                dy = float(pen_center.y) - flock_y
+                dist = hypot(dx, dy)
+                if dist > 1e-6:
+                    ux, uy = dx / dist, dy / dist
+                else:
+                    ux, uy = 1.0, 0.0
+                perp_x, perp_y = -uy, ux
+
+                min_safe_dist = max(14.0, float(self.env_config.sheep_vision) + 1e-6)
+                target_max_dist = max(18.0, min_safe_dist + 4.0)
+
+                for dog in self._dogs:
+                    chosen: Point | None = None
+                    # Pass 1: pen/lateral-pen side targeting 14.0 <= min_dist <= 18.0
+                    for attempt in range(400):
+                        max_lat = 1.15 if attempt < 250 else 1.45
+                        forward_frac = self._rng.uniform(0.25 if attempt < 250 else 0.05, 0.95)
+                        lateral_sign = self._rng.choice((-1.0, 1.0))
+                        # Angle relative to pen-direction vector
+                        angle = lateral_sign * self._rng.uniform(0.2, max_lat)
+                        radius = self._rng.uniform(
+                            min_safe_dist + 0.5,
+                            target_max_dist + (2.0 if attempt >= 250 else 0.0),
+                        )
+                        dir_x = ux * (1.0 - 0.5 * angle * angle if abs(angle) < 1.0 else max(0.05, forward_frac))
+                        # Exact unit rotation around (ux, uy)
+                        import math
+
+                        c_ang = math.cos(angle)
+                        s_ang = math.sin(angle)
+                        rx = ux * c_ang + perp_x * s_ang
+                        ry = uy * c_ang + perp_y * s_ang
+                        _ = dir_x
+                        cand = Point(
+                            int(round(flock_x + rx * radius)),
+                            int(round(flock_y + ry * radius)),
+                        )
+                        if not (
+                            0 <= cand.x < self.env_config.width
+                            and 0 <= cand.y < self.env_config.height
+                        ):
+                            continue
+                        if (
+                            cand in occupied
+                            or cand in self._fence_cells
+                            or self._pen.contains(cand)
+                        ):
+                            continue
+                        min_s = min(cand.distance_to(s.position) for s in sheep)
+                        if min_safe_dist <= min_s <= target_max_dist:
+                            chosen = cand
+                            break
+
+                    if chosen is None:
+                        # Deterministic fallback: scan valid cells on pen/lateral-pen side
+                        best_cand: Point | None = None
+                        best_score = float("inf")
+                        for y in range(self.env_config.height):
+                            for x in range(self.env_config.width):
+                                cand = Point(x, y)
+                                if (
+                                    cand in occupied
+                                    or cand in self._fence_cells
+                                    or self._pen.contains(cand)
+                                ):
+                                    continue
+                                forward_proj = (x - flock_x) * ux + (y - flock_y) * uy
+                                if forward_proj < 0.0:
+                                    continue
+                                min_s = min(cand.distance_to(s.position) for s in sheep)
+                                if min_s < min_safe_dist:
+                                    continue
+                                score = abs(min_s - 16.0)
+                                if min_s <= target_max_dist:
+                                    score -= 100.0
+                                if score < best_score:
+                                    best_score = score
+                                    best_cand = cand
+                        chosen = best_cand
+
+                    if chosen is None:
+                        raise RuntimeError(
+                            "Unable to place dog outside sheep_vision in wrong_side_safe_radius."
+                        )
+                    occupied.add(chosen)
+                    dog.position = chosen
                 return sheep
 
         self._spawn_mode = "legacy_stage_layout"
@@ -2583,8 +2912,13 @@ class SheepdogEnvironment:
                 ) * self.env_config.sheep_flock_cohesion_weight
         elif personality == "escapist" and strength > 0.0 and flock_center is not None:
             # Escapist bolts away from flock only when not packed
-            vector_x += (position.x - flock_center.x) * 0.35 * strength
-            vector_y += (position.y - flock_center.y) * 0.35 * strength
+            dx = position.x - flock_center.x
+            dy = position.y - flock_center.y
+            dist = hypot(dx, dy)
+            if dist > 1e-6:
+                scale = min(dist, ESCAPIST_MAX_BOLT_DISTANCE) / dist
+                vector_x += dx * scale * 0.35 * strength
+                vector_y += dy * scale * 0.35 * strength
 
         if nearest_dog_distance <= self.env_config.sheep_vision:
             vector_x *= 1.5
@@ -3040,6 +3374,8 @@ class SheepdogEnvironment:
         return current_score >= best_move_score - 0.05
 
     def _waited_without_reason(self, actions: list[Action]) -> bool:
+        if self.config.policy.policy_mode == "neural_policy":
+            return False
         return any(
             action == "wait" and not self._tactically_valid_wait(self._dogs[index])
             for index, action in enumerate(actions)

@@ -1,7 +1,9 @@
 import type {
+  CheckpointEntry,
   CheckpointIndex,
   ConfigHistory,
   ConfigRevision,
+  EvaluationSummary,
   NetworkTopologyInfo,
   ReplayBundle,
   ReplayRunRequest,
@@ -9,6 +11,7 @@ import type {
   ScenarioIndex,
   ScenarioRunResult,
   TrainingStartRequest,
+  StageTrainingReport,
   TrainingStatus,
   UserHyperparams,
   TelemetryRecord,
@@ -23,6 +26,9 @@ import type {
   TemporalDiagnosticExample,
   TemporalDiagnosticPayload,
   EarlyWarningsPayload,
+  StageTimingsResponse,
+  ModelHistoryResponse,
+  ModelLineageResponse,
 } from "../state/types";
 
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL?.trim() || "";
@@ -193,63 +199,244 @@ export async function checkBackendHealth(): Promise<BackendHealthResult> {
   }
 }
 
+const DROPPED_EVAL_SUMMARY_KEYS = [
+  "failure_directed_telemetry",
+  "failure_directed_weights",
+  "policy_weights",
+  "training_scenario_coverage",
+] as const;
+
+const DROPPED_CHECKPOINT_KEYS = [
+  ...DROPPED_EVAL_SUMMARY_KEYS,
+  "policy_config",
+] as const;
+
+const ALLOWED_ENV_CONFIG_KEYS = [
+  "dogs",
+  "sheep",
+  "width",
+  "height",
+  "curriculum_stage",
+] as const;
+
+function slimEvaluationRecord<T>(rec: T): T {
+  if (!rec || typeof rec !== "object") {
+    return rec;
+  }
+  const recObj = rec as Record<string, unknown>;
+  if (!("failed_trajectory_summary" in recObj) && !("observation_diagnostics" in recObj)) {
+    return rec;
+  }
+  const trimmedRec = { ...recObj };
+  delete trimmedRec.failed_trajectory_summary;
+  delete trimmedRec.observation_diagnostics;
+  return trimmedRec as T;
+}
+
+function stripKeysAndRecords<T extends object>(obj: T, keysToDrop: readonly string[]): T {
+  if (!obj || typeof obj !== "object") {
+    return obj;
+  }
+  const slim: Record<string, unknown> = { ...(obj as unknown as Record<string, unknown>) };
+  for (const key of keysToDrop) {
+    delete slim[key];
+  }
+  if (Array.isArray(slim.records)) {
+    slim.records = slim.records.map((rec) => slimEvaluationRecord(rec));
+  }
+  return slim as unknown as T;
+}
+
+/** Strip unused multi-MB payloads and excess nested metadata from a checkpoint entry. */
+export function slimCheckpointEntry(entry: CheckpointEntry): CheckpointEntry {
+  if (!entry || typeof entry !== "object") {
+    return entry;
+  }
+  const slim = stripKeysAndRecords(entry, DROPPED_CHECKPOINT_KEYS) as unknown as Record<string, unknown>;
+
+  const rawEnv = slim.environment_config;
+  if (rawEnv && typeof rawEnv === "object") {
+    const rawEnvRecord = rawEnv as Record<string, unknown>;
+    const trimmedEnv: Record<string, unknown> = {};
+    for (const key of ALLOWED_ENV_CONFIG_KEYS) {
+      if (key in rawEnvRecord && rawEnvRecord[key] !== undefined) {
+        trimmedEnv[key] = rawEnvRecord[key];
+      }
+    }
+    slim.environment_config = trimmedEnv;
+  }
+
+  if ("reward_config" in slim) {
+    const rawReward = slim.reward_config;
+    const rawInstincts =
+      rawReward && typeof rawReward === "object"
+        ? (rawReward as Record<string, unknown>).instincts
+        : undefined;
+    if (rawInstincts && typeof rawInstincts === "object") {
+      const instinctsRecord = rawInstincts as Record<string, unknown>;
+      const trimmedInstincts: Record<string, unknown> = {};
+      if ("curriculum_stage" in instinctsRecord && instinctsRecord.curriculum_stage !== undefined) {
+        trimmedInstincts.curriculum_stage = instinctsRecord.curriculum_stage;
+      }
+      if (
+        "enable_instinct_rewards" in instinctsRecord &&
+        instinctsRecord.enable_instinct_rewards !== undefined
+      ) {
+        trimmedInstincts.enable_instinct_rewards = instinctsRecord.enable_instinct_rewards;
+      }
+      slim.reward_config = { instincts: trimmedInstincts };
+    } else {
+      delete slim.reward_config;
+    }
+  }
+
+  return slim as unknown as CheckpointEntry;
+}
+
+/** Strip unused heavy fields from an evaluation summary payload and its per-seed records. */
+export function slimEvaluationSummary(summary: EvaluationSummaryPayload): EvaluationSummaryPayload {
+  return stripKeysAndRecords(summary, DROPPED_EVAL_SUMMARY_KEYS);
+}
+
+/** Trim unused heavy fields across all checkpoint entries and `latest` summary. */
+export function slimCheckpointIndex(index: CheckpointIndex): CheckpointIndex {
+  if (!index || typeof index !== "object") {
+    return index;
+  }
+  return {
+    ...index,
+    checkpoints: Array.isArray(index.checkpoints)
+      ? index.checkpoints.map((entry) => slimCheckpointEntry(entry))
+      : [],
+    latest: index.latest
+      ? (slimCheckpointEntry(index.latest as unknown as CheckpointEntry) as unknown as EvaluationSummary)
+      : null,
+  };
+}
+
+export type CheckpointIndexLoadResult =
+  | { status: "ok"; index: CheckpointIndex; etag: string | null }
+  | { status: "not_modified"; etag: string | null }
+  | { status: "empty" };
+
 // The checkpoint index grows with every checkpoint (tens of MB on long runs) and is
 // served by the same Python process that runs training. Share one in-flight request
 // between concurrent callers so a single status change doesn't trigger several
-// full downloads that compete with the trainer for CPU.
-let checkpointIndexInFlight: Promise<CheckpointIndex | null> | null = null;
+// full downloads that compete with the trainer for CPU. Never retain resolved payloads here.
+let checkpointIndexConditionalInFlight: Promise<CheckpointIndexLoadResult> | null = null;
 
 /** Slow fallback refresh for the checkpoint index; normal refreshes are status-driven. */
 export const CHECKPOINT_INDEX_SAFETY_REFRESH_MS = 60_000;
 
-export function loadCheckpointIndex(): Promise<CheckpointIndex | null> {
-  if (checkpointIndexInFlight) {
-    return checkpointIndexInFlight;
+export function loadCheckpointIndexConditional(
+  ifNoneMatch?: string | null,
+): Promise<CheckpointIndexLoadResult> {
+  if (isBackendMarkedOffline()) {
+    console.debug("[Sheepdog API] Backend server is in offline cooldown; skipping checkpoint index fetch.");
+    return Promise.resolve({ status: "empty" });
   }
-  const request = loadCheckpointIndexUncached();
-  checkpointIndexInFlight = request;
-  const clear = () => {
-    if (checkpointIndexInFlight === request) {
-      checkpointIndexInFlight = null;
+  if (checkpointIndexConditionalInFlight) {
+    return checkpointIndexConditionalInFlight;
+  }
+  const request = loadCheckpointIndexConditionalUncached(ifNoneMatch).finally(() => {
+    if (checkpointIndexConditionalInFlight === request) {
+      checkpointIndexConditionalInFlight = null;
     }
-  };
-  request.then(clear, clear);
+  });
+  checkpointIndexConditionalInFlight = request;
   return request;
 }
 
-async function loadCheckpointIndexUncached(): Promise<CheckpointIndex | null> {
+async function loadCheckpointIndexConditionalUncached(
+  ifNoneMatch?: string | null,
+): Promise<CheckpointIndexLoadResult> {
   if (isBackendMarkedOffline()) {
     console.debug("[Sheepdog API] Backend server is in offline cooldown; skipping checkpoint index fetch.");
-    return null;
+    return { status: "empty" };
   }
+  const hasEtag = Boolean(ifNoneMatch);
+  const path = hasEtag
+    ? "/generated/checkpoint-index.json"
+    : `/generated/checkpoint-index.json?t=${Date.now()}`;
+  const requestUrl = API_BASE_URL ? new URL(path, API_BASE_URL) : path;
+  const init: RequestInit = hasEtag
+    ? { cache: "no-store", headers: { "If-None-Match": ifNoneMatch! } }
+    : { cache: "no-store" };
+
   try {
-    return await fetchJson<CheckpointIndex>(`/generated/checkpoint-index.json?t=${Date.now()}`, undefined, API_BASE_URL);
+    const response = await fetch(requestUrl, init);
+    clearBackendOffline();
+
+    const getHeader = (name: string): string | null =>
+      typeof response.headers?.get === "function" ? response.headers.get(name) ?? null : null;
+
+    if (response.status === 304) {
+      return {
+        status: "not_modified",
+        etag: getHeader("etag") ?? ifNoneMatch ?? null,
+      };
+    }
+
+    if (response.status === 404 || response.status === 500) {
+      console.info(
+        `Checkpoint index "/generated/checkpoint-index.json" is not available yet (HTTP ${response.status}). This is expected during startup or if no checkpoints have been saved yet.`
+      );
+      return { status: "empty" };
+    }
+
+    if (!response.ok) {
+      const error = new Error(`Failed to fetch ${path}: ${response.status}`) as ApiError;
+      error.status = response.status;
+      throw error;
+    }
+
+    const contentType = getHeader("content-type") ?? "";
+    if (contentType.toLowerCase().includes("text/html")) {
+      console.info(
+        `Checkpoint index request returned HTML (status ${response.status}). Treating as not available yet.`
+      );
+      return { status: "empty" };
+    }
+
+    if (contentType && !contentType.toLowerCase().includes("application/json")) {
+      const error = new Error(
+        `Expected JSON from ${path}, received ${contentType || "unknown content type"}`
+      ) as ApiError;
+      error.status = response.status;
+      error.contentType = contentType;
+      throw error;
+    }
+
+    const raw = (await response.json()) as CheckpointIndex;
+    return {
+      status: "ok",
+      index: slimCheckpointIndex(raw),
+      etag: getHeader("etag"),
+    };
   } catch (error) {
     const fetchError = error as ApiError;
-    // Treat 404 and 500 (Vite serves 500 when the file doesn't exist yet)
-    // as "not available yet" rather than a hard error.
-    if (fetchError.status === 404 || fetchError.status === 500) {
-      console.info(
-        `Checkpoint index "/generated/checkpoint-index.json" is not available yet (HTTP ${fetchError.status}). This is expected during startup or if no checkpoints have been saved yet.`
-      );
-      return null;
+    if (fetchError?.status === 404 || fetchError?.status === 500) {
+      return { status: "empty" };
     }
-    // Also treat network/connection errors (status 0 / ERR_CONNECTION_REFUSED) as not available yet.
-    if (fetchError.isNetworkError || fetchError.status === 0 || !fetchError.status || error instanceof TypeError) {
+    if (
+      error instanceof TypeError ||
+      (error instanceof Error && error.name === "TypeError") ||
+      fetchError?.isNetworkError ||
+      fetchError?.status === 0
+    ) {
       markBackendOffline();
       console.debug(
-        `Backend server offline or unreachable on port 8000 when fetching checkpoint index (${fetchError.message || String(error)}). Treating as not available yet.`
+        `Backend server offline or unreachable on port 8000 when fetching checkpoint index (${fetchError?.message || String(error)}). Treating as not available yet.`
       );
-      return null;
-    }
-    if (fetchError.status === 200 && fetchError.contentType?.toLowerCase().includes("text/html")) {
-      console.info(
-        `Checkpoint index request returned HTML (status 200). Treating as not available yet.`
-      );
-      return null;
+      return { status: "empty" };
     }
     throw error;
   }
+}
+
+export async function loadCheckpointIndex(): Promise<CheckpointIndex | null> {
+  const res = await loadCheckpointIndexConditional(null);
+  return res.status === "ok" ? res.index : null;
 }
 
 export interface LoadEpisodesOptions {
@@ -322,7 +509,7 @@ export async function loadRecentEvaluations(
   const path = `/api/insights/evaluations?${query.toString()}`;
   try {
     const res = await fetchJson<{ evaluations: EvaluationSummaryPayload[] }>(path, undefined, API_BASE_URL);
-    return res?.evaluations ?? [];
+    return (res?.evaluations ?? []).map((entry) => slimEvaluationSummary(entry));
   } catch (error) {
     const fetchErr = error as ApiError;
     if (fetchErr.isNetworkError || fetchErr.status === 0 || !fetchErr.status || error instanceof TypeError) {
@@ -340,26 +527,59 @@ export async function loadSessionEvents(): Promise<SessionEventsResponse | null>
   }
 }
 
-export async function loadReplay(path: string): Promise<ReplayBundle> {
+const replayInFlight = new Map<string, Promise<ReplayBundle>>();
+const replayByIdInFlight = new Map<string, Promise<ReplayBundle | null>>();
+
+export function loadReplay(path: string): Promise<ReplayBundle> {
   if (!path || !path.trim()) {
-    throw new Error("No replay path specified.");
+    return Promise.reject(new Error("No replay path specified."));
   }
   const cleanPath = path.replace(/\\/g, "/");
-  const filename = cleanPath.split("/").pop() || "";
-  const replayId = filename.replace(/\.json(\.gz)?$/, "");
-  if (replayId && (cleanPath.includes("evaluations") || cleanPath.includes("replays") || cleanPath.startsWith("artifacts/"))) {
-    const fromApi = await fetchReplayById(replayId);
-    if (fromApi) return fromApi;
+  const existing = replayInFlight.get(cleanPath);
+  if (existing) {
+    return existing;
   }
-  return fetchJson<ReplayBundle>(path, undefined, API_BASE_URL);
+  const request = (async (): Promise<ReplayBundle> => {
+    const filename = cleanPath.split("/").pop() || "";
+    const replayId = filename.replace(/\.json(\.gz)?$/, "");
+    if (
+      replayId &&
+      (cleanPath.includes("evaluations") ||
+        cleanPath.includes("replays") ||
+        cleanPath.startsWith("artifacts/"))
+    ) {
+      const fromApi = await fetchReplayById(replayId);
+      if (fromApi) return fromApi;
+    }
+    return fetchJson<ReplayBundle>(path, undefined, API_BASE_URL);
+  })().finally(() => {
+    if (replayInFlight.get(cleanPath) === request) {
+      replayInFlight.delete(cleanPath);
+    }
+  });
+  replayInFlight.set(cleanPath, request);
+  return request;
 }
 
-export async function fetchReplayById(replayId: string): Promise<ReplayBundle | null> {
-  try {
-    return await fetchJson<ReplayBundle>(`/api/replays/${replayId}`, undefined, API_BASE_URL);
-  } catch {
-    return null;
+export function fetchReplayById(replayId: string): Promise<ReplayBundle | null> {
+  const cleanId = replayId.trim();
+  const existing = replayByIdInFlight.get(cleanId);
+  if (existing) {
+    return existing;
   }
+  const request = (async (): Promise<ReplayBundle | null> => {
+    try {
+      return await fetchJson<ReplayBundle>(`/api/replays/${cleanId}`, undefined, API_BASE_URL);
+    } catch {
+      return null;
+    }
+  })().finally(() => {
+    if (replayByIdInFlight.get(cleanId) === request) {
+      replayByIdInFlight.delete(cleanId);
+    }
+  });
+  replayByIdInFlight.set(cleanId, request);
+  return request;
 }
 
 export async function pinEvaluation(
@@ -436,6 +656,18 @@ export async function startTraining(request: TrainingStartRequest): Promise<Trai
     },
     body: JSON.stringify(request),
   }, API_BASE_URL);
+}
+
+export async function loadStageTrainingReport(
+  stage: number,
+  runId?: string | null,
+  signal?: AbortSignal,
+  journey?: string,
+): Promise<StageTrainingReport> {
+  const query = new URLSearchParams({ stage: String(stage) });
+  if (runId) query.set("run_id", runId);
+  if (journey) query.set("journey", journey);
+  return fetchJson<StageTrainingReport>(`/api/insights/stage-report?${query}`, { signal }, API_BASE_URL);
 }
 
 export async function pauseTraining(): Promise<TrainingStatus> {
@@ -767,7 +999,7 @@ export async function acknowledgeEarlyWarning(
   }
 }
 
-const MAX_TEMPORAL_DIAGNOSTIC_CACHE_ENTRIES = 12;
+const MAX_TEMPORAL_DIAGNOSTIC_CACHE_ENTRIES = 4;
 const temporalDiagnosticPayloadCache = new Map<string, Promise<TemporalDiagnosticPayload>>();
 const resolvedTemporalDiagnosticPayloads = new Map<string, TemporalDiagnosticPayload>();
 
@@ -849,3 +1081,33 @@ export async function loadTemporalDiagnosticAnalysis(
 
 
 
+
+export async function loadStageTimings(): Promise<StageTimingsResponse> {
+  return fetchJson<StageTimingsResponse>("/api/stage-timings", undefined, API_BASE_URL);
+}
+
+export async function loadModelHistory(params?: {
+  passId?: string;
+  stage?: number | null;
+  limit?: number;
+}): Promise<ModelHistoryResponse> {
+  const query = new URLSearchParams();
+  if (params?.passId) query.set("pass_id", params.passId);
+  if (params?.stage !== undefined && params?.stage !== null) query.set("stage", String(params.stage));
+  if (params?.limit !== undefined) query.set("limit", String(params.limit));
+  const qs = query.toString();
+  return fetchJson<ModelHistoryResponse>(
+    `/api/model-history${qs ? `?${qs}` : ""}`,
+    undefined,
+    API_BASE_URL,
+  );
+}
+
+export async function loadModelLineage(passId: string): Promise<ModelLineageResponse> {
+  const query = new URLSearchParams({ pass_id: passId });
+  return fetchJson<ModelLineageResponse>(
+    `/api/model-history/lineage?${query.toString()}`,
+    undefined,
+    API_BASE_URL,
+  );
+}

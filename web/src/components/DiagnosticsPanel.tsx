@@ -175,10 +175,10 @@ function buildDecisionSignal(params: {
 
   if (abovePromotionThreshold) {
     return {
-      title: `Accumulating qualified streak (${qualifiedStreak}/${minStreak})`,
-      body: `Performance is at or above the ${Math.round(requiredThreshold * 100)}% promotion threshold. Accumulating consecutive evaluations to prove policy stability before promotion.`,
+      title: `Accumulating qualified evals (${qualifiedStreak}/${minStreak})`,
+      body: `Performance is at or above the ${Math.round(requiredThreshold * 100)}% promotion threshold. Accumulating qualifying evaluations within the rolling window to prove policy stability before promotion.`,
       tone: "good",
-      badge: `${qualifiedStreak}/${minStreak} streak`,
+      badge: `${qualifiedStreak}/${minStreak} qualified`,
     };
   }
 
@@ -3220,8 +3220,8 @@ export function DiagnosticsPanel({
         };
       }
       return {
-        statusText: `QUALIFIED STREAK ${qualifiedStreak}/${minStreak}`,
-        statusDetail: "Performing above threshold; accumulating consecutive successful checkpoints for promotion approval.",
+        statusText: `QUALIFIED EVALS ${qualifiedStreak}/${minStreak}`,
+        statusDetail: "Performing above threshold; accumulating qualifying checkpoints within the rolling window for promotion approval.",
         toneClass: " warning-box--success"
       };
     }
@@ -4690,7 +4690,7 @@ export function DiagnosticsPanel({
                           <div>• <strong>Evaluation Seeds:</strong> {stageEvaluationSeedCount} seeds</div>
                           <div>• <strong>Success Rate:</strong> {stageLatestCheckpoint ? `${Math.round(stageLatestSuccessRate * 100)}%` : liveMetrics ? `${Math.round(liveMetrics.successRate * 100)}% (live rolling avg)` : "N/A"}</div>
                           <div>• <strong>Required Threshold:</strong> {Math.round(requiredThreshold * 100)}%</div>
-                          <div>• <strong>Qualified Streak:</strong> {qualifiedStreak} / {minStreak}</div>
+                          <div>• <strong>Qualified Evals (Window):</strong> {qualifiedStreak} / {minStreak}</div>
                         </div>
                       </div>
                     )}
